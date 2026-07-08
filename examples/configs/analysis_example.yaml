@@ -1,0 +1,56 @@
+# ============================================================================
+# TSARA analysis config example
+# ----------------------------------------------------------------------------
+# Describes the SCIENCE applied to ingested data. List-valued fields
+# (baseline windows/quantiles, detection enter_mads, smoothing cutoffs)
+# are PARAMETER SWEEP dimensions: every combination is evaluated, and the
+# spread of results across the hypercube becomes the methodological
+# uncertainty. Single-element lists = fixed methodology, zero sweep.
+# Load with:
+#     from tsara import load_analysis
+#     a = load_analysis("analysis_example.yaml")
+# ============================================================================
+
+# --- Master time grid -------------------------------------------------------
+grid:
+  freq: 1s                # target cadence all streams are synchronized to
+  max_interp_gap: 10s     # never interpolate across gaps longer than this
+  bin_statistic: mean     # how fast streams are aggregated into grid bins
+  # start / end: optional UTC datetimes; default = union of all streams
+
+# --- Rolling baselines -------------------------------------------------------
+baseline:
+  # Strictly increasing, short -> long. Also defines the multi-scale
+  # hierarchy for nested-plume attribution (short window catches the sharp
+  # blip riding on the broad plume caught by the long window).
+  windows: [2min, 10min, 60min]
+  quantiles: [0.01, 0.05, 0.10]
+  min_valid_fraction: 0.5
+
+# --- Plume detection ---------------------------------------------------------
+detection:
+  enter_mads: [3.0, 5.0]  # sweep: sensitivity of event detection
+  exit_mad: 1.0           # hysteresis: exit threshold must be below entry
+  noise_window: 10min
+  min_duration: 3s        # discard blips shorter than this
+  max_internal_gap: 5s    # bridge sub-threshold dips shorter than this
+
+# --- Optional: low-pass smoothing to align disjoint plumes -------------------
+smoothing:
+  enabled: true
+  cutoff_periods: [30s, 60s, 120s]   # sweep: resolution vs covariance trade-off
+  order: 4
+
+# --- Optional: Source Complex clustering -------------------------------------
+clustering:
+  enabled: true
+  eps_m: 500.0            # DBSCAN neighborhood radius (scaled meters)
+  space_time_scale: 2.0   # m per s: advection-speed equivalence for time
+  min_samples: 2
+
+# --- Enhancement-ratio regressions -------------------------------------------
+regression:
+  reference_species: ch4  # denominator; must be a role=gas manifest variable
+  methods: [ols, odr]
+  min_points: 8
+  confidence_level: 0.95
