@@ -72,7 +72,18 @@ instruments:
     loader:
       format: icartt
       # ICARTT defines its own time axis in the file header, so no `time:`.
-      path_template: "noaa/{campaign}/voc/%Y%m%d/*.ict"
+      # Multiple templates: the same instrument's files often live under
+      # several directory layouts / naming conventions at once (archive
+      # mirror vs. local copy, mid-campaign reorganization). List each;
+      # the crawler searches all of them. Single-layout instruments may
+      # use the singular `path_template: "..."` instead.
+      path_templates:
+        - "noaa/{campaign}/voc/%Y%m%d/*.ict"
+        - "noaa/archive/{campaign}/%Y/*.ict"
+      # ICARTT archives hold multiple revisions of the same day
+      # (..._20250601_R0.ict, ..._R1.ict). 'latest' (default) keeps only
+      # the highest revision per file identity — never double-counts.
+      revision_policy: latest
     metadata:
       campaign: slv2025
     variables:

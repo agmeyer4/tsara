@@ -9,7 +9,8 @@
 # ============================================================================
 
 [build-system]
-requires = ["setuptools>=68"]
+# >=77 for PEP 639 license expressions (the `license = "MIT"` string below).
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -17,9 +18,12 @@ name = "tsara"
 version = "0.1.0"
 description = "Time Series and Ratio Analyses: enhancement-ratio extraction and source fingerprinting for multi-rate trace gas timeseries."
 readme = "README.md"
-license = { file = "LICENSE" }
+# PEP 639 SPDX license expression; the old `license = { file = ... }` table
+# form is deprecated and newer setuptools will eventually reject it.
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
-authors = [{ name = "Andrew Meyer", email = "agmeyer4@gmail.com" }]
+authors = [{ name = "Aaron Meyer", email = "agmeyer4@gmail.com" }]
 keywords = [
     "atmospheric-science",
     "trace-gases",
@@ -28,12 +32,14 @@ keywords = [
     "plume-detection",
     "source-apportionment",
 ]
+# NOTE: no "License ::" classifier — PEP 639 forbids mixing the deprecated
+# license classifiers with the SPDX `license` expression above.
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Atmospheric Science",
 ]
 
@@ -51,7 +57,11 @@ dependencies = [
     "statsmodels>=0.14",
     "scikit-learn>=1.3",
     "typer>=0.9",
-    "icartt>=2.0",
+    # NOTE: deliberately NO `icartt` dependency — the PyPI package is
+    # GPL-3.0 (incompatible with our MIT license as a hard dependency) and
+    # dormant since 2022. TSARA ships its own ICARTT FFI-1001 reader
+    # (Phase 3), which also lets us tolerate the spec-noncompliant files
+    # common in real campaigns.
 ]
 
 [project.optional-dependencies]

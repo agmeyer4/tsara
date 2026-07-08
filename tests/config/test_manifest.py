@@ -66,6 +66,80 @@ def test_template_fields_extracted():
 
 
 # ---------------------------------------------------------------------------
+# Multiple path templates (heterogeneous directory/naming conventions)
+# ---------------------------------------------------------------------------
+
+
+def test_single_template_string_coerced_to_tuple():
+    """The singular `path_template: "..."` shorthand lands in the tuple field."""
+    loader = CSVLoader(
+        path_template="a/%Y/*.csv",
+        time={"column": "t", "format": "unix"},
+    )
+    assert loader.path_templates == ("a/%Y/*.csv",)
+
+
+def test_multiple_templates_accepted():
+    loader = CSVLoader(
+        path_templates=["layout_a/{campaign}/%Y/*.csv", "layout_b/{site}/*.csv"],
+        time={"column": "t", "format": "unix"},
+    )
+    assert len(loader.path_templates) == 2
+    # Fields are the deduplicated union across templates, in order.
+    assert loader.template_fields == ("campaign", "site")
+
+
+def test_duplicate_templates_rejected():
+    with pytest.raises(ValidationError, match="duplicate"):
+        CSVLoader(
+            path_templates=["a/*.csv", "a/*.csv"],
+            time={"column": "t", "format": "unix"},
+        )
+
+
+def test_any_bad_template_in_list_rejected():
+    """One absolute path among several relative ones must still fail."""
+    with pytest.raises(ValidationError, match="relative"):
+        CSVLoader(
+            path_templates=["good/%Y/*.csv", "/bad/abs/*.csv"],
+            time={"column": "t", "format": "unix"},
+        )
+
+
+def test_empty_template_list_rejected():
+    with pytest.raises(ValidationError):
+        CSVLoader(path_templates=[], time={"column": "t", "format": "unix"})
+
+
+# ---------------------------------------------------------------------------
+# ICARTT revision policy
+# ---------------------------------------------------------------------------
+
+
+def test_icartt_revision_policy_defaults_to_latest():
+    """'latest' is the safe default: ingesting all revisions double-counts."""
+    from tsara.config.manifest import ICARTTLoader
+
+    loader = ICARTTLoader(path_template="voc/%Y/*.ict")
+    assert loader.revision_policy == "latest"
+
+
+def test_icartt_unknown_revision_policy_rejected():
+    from tsara.config.manifest import ICARTTLoader
+
+    with pytest.raises(ValidationError, match="revision_policy"):
+        ICARTTLoader(path_template="voc/%Y/*.ict", revision_policy="newest")
+
+
+def test_csv_loader_has_no_revision_policy(stationary_manifest_dict):
+    """revision_policy is ICARTT-specific; CSV filenames aren't standardized."""
+    bad = copy.deepcopy(stationary_manifest_dict)
+    bad["instruments"]["picarro"]["loader"]["revision_policy"] = "latest"
+    with pytest.raises(ValidationError, match="revision_policy"):
+        Manifest.model_validate(bad)
+
+
+# ---------------------------------------------------------------------------
 # Typo protection: unknown keys are rejected everywhere
 # ---------------------------------------------------------------------------
 

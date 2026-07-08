@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import (
+    AliasChoices,
     Field,
     field_validator,
     model_validator,
@@ -277,38 +278,72 @@ class TimeParsing(_StrictModel):
 
 
 class _BaseLoader(_StrictModel):
-    """Fields common to every file format."""
+    """Fields common to every file format.
 
-    path_template: str = Field(
+    Why a *list* of templates: real archives are messy. The same
+    instrument's files routinely live under several directory layouts and
+    naming conventions at once (a reorganization mid-campaign, a NOAA
+    archive mirror vs. a local copy, per-year restructuring). Each template
+    describes one such convention; the crawler (Phase 3) searches all of
+    them and merges the results, harvesting {field} metadata per template.
+    Adding a new layout is a YAML edit, never a code change.
+    """
+
+    path_templates: tuple[str, ...] = Field(
+        min_length=1,
+        # Ergonomics: a manifest with one layout may write the singular
+        # `path_template: "..."` with a plain string; both spellings land
+        # in this field (the string is coerced to a 1-tuple below).
+        validation_alias=AliasChoices("path_templates", "path_template"),
         description=(
-            "Path pattern relative to Manifest.base_path. Supports {field} "
-            "metadata placeholders, strftime tokens (%Y/%m/%d), and glob "
-            "wildcards, e.g. '{institution}/{campaign}/%Y/%m/%d/*.ict'."
-        )
+            "One or more path patterns relative to Manifest.base_path, each "
+            "describing a directory/naming convention where this "
+            "instrument's files live. Supports {field} metadata "
+            "placeholders, strftime tokens (%Y/%m/%d), and glob wildcards, "
+            "e.g. '{institution}/{campaign}/%Y/%m/%d/*.ict'."
+        ),
     )
 
-    @field_validator("path_template")
+    @field_validator("path_templates", mode="before")
     @classmethod
-    def _sane_template(cls, value: str) -> str:
-        if not value or value.strip() == "":
-            raise ValueError("path_template must be a non-empty path pattern.")
-        if Path(value).is_absolute():
+    def _coerce_single_template(cls, value: object) -> object:
+        """Accept a bare string as shorthand for a one-element list."""
+        if isinstance(value, str):
+            return (value,)
+        return value
+
+    @field_validator("path_templates")
+    @classmethod
+    def _sane_templates(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for template in value:
+            if not template or template.strip() == "":
+                raise ValueError("path_templates entries must be non-empty path patterns.")
+            if Path(template).is_absolute():
+                raise ValueError(
+                    "path_templates must be relative (they are joined to "
+                    f"Manifest.base_path); got absolute path '{template}'."
+                )
+            # Reserved field names would collide with coordinates TSARA creates.
+            reserved = {"time", "species"} & set(_TEMPLATE_FIELD_RE.findall(template))
+            if reserved:
+                raise ValueError(
+                    f"path_templates metadata fields {sorted(reserved)} are reserved names."
+                )
+        if len(set(value)) != len(value):
             raise ValueError(
-                "path_template must be relative (it is joined to Manifest.base_path); "
-                f"got absolute path '{value}'."
-            )
-        # Reserved field names would collide with coordinates TSARA creates.
-        reserved = {"time", "species"} & set(_TEMPLATE_FIELD_RE.findall(value))
-        if reserved:
-            raise ValueError(
-                f"path_template metadata fields {sorted(reserved)} are reserved names."
+                "path_templates contains duplicates; each entry must describe "
+                "a distinct layout or the same files would be ingested twice."
             )
         return value
 
     @property
     def template_fields(self) -> tuple[str, ...]:
-        """Metadata field names embedded in the template, in order."""
-        return tuple(_TEMPLATE_FIELD_RE.findall(self.path_template))
+        """Metadata field names across all templates, deduplicated in order."""
+        seen: dict[str, None] = {}
+        for template in self.path_templates:
+            for field in _TEMPLATE_FIELD_RE.findall(template):
+                seen.setdefault(field)
+        return tuple(seen)
 
 
 class CSVLoader(_BaseLoader):
@@ -329,12 +364,30 @@ class CSVLoader(_BaseLoader):
 class ICARTTLoader(_BaseLoader):
     """Loader for ICARTT (.ict) files per the NASA/NOAA FFI-1001 convention.
 
+    TSARA ships its own FFI-1001 parser (Phase 3) rather than depending on
+    the GPL-licensed, unmaintained ``icartt`` PyPI package. Owning the
+    parser also lets us tolerate the spec-noncompliant files common in real
+    campaign archives.
+
     Time handling is intentionally absent: the ICARTT format defines its own
     time axis (an independent variable of seconds since a date declared in
     the header), which the reader interprets directly.
     """
 
     format: Literal["icartt"] = "icartt"
+    revision_policy: Literal["latest", "all"] = Field(
+        default="latest",
+        description=(
+            "How to handle multiple revisions of the same data file. ICARTT "
+            "filenames follow 'dataID_locationID_YYYYMMDD[_R#].ict', and "
+            "archives routinely hold several revisions of one day (R0 "
+            "preliminary, R1 final, ...). 'latest' keeps only the highest "
+            "revision per (dataID, locationID, date) — the safe default, "
+            "since ingesting all revisions double-counts the same air. "
+            "'all' ingests everything (only for revision-comparison "
+            "studies; expect duplicate timestamps downstream)."
+        ),
+    )
 
 
 #: Tagged union dispatched on 'format'. New formats (Phase 3+) extend this
