@@ -24,7 +24,7 @@ from typing import Literal
 from pydantic import Field, field_validator, model_validator
 
 from tsara.config.base import StrictModel as _StrictModel
-from tsara.config.base import validate_timedelta as _parse_timedelta
+from tsara.config.base import validate_positive_timedelta as _validate_duration
 
 # ---------------------------------------------------------------------------
 # Master time grid
@@ -71,7 +71,7 @@ class GridConfig(_StrictModel):
     @field_validator("freq", "max_interp_gap")
     @classmethod
     def _valid_durations(cls, value: str, info) -> str:
-        _parse_timedelta(value, field=f"GridConfig.{info.field_name}")
+        _validate_duration(value, field=f"GridConfig.{info.field_name}")
         return value
 
     @model_validator(mode="after")
@@ -140,7 +140,7 @@ class BaselineConfig(_StrictModel):
         import pandas as pd
 
         for w in value:
-            _parse_timedelta(w, field="BaselineConfig.windows")
+            _validate_duration(w, field="BaselineConfig.windows")
         tds = [pd.Timedelta(w) for w in value]
         if any(b <= a for a, b in zip(tds, tds[1:])):
             raise ValueError(
@@ -210,7 +210,7 @@ class DetectionConfig(_StrictModel):
     @field_validator("noise_window", "min_duration", "max_internal_gap")
     @classmethod
     def _valid_durations(cls, value: str, info) -> str:
-        _parse_timedelta(value, field=f"DetectionConfig.{info.field_name}")
+        _validate_duration(value, field=f"DetectionConfig.{info.field_name}")
         return value
 
     @model_validator(mode="after")
@@ -264,7 +264,7 @@ class SmoothingConfig(_StrictModel):
     @classmethod
     def _valid_cutoffs(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         for c in value:
-            _parse_timedelta(c, field="SmoothingConfig.cutoff_periods")
+            _validate_duration(c, field="SmoothingConfig.cutoff_periods")
         return value
 
 

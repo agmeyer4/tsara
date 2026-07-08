@@ -39,7 +39,7 @@ from pydantic import (
 )
 
 from tsara.config.base import StrictModel as _StrictModel
-from tsara.config.base import validate_timedelta as _parse_timedelta
+from tsara.config.base import validate_positive_timedelta as _validate_duration
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +154,7 @@ class SpikeRule(_StrictModel):
     @field_validator("window")
     @classmethod
     def _valid_timedelta(cls, value: str) -> str:
-        _parse_timedelta(value, field="SpikeRule.window")
+        _validate_duration(value, field="SpikeRule.window")
         return value
 
 

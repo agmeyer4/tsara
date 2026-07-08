@@ -20,8 +20,15 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-def validate_timedelta(value: str, *, field: str) -> None:
-    """Validate a pandas-style positive timedelta string ('30s', '10min').
+def validate_positive_timedelta(value: str, *, field: str) -> None:
+    """Validate a pandas-style strictly positive timedelta string ('30s', '10min').
+
+    For *durations* — window lengths, grid spacings, gap tolerances — where a
+    non-positive value is physically meaningless. Signed time quantities
+    (e.g. a future per-instrument ``time_shift`` for inlet-lag correction,
+    which is legitimately negative) are a different physical animal and must
+    NOT use this validator; add a parse-only ``validate_signed_timedelta``
+    sibling when such a field first appears.
 
     Raises ``ValueError`` (which Pydantic converts into a field-scoped
     validation error) if the string doesn't parse or is non-positive. The
