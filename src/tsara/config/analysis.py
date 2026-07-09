@@ -97,9 +97,9 @@ class BaselineConfig(_StrictModel):
 
     ``windows`` and ``quantiles`` are sweep dimensions: every (window,
     quantile) pair is evaluated. Windows double as the *multi-scale
-    hierarchy* used for nested-plume attribution in Phase 6 — a sharp blip
-    is an enhancement over the shortest window's baseline, a broad plume
-    over the longest.
+    hierarchy* used for nested-plume parent/child bookkeeping in Phase 6 —
+    a sharp blip is an enhancement over the shortest window's baseline, a
+    broad plume over the longest.
     """
 
     windows: tuple[str, ...] = Field(
