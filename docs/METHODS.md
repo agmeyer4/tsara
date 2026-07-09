@@ -366,6 +366,57 @@ independent "measurement" term — adding one separately would double-count).
 The precise estimator for $\sigma^2_{\text{method}}$ (which cube axes, which
 dispersion statistic) is specified in Phase 7. **[partial stub — Phase 7]**
 
+### 5.1 Error-budget closure: within-fit SE vs. between-fit scatter
+
+If per-fit standard errors are honest, they must statistically explain the
+observed spread of slopes across repeated fits of the same (stable) ratio.
+For K slope estimates $b_k$ with reported standard errors $\sigma_{b,k}$ and
+their inverse-variance weighted mean $\bar{b}$:
+
+$$R_B^2 \;=\; \frac{1}{K-1} \sum_k \frac{(b_k - \bar{b})^2}{\sigma_{b,k}^2}$$
+
+— the **Birge ratio**, equivalently a reduced χ² with K−1 degrees of freedom;
+the metrological standard (e.g., CODATA practice) for testing whether stated
+uncertainties account for observed dispersion. The informal version — compare
+the typical per-fit SE to the plain standard deviation of the $b_k$ — is the
+quick-look equivalent.
+
+Interpretation:
+
+- **R_B ≈ 1** — the budget closes: reported fit errors explain the
+  event-to-event scatter.
+- **R_B ≫ 1** — excess scatter: understated per-fit errors (missing error
+  components, unmodeled correlation) *or* genuine variability of the source
+  ratio. TSARA cannot distinguish these two on its own; that judgment is
+  scientific context, and outputs must not pretend otherwise.
+- **R_B ≪ 1** — overstated errors, or correlated fits (see caveats).
+
+Two uses in TSARA:
+
+1. **Stability-cube layer (Phase 7):** R_B is computed per sweep point, so a
+   user can see *where in parameter space the error budget closes*.
+2. **Methodology selection:** choosing sweep parameters such that per-fit SE
+   matches aggregate scatter (R_B ≈ 1) — the criterion used in the project
+   owner's EM27 enhancement-ratio work — is a principled, self-consistency
+   basis for picking the primary combination(s), and is the leading candidate
+   criterion for the open "primary combinations" question (CLAUDE.md §5,
+   open flags).
+
+This is the same closure logic as York's per-event goodness of fit
+$S/(N-2)$ (§4.2), applied one aggregation level up: point errors vs. residual
+scatter *within* an event there; fit errors vs. slope scatter *across* events
+here. A budget that closes at both levels, with small sweep spread
+($\sigma_{\text{method}}$), is the strongest defensibility statement TSARA
+can make about a reported ratio.
+
+Caveats: valid as stated only for (quasi-)independent fits sampling an
+approximately stable true ratio — discrete, non-overlapping plume events
+qualify; overlapping rolling-window fits are serially correlated (effective
+K < K), biasing R_B low. And forcing R_B → 1 as a hard optimization target
+when the source ratio genuinely varies would drive selection toward
+over-conservative parameters: use closure as a constraint and diagnostic,
+not a sole objective. **[estimator details — Phase 7]**
+
 ---
 
 ## 6. Baselines, detection, smoothing, clustering **[stubs]**
