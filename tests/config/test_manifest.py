@@ -111,6 +111,12 @@ def test_empty_template_list_rejected():
         CSVLoader(path_templates=[], time={"column": "t", "format": "unix"})
 
 
+def test_blank_template_entry_rejected():
+    """A whitespace-only entry is a distinct failure from an empty *list*."""
+    with pytest.raises(ValidationError, match="non-empty"):
+        CSVLoader(path_templates=["   ", "b/%Y/*.csv"], time={"column": "t", "format": "unix"})
+
+
 # ---------------------------------------------------------------------------
 # ICARTT revision policy
 # ---------------------------------------------------------------------------
@@ -201,6 +207,27 @@ def test_mobile_wrong_gps_role_rejected(mobile_manifest_dict):
     bad = copy.deepcopy(mobile_manifest_dict)
     bad["instruments"]["gps"]["variables"]["latitude"]["role"] = "aux"
     with pytest.raises(ValidationError, match="gps_lat"):
+        Manifest.model_validate(bad)
+
+
+def test_mobile_altitude_variable_accepted_when_present(mobile_manifest_dict):
+    """alt_variable is optional; when given it must pass the same
+    exists-and-has-the-right-role check already covered for lat/lon."""
+    ok = copy.deepcopy(mobile_manifest_dict)
+    ok["platform"]["alt_variable"] = "altitude"
+    ok["instruments"]["gps"]["variables"]["altitude"] = {
+        "column": "alt",
+        "role": "gps_alt",
+        "units": "m",
+    }
+    manifest = Manifest.model_validate(ok)
+    assert manifest.platform.alt_variable == "altitude"
+
+
+def test_mobile_missing_alt_variable_rejected(mobile_manifest_dict):
+    bad = copy.deepcopy(mobile_manifest_dict)
+    bad["platform"]["alt_variable"] = "elevation"  # never declared on gps
+    with pytest.raises(ValidationError, match="elevation"):
         Manifest.model_validate(bad)
 
 

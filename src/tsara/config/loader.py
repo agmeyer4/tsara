@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import yaml
 from pydantic import ValidationError, model_validator
@@ -29,6 +29,10 @@ from tsara.config.manifest import Manifest
 from tsara.exceptions import TsaraConfigError
 
 logger = logging.getLogger(__name__)
+
+#: Bound to StrictModel so `_validate(Manifest, ...)` types as Manifest, not
+#: Any — callers keep full attribute/type checking on the returned object.
+_ModelT = TypeVar("_ModelT", bound=_StrictModel)
 
 
 class TsaraConfig(_StrictModel):
@@ -83,7 +87,7 @@ def _read_yaml(path: str | Path) -> dict[str, Any]:
     return data
 
 
-def _validate(model_cls: type, data: dict[str, Any], path: Path) -> Any:
+def _validate(model_cls: type[_ModelT], data: dict[str, Any], path: Path) -> _ModelT:
     """Run Pydantic validation, re-raising with the file path attached.
 
     Pydantic's ValidationError already pinpoints the offending field

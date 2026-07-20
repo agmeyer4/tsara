@@ -21,7 +21,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 
 from tsara.config.base import StrictModel as _StrictModel
 from tsara.config.base import validate_positive_timedelta as _validate_duration
@@ -70,7 +70,7 @@ class GridConfig(_StrictModel):
 
     @field_validator("freq", "max_interp_gap")
     @classmethod
-    def _valid_durations(cls, value: str, info) -> str:
+    def _valid_durations(cls, value: str, info: ValidationInfo) -> str:
         _validate_duration(value, field=f"GridConfig.{info.field_name}")
         return value
 
@@ -209,7 +209,7 @@ class DetectionConfig(_StrictModel):
 
     @field_validator("noise_window", "min_duration", "max_internal_gap")
     @classmethod
-    def _valid_durations(cls, value: str, info) -> str:
+    def _valid_durations(cls, value: str, info: ValidationInfo) -> str:
         _validate_duration(value, field=f"DetectionConfig.{info.field_name}")
         return value
 
@@ -385,7 +385,7 @@ class AnalysisConfig(_StrictModel):
 
     @model_validator(mode="after")
     def _grid_finer_than_shortest_window(self) -> AnalysisConfig:
-        """The grid must resolve the shortest baseline window.
+        """Require the grid to resolve the shortest baseline window.
 
         A 5-minute grid with a 2-minute baseline window means windows hold
         zero or one samples — the quantile degenerates to the identity and

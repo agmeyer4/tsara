@@ -80,6 +80,13 @@ def test_duplicate_windows_rejected(analysis_dict):
         AnalysisConfig.model_validate(bad)
 
 
+def test_duplicate_quantiles_rejected(analysis_dict):
+    bad = copy.deepcopy(analysis_dict)
+    bad["baseline"]["quantiles"] = [0.05, 0.05]
+    with pytest.raises(ValidationError, match="duplicate"):
+        AnalysisConfig.model_validate(bad)
+
+
 @pytest.mark.parametrize("quantile", [0.0, 0.51, 0.95, 1.0, -0.05])
 def test_out_of_range_quantiles_rejected(analysis_dict, quantile):
     """Baseline quantiles above the median are not backgrounds."""

@@ -51,6 +51,19 @@ def test_example_configs_are_valid():
     assert analysis.regression.reference_species in manifest.gas_species
 
 
+def test_stationary_example_config_is_valid():
+    """The stationary counterpart to the mobile example above: no GPS
+    instrument, a single static coordinate applied to every sample."""
+    from pathlib import Path
+
+    from tsara.config.manifest import StationaryPlatform
+
+    examples = Path(__file__).parents[2] / "examples" / "configs"
+    manifest = load_manifest(examples / "manifest_stationary_example.yaml")
+    assert isinstance(manifest.platform, StationaryPlatform)
+    assert set(manifest.gas_species) == {"ch4", "co2"}
+
+
 # ---------------------------------------------------------------------------
 # Error reporting
 # ---------------------------------------------------------------------------

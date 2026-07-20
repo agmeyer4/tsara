@@ -41,7 +41,6 @@ from pydantic import (
 from tsara.config.base import StrictModel as _StrictModel
 from tsara.config.base import validate_positive_timedelta as _validate_duration
 
-
 # ---------------------------------------------------------------------------
 # Units
 # ---------------------------------------------------------------------------
