@@ -7,7 +7,12 @@ import copy
 import pytest
 from pydantic import ValidationError
 
-from tsara.config.analysis import AnalysisConfig, DetectionConfig, GridConfig
+from tsara.config.analysis import (
+    AlignmentConfig,
+    AnalysisConfig,
+    DetectionConfig,
+    OutputGridConfig,
+)
 
 # ---------------------------------------------------------------------------
 # Happy paths & defaults
@@ -16,49 +21,74 @@ from tsara.config.analysis import AnalysisConfig, DetectionConfig, GridConfig
 
 def test_minimal_analysis_parses(analysis_dict):
     config = AnalysisConfig.model_validate(analysis_dict)
-    assert config.grid.freq == "1s"
+    assert config.output_grid.freq == "1s"
     assert config.baseline.windows == ("2min", "10min")
     # Optional stages exist with safe defaults instead of being None.
-    assert config.detection.exit_mad == 1.0
+    assert config.alignment.max_interp_gap == "10s"
+    assert config.detection.exit_sigma == 1.0
+    assert config.detection.noise_estimator == "diff_mad"
     assert config.smoothing.enabled is False
     assert config.clustering.enabled is False
-    assert config.regression.methods == ("ols", "odr")
+    assert config.regression.methods == ("ols", "york")
 
 
 def test_sweep_lists_accepted(analysis_dict):
     full = copy.deepcopy(analysis_dict)
     full["baseline"]["quantiles"] = [0.01, 0.05, 0.10]
-    full["detection"] = {"enter_mads": [3.0, 5.0], "exit_mad": 1.0}
+    full["detection"] = {"enter_sigma": [3.0, 5.0], "exit_sigma": 1.0}
     full["smoothing"] = {"enabled": True, "cutoff_periods": ["30s", "60s"]}
     config = AnalysisConfig.model_validate(full)
     assert len(config.baseline.quantiles) == 3
-    assert len(config.detection.enter_mads) == 2
+    assert len(config.detection.enter_sigma) == 2
     assert len(config.smoothing.cutoff_periods) == 2
 
 
 # ---------------------------------------------------------------------------
-# Grid validation
+# Output grid validation
 # ---------------------------------------------------------------------------
 
 
 def test_bad_grid_freq_rejected(analysis_dict):
     bad = copy.deepcopy(analysis_dict)
-    bad["grid"]["freq"] = "one second"
+    bad["output_grid"]["freq"] = "one second"
     with pytest.raises(ValidationError, match="timedelta"):
         AnalysisConfig.model_validate(bad)
 
 
 def test_negative_duration_rejected():
     with pytest.raises(ValidationError, match="positive"):
-        GridConfig(freq="-5s")
+        OutputGridConfig(freq="-5s")
 
 
 def test_grid_start_must_precede_end(analysis_dict):
     bad = copy.deepcopy(analysis_dict)
-    bad["grid"]["start"] = "2025-06-02T00:00:00"
-    bad["grid"]["end"] = "2025-06-01T00:00:00"
+    bad["output_grid"]["start"] = "2025-06-02T00:00:00"
+    bad["output_grid"]["end"] = "2025-06-01T00:00:00"
     with pytest.raises(ValidationError, match="before"):
         AnalysisConfig.model_validate(bad)
+
+
+# ---------------------------------------------------------------------------
+# Alignment (aux-field interpolation guard) validation
+# ---------------------------------------------------------------------------
+
+
+def test_alignment_defaults_present_without_being_specified(analysis_dict):
+    """alignment is optional-but-present, like smoothing/clustering/detection."""
+    config = AnalysisConfig.model_validate(analysis_dict)
+    assert config.alignment.max_interp_gap == "10s"
+
+
+def test_bad_alignment_gap_rejected(analysis_dict):
+    bad = copy.deepcopy(analysis_dict)
+    bad["alignment"] = {"max_interp_gap": "not a duration"}
+    with pytest.raises(ValidationError, match="timedelta"):
+        AnalysisConfig.model_validate(bad)
+
+
+def test_negative_alignment_gap_rejected():
+    with pytest.raises(ValidationError, match="positive"):
+        AlignmentConfig(max_interp_gap="-10s")
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +142,7 @@ def test_empty_windows_rejected(analysis_dict):
 def test_grid_must_resolve_shortest_window(analysis_dict):
     """A 5-min grid cannot support a 2-min rolling window."""
     bad = copy.deepcopy(analysis_dict)
-    bad["grid"]["freq"] = "5min"
+    bad["output_grid"]["freq"] = "5min"
     with pytest.raises(ValidationError, match="10x"):
         AnalysisConfig.model_validate(bad)
 
@@ -125,12 +155,23 @@ def test_grid_must_resolve_shortest_window(analysis_dict):
 def test_enter_must_exceed_exit():
     """Inverted hysteresis makes event boundaries ill-defined."""
     with pytest.raises(ValidationError, match="exceed"):
-        DetectionConfig(enter_mads=(2.0,), exit_mad=3.0)
+        DetectionConfig(enter_sigma=(2.0,), exit_sigma=3.0)
 
 
 def test_any_enter_below_exit_rejected():
     with pytest.raises(ValidationError, match="exceed"):
-        DetectionConfig(enter_mads=(5.0, 0.5), exit_mad=1.0)
+        DetectionConfig(enter_sigma=(5.0, 0.5), exit_sigma=1.0)
+
+
+def test_unknown_noise_estimator_rejected():
+    with pytest.raises(ValidationError):
+        DetectionConfig(noise_estimator="qn")  # not yet a registered name
+
+
+def test_mad_noise_estimator_accepted():
+    """'mad' is registered (kept for comparison against the diff_mad default)."""
+    config = DetectionConfig(noise_estimator="mad")
+    assert config.noise_estimator == "mad"
 
 
 # ---------------------------------------------------------------------------
@@ -138,9 +179,23 @@ def test_any_enter_below_exit_rejected():
 # ---------------------------------------------------------------------------
 
 
+def test_york_is_the_default_preferred_method(analysis_dict):
+    """York (errors-in-both-axes, correlation-aware) is default; odr is opt-in."""
+    config = AnalysisConfig.model_validate(analysis_dict)
+    assert config.regression.methods == ("ols", "york")
+    assert "odr" not in config.regression.methods
+
+
+def test_all_three_methods_accepted(analysis_dict):
+    ok = copy.deepcopy(analysis_dict)
+    ok["regression"]["methods"] = ["ols", "york", "odr"]
+    config = AnalysisConfig.model_validate(ok)
+    assert config.regression.methods == ("ols", "york", "odr")
+
+
 def test_unknown_method_rejected(analysis_dict):
     bad = copy.deepcopy(analysis_dict)
-    bad["regression"]["methods"] = ["ols", "york"]
+    bad["regression"]["methods"] = ["ols", "wls"]  # 'wls' is not a registered estimator
     with pytest.raises(ValidationError):
         AnalysisConfig.model_validate(bad)
 

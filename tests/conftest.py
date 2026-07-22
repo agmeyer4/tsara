@@ -89,7 +89,7 @@ def mobile_manifest_dict(stationary_manifest_dict: dict[str, Any]) -> dict[str, 
 def analysis_dict() -> dict[str, Any]:
     """Minimal valid analysis configuration."""
     return {
-        "grid": {"freq": "1s"},
+        "output_grid": {"freq": "1s"},
         "baseline": {"windows": ["2min", "10min"], "quantiles": [0.05]},
         "regression": {"reference_species": "ch4"},
     }

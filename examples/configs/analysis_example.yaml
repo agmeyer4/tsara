@@ -2,7 +2,7 @@
 # TSARA analysis config example
 # ----------------------------------------------------------------------------
 # Describes the SCIENCE applied to ingested data. List-valued fields
-# (baseline windows/quantiles, detection enter_mads, smoothing cutoffs)
+# (baseline windows/quantiles, detection enter_sigma, smoothing cutoffs)
 # are PARAMETER SWEEP dimensions: every combination is evaluated, and the
 # spread of results across the hypercube becomes the methodological
 # uncertainty. Single-element lists = fixed methodology, zero sweep.
@@ -11,12 +11,23 @@
 #     a = load_analysis("analysis_example.yaml")
 # ============================================================================
 
-# --- Master time grid -------------------------------------------------------
-grid:
-  freq: 1s                # target cadence all streams are synchronized to
-  max_interp_gap: 10s     # never interpolate across gaps longer than this
-  bin_statistic: mean     # how fast streams are aggregated into grid bins
+# --- Output grid --------------------------------------------------------
+# NOT what streams are synchronized onto (that's native-rate, "synchronize
+# late" -- see METHODS.md §1.1). This grid exists only for the continuous
+# rolling state and the PMF export matrix, the two products that inherently
+# need a common (time x species) cube.
+output_grid:
+  freq: 1s                # cadence of the continuous-state / PMF output cube
+  bin_statistic: mean     # how native samples are aggregated into grid bins
   # start / end: optional UTC datetimes; default = union of all streams
+
+# --- Auxiliary-field alignment -------------------------------------------
+# Guards interpolation of SMOOTH fields (GPS, met) onto gas timestamps.
+# Gases themselves are never interpolated (METHODS.md §1.2) -- this has
+# nothing to do with cross-species pairing for regression (§1.3), which
+# always uses the slower-of-the-pair's native clock with no free parameters.
+alignment:
+  max_interp_gap: 10s     # never interpolate GPS/met across gaps longer than this
 
 # --- Rolling baselines -------------------------------------------------------
 baseline:
@@ -29,8 +40,12 @@ baseline:
 
 # --- Plume detection ---------------------------------------------------------
 detection:
-  enter_mads: [3.0, 5.0]  # sweep: sensitivity of event detection
-  exit_mad: 1.0           # hysteresis: exit threshold must be below entry
+  enter_sigma: [3.0, 5.0]  # sweep: sensitivity of event detection, in noise-sigma units
+  exit_sigma: 1.0          # hysteresis: exit threshold must be below entry
+  # Registered empirical-fallback estimator (METHODS.md §2.5), used only for
+  # species with no declared/reported random uncertainty -- declared/reported
+  # sigma always takes precedence when a species has one (§2.3/§6).
+  noise_estimator: diff_mad
   noise_window: 10min
   min_duration: 3s        # discard blips shorter than this
   max_internal_gap: 5s    # bridge sub-threshold dips shorter than this
@@ -51,6 +66,9 @@ clustering:
 # --- Enhancement-ratio regressions -------------------------------------------
 regression:
   reference_species: ch4  # denominator; must be a role=gas manifest variable
-  methods: [ols, odr]
+  # 'york' (errors-in-both-axes, correlation-aware) is the default preferred
+  # estimator; 'odr' is an opt-in numerical cross-check, shown here alongside
+  # 'ols' to demonstrate that all three registered methods can run together.
+  methods: [ols, york, odr]
   min_points: 8
   confidence_level: 0.95

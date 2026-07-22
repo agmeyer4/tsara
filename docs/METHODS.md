@@ -65,7 +65,7 @@ A concentration inside a plume is not a smooth field; linearly interpolating
 it invents structure exactly where the science happens. Platform position and
 ambient met vary smoothly on sampling timescales, so interpolation onto gas
 timestamps is physically justified there — but never across gaps longer than
-`max_interp_gap`.
+`max_interp_gap` (config: `AlignmentConfig.max_interp_gap`, `tsara.config.analysis`).
 
 ### 1.3 Pairing for regression (fast → slow, never the reverse)
 
@@ -99,7 +99,10 @@ matrix, which inherently require one. Construction is binning-only
 (`bin_statistic`), with per-cell propagated uncertainties and `n_native`
 counts carried alongside values. Validation requires the grid period to be
 ≥ the slowest stream's native period; cells with no native samples are NaN
-with `n_native = 0`, never interpolated.
+with `n_native = 0`, never interpolated. Config: `OutputGridConfig`
+(`tsara.config.analysis`) — deliberately not named "the grid" or paired with
+the aux-interpolation guard, since neither streams nor cross-species pairing
+(§1.3) use it; it exists solely for this output boundary.
 
 ### 1.5 Circular statistics for angular variables **[stub — Phase 4]**
 
@@ -141,9 +144,19 @@ Each component of each variable may be specified as:
 An optional **decorrelation timescale** τ on the random component covers the
 in-between world (errors correlated over minutes but not hours); see §3.3.
 
-The Phase-1 `UncertaintySpec` (`absolute` ⊕ `relative` in quadrature) is
-exactly the `declared` mode of the *random* component; the schema will be
-extended to the full structure above (see CLAUDE.md §5, open flags).
+**Implemented schema** (settled 2026-07-22, `tsara.config.manifest`):
+`UncertaintySpec.random` and `.systematic` are each an optional discriminated
+union tagged by `mode` — `DeclaredUncertainty` (`absolute`/`relative`,
+quadrature) or `ReportedUncertainty` (`column`, the raw-file column holding
+that component's per-point sigma) — matching the `kind`/`format`-discriminator
+convention already used for QA/QC rules, loaders, and platforms.
+`UncertaintySpec.decorrelation_timescale` is an optional duration string
+carrying τ for the random component (§3.4). Omitting a component means "not
+modeled here": an omitted `systematic` is zero; an omitted `random` falls back
+to the empirical estimator (§2.5) at runtime. A `ReportedUncertainty.column`
+is scaled by the parent variable's `convert.scale` at ingestion (a spread has
+no origin, so `convert.offset` never applies to it) — that scaling is Phase-3
+ingestion logic, not part of this schema.
 
 ### 2.3 No silent assumptions
 
@@ -275,7 +288,8 @@ binning trades this efficiency loss for robustness to sub-grid spikes.)
 
 ## 4. Regression estimators
 
-Registered names: `ols`, `york`, `odr`. Defaults: `("ols", "york")`.
+Registered names: `ols`, `york`, `odr`. Defaults: `("ols", "york")` (config:
+`RegressionConfig.methods`, `tsara.config.analysis`).
 
 ### 4.1 `ols` — ordinary least squares (statsmodels)
 
@@ -426,13 +440,15 @@ not a sole objective. **[estimator details — Phase 7]**
   Baseline *uncertainty* (order-statistic variance or block bootstrap) to be
   specified in Phase 5 — it feeds Δ uncertainty.
 - **Plume detection** **[partial stub — Phase 6]**: two-threshold hysteresis
-  segmentation of the enhancement Δ (enter/exit thresholds in noise-σ units,
-  minimum duration, internal-gap bridging). Decided 2026-07-09: the noise
+  segmentation of the enhancement Δ (config: `DetectionConfig.enter_sigma`
+  (sweep dim) / `exit_sigma`, both in noise-σ units, plus `min_duration` and
+  `max_internal_gap` for internal-gap bridging). Decided 2026-07-09: the noise
   scale σ comes from the measurement-uncertainty system in provenance order —
   declared or reported $\sigma^{\mathrm{rand}}$ when available, else the
-  empirical `diff_mad` estimator (§2.5); detection has no private definition
-  of noise, and the §2.5 quantization floor applies to whichever source is
-  used. Also decided: **quantile-offset correction** — because the baseline
+  empirical estimator named by `DetectionConfig.noise_estimator` (default
+  `diff_mad`, §2.5); detection has no private definition of noise, and the
+  §2.5 quantization floor applies to whichever source is used. Also decided:
+  **quantile-offset correction** — because the baseline
   is a low quantile q, even pure noise has a positive median enhancement of
   $-z_q\,\sigma$ (≈ 1.64σ at q = 0.05, Gaussian), so thresholds are applied
   to the offset-corrected enhancement; otherwise the effective threshold

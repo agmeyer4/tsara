@@ -55,7 +55,16 @@ instruments:
         role: gas
         units: ppm
         convert: {from_unit: ppm, to_unit: ppb, scale: 1000.0}
-        uncertainty: {absolute: 0.7, relative: 0.0005}   # ppb noise floor + 0.05 %
+        # Two-component uncertainty budget (METHODS.md §2): a declared random
+        # noise floor + 0.05 % term, PLUS a declared systematic term (e.g.
+        # calibration-tank scale uncertainty) that must NOT average down the
+        # way random noise does. decorrelation_timescale says the random
+        # component is only independent beyond ~5 min (in-between world of
+        # §3.4) rather than fully i.i.d. sample-to-sample.
+        uncertainty:
+          random: {mode: declared, absolute: 0.7, relative: 0.0005}
+          systematic: {mode: declared, relative: 0.01}
+          decorrelation_timescale: 5min
         qaqc:
           - {kind: range, min: 1700.0, max: 100000.0}    # ppb, post-conversion sanity
           - {kind: spike, window: 5s, n_mad: 6.0}
@@ -63,7 +72,8 @@ instruments:
         column: CO2_dry
         role: gas
         units: ppm
-        uncertainty: {absolute: 0.05}
+        uncertainty:
+          random: {mode: declared, absolute: 0.05}
         qaqc:
           - {kind: range, min: 350.0}
 
@@ -91,14 +101,19 @@ instruments:
         column: C6H6_ppbv
         role: gas
         units: ppbv
-        uncertainty: {relative: 0.15}
+        # 'reported' mode: a per-point sigma column from the retrieval itself
+        # (changes every sample), rather than a fixed instrument spec -- the
+        # EM27-style case METHODS.md §2.2 is written for.
+        uncertainty:
+          random: {mode: reported, column: C6H6_1SIGMA_ppbv}
         qaqc:
           - {kind: flag, flag_column: QC_FLAG, good_values: [0]}
       toluene:
         column: C7H8_ppbv
         role: gas
         units: ppbv
-        uncertainty: {relative: 0.15}
+        uncertainty:
+          random: {mode: declared, relative: 0.15}
 
   gps:
     description: Roof GPS + sonic anemometer

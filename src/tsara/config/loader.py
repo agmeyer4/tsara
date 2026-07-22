@@ -174,8 +174,8 @@ def load_analysis(path: str | Path) -> AnalysisConfig:
     path = Path(path)
     analysis = _validate(AnalysisConfig, _read_yaml(path), path)
     logger.info(
-        "Loaded analysis config: grid=%s, %d baseline window(s) x %d quantile(s)",
-        analysis.grid.freq,
+        "Loaded analysis config: output_grid=%s, %d baseline window(s) x %d quantile(s)",
+        analysis.output_grid.freq,
         len(analysis.baseline.windows),
         len(analysis.baseline.quantiles),
     )

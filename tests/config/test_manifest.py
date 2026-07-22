@@ -9,9 +9,12 @@ from pydantic import ValidationError
 
 from tsara.config.manifest import (
     CSVLoader,
+    DeclaredUncertainty,
     Manifest,
     MobilePlatform,
+    ReportedUncertainty,
     StationaryPlatform,
+    UncertaintySpec,
     UnitConversion,
 )
 
@@ -346,13 +349,104 @@ def test_unknown_qaqc_kind_rejected(stationary_manifest_dict):
 # ---------------------------------------------------------------------------
 
 
-def test_all_zero_uncertainty_rejected(stationary_manifest_dict):
+def test_declared_component_all_zero_rejected(stationary_manifest_dict):
+    """absolute=0 and relative=0 declares perfect measurement for that component."""
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["variables"]["ch4"]["uncertainty"] = {
-        "absolute": 0.0,
-        "relative": 0.0,
+        "random": {"mode": "declared", "absolute": 0.0, "relative": 0.0}
     }
     with pytest.raises(ValidationError, match="perfect"):
+        Manifest.model_validate(bad)
+
+
+def test_uncertainty_with_no_components_rejected(stationary_manifest_dict):
+    """Neither random nor systematic declares nothing at all."""
+    bad = copy.deepcopy(stationary_manifest_dict)
+    bad["instruments"]["picarro"]["variables"]["ch4"]["uncertainty"] = {}
+    with pytest.raises(ValidationError, match="omit"):
+        Manifest.model_validate(bad)
+
+
+def test_declared_random_component_parses(stationary_manifest_dict):
+    ok = copy.deepcopy(stationary_manifest_dict)
+    ok["instruments"]["picarro"]["variables"]["ch4"]["uncertainty"] = {
+        "random": {"mode": "declared", "absolute": 0.5, "relative": 0.02}
+    }
+    manifest = Manifest.model_validate(ok)
+    spec = manifest.instruments["picarro"].variables["ch4"].uncertainty
+    assert isinstance(spec, UncertaintySpec)
+    assert isinstance(spec.random, DeclaredUncertainty)
+    assert spec.random.absolute == 0.5
+    assert spec.systematic is None
+
+
+def test_reported_component_requires_column(stationary_manifest_dict):
+    bad = copy.deepcopy(stationary_manifest_dict)
+    bad["instruments"]["picarro"]["variables"]["ch4"]["uncertainty"] = {
+        "random": {"mode": "reported"}
+    }
+    with pytest.raises(ValidationError, match="column"):
+        Manifest.model_validate(bad)
+
+
+def test_reported_component_parses(stationary_manifest_dict):
+    """EM27-style per-point sigma column, e.g. a per-retrieval error column."""
+    ok = copy.deepcopy(stationary_manifest_dict)
+    ok["instruments"]["picarro"]["variables"]["ch4"]["uncertainty"] = {
+        "random": {"mode": "reported", "column": "CH4_1SIGMA"}
+    }
+    manifest = Manifest.model_validate(ok)
+    spec = manifest.instruments["picarro"].variables["ch4"].uncertainty
+    assert isinstance(spec, UncertaintySpec)
+    assert isinstance(spec.random, ReportedUncertainty)
+    assert spec.random.column == "CH4_1SIGMA"
+
+
+def test_both_components_and_decorrelation_timescale_parse(stationary_manifest_dict):
+    """A per-point random column plus a declared, constant systematic term."""
+    ok = copy.deepcopy(stationary_manifest_dict)
+    ok["instruments"]["picarro"]["variables"]["ch4"]["uncertainty"] = {
+        "random": {"mode": "reported", "column": "CH4_1SIGMA"},
+        "systematic": {"mode": "declared", "relative": 0.01},
+        "decorrelation_timescale": "5min",
+    }
+    manifest = Manifest.model_validate(ok)
+    spec = manifest.instruments["picarro"].variables["ch4"].uncertainty
+    assert isinstance(spec, UncertaintySpec)
+    assert isinstance(spec.systematic, DeclaredUncertainty)
+    assert spec.systematic.relative == 0.01
+    assert spec.decorrelation_timescale == "5min"
+
+
+def test_explicit_null_decorrelation_timescale_accepted(stationary_manifest_dict):
+    """Explicitly passing null is equivalent to omitting the field entirely."""
+    ok = copy.deepcopy(stationary_manifest_dict)
+    ok["instruments"]["picarro"]["variables"]["ch4"]["uncertainty"] = {
+        "random": {"mode": "declared", "absolute": 0.5},
+        "decorrelation_timescale": None,
+    }
+    manifest = Manifest.model_validate(ok)
+    spec = manifest.instruments["picarro"].variables["ch4"].uncertainty
+    assert spec is not None
+    assert spec.decorrelation_timescale is None
+
+
+def test_bad_decorrelation_timescale_rejected(stationary_manifest_dict):
+    bad = copy.deepcopy(stationary_manifest_dict)
+    bad["instruments"]["picarro"]["variables"]["ch4"]["uncertainty"] = {
+        "random": {"mode": "declared", "absolute": 0.5},
+        "decorrelation_timescale": "not a duration",
+    }
+    with pytest.raises(ValidationError, match="timedelta"):
+        Manifest.model_validate(bad)
+
+
+def test_unknown_uncertainty_mode_rejected(stationary_manifest_dict):
+    bad = copy.deepcopy(stationary_manifest_dict)
+    bad["instruments"]["picarro"]["variables"]["ch4"]["uncertainty"] = {
+        "random": {"mode": "magic", "absolute": 0.5}
+    }
+    with pytest.raises(ValidationError):
         Manifest.model_validate(bad)
 
 

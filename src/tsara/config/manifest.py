@@ -173,26 +173,115 @@ QAQCRule = Annotated[RangeRule | FlagRule | SpikeRule, Field(discriminator="kind
 VariableRole = Literal["gas", "met", "gps_lat", "gps_lon", "gps_alt", "aux"]
 
 
-class UncertaintySpec(_StrictModel):
-    """Per-sample measurement uncertainty, consumed by ODR in Phase 7.
+class DeclaredUncertainty(_StrictModel):
+    """A component's 1-sigma uncertainty as a declared noise-floor + fraction.
 
-    Total 1-sigma uncertainty is combined in quadrature:
-    ``sigma = sqrt(absolute**2 + (relative * value)**2)``. This two-term
-    form matches how instrument teams typically report precision (a noise
-    floor plus a percent-of-reading term).
+    Total sigma is combined in quadrature: ``sigma = sqrt(absolute**2 +
+    (relative * value)**2)``. This two-term form matches how instrument
+    teams typically report precision (a noise floor plus a percent-of-
+    reading term). Used for either the random or systematic component of
+    :class:`UncertaintySpec` (METHODS.md §2.2).
     """
 
+    mode: Literal["declared"] = "declared"
     absolute: float = Field(default=0.0, ge=0, description="Noise floor in canonical units.")
     relative: float = Field(
         default=0.0, ge=0, lt=1, description="Fraction of reading, e.g. 0.02 for 2 %."
     )
 
     @model_validator(mode="after")
-    def _nonzero(self) -> UncertaintySpec:
+    def _nonzero(self) -> DeclaredUncertainty:
         if self.absolute == 0.0 and self.relative == 0.0:
             raise ValueError(
-                "UncertaintySpec with absolute=0 and relative=0 declares perfect "
-                "measurement; omit the 'uncertainty' block instead."
+                "DeclaredUncertainty with absolute=0 and relative=0 declares "
+                "perfect measurement; omit this component instead."
+            )
+        return self
+
+
+class ReportedUncertainty(_StrictModel):
+    """A component's per-point 1-sigma uncertainty, read from the raw file.
+
+    Some instruments (e.g. EM27 retrievals) report a per-sample uncertainty
+    that changes every point rather than a fixed instrument spec — this
+    mode names the raw-file column holding it (METHODS.md §2.2). Unit
+    conversion for this column follows the parent variable's own
+    ``convert.scale`` (a spread scales with the value's units) but never
+    ``convert.offset`` (a spread has no origin to shift); that scaling is
+    applied at ingestion (Phase 3), not by this schema.
+    """
+
+    mode: Literal["reported"] = "reported"
+    column: str = Field(
+        min_length=1, description="Column in the raw file holding this component's per-point sigma."
+    )
+
+
+#: Tagged union — dispatches on 'mode', matching the QAQCRule/LoaderConfig/
+#: PlatformConfig discriminated-union convention used throughout this schema.
+ComponentUncertainty = Annotated[
+    DeclaredUncertainty | ReportedUncertainty, Field(discriminator="mode")
+]
+
+
+class UncertaintySpec(_StrictModel):
+    """Per-sample measurement uncertainty, consumed by regression in Phase 7.
+
+    Two components, carried separately because downstream operations treat
+    them differently (METHODS.md §2.1, §3, §4.3):
+
+    * ``random`` — uncorrelated point-to-point noise. Averages down with the
+      number of effective samples; feeds regression point weights directly.
+    * ``systematic`` — correlated error (calibration scale/offset, drift).
+      Does *not* average down; propagated to the ratio analytically after
+      the fit rather than folded into per-point weights.
+
+    Each component is independently either :class:`DeclaredUncertainty`
+    (absolute/relative) or :class:`ReportedUncertainty` (a per-point
+    column) — a real instrument might declare a constant systematic
+    calibration uncertainty while reporting a per-point random column, or
+    any other combination. Omitting a component means "not modeled here":
+    an omitted ``systematic`` is treated as zero; an omitted ``random``
+    falls back to the empirical ``diff_mad`` estimator (METHODS.md §2.5) at
+    runtime, with `uncertainty_source` provenance recorded either way.
+    """
+
+    random: ComponentUncertainty | None = Field(
+        default=None,
+        description=(
+            "Random (uncorrelated) component. None = fall back to the "
+            "empirical noise estimator at runtime (METHODS.md §2.3)."
+        ),
+    )
+    systematic: ComponentUncertainty | None = Field(
+        default=None,
+        description=(
+            "Systematic (correlated, non-averaging) component. None = not "
+            "modeled (treated as zero)."
+        ),
+    )
+    decorrelation_timescale: str | None = Field(
+        default=None,
+        description=(
+            "Optional AR(1)-like decorrelation timescale tau for the random "
+            "component (METHODS.md §3.4), covering errors correlated over "
+            "minutes but not hours. None = points treated as independent."
+        ),
+    )
+
+    @field_validator("decorrelation_timescale")
+    @classmethod
+    def _valid_decorrelation_timescale(cls, value: str | None) -> str | None:
+        if value is not None:
+            _validate_duration(value, field="UncertaintySpec.decorrelation_timescale")
+        return value
+
+    @model_validator(mode="after")
+    def _at_least_one_component(self) -> UncertaintySpec:
+        if self.random is None and self.systematic is None:
+            raise ValueError(
+                "UncertaintySpec with no 'random' and no 'systematic' component "
+                "declares nothing; omit the 'uncertainty' block instead."
             )
         return self
 
@@ -219,7 +308,12 @@ class VariableConfig(_StrictModel):
         ),
     )
     uncertainty: UncertaintySpec | None = Field(
-        default=None, description="1-sigma measurement uncertainty for ODR weighting."
+        default=None,
+        description=(
+            "Measurement uncertainty budget (random/systematic components), "
+            "consumed by plume detection's noise scale and by regression "
+            "point weights (METHODS.md §2, §4.3)."
+        ),
     )
     qaqc: tuple[QAQCRule, ...] = Field(
         default=(), description="Masking rules applied in order at ingestion."

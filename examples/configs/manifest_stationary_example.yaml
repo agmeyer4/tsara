@@ -50,7 +50,12 @@ instruments:
         role: gas
         units: ppm
         convert: {from_unit: ppm, to_unit: ppb, scale: 1000.0}
-        uncertainty: {absolute: 0.7, relative: 0.0005}
+        # Declared random component (noise floor + relative term, METHODS.md
+        # §2.2); see manifest_mobile_example.yaml for the fuller uncertainty
+        # example (systematic component + decorrelation timescale, and a
+        # 'reported' per-point column).
+        uncertainty:
+          random: {mode: declared, absolute: 0.7, relative: 0.0005}
         qaqc:
           - {kind: range, min: 1700.0, max: 100000.0}
           - {kind: spike, window: 5s, n_mad: 6.0}
@@ -58,7 +63,8 @@ instruments:
         column: CO2_dry
         role: gas
         units: ppm
-        uncertainty: {absolute: 0.05}
+        uncertainty:
+          random: {mode: declared, absolute: 0.05}
         qaqc:
           - {kind: range, min: 350.0}
 

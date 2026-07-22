@@ -33,7 +33,7 @@ def test_combined_roundtrip(write_yaml, mobile_manifest_dict, analysis_dict):
     )
     config = load_config(path)
     assert config.manifest.name == "test_mobile"
-    assert config.analysis.grid.freq == "1s"
+    assert config.analysis.output_grid.freq == "1s"
 
 
 def test_example_configs_are_valid():
