@@ -1,0 +1,89 @@
+# ============================================================================
+# TSARA manifest example: STATIONARY platform (fixed rooftop site)
+# ----------------------------------------------------------------------------
+# Compare against manifest_mobile_example.yaml: a stationary platform needs
+# no GPS instrument and no lat/lon cross-referencing at all -- one static
+# coordinate, declared once, applies to every sample. That's the whole
+# platform-metadata difference the schema exists to capture.
+# Load with:
+#     from tsara import load_manifest
+#     m = load_manifest("manifest_stationary_example.yaml")
+# ============================================================================
+
+name: uu_rooftop_2025
+description: >
+  University of Utah rooftop greenhouse-gas monitoring site. Fixed Picarro
+  CH4/CO2 analyzer plus a met station for wind-based source attribution.
+
+base_path: ../data/raw
+
+# --- Platform -----------------------------------------------------------
+# kind=stationary: one lat/lon/altitude, applied globally. No instrument
+# reference needed (contrast with the mobile example's platform.gps_instrument).
+platform:
+  kind: stationary
+  latitude: 40.7649
+  longitude: -111.8421
+  altitude_m: 1478.0
+
+# --- Instruments ----------------------------------------------------------
+instruments:
+
+  picarro:
+    description: Picarro G2401 CH4/CO2/CO cavity ring-down analyzer
+    loader:
+      format: csv
+      # Singular `path_template` shorthand: this instrument has only ONE
+      # directory convention, so the plural path_templates list (see the
+      # mobile example's voc_spec instrument) would be unnecessary.
+      path_template: "picarro/%Y/%m/%d/*.dat"
+      delimiter: ","
+      header_row: 0
+      na_values: ["-9999"]
+      time:
+        column: EPOCH_TIME
+        format: unix
+        timezone: UTC
+    variables:
+      ch4:
+        column: CH4_dry
+        role: gas
+        units: ppm
+        convert: {from_unit: ppm, to_unit: ppb, scale: 1000.0}
+        # Declared random component (noise floor + relative term, METHODS.md
+        # §2.2); see manifest_mobile_example.yaml for the fuller uncertainty
+        # example (systematic component + decorrelation timescale, and a
+        # 'reported' per-point column).
+        uncertainty:
+          random: {mode: declared, absolute: 0.7, relative: 0.0005}
+        qaqc:
+          - {kind: range, min: 1700.0, max: 100000.0}
+          - {kind: spike, window: 5s, n_mad: 6.0}
+      co2:
+        column: CO2_dry
+        role: gas
+        units: ppm
+        uncertainty:
+          random: {mode: declared, absolute: 0.05}
+        qaqc:
+          - {kind: range, min: 350.0}
+
+  met:
+    description: Rooftop sonic anemometer
+    loader:
+      format: csv
+      path_template: "met/%Y/*.csv"
+      time:
+        column: timestamp
+        format: "%Y-%m-%d %H:%M:%S"
+        timezone: UTC
+    variables:
+      wind_dir:
+        column: wdir
+        role: met
+        units: degrees
+        circular: true        # vector-averaged during synchronization
+      wind_speed:
+        column: wspd
+        role: met
+        units: m/s

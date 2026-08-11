@@ -1,0 +1,138 @@
+# ============================================================================
+# TSARA manifest example: MOBILE platform (van-based survey)
+# ----------------------------------------------------------------------------
+# A manifest describes WHAT the raw data is and HOW to read it. Science
+# settings (baselines, detection, regressions) live in a separate analysis
+# config. Load with:
+#     from tsara import load_manifest
+#     m = load_manifest("manifest_mobile_example.yaml")
+# ============================================================================
+
+name: slv_mobile_2025
+description: >
+  Salt Lake Valley mobile survey, spring 2025. Picarro CH4/CO2 analyzer and
+  a VOC spectrometer on the van, GPS from the roof antenna.
+
+# Root of the raw data tree. Relative paths are resolved against THIS file's
+# directory, so the manifest can live in a repo alongside a data/ folder.
+base_path: ../data/raw
+
+# --- Platform -----------------------------------------------------------
+# kind=mobile means coordinates come from a GPS instrument's timeseries.
+# The instrument and variable names below must exist in `instruments:`,
+# with roles gps_lat/gps_lon — TSARA validates these cross-references.
+platform:
+  kind: mobile
+  gps_instrument: gps
+  lat_variable: latitude
+  lon_variable: longitude
+
+# --- Instruments ----------------------------------------------------------
+instruments:
+
+  picarro:
+    description: Picarro G2401 CH4/CO2/CO cavity ring-down analyzer
+    loader:
+      format: csv
+      # {field} placeholders + strftime tokens + glob wildcards.
+      # Fields given in `metadata:` below are fixed; anything else would be
+      # harvested from the matched paths as campaign metadata.
+      path_template: "{institution}/picarro/%Y/%m/%d/*.dat"
+      delimiter: ","
+      header_row: 0
+      na_values: ["-9999"]
+      time:
+        column: EPOCH_TIME
+        format: unix          # epoch seconds; or a strftime pattern, or iso8601
+        timezone: UTC
+    metadata:
+      institution: uutah
+    variables:
+      # Keys are CANONICAL names: they become variable names in the merged
+      # dataset, and role=gas entries form the `species` dimension.
+      ch4:
+        column: CH4_dry
+        role: gas
+        units: ppm
+        convert: {from_unit: ppm, to_unit: ppb, scale: 1000.0}
+        # Two-component uncertainty budget (METHODS.md §2): a declared random
+        # noise floor + 0.05 % term, PLUS a declared systematic term (e.g.
+        # calibration-tank scale uncertainty) that must NOT average down the
+        # way random noise does. decorrelation_timescale says the random
+        # component is only independent beyond ~5 min (in-between world of
+        # §3.4) rather than fully i.i.d. sample-to-sample.
+        uncertainty:
+          random: {mode: declared, absolute: 0.7, relative: 0.0005}
+          systematic: {mode: declared, relative: 0.01}
+          decorrelation_timescale: 5min
+        qaqc:
+          - {kind: range, min: 1700.0, max: 100000.0}    # ppb, post-conversion sanity
+          - {kind: spike, window: 5s, n_mad: 6.0}
+      co2:
+        column: CO2_dry
+        role: gas
+        units: ppm
+        uncertainty:
+          random: {mode: declared, absolute: 0.05}
+        qaqc:
+          - {kind: range, min: 350.0}
+
+  voc_spec:
+    description: PTR-ToF VOC spectrometer (ICARTT output)
+    loader:
+      format: icartt
+      # ICARTT defines its own time axis in the file header, so no `time:`.
+      # Multiple templates: the same instrument's files often live under
+      # several directory layouts / naming conventions at once (archive
+      # mirror vs. local copy, mid-campaign reorganization). List each;
+      # the crawler searches all of them. Single-layout instruments may
+      # use the singular `path_template: "..."` instead.
+      path_templates:
+        - "noaa/{campaign}/voc/%Y%m%d/*.ict"
+        - "noaa/archive/{campaign}/%Y/*.ict"
+      # ICARTT archives hold multiple revisions of the same day
+      # (..._20250601_R0.ict, ..._R1.ict). 'latest' (default) keeps only
+      # the highest revision per file identity — never double-counts.
+      revision_policy: latest
+    metadata:
+      campaign: slv2025
+    variables:
+      benzene:
+        column: C6H6_ppbv
+        role: gas
+        units: ppbv
+        # 'reported' mode: a per-point sigma column from the retrieval itself
+        # (changes every sample), rather than a fixed instrument spec -- the
+        # EM27-style case METHODS.md §2.2 is written for.
+        uncertainty:
+          random: {mode: reported, column: C6H6_1SIGMA_ppbv}
+        qaqc:
+          - {kind: flag, flag_column: QC_FLAG, good_values: [0]}
+      toluene:
+        column: C7H8_ppbv
+        role: gas
+        units: ppbv
+        uncertainty:
+          random: {mode: declared, relative: 0.15}
+
+  gps:
+    description: Roof GPS + sonic anemometer
+    loader:
+      format: csv
+      path_template: "gps/%Y/%m/*.csv"
+      time:
+        column: timestamp
+        format: "%Y-%m-%d %H:%M:%S"
+        timezone: UTC
+    variables:
+      latitude:  {column: lat,  role: gps_lat, units: degrees_north}
+      longitude: {column: lon,  role: gps_lon, units: degrees_east}
+      wind_dir:
+        column: wdir
+        role: met
+        units: degrees
+        circular: true        # vector-averaged during synchronization
+      wind_speed:
+        column: wspd
+        role: met
+        units: m/s
