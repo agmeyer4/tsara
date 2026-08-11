@@ -57,6 +57,13 @@ dependencies = [
     "statsmodels>=0.14",
     "scikit-learn>=1.3",
     "typer>=0.9",
+    # Persistence of TSARA bundle stage products (CLAUDE.md §5): netCDF4 is
+    # the default interchange format for gridded/stream products (the
+    # atmospheric-community standard), pyarrow backs the Parquet event
+    # catalog. Both are needed from Phase 2 onward, since every phase ships
+    # save/load for the stage products it introduces.
+    "netCDF4>=1.6",
+    "pyarrow>=14",
     # NOTE: deliberately NO `icartt` dependency — the PyPI package is
     # GPL-3.0 (incompatible with our MIT license as a hard dependency) and
     # dormant since 2022. TSARA ships its own ICARTT FFI-1001 reader
@@ -140,3 +147,11 @@ init_typed = true
 # singular/plural manifest ergonomics feature) -- that is intentional API
 # design, not a mistake the plugin should flag.
 warn_required_dynamic_aliases = false
+
+[[tool.mypy.overrides]]
+# SciPy ships no type stubs in this environment (scipy-stubs is a separate,
+# partial package). The two functions TSARA imports from it — special.erfcx
+# and signal.lfilter — are used behind our own fully-typed wrappers, so the
+# untyped boundary is one line deep and does not leak into the public API.
+module = ["scipy.*"]
+ignore_missing_imports = true

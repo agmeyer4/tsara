@@ -109,3 +109,25 @@ def write_yaml(tmp_path: Path):
         return path
 
     return _write
+
+
+@pytest.fixture()
+def synthetic_dict() -> dict[str, Any]:
+    """Minimal valid synthetic-dataset configuration."""
+    return {
+        "name": "cfg",
+        "start": "2026-01-01T00:00:00Z",
+        "duration": "1h",
+        "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
+        "instruments": {
+            "analyzer": {
+                "native_rate": "1s",
+                "species": {
+                    "ch4": {
+                        "background": {"kind": "parametric", "offset": 1900.0},
+                        "units": "ppb",
+                    }
+                },
+            }
+        },
+    }

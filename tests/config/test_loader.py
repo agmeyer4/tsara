@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 import pytest
 
@@ -144,3 +145,52 @@ def test_combined_config_resolves_relative_base_path(
     path = write_yaml({"manifest": rel_manifest, "analysis": analysis_dict}, "run.yaml")
     config = load_config(path)
     assert config.manifest.base_path == (tmp_path / "data").resolve()
+
+
+# ---------------------------------------------------------------------------
+# Synthetic configs
+# ---------------------------------------------------------------------------
+
+
+def test_load_synthetic_reads_a_valid_file(synthetic_dict, write_yaml) -> None:
+    from tsara.config.loader import load_synthetic
+
+    config = load_synthetic(write_yaml(synthetic_dict, "synthetic.yaml"))
+    assert config.name == "cfg"
+    assert "analyzer" in config.instruments
+
+
+def test_load_synthetic_reports_the_file_on_invalid_config(synthetic_dict, write_yaml) -> None:
+    from tsara.config.loader import load_synthetic
+
+    synthetic_dict["duration"] = "not-a-duration"
+    path = write_yaml(synthetic_dict, "broken.yaml")
+    with pytest.raises(TsaraConfigError, match="broken.yaml"):
+        load_synthetic(path)
+
+
+def test_load_synthetic_reports_a_missing_file(tmp_path) -> None:
+    from tsara.config.loader import load_synthetic
+
+    with pytest.raises(TsaraConfigError, match="not found"):
+        load_synthetic(tmp_path / "absent.yaml")
+
+
+def test_shipped_synthetic_example_is_valid_and_generates() -> None:
+    """The example config must stay runnable, not just parseable."""
+    from tsara.config.loader import load_synthetic
+    from tsara.synthetic import generate
+
+    path = Path(__file__).parents[2] / "examples" / "configs" / "synthetic_example.yaml"
+    config = load_synthetic(path)
+    dataset = generate(config)
+
+    # Four streams: three instruments plus the platform's own GPS.
+    assert set(dataset.streams) == {"aeris", "picarro", "met", "gps"}
+    # Instruments really are on different clocks.
+    assert len(dataset.streams["aeris"].time) > len(dataset.streams["picarro"].time)
+    assert len(dataset.ground_truth) > 0
+    # Both source types fired, including nested children.
+    frame = dataset.ground_truth.to_frame()
+    assert set(frame["source_name"].unique()) == {"well_pad", "compressor"}
+    assert frame["parent_event_id"].notna().any()

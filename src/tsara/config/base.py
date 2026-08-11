@@ -53,3 +53,38 @@ def validate_positive_timedelta(value: str, *, field: str) -> None:
         ) from exc
     if td <= pd.Timedelta(0):
         raise ValueError(f"{field}: duration must be positive, got '{value}'.")
+
+
+def validate_signed_timedelta(value: str, *, field: str) -> None:
+    """Validate a pandas-style timedelta string of *either* sign ('30s', '-15s').
+
+    The sibling anticipated by :func:`validate_positive_timedelta`, added when
+    the first genuinely signed time quantity appeared: the synthetic
+    generator's ``inter_species_lag`` (:mod:`tsara.synthetic.config`). A lag is
+    an *offset*, not a duration — a species that arrives at the inlet 15 s
+    *before* the reference species is a physically meaningful configuration
+    (different stacks, different transport paths), so zero and negative values
+    must both be accepted here. The same will apply to a per-instrument
+    ``time_shift`` for inlet-lag correction whenever that lands.
+
+    Raises ``ValueError`` (which Pydantic converts into a field-scoped
+    validation error) if the string doesn't parse. Unlike its positive-only
+    sibling it imposes no sign constraint at all; the pandas import is
+    likewise deferred to call time to keep schema import fast.
+
+    Parameters
+    ----------
+    value : str
+        Candidate signed offset string.
+    field : str
+        Dotted field name used in the error message, e.g.
+        ``'SourceSpec.inter_species_lag'``.
+    """
+    import pandas as pd
+
+    try:
+        pd.Timedelta(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{field}: '{value}' is not a valid timedelta string (try '30s', '-15s', '2min')."
+        ) from exc

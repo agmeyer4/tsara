@@ -18,7 +18,13 @@ from __future__ import annotations
 import logging
 
 from tsara.config.analysis import AnalysisConfig
-from tsara.config.loader import TsaraConfig, load_analysis, load_config, load_manifest
+from tsara.config.loader import (
+    TsaraConfig,
+    load_analysis,
+    load_config,
+    load_manifest,
+    load_synthetic,
+)
 from tsara.config.manifest import Manifest
 from tsara.exceptions import TsaraConfigError, TsaraError
 from tsara.logutil import setup_logging
@@ -39,5 +45,6 @@ __all__ = [
     "load_analysis",
     "load_config",
     "load_manifest",
+    "load_synthetic",
     "setup_logging",
 ]

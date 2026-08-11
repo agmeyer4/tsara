@@ -492,6 +492,218 @@ v1:
 
 ---
 
+## 8. Synthetic data generation (Phase 2)
+
+TSARA has **no controlled-release measurements** to validate against
+(CLAUDE.md §5): the campaign archive is ambient field data, plume-dense
+throughout, with no independently documented emission rates. Injected
+synthetic ground truth is therefore the *only* arbiter of detection and
+enhancement-ratio correctness in v1. That makes the generator a scientific
+instrument in its own right, and this section specifies it to the same
+standard as the estimators above.
+
+Implementation: `tsara.synthetic` (config, profiling, background, plumes,
+noise, platform, generator, bundle, timebase).
+
+### 8.1 What is manufactured, and what is recorded
+
+One `SyntheticConfig` yields per-instrument `xarray.Dataset` streams on their
+own native, irregular clocks (§1.1) plus a `GroundTruth` catalog. Each stream
+carries the observable variable, the exact `truth_background_*` /
+`truth_enhancement_*` decomposition, the true `truth_sigma_rand_*` /
+`truth_sigma_sys_*` budget, and any instrument-*reported* sigma column under
+its configured raw-file name. Everything prefixed `truth_` is the answer key
+and is excluded from the pipeline-visible view (`SyntheticDataset.observable`).
+
+The catalog is deliberately schema-compatible with a subset of the future
+Phase-6 `PlumeCatalog`, so scoring detection is a column-wise diff rather than
+a translation layer. It records both `true_amplitude` (the continuous peak the
+source produced) and `sampled_peak_amplitude` (the largest value the
+instrument's clock could have seen, NaN if the event fell entirely inside a
+gap). These answer different questions, and a detector cannot be faulted for
+the difference between them.
+
+**Events are drawn before any instrument is rendered.** A plume is one
+physical release: the same leak must appear on the 1 Hz and the 10 Hz analyzer
+with consistent amplitudes and one consistent ratio. Drawing per-instrument
+would destroy exactly the cross-species covariance TSARA exists to measure,
+and every regression test built on such data would be measuring an artifact.
+
+### 8.2 Plume shapes
+
+Two registered shapes. **Gaussian** (`sigma`) is the symmetric textbook case.
+**EMG** (`sigma`, `tau`) is the physically motivated one: a Gaussian
+(turbulent dispersion) convolved with a decaying exponential (residence time
+in the source volume, inlet and cavity flushing), producing the sharp rise and
+long trailing tail real transects show. The asymmetric tail is what makes
+baseline placement genuinely hard — it decays asymptotically, so "where the
+plume ends" has no crisp answer.
+
+The textbook EMG form,
+
+$$f(t) \propto \exp\!\Big(\tfrac{\sigma^2}{2\tau^2} - \tfrac{t-\mu}{\tau}\Big)\,
+\mathrm{erfc}\!\Big(\tfrac{\sigma/\tau - u}{\sqrt 2}\Big), \qquad u = \tfrac{t-\mu}{\sigma}$$
+
+overflows catastrophically in float64 — the exponential diverges while `erfc`
+underflows to 0, so the product evaluates to `inf * 0 = nan` precisely in the
+tail that matters. TSARA evaluates it through the *scaled* complementary error
+function $\mathrm{erfcx}(z) = e^{z^2}\mathrm{erfc}(z)$, which cancels the two
+divergences analytically:
+
+$$f(t) \propto e^{-u^2/2}\;\mathrm{erfcx}\!\Big(\tfrac{\sigma/\tau - u}{\sqrt 2}\Big)$$
+
+stable until `erfcx` itself overflows near $z = -26$ (since $e^{709}$ is the
+float64 ceiling). Beyond that, $\mathrm{erfcx}(z) \to 2e^{z^2}$ gives the exact
+closed form $\log f \to \log 2 + \sigma^2/(2\tau^2) - u\sigma/\tau$ — a pure
+exponential decay of timescale τ, which is the physical tail behaviour the EMG
+was chosen for. The two branches are continuous to <1e-6 in the log-shape.
+
+Kernels are normalized to unit peak on a dense reference grid with a
+refinement pass, so `sampled_peak_amplitude ≤ true_amplitude` holds exactly
+rather than to within a normalization artifact. Support is truncated at 4σ
+(and +6τ for the EMG tail), keeping rendering O(events × window).
+
+### 8.3 Backgrounds
+
+**Parametric**: `offset` + diurnal + linear drift + random walk, deliberately
+separable so a test can switch on one term at a time. The diurnal term is
+phased off the Unix epoch (midnight-aligned) rather than each stream's start,
+so two instruments in one run breathe in phase as they physically must.
+Random-walk increments scale as $\sqrt{\Delta t}$ so the configured
+one-day wander magnitude is independent of sampling rate.
+
+**Bootstrap** (real-data-driven): fluctuations are resampled in contiguous
+*blocks* from a `RealDataProfile` (§8.4). Block resampling rather than
+point-wise is the whole point — drawing points independently would destroy the
+residual's autocorrelation and hand back white noise, defeating the purpose of
+using real data.
+
+Two documented limitations:
+
+- **Blocks are mean-centred**, so only *within-block* (high-frequency)
+  structure survives; between-block low-frequency structure is discarded to
+  avoid step discontinuities at the stitching seams. Slow structure is
+  supplied by the optional parametric `base` instead. On records with strong
+  slow structure the discarded fraction is large — measured at ~3× reduction
+  in robust spread on this project's real Picarro CH₄ (ρ₁ ≈ 0.997).
+- Because the source records are plume-dense, real plume energy leaks through
+  the profiling baseline into the residual. This is treated as a **feature**:
+  it is precisely the adversarial "is `diff_mad` really plume-immune on my
+  instrument?" test case (§2.5). But it means the substrate is not a pure
+  noise realization, and `RealDataProfile.lag1_autocorr` describes the
+  *substrate*, not the instrument noise — it must not be fed to an N_eff
+  calculation as though it were a noise decorrelation timescale.
+
+### 8.4 Profiling real data
+
+Deliberately **not** called "calibration" — in this domain that word means
+referencing an instrument against gas standards, an operation the campaign
+archive already uses the name for (`04_calibrated/`, `calibration_coefs.json`).
+"Profiling" is the standard term for summarizing a dataset's statistical shape.
+
+`profile_series` fits a plain rolling low-quantile background (no sweep, no
+uncertainty propagation — explicitly *not* the Phase-5 baseline engine),
+subtracts it, and characterizes the residual: robust spread, the plume-immune
+`diff_mad` noise scale (§2.5), lag-1 autocorrelation and its implied AR(1) τ,
+then cuts gap-free mean-centred blocks. Segments are split on gaps first, so
+no block straddles a dropout and no resampled substrate can contain a jump the
+real instrument never made.
+
+`residual_sigma / noise_sigma` is a useful diagnostic in its own right: values
+far above 1 indicate a plume-dense record rather than a noisy one (measured at
+~34 on this project's real Picarro CH₄).
+
+**No real data ships with TSARA, ever.** Profiles are computed from a live
+mount, referenced *by name* in configs, and passed to the generator at call
+time — never embedded, so every `SyntheticConfig` stays losslessly
+YAML-round-trippable and no real-derived numbers can reach a committed file.
+Tests touching real data skip unless `TSARA_REAL_DATA` is set.
+
+### 8.5 Error injection with known decomposition
+
+The generator's `TrueUncertainty` is the *inverse* of the manifest's
+`UncertaintySpec` (§2.2): the manifest describes how to **read** an
+uncertainty an instrument reports; the generator needs parameters from which
+to **manufacture** it. `TrueComponent` mirrors `DeclaredUncertainty`'s
+$\sigma_i = \sqrt{a^2 + (r x_i)^2}$ form and adds `report_as` (the raw-file
+column an instrument would publish its per-point sigma under) and
+`report_bias` (so an instrument that *understates* its own error by 20 % is
+expressible, and downstream UQ can be tested against one).
+`TrueUncertainty.to_manifest_uncertainty()` converts back, keeping the two
+schemas provably aligned.
+
+The components differ in **how they are drawn**, which is the entire point:
+
+- **random** — one independent draw per sample, or, with a configured
+  `decorrelation_timescale`, an AR(1) process with $\rho = e^{-\Delta t/\tau}$
+  (§3.4). The *standardized* series carries the correlation and is then scaled
+  by the per-point sigma, so marginal variance is unchanged and τ can be
+  varied alone. This is the only way to obtain data with a **known** τ, which
+  the open N_eff estimator question has no other way to be tested against.
+  Uniform sampling uses a vectorized IIR filter seeded from a stationary draw
+  (no burn-in transient); irregular sampling uses the exact per-point
+  recursion rather than approximating ρ from a median interval — silently
+  assuming regularity is exactly the class of hidden assumption this package
+  refuses to make.
+- **systematic** — two standard normals drawn **once per species per run**,
+  applied as $e^{\mathrm{sys}}_i = a\,g_{\mathrm{abs}} + r\,x_i\,g_{\mathrm{rel}}$.
+  This is rank-1: correlation exactly 1 between every pair of points, i.e.
+  §3.3's fully-correlated case. Averaging a million samples does not reduce it
+  at all, and a pipeline claiming otherwise is caught by data generated here.
+  The realized coefficients are recorded in the variable's attrs, so a test
+  can verify systematic error was correctly *propagated*, not merely present.
+
+**Quantization** rounds to a configured reporting step, the required
+adversarial case: once more than half a window shares one value every
+median-based estimator collapses to exactly zero, making every point a
+detection. `quantization_floor(δ) = δ/√12` exposes the §2.5 guard constant so
+detection tests compare against the same number the generator used.
+
+### 8.6 Clocks, gaps, and platforms
+
+Instruments carry their own `native_rate`, optional `timestamp_jitter`
+(schema-bounded under half the nominal interval so the clock can never run
+backwards), and optional dropouts. Outages **delete** samples rather than
+NaN-filling them — that is what a logger which stops writing produces, and the
+resulting irregular timestamps are what §1.1's claim about rolling machinery
+must actually survive. Outage onsets may predate the record start, since an
+instrument can already be down when logging begins; restricting them to the
+record would leave the first samples artificially immune.
+
+Platforms are stationary (scalar lat/lon coordinates) or mobile. A mobile
+track is emitted as its **own stream at its own rate**, which is the canonical
+§1.2 case: position is a smooth auxiliary field that may be interpolated onto
+gas timestamps, while the gases may not be. Putting GPS on the gas clock would
+leave that asymmetry untestable. Two track patterns: `random_walk` (constant
+speed, diffusing heading — a vehicle's actual behaviour, unlike a
+position-space walk which would reverse instantaneously) and `circuit` (a
+closed circle, which *revisits* coordinates and therefore produces genuinely
+clusterable data for Phase 8). Tracks integrate in a local flat-Earth
+approximation, metres-accurate at survey scale.
+
+All timestamps are normalized to tz-naive UTC at construction, so tz-aware and
+tz-naive configs produce byte-identical streams and every persisted file
+carries one consistent time representation.
+
+**Known limitation:** plume timing is *not* derived from track geometry —
+there is no dispersion model placing sources in space and computing when the
+vehicle drives through them. Ground-truth event coordinates are the platform
+position at each event's peak, which is what a real mobile catalog records
+anyway (a drive-by localizes the *encounter*, not the source).
+
+### 8.7 Persistence
+
+`SyntheticDataset.save/load` implement the CLAUDE.md §5 bundle convention for
+the products this phase introduces, establishing the layout later phases
+extend: `bundle.json` (contents + format version), `config.yaml` (the exact
+config, so a bundle reproduces itself), `ground_truth.parquet` (catalog-shaped,
+so ground truth and detections are directly comparable on disk), and
+`streams/<instrument>.nc`. Streams self-describe as synthetic in their attrs —
+a synthetic file mistaken for a measurement is a scientific hazard.
+
+
+---
+
 ## References
 
 - JCGM 100:2008. *Evaluation of measurement data — Guide to the expression of
