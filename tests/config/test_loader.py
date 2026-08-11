@@ -28,9 +28,7 @@ def test_analysis_roundtrip(write_yaml, analysis_dict):
 
 
 def test_combined_roundtrip(write_yaml, mobile_manifest_dict, analysis_dict):
-    path = write_yaml(
-        {"manifest": mobile_manifest_dict, "analysis": analysis_dict}, "run.yaml"
-    )
+    path = write_yaml({"manifest": mobile_manifest_dict, "analysis": analysis_dict}, "run.yaml")
     config = load_config(path)
     assert config.manifest.name == "test_mobile"
     assert config.analysis.output_grid.freq == "1s"
@@ -112,9 +110,7 @@ def test_reference_species_must_be_declared_gas(
 ):
     bad_analysis = copy.deepcopy(analysis_dict)
     bad_analysis["regression"]["reference_species"] = "sf6"  # not in manifest
-    path = write_yaml(
-        {"manifest": stationary_manifest_dict, "analysis": bad_analysis}, "run.yaml"
-    )
+    path = write_yaml({"manifest": stationary_manifest_dict, "analysis": bad_analysis}, "run.yaml")
     with pytest.raises(TsaraConfigError, match="sf6"):
         load_config(path)
 

@@ -74,9 +74,7 @@ def test_repeated_calls_do_not_duplicate_handlers(clean_tsara_logger):
     assert len(clean_tsara_logger.handlers) == count_after_first_call
 
 
-def test_repeated_calls_with_logfile_do_not_duplicate_handlers(
-    clean_tsara_logger, tmp_path: Path
-):
+def test_repeated_calls_with_logfile_do_not_duplicate_handlers(clean_tsara_logger, tmp_path: Path):
     logfile = tmp_path / "tsara.log"
     setup_logging(logfile=logfile)
     count_after_first_call = len(clean_tsara_logger.handlers)

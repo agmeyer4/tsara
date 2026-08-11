@@ -329,8 +329,7 @@ class VariableConfig(_StrictModel):
         """
         if self.circular and self.role != "met":
             raise ValueError(
-                f"circular=true is only valid for role='met' variables "
-                f"(got role='{self.role}')."
+                f"circular=true is only valid for role='met' variables (got role='{self.role}')."
             )
         return self
 

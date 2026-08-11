@@ -48,9 +48,7 @@ class OutputGridConfig(_StrictModel):
     (GPS, met) is a separate concern, see :class:`AlignmentConfig`.
     """
 
-    freq: str = Field(
-        description="Grid spacing as a pandas offset alias, e.g. '1s', '5s', '1min'."
-    )
+    freq: str = Field(description="Grid spacing as a pandas offset alias, e.g. '1s', '5s', '1min'.")
     start: datetime | None = Field(
         default=None,
         description="Optional grid start (UTC). Default: first timestamp across streams.",
@@ -240,9 +238,7 @@ class DetectionConfig(_StrictModel):
             "('detection_enter_sigma') when more than one value is given."
         ),
     )
-    exit_sigma: float = Field(
-        default=1.0, gt=0, description="Exit threshold in noise-sigma units."
-    )
+    exit_sigma: float = Field(default=1.0, gt=0, description="Exit threshold in noise-sigma units.")
     noise_estimator: NoiseEstimator = Field(
         default="diff_mad",
         description=(

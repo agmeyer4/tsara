@@ -81,8 +81,7 @@ def _read_yaml(path: str | Path) -> dict[str, Any]:
 
     if not isinstance(data, dict):
         raise TsaraConfigError(
-            f"Top level of {path} must be a mapping (key: value pairs), "
-            f"got {type(data).__name__}."
+            f"Top level of {path} must be a mapping (key: value pairs), got {type(data).__name__}."
         )
     return data
 
