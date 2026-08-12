@@ -194,3 +194,43 @@ def test_shipped_synthetic_example_is_valid_and_generates() -> None:
     frame = dataset.ground_truth.to_frame()
     assert set(frame["source_name"].unique()) == {"well_pad", "compressor"}
     assert frame["parent_event_id"].notna().any()
+
+
+def test_shipped_bootstrap_example_is_valid_and_generates() -> None:
+    """The bootstrap example must run against a supplied profile.
+
+    It cannot be generated without one — that is the point of the design, so
+    the test builds a stand-in profile exactly as the file's header documents,
+    from synthetic numbers rather than a live mount.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from tsara.config.loader import load_synthetic
+    from tsara.synthetic import generate
+    from tsara.synthetic.background import TsaraSyntheticError
+    from tsara.synthetic.profiling import profile_series
+
+    path = Path(__file__).parents[2] / "examples" / "configs" / "synthetic_bootstrap.yaml"
+    config = load_synthetic(path)
+
+    # Without the named profile the generator must refuse rather than invent.
+    with pytest.raises(TsaraSyntheticError, match="picarro_ch4"):
+        generate(config)
+
+    rng = np.random.default_rng(0)
+    n = 8000
+    ar = np.zeros(n)
+    for i in range(1, n):
+        ar[i] = 0.9 * ar[i - 1] + rng.normal(0.0, 0.7)
+    stand_in = pd.Series(
+        1950.0 + ar,
+        index=pd.date_range("2026-02-03T17:00:00", periods=n, freq="2s"),
+    )
+    profile = profile_series(stand_in, name="picarro_ch4", block_length=512)
+
+    dataset = generate(config, profiles={"picarro_ch4": profile})
+    assert set(dataset.streams) == {"picarro"}
+    # One instrument, two species, one bootstrapped and one parametric.
+    assert {"ch4", "co2"} <= set(dataset.streams["picarro"].data_vars)
+    assert len(dataset.ground_truth) > 0

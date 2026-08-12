@@ -621,6 +621,16 @@ Two documented limitations:
   supplied by the optional parametric `base` instead. On records with strong
   slow structure the discarded fraction is large — measured at ~3× reduction
   in robust spread on this project's real Picarro CH₄ (ρ₁ ≈ 0.997).
+- Mean-centring equalizes block *levels*, so no step in the mean appears where
+  two blocks meet, but the samples either side of a seam remain independent
+  draws: a seam carries a sample-to-sample step of order the residual σ,
+  empirically ~4× the typical interior step. This is accepted rather than
+  blended away, because seams are only `1/block_length` of adjacent pairs
+  (0.8 % at the default 128) and every downstream noise estimator is
+  median-based, so `diff_mad` shifts by well under 1 %; overlap-blending would
+  smooth exactly the high-frequency structure the bootstrap exists to
+  preserve. When reading a generated record, an isolated sharp step every
+  `block_length` samples is a stitching artifact, not injected signal.
 - Because the source records are plume-dense, real plume energy leaks through
   the profiling baseline into the residual. This is treated as a **feature**:
   it is precisely the adversarial "is `diff_mad` really plume-immune on my
@@ -640,13 +650,38 @@ archive already uses the name for (`04_calibrated/`, `calibration_coefs.json`).
 uncertainty propagation — explicitly *not* the Phase-5 baseline engine),
 subtracts it, and characterizes the residual: robust spread, the plume-immune
 `diff_mad` noise scale (§2.5), lag-1 autocorrelation and its implied AR(1) τ,
-then cuts gap-free mean-centred blocks. Segments are split on gaps first, so
-no block straddles a dropout and no resampled substrate can contain a jump the
-real instrument never made.
+then cuts gap-free mean-centred blocks. Segments are split on gaps before
+blocking, so no block straddles a dropout and no resampled substrate can
+contain a jump the real instrument never made.
+
+**Gap structure is handled where it changes the generated data, and nowhere
+else.** Blocking is that place: a fabricated jump becomes part of the output.
+The scalar statistics deliberately are not segmented — they are median- and
+correlation-based, so 20 % data loss across 60 gaps moves `noise_sigma` by
+only ~1.6 %, and on this project's records the question does not arise at all
+(`03_instrument_aligned` Picarro data is already on a regular 2 s grid, with
+0 gaps in 12 450 intervals across a measurement day). Segment-wise variants
+were implemented, measured against the real archive, and removed as unearned
+complexity. Revisit only if Phase 3's QA/QC masking begins feeding
+hole-punched series into `profile_series`.
 
 `residual_sigma / noise_sigma` is a useful diagnostic in its own right: values
 far above 1 indicate a plume-dense record rather than a noisy one (measured at
 ~34 on this project's real Picarro CH₄).
+
+**τ is ill-conditioned near ρ₁ → 1**, which is a distinct problem from the
+interpretive caveat above and applies even when ρ₁ is measured perfectly.
+Differentiating $\tau = -\Delta t/\ln\rho$ gives
+
+$$\frac{d\tau/\tau}{d\rho/\rho} = \frac{-1}{\rho\ln\rho}$$
+
+an amplification of ~334× at ρ₁ = 0.997. At the Picarro's Δt = 2 s that is
+τ = 666 s for ρ₁ = 0.997 versus 499 s for ρ₁ = 0.996 — a one-part-in-a-thousand
+shift moving the answer by a quarter. `decorrelation_timescale_s` is therefore
+an order-of-magnitude indicator on strongly autocorrelated records, never a
+calibrated timescale, and must not enter an N_eff calculation without an
+uncertainty of its own. This bears directly on the open N_eff estimator
+question (§3.4).
 
 **No real data ships with TSARA, ever.** Profiles are computed from a live
 mount, referenced *by name* in configs, and passed to the generator at call

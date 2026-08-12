@@ -68,7 +68,7 @@ class TsaraProfilingError(TsaraError):
 
 @dataclass(frozen=True, eq=False)
 class RealDataProfile:
-    """Statistical fingerprint of one real timeseries.
+    r"""Statistical fingerprint of one real timeseries.
 
     Deliberately a plain frozen dataclass rather than a Pydantic model: this
     is a *computed artifact* holding numpy arrays, not user-authored
@@ -113,6 +113,26 @@ class RealDataProfile:
         at lag 1 (no AR(1) fit exists). Inherits the caveat above: on a clean
         record it recovers the true noise timescale; on a plume-dense one it
         measures structure plus noise.
+
+        **Numerically ill-conditioned as rho1 approaches 1**, which is a
+        separate problem from the interpretive one above and bites even when
+        ``lag1_autocorr`` is measured perfectly. Differentiating
+        ``tau = -dt/ln(rho)`` gives
+
+        .. math::
+
+            \frac{d\tau/\tau}{d\rho/\rho} = \frac{-1}{\rho \ln \rho}
+
+        so the relative error in ``tau`` is amplified by a factor of about
+        334 at ``rho1 = 0.997`` — the value measured on the project's real
+        Picarro CH4. Concretely, at ``dt = 2 s``: ``rho1 = 0.997`` gives
+        ``tau = 666 s``, while ``rho1 = 0.996`` gives ``tau = 499 s``. A
+        one-part-in-a-thousand shift moves the answer by a quarter.
+
+        Treat this field as an order-of-magnitude indicator on strongly
+        autocorrelated records, never as a calibrated timescale, and do not
+        propagate it into an N_eff calculation without an uncertainty of its
+        own.
     background_median : float
         Median of the fitted background — the "typical clean-air level".
     background_iqr : float
@@ -307,6 +327,16 @@ def profile_series(
     residual_sigma = float(
         MAD_TO_SIGMA * np.median(np.abs(residual_values - np.median(residual_values)))
     )
+    # Computed over the whole finite residual rather than per gap-free run.
+    # Dropping NaNs closes holes in the array but not in the clock, so a
+    # difference or a lagged pair can in principle straddle a dropout. Both
+    # estimators are median/correlation based and therefore barely move: on a
+    # record with 20% data loss across 60 gaps, noise_sigma shifts ~1.6%. And
+    # on this project's real records the question does not arise at all —
+    # `03_instrument_aligned` Picarro data is already on a regular grid, with
+    # 0 gaps in 12450 intervals over a measurement day. Segment-wise variants
+    # were written, measured, and removed as unearned complexity; revisit only
+    # if Phase 3's QA/QC masking starts feeding holed series in here.
     noise_sigma = diff_mad_sigma(residual_values)
 
     # Lag-1 autocorrelation of the residual. Two degenerate cases map to
@@ -381,8 +411,10 @@ def _extract_blocks(
     """Cut a residual series into contiguous, gap-free, mean-centred blocks.
 
     Segments are split wherever the sampling interval exceeds 1.5x the
-    nominal period, so no block spans a dropout. Each retained block has its
-    own mean removed (see :class:`RealDataProfile.residual_blocks` for why).
+    nominal period, so no block straddles a dropout and no resampled
+    substrate can contain a jump the real instrument never made. This is the
+    one place gap structure matters: a fabricated jump would become part of
+    the generated data, unlike a slightly-off scalar statistic.
 
     Parameters
     ----------
@@ -416,7 +448,7 @@ def _extract_blocks(
     # Gap detection. A zero/negative nominal period (a degenerate record with
     # duplicate timestamps) disables splitting rather than dividing by zero.
     if sample_period_s > 0.0:
-        gap_threshold_ns = 1.5 * sample_period_s * 1e9
+        gap_threshold_ns = 1.5 * sample_period_s * NS_PER_S
         breaks = np.flatnonzero(np.diff(times) > gap_threshold_ns) + 1
     else:  # pragma: no cover - degenerate records are rejected upstream
         breaks = np.array([], dtype=int)

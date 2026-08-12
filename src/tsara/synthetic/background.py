@@ -233,9 +233,27 @@ def _stitch_blocks(
     Block resampling — rather than resampling individual points — is the
     whole point: drawing point-by-point would destroy the residual's
     autocorrelation and hand back white noise, defeating the purpose of using
-    real data. Blocks are already mean-centred by
-    :func:`~tsara.synthetic.profiling.profile_series`, so the seams between
-    them carry no level jump.
+    real data.
+
+    What the mean-centring in
+    :func:`~tsara.synthetic.profiling.profile_series` buys, and what it does
+    not: adjacent blocks share a mean, so no *level* discontinuity appears at
+    a seam. The individual samples either side of a seam are still
+    independent draws, so a seam does carry a sample-to-sample step of order
+    the residual sigma — empirically about 4x the typical interior step.
+
+    That is tolerable, and deliberately so. Seams occupy only
+    ``1/block_length`` of all adjacent pairs (0.8 % at the default 128), and
+    every noise estimator downstream is median-based, so the seam steps sit
+    far out in the tail where they cannot move the answer: on a strongly
+    autocorrelated substrate ``diff_mad`` differs by well under 1 % from its
+    seam-free value. The alternative — overlap-blending seams — would smooth
+    real high-frequency structure, which is the one thing the bootstrap
+    exists to preserve.
+
+    Worth knowing when reading a generated record: an isolated sharp step
+    every ``block_length`` samples is an artifact of this stitching, not
+    injected signal.
 
     Parameters
     ----------
