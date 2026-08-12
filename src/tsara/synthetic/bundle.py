@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 from tsara import __version__
-from tsara.exceptions import TsaraError
+from tsara.core.exceptions import TsaraError
 from tsara.synthetic.config import SyntheticConfig
 from tsara.synthetic.plumes import GroundTruth
 

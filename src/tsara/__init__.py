@@ -26,8 +26,8 @@ from tsara.config.loader import (
     load_synthetic,
 )
 from tsara.config.manifest import Manifest
-from tsara.exceptions import TsaraConfigError, TsaraError
-from tsara.logutil import setup_logging
+from tsara.core.exceptions import TsaraConfigError, TsaraError
+from tsara.core.logutil import setup_logging
 
 __version__ = "0.1.0"
 

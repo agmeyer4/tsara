@@ -23,6 +23,7 @@ from tsara.synthetic.config import (
     MobileTrack,
     NestedSpec,
     ParametricBackground,
+    RatioSpec,
     SpeciesSpec,
     SyntheticConfig,
     TrueComponent,
@@ -590,6 +591,54 @@ def test_nested_children_appear_in_the_catalog_with_parent_links(
     parents = {event.event_id for event in truth.events if event.parent_event_id is None}
     assert children
     assert all(child.parent_event_id in parents for child in children)
+
+
+def test_nested_child_can_carry_a_species_its_parent_never_emits(
+    noise_free_config: SyntheticConfig,
+) -> None:
+    """The landfill-plus-blip case, end to end.
+
+    Parent emits methane only; the nested child is thermogenic and carries
+    ethane. Ethane enhancement must therefore appear *only* under children,
+    and every ethane truth row must be a child row. This is the generator-side
+    proof that relaxing the schema restriction actually renders — the config
+    layer permitting it would be worthless if the injection path did not.
+    """
+    config = noise_free_config.model_copy(
+        update={
+            "sources": {
+                "landfill": noise_free_config.sources["pad"].model_copy(
+                    update={
+                        "ratios": {},  # parent: methane only, no ethane
+                        "nested": NestedSpec(
+                            probability=1.0,
+                            shape=GaussianShape(kind="gaussian", sigma="3s"),
+                            amplitude_factor=0.5,
+                            ratios={"c2h6": RatioSpec(mean=0.06)},
+                        ),
+                    }
+                )
+            }
+        }
+    )
+    dataset = generate(config)
+
+    ethane_rows = [event for event in dataset.ground_truth.events if event.species == "c2h6"]
+    assert ethane_rows, "the nested child should have produced ethane truth rows"
+    assert all(row.parent_event_id is not None for row in ethane_rows)
+    assert all(row.true_ratio_to_reference == pytest.approx(0.06) for row in ethane_rows)
+
+    # Parent methane rows still exist, and outnumber the children's ethane.
+    methane_parents = [
+        event
+        for event in dataset.ground_truth.events
+        if event.species == "ch4" and event.parent_event_id is None
+    ]
+    assert len(methane_parents) == len(ethane_rows)
+
+    # And the ethane stream really does carry the injected enhancement.
+    enhancement = dataset.streams["analyzer"][f"{TRUTH_PREFIX}enhancement_c2h6"].values
+    assert enhancement.max() > 0.0
 
 
 def test_plume_dense_configuration_produces_overlapping_events(

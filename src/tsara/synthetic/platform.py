@@ -1,27 +1,18 @@
-"""Platform coordinates: fixed sites and synthetic mobile tracks.
+"""Manufacturing synthetic mobile tracks.
 
-Position enters TSARA in two structurally different ways (CLAUDE.md §1), and
-this module manufactures both so the distinction is exercised rather than
-assumed:
+This module *invents* a drive; :mod:`tsara.core.geodesy` holds the shared
+primitives it is expressed in (the metre<->degree mapping, coordinate
+bounding, and track interpolation), because those are needed just as much by
+real ingested GPS as by a fabricated track.
 
-* **Stationary** — a single lat/lon applied globally, attached to every
-  stream as a scalar coordinate.
-* **Mobile** — a GPS *timeseries*, emitted as its own stream at its own
-  rate. Keeping GPS on a separate clock from the gas analyzers is deliberate:
-  it is the canonical case for METHODS.md §1.2's asymmetric interpolation
-  rule (position is a smooth auxiliary field and may be interpolated onto gas
-  timestamps; the gases themselves may not be). A generator that put GPS on
-  the gas clock would leave that rule untestable.
-
-Geodesy
--------
-Tracks are integrated in a local flat-Earth (equirectangular) approximation:
-one degree of latitude is treated as a constant 111,320 m and one degree of
-longitude as that scaled by ``cos(latitude)``. Over the tens-of-kilometres
-extent of a survey drive the error is metres — far below GPS noise and utterly
-below the scale at which plume clustering operates — while a full geodesic
-integration would add a dependency and obscure the code. The approximation
-degrades near the poles, which is where the alternative would matter.
+Only the mobile case needs manufacturing at all. A stationary site is a
+single configured lat/lon that the generator attaches to every stream as a
+scalar coordinate — there is nothing to synthesize. Keeping GPS on a
+*separate clock* from the gas analyzers is deliberate: it is the canonical
+case for METHODS.md §1.2's asymmetric interpolation rule (position may be
+interpolated onto gas timestamps; gases may not be interpolated onto
+anything). A generator that put GPS on the gas clock would leave that rule
+untestable.
 """
 
 from __future__ import annotations
@@ -32,17 +23,20 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from tsara.core.geodesy import (
+    METERS_PER_DEGREE,
+    clamp_latitude,
+    meters_per_degree_longitude,
+    wrap_longitude,
+)
+from tsara.core.timebase import epoch_s as _epoch_s
 from tsara.synthetic.config import MobileTrack
-from tsara.synthetic.timebase import epoch_s as _epoch_s
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt
     import pandas as pd
 
 logger = logging.getLogger(__name__)
-
-#: Metres per degree of latitude (WGS-84 mean meridional degree).
-METERS_PER_DEGREE_LAT = 111_320.0
 
 
 def build_track(
@@ -76,7 +70,7 @@ def build_track(
     -------
     tuple of numpy.ndarray
         ``(latitude, longitude)`` in decimal degrees, each of length
-        ``len(times)``.
+        ``len(times)``, guaranteed to be valid coordinates.
     """
     n = len(times)
     if n == 0:  # pragma: no cover - guarded by the caller's span validation
@@ -95,16 +89,14 @@ def build_track(
     # scale uses the *start* latitude throughout rather than each point's own
     # latitude: it keeps the mapping invertible and single-valued, and over a
     # survey-scale track the cos(lat) change is negligible.
-    lat = platform.start_latitude + north_m / METERS_PER_DEGREE_LAT
-    lon_scale = METERS_PER_DEGREE_LAT * math.cos(math.radians(platform.start_latitude))
-    # Guard the degenerate polar case where the longitude scale collapses.
-    lon_scale = max(lon_scale, 1.0)
-    lon = platform.start_longitude + east_m / lon_scale
+    lat = platform.start_latitude + north_m / METERS_PER_DEGREE
+    lon = platform.start_longitude + east_m / meters_per_degree_longitude(platform.start_latitude)
 
-    return (
-        np.asarray(lat, dtype=np.float64),
-        np.asarray(lon, dtype=np.float64),
-    )
+    # Offsets are integrated without bound, so a track starting near the
+    # antimeridian can run past 180 degrees and a long northward drive past
+    # 90. Both are non-coordinates, and they would propagate into the ground
+    # truth (and from there into Phase 8 clustering) unnoticed.
+    return clamp_latitude(lat), wrap_longitude(lon)
 
 
 def _circuit_offsets(
@@ -141,13 +133,22 @@ def _random_walk_offsets(
     elapsed_s: npt.NDArray[np.float64],
     rng: np.random.Generator,
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-    """Return east/north metre offsets for a constant-speed heading random walk.
+    r"""Return east/north metre offsets for a constant-speed heading random walk.
 
     Speed is held constant and only the *heading* diffuses, which is what a
     vehicle actually does — a position-space random walk would produce
     physically impossible instantaneous reversals and a track that never gets
-    anywhere. Heading increments scale as ``sqrt(dt)`` so the wander is
-    independent of the GPS sampling rate.
+    anywhere.
+
+    Heading is a Wiener process: increments are drawn as
+    :math:`\mathcal{N}(0, \sigma\sqrt{\Delta t})`, so the heading's spread
+    after elapsed time :math:`T` grows as :math:`\sigma\sqrt{T}` — *not*
+    :math:`\sigma T`. The ``heading_volatility`` parameter :math:`\sigma`
+    therefore has units of rad·s^(-1/2), not radians per second. The
+    :math:`\sqrt{\Delta t}` scaling is also what makes the wander independent
+    of the GPS sampling rate: doubling the rate halves each increment's
+    variance and doubles the number of increments, leaving the total
+    unchanged.
 
     Parameters
     ----------
@@ -174,40 +175,3 @@ def _random_walk_offsets(
     east_m = np.cumsum(step_m * np.sin(heading))
     north_m = np.cumsum(step_m * np.cos(heading))
     return np.asarray(east_m, dtype=np.float64), np.asarray(north_m, dtype=np.float64)
-
-
-def positions_at(
-    times: pd.DatetimeIndex,
-    track_times: pd.DatetimeIndex,
-    latitude: npt.NDArray[np.float64],
-    longitude: npt.NDArray[np.float64],
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-    """Interpolate track coordinates onto arbitrary times.
-
-    Used to stamp each ground-truth event with the platform position at its
-    peak. Linear interpolation of position is legitimate here for the same
-    reason METHODS.md §1.2 permits it for auxiliary fields generally —
-    position is a smooth, continuously-varying quantity, unlike a
-    concentration inside a plume.
-
-    Parameters
-    ----------
-    times : pandas.DatetimeIndex
-        Target times.
-    track_times : pandas.DatetimeIndex
-        Times at which the track is defined.
-    latitude, longitude : numpy.ndarray
-        Track coordinates.
-
-    Returns
-    -------
-    tuple of numpy.ndarray
-        Interpolated ``(latitude, longitude)`` at ``times``. Targets outside
-        the track's span clamp to its endpoints.
-    """
-    target = _epoch_s(times)
-    source = _epoch_s(track_times)
-    return (
-        np.interp(target, source, latitude),
-        np.interp(target, source, longitude),
-    )

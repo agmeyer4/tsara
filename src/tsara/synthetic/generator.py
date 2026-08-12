@@ -48,26 +48,28 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from tsara import __version__
+from tsara.core.geodesy import positions_at
+from tsara.core.timebase import epoch_ns as _epoch_ns
+from tsara.core.timebase import epoch_s as _epoch_s
+from tsara.core.timebase import timestamp_epoch_ns as _stamp_ns
+from tsara.core.timebase import timestamp_epoch_s as _stamp_s
+from tsara.core.timebase import to_utc_naive as _to_utc_naive
 from tsara.synthetic.background import TsaraSyntheticError, render_background
 from tsara.synthetic.config import (
+    TRUTH_PREFIX,
     InstrumentSpec,
     MobileTrack,
     StationarySite,
     SyntheticConfig,
 )
 from tsara.synthetic.noise import apply_uncertainty, quantize
-from tsara.synthetic.platform import build_track, positions_at
+from tsara.synthetic.platform import build_track
 from tsara.synthetic.plumes import (
     GroundTruth,
     GroundTruthEvent,
     RealizedEvent,
     schedule_events,
 )
-from tsara.synthetic.timebase import epoch_ns as _epoch_ns
-from tsara.synthetic.timebase import epoch_s as _epoch_s
-from tsara.synthetic.timebase import timestamp_epoch_ns as _stamp_ns
-from tsara.synthetic.timebase import timestamp_epoch_s as _stamp_s
-from tsara.synthetic.timebase import to_utc_naive as _to_utc_naive
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt
@@ -79,7 +81,10 @@ if TYPE_CHECKING:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 #: Prefix marking variables that describe the answer rather than the data.
-TRUTH_PREFIX = "truth_"
+#: Defined in :mod:`tsara.synthetic.config` (the schema layer reserves it so
+#: a ``report_as`` column can never shadow the answer key) and re-exported
+#: here, where it is used.
+__all__ = ["TRUTH_PREFIX", "SyntheticDataset", "generate"]
 
 
 @dataclass(frozen=True, eq=False)

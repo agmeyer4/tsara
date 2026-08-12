@@ -28,15 +28,15 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from tsara.exceptions import TsaraError
+from tsara.core.exceptions import TsaraError
+from tsara.core.timebase import NS_PER_S
+from tsara.core.timebase import epoch_ns as _epoch_ns
+from tsara.core.timebase import epoch_s as _epoch_s
 from tsara.synthetic.config import (
     BackgroundConfig,
     BootstrapBackground,
     ParametricBackground,
 )
-from tsara.synthetic.timebase import NS_PER_S
-from tsara.synthetic.timebase import epoch_ns as _epoch_ns
-from tsara.synthetic.timebase import epoch_s as _epoch_s
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt

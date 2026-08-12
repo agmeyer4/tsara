@@ -10,7 +10,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from tsara.synthetic.timebase import (
+from tsara.core.timebase import (
     epoch_ns,
     epoch_s,
     timestamp_epoch_ns,

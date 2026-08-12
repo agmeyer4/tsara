@@ -28,7 +28,7 @@ from pydantic import ValidationError, model_validator
 from tsara.config.analysis import AnalysisConfig
 from tsara.config.base import StrictModel as _StrictModel
 from tsara.config.manifest import Manifest
-from tsara.exceptions import TsaraConfigError
+from tsara.core.exceptions import TsaraConfigError
 
 if TYPE_CHECKING:  # pragma: no cover
     from tsara.synthetic.config import SyntheticConfig

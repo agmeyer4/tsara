@@ -529,6 +529,41 @@ with consistent amplitudes and one consistent ratio. Drawing per-instrument
 would destroy exactly the cross-species covariance TSARA exists to measure,
 and every regression test built on such data would be measuring an artifact.
 
+**Sources, ratios, and nesting.** A `SourceSpec` is a family of correlated
+multi-species events, not a per-species plume model. Each event draws its
+reference species' peak amplitude from `amplitude`, and every other
+participating species gets `amplitude × ratio` with the ratio drawn from that
+species' `RatioSpec`. Ratios are specified as a *distribution* rather than a
+constant because real emission ratios vary between encounters of the same
+source type; `relative_spread = 0` collapses to the fixed-ratio textbook case,
+and non-zero spread is what gives the Phase-7 methodological-variance and
+Birge-ratio diagnostics (§5.1) something to detect. Draws are lognormal,
+parameterized so the configured `mean` is the arithmetic mean:
+
+$$\sigma_{\log} = \sqrt{\ln(1 + s^2)}, \qquad \mu = \ln m - \tfrac{1}{2}\sigma_{\log}^2$$
+
+which keeps "did the estimator recover the true ratio?" a well-posed question
+with an unambiguous target.
+
+A **nested** child is a short, sharp plume riding inside a broader parent — the
+multi-scale case from CLAUDE.md §1. The child is modelled as a *distinct
+physical source encountered inside the parent*, so when `nested.ratios` is set
+it may name species the parent never emits: a broad landfill plume (methane,
+no ethane) carrying a thermogenic blip (methane *and* ethane) is the canonical
+example, and forbidding it would make the package's own motivating case
+inexpressible. Species the child does not mention inherit the parent's realized
+ratio; leaving `nested.ratios` unset inherits the parent's chemistry entirely,
+describing finer temporal structure within one source rather than a second
+source. The reference species may not appear in either ratio mapping — its
+ratio to itself is 1 by definition, and a declared entry would double-count it.
+Names are validated campaign-wide against the declared `role="gas"` species
+rather than against the parent's list, which is what still catches typos.
+
+Scientifically this is the case that matters most for v1: a regression that
+lumps child and parent samples together measures neither source's ratio.
+Phase 6 records the parent–child link in the catalog; the area mathematics that
+would separate their masses is deferred (§7).
+
 ### 8.2 Plume shapes
 
 Two registered shapes. **Gaussian** (`sigma`) is the symmetric textbook case.
@@ -678,8 +713,32 @@ leave that asymmetry untestable. Two track patterns: `random_walk` (constant
 speed, diffusing heading — a vehicle's actual behaviour, unlike a
 position-space walk which would reverse instantaneously) and `circuit` (a
 closed circle, which *revisits* coordinates and therefore produces genuinely
-clusterable data for Phase 8). Tracks integrate in a local flat-Earth
-approximation, metres-accurate at survey scale.
+clusterable data for Phase 8).
+
+In `random_walk`, heading increments are drawn as $\mathcal{N}(0,
+\sigma\sqrt{\Delta t})$, so the heading's spread after elapsed time $T$ grows
+as $\sigma\sqrt{T}$ — the `heading_volatility` parameter $\sigma$ is a Wiener
+diffusion coefficient with units rad·s^(−1/2), **not** radians per second. The
+$\sqrt{\Delta t}$ scaling is what makes the drive independent of the GPS
+sampling rate: sampling the same 400 s span at 1 s, 500 ms and 250 ms yields
+mean net displacements agreeing to better than 0.5 %.
+
+Position primitives live in `tsara.core.geodesy` rather than with the
+generator, because real ingested GPS (Phase 4) and plume clustering (Phase 8)
+need the same metre↔degree mapping and the same track interpolation; only the
+*manufacturing* of a fake track is synthetic-specific. Tracks integrate in a
+local flat-Earth (equirectangular) approximation using a single constant of
+111 320 m per degree on both axes — the WGS-84 equatorial degree of longitude,
+$2\pi a/360$. It is deliberately also used for latitude, where the true mean
+meridional degree is 111 133 m: the 0.17 % difference is two orders of
+magnitude below GPS noise at survey scale, and one constant keeps the
+metre↔degree mapping invertible and single-valued. Generated coordinates are
+bounded before release — longitude wrapped into $[-180, 180)$, latitude
+clamped to $[\pm 90]$ — since offsets are integrated without bound and a track
+crossing the antimeridian would otherwise emit 180.08°, which is not a
+coordinate and would propagate silently into the ground truth. Polar platforms
+are outside the supported domain; the longitude-scale floor keeps the
+arithmetic finite there but does not make it meaningful.
 
 All timestamps are normalized to tz-naive UTC at construction, so tz-aware and
 tz-naive configs produce byte-identical streams and every persisted file

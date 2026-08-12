@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from tsara.config.base import validate_signed_timedelta
 from tsara.config.manifest import DeclaredUncertainty, ReportedUncertainty
 from tsara.synthetic.config import (
+    TRUTH_PREFIX,
     BootstrapBackground,
     InstrumentSpec,
     LognormalAmplitude,
@@ -62,13 +63,24 @@ def test_bootstrap_background_rejects_nonpositive_scale() -> None:
         BootstrapBackground(kind="bootstrap", profile="p", scale=0.0)
 
 
-def test_blank_profile_key_rejected_at_config_level(synthetic_dict: dict[str, Any]) -> None:
-    # A whitespace-only key survives min_length but would fail at generate time.
+def test_whitespace_only_profile_key_rejected_at_the_field() -> None:
+    # min_length=1 accepts "   "; the field validator is what rejects it, so
+    # the error lands on BootstrapBackground itself rather than surfacing much
+    # later as a confusing "profile not supplied" from the generator.
+    with pytest.raises(ValidationError, match="must not be blank"):
+        BootstrapBackground(kind="bootstrap", profile="   ")
+
+
+def test_whitespace_only_profile_key_rejected_through_a_full_config(
+    synthetic_dict: dict[str, Any],
+) -> None:
+    # Same rule, reached by nesting: field validators fire wherever the model
+    # appears, which is the reason for moving the check down to the field.
     synthetic_dict["instruments"]["analyzer"]["species"]["ch4"]["background"] = {
         "kind": "bootstrap",
         "profile": "   ",
     }
-    with pytest.raises(ValidationError, match="blank profile key"):
+    with pytest.raises(ValidationError, match="must not be blank"):
         SyntheticConfig.model_validate(synthetic_dict)
 
 
@@ -200,6 +212,21 @@ def test_reported_columns_must_be_unique() -> None:
         InstrumentSpec.model_validate(spec)
 
 
+def test_reported_column_may_not_claim_the_truth_prefix() -> None:
+    """The answer key's namespace is reserved.
+
+    A reported-sigma column named ``truth_*`` would be written into the same
+    stream as the generator's ground-truth variables, silently corrupting the
+    record every later phase is scored against.
+    """
+    spec = _instrument()
+    spec["species"]["ch4"]["uncertainty"] = {
+        "random": {"absolute": 1.0, "report_as": f"{TRUTH_PREFIX}background_ch4"}
+    }
+    with pytest.raises(ValidationError, match="is reserved"):
+        InstrumentSpec.model_validate(spec)
+
+
 def test_instrument_without_uncertainty_passes_column_check() -> None:
     instrument = InstrumentSpec.model_validate(_instrument())
     assert instrument.species["ch4"].uncertainty is None
@@ -300,15 +327,71 @@ def test_unparseable_lag_is_rejected(source_dict: dict[str, Any]) -> None:
         SourceSpec.model_validate(source_dict)
 
 
-def test_nested_ratios_may_not_add_species(source_dict: dict[str, Any]) -> None:
+def test_nested_ratios_may_add_species_the_parent_does_not_emit(
+    source_dict: dict[str, Any],
+) -> None:
+    """The CLAUDE.md multi-scale case must be expressible.
+
+    A broad landfill plume (methane only) carrying a sharp thermogenic blip
+    (methane *and* ethane) is the package's own motivating example for nested
+    events. The child is a distinct physical source, so it is entitled to
+    chemistry the parent does not have.
+    """
+    source_dict["ratios"] = {}  # parent emits its reference species only
     source_dict["nested"] = {
         "probability": 0.5,
         "shape": {"kind": "gaussian", "sigma": "3s"},
         "amplitude_factor": 0.4,
-        "ratios": {"co2": {"mean": 2.0}},
+        "ratios": {"c2h6": {"mean": 0.06}},
     }
-    with pytest.raises(ValidationError, match="not emitted by the parent"):
+    source = SourceSpec.model_validate(source_dict)
+    assert source.ratios == {}
+    assert source.nested is not None
+    assert source.nested.ratios is not None
+    assert set(source.nested.ratios) == {"c2h6"}
+
+
+def test_nested_ratios_may_not_name_the_reference_species(
+    source_dict: dict[str, Any],
+) -> None:
+    """A child's ratio to the reference species would double-count it.
+
+    The child's amplitudes are built as ``reference_amplitude * ratio``, with
+    the reference implicitly at 1.0; a declared entry would overwrite that.
+    """
+    source_dict["nested"] = {
+        "probability": 0.5,
+        "shape": {"kind": "gaussian", "sigma": "3s"},
+        "amplitude_factor": 0.4,
+        "ratios": {"ch4": {"mean": 2.0}},
+    }
+    with pytest.raises(ValidationError, match="must not contain the reference species"):
         SourceSpec.model_validate(source_dict)
+
+
+def test_nested_species_must_still_be_a_declared_gas(synthetic_dict: dict[str, Any]) -> None:
+    """Typo protection moved up a level, not away.
+
+    Relaxing the parent-subset rule means a misspelled nested species is no
+    longer caught by SourceSpec; the campaign-wide declared-gas check is what
+    catches it instead.
+    """
+    synthetic_dict["sources"] = {
+        "vent": {
+            "rate_per_hour": 2.0,
+            "shape": {"kind": "gaussian", "sigma": "20s"},
+            "reference_species": "ch4",
+            "amplitude": {"kind": "lognormal", "median": 100.0, "sigma_log": 0.5},
+            "nested": {
+                "probability": 0.5,
+                "shape": {"kind": "gaussian", "sigma": "3s"},
+                "amplitude_factor": 0.4,
+                "ratios": {"c2h6_typo": {"mean": 0.06}},
+            },
+        }
+    }
+    with pytest.raises(ValidationError, match="undeclared species 'c2h6_typo'"):
+        SyntheticConfig.model_validate(synthetic_dict)
 
 
 def test_nested_ratios_subset_is_accepted(source_dict: dict[str, Any]) -> None:

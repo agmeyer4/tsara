@@ -28,8 +28,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from tsara.core.timebase import epoch_s as _epoch_s
 from tsara.synthetic.config import TrueComponent, TrueUncertainty
-from tsara.synthetic.timebase import epoch_s as _epoch_s
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt

@@ -29,7 +29,12 @@ Design decisions embedded in this schema
   ``report_as`` — the raw-file column an instrument would publish its
   per-point sigma under. :meth:`TrueUncertainty.to_manifest_uncertainty`
   converts back, so the budget a synthetic instrument *has* and the budget a
-  manifest would *declare* for it are provably the same object.
+  manifest would *declare* for it stay structurally in step: same components,
+  same absolute/relative terms, same reported-column names. It is the same
+  *declaration*, not the same *budget* — ``report_bias`` is deliberately not
+  carried across, because a manifest cannot know that an instrument
+  understates its own error. That gap is the point: it is what makes
+  "does downstream UQ notice an optimistic instrument?" a testable question.
 * **Real-data profiles are referenced by name, never embedded.** A
   :class:`BootstrapBackground` names a profile key; the actual numeric
   residual blocks (which are derived point-for-point from real
@@ -43,7 +48,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 
@@ -56,6 +61,16 @@ from tsara.config.manifest import (
     UncertaintySpec,
     VariableRole,
 )
+
+if TYPE_CHECKING:  # pragma: no cover
+    import numpy as np
+    import numpy.typing as npt
+
+#: Prefix marking generator-emitted answer-key variables. Defined here, in the
+#: schema layer, so validation can reserve it without importing the generator
+#: (which imports this module); :mod:`tsara.synthetic.generator` re-exports it.
+TRUTH_PREFIX = "truth_"
+
 
 # ---------------------------------------------------------------------------
 # Background models (tagged union on 'kind')
@@ -160,6 +175,21 @@ class BootstrapBackground(_StrictModel):
         ),
     )
 
+    @field_validator("profile")
+    @classmethod
+    def _profile_key_not_blank(cls, value: str) -> str:
+        """Reject a whitespace-only profile key.
+
+        ``min_length=1`` already rejects the empty string, but a key of
+        spaces would survive validation and fail much later inside the
+        generator, reporting that an apparently-invisible profile name was
+        never supplied. Catching it at the field keeps the error where the
+        mistake is.
+        """
+        if not value.strip():
+            raise ValueError("BootstrapBackground.profile must not be blank.")
+        return value
+
 
 #: Tagged union on 'kind', matching the manifest schema's convention.
 BackgroundConfig = Annotated[
@@ -228,12 +258,16 @@ class TrueComponent(_StrictModel):
             )
         return self
 
-    def sigma(self, values: object) -> object:
-        """Return the per-point 1-sigma for ``values`` (numpy array in, array out).
+    def sigma(self, values: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Return the per-point 1-sigma for ``values``.
 
         Kept here rather than in the noise module so the *definition* of the
         two-term quadrature form lives in exactly one place, next to the
         fields that parameterize it.
+
+        numpy is imported inside the function (and only for typing at module
+        scope) so that importing the config schema stays cheap: validating a
+        YAML file should not pull in the numeric stack.
 
         Parameters
         ----------
@@ -245,10 +279,11 @@ class TrueComponent(_StrictModel):
         numpy.ndarray
             Per-point standard deviation, same shape as ``values``.
         """
-        import numpy as np
+        import numpy
 
-        arr = np.asarray(values, dtype=float)
-        return np.sqrt(self.absolute**2 + (self.relative * arr) ** 2)
+        arr = numpy.asarray(values, dtype=float)
+        result: npt.NDArray[np.float64] = numpy.sqrt(self.absolute**2 + (self.relative * arr) ** 2)
+        return result
 
 
 class TrueUncertainty(_StrictModel):
@@ -514,7 +549,10 @@ class InstrumentSpec(_StrictModel):
         """Reject a 'report_as' column colliding with a species or another column.
 
         Reported-sigma variables share the instrument's namespace, so a
-        collision would silently overwrite one variable with another.
+        collision would silently overwrite one variable with another. The
+        ``truth_`` prefix is reserved for the same reason: those variables are
+        the answer key, and a reported column shadowing one would corrupt the
+        very record later phases are scored against.
         """
         seen: dict[str, str] = {}
         for name, spec in self.species.items():
@@ -527,6 +565,12 @@ class InstrumentSpec(_StrictModel):
                 if component is None or component.report_as is None:
                     continue
                 column = component.report_as
+                if column.startswith(TRUTH_PREFIX):
+                    raise ValueError(
+                        f"Species '{name}' reports its {label} sigma as '{column}', "
+                        f"but the '{TRUTH_PREFIX}' prefix is reserved for "
+                        "generator-emitted ground-truth variables."
+                    )
                 if column in self.species:
                     raise ValueError(
                         f"Species '{name}' reports its {label} sigma as '{column}', "
@@ -705,10 +749,15 @@ class NestedSpec(_StrictModel):
 
     The multi-scale case from CLAUDE.md: a natural-gas "blip" superimposed on
     a broad landfill plume. The child is a *distinct physical source* that
-    happens to be encountered inside the parent, so by default it draws its
-    own ratios — which is exactly why nesting matters scientifically. A
-    regression that lumps child and parent samples together measures neither
-    source's ratio.
+    happens to be encountered inside the parent, which is exactly why nesting
+    matters scientifically — a regression that lumps child and parent samples
+    together measures neither source's ratio.
+
+    Setting ``ratios`` is what expresses that distinctness, and it may name
+    species the parent never emits: the landfill above has no ethane, while
+    the thermogenic blip inside it does. Leaving ``ratios`` as ``None``
+    inherits the parent's chemistry instead, describing finer temporal
+    structure within one source rather than a second source.
 
     Phase 6 records the parent-child link in the catalog; the area
     mathematics that would separate their masses is deferred (METHODS.md §7).
@@ -727,9 +776,12 @@ class NestedSpec(_StrictModel):
     ratios: dict[str, RatioSpec] | None = Field(
         default=None,
         description=(
-            "Child's own species ratios. None inherits the parent's ratios "
-            "(same source, finer structure); setting them makes the child a "
-            "genuinely different source, the harder and more realistic case."
+            "Child's own species ratios, relative to the parent's reference "
+            "species. None inherits the parent's ratios (same source, finer "
+            "structure). Setting them makes the child a genuinely different "
+            "source — the harder and more realistic case — and may name "
+            "species the parent does not emit; species left unmentioned still "
+            "inherit the parent's ratio."
         ),
     )
 
@@ -806,6 +858,15 @@ class SourceSpec(_StrictModel):
         the reference species a ratio to itself (which would double-count it),
         and lagging a species the source does not actually emit (a typo that
         would simply do nothing).
+
+        Note what is deliberately *not* checked here: a nested child may name
+        species the parent does not emit. That is the CLAUDE.md multi-scale
+        case — a sharp thermogenic blip (with ethane) encountered inside a
+        broad landfill plume (without) — and forbidding it would make the
+        package's own motivating example inexpressible. Those names are
+        instead validated against the declared gas species campaign-wide by
+        ``SyntheticConfig._sources_reference_declared_gas_species``, which is
+        the check that actually catches typos.
         """
         if self.reference_species in self.ratios:
             raise ValueError(
@@ -820,14 +881,19 @@ class SourceSpec(_StrictModel):
                 f"that this source does not emit; participating species are "
                 f"{sorted(participating)}."
             )
-        if self.nested is not None and self.nested.ratios is not None:
-            unknown_nested = set(self.nested.ratios) - set(self.ratios)
-            if unknown_nested:
-                raise ValueError(
-                    f"SourceSpec.nested.ratios names species {sorted(unknown_nested)} "
-                    f"not emitted by the parent source; a nested child may only "
-                    f"re-weight the parent's species, not introduce new ones."
-                )
+        if (
+            self.nested is not None
+            and self.nested.ratios is not None
+            and self.reference_species in self.nested.ratios
+        ):
+            # Same rule, same reason as the parent's own ratios above: the
+            # child's amplitudes are built as reference_amplitude x ratio, so
+            # a ratio of the reference to itself would overwrite the implicit
+            # 1.0 and double-count the reference species.
+            raise ValueError(
+                f"SourceSpec.nested.ratios must not contain the reference species "
+                f"'{self.reference_species}'; its ratio to itself is 1 by definition."
+            )
         return self
 
 
@@ -985,6 +1051,13 @@ class SyntheticConfig(_StrictModel):
 
         for source_name, source in self.sources.items():
             emitted = {source.reference_species} | set(source.ratios)
+            # A nested child may introduce species of its own (see
+            # SourceSpec._references_are_consistent), so its ratios are folded
+            # in here: this is the single place every species name a source
+            # can possibly emit is checked against what the instruments
+            # actually declare.
+            if source.nested is not None and source.nested.ratios is not None:
+                emitted |= set(source.nested.ratios)
             for species in sorted(emitted):
                 if species not in all_species:
                     raise ValueError(
@@ -1014,29 +1087,6 @@ class SyntheticConfig(_StrictModel):
                 "with a declared instrument name; the GPS stream is generated "
                 "separately and needs its own name."
             )
-        return self
-
-    @model_validator(mode="after")
-    def _bootstrap_backgrounds_name_profiles(self) -> SyntheticConfig:
-        """Collect nothing, but assert bootstrap profiles are named consistently.
-
-        The generator validates that every referenced profile key was
-        actually supplied at call time (it cannot be checked here, since
-        profiles are runtime objects). What *can* be checked here is that a
-        ``BootstrapBackground`` never nests another bootstrap in its ``base``
-        slot — the type system already forbids it — so this validator instead
-        guards the one remaining foot-gun: an empty profile key surviving
-        into the generator.
-        """
-        for inst_name, inst in self.instruments.items():
-            for species_name, spec in inst.species.items():
-                if isinstance(spec.background, BootstrapBackground) and not (
-                    spec.background.profile.strip()
-                ):
-                    raise ValueError(
-                        f"{inst_name}.{species_name} declares a bootstrap background "
-                        "with a blank profile key."
-                    )
         return self
 
     @property

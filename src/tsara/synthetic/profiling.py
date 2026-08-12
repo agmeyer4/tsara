@@ -42,9 +42,9 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
-from tsara.exceptions import TsaraError
-from tsara.synthetic.timebase import NS_PER_S
-from tsara.synthetic.timebase import epoch_ns as _epoch_ns
+from tsara.core.exceptions import TsaraError
+from tsara.core.timebase import NS_PER_S
+from tsara.core.timebase import epoch_ns as _epoch_ns
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt

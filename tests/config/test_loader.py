@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from tsara import load_analysis, load_config, load_manifest
-from tsara.exceptions import TsaraConfigError
+from tsara.core.exceptions import TsaraConfigError
 
 # ---------------------------------------------------------------------------
 # Round trips

@@ -84,26 +84,12 @@ def epoch_s(times: pd.DatetimeIndex) -> npt.NDArray[np.float64]:
     return np.asarray(epoch_ns(times) / NS_PER_S, dtype=np.float64)
 
 
-def timestamp_epoch_s(stamp: pd.Timestamp) -> float:
-    """Return one timestamp as float seconds since the Unix epoch.
-
-    Parameters
-    ----------
-    stamp : pandas.Timestamp
-        Timestamp, timezone-aware or naive.
-
-    Returns
-    -------
-    float
-        Seconds since 1970-01-01T00:00:00Z.
-    """
-    if stamp.tz is not None:
-        stamp = stamp.tz_convert("UTC").tz_localize(None)
-    return float(stamp.value) / NS_PER_S
-
-
 def timestamp_epoch_ns(stamp: pd.Timestamp) -> int:
     """Return one timestamp as integer nanoseconds since the Unix epoch.
+
+    This is the single scalar conversion; :func:`timestamp_epoch_s` is
+    derived from it, so the timezone rule this module exists to centralize
+    is written down exactly once.
 
     Parameters
     ----------
@@ -118,3 +104,19 @@ def timestamp_epoch_ns(stamp: pd.Timestamp) -> int:
     if stamp.tz is not None:
         stamp = stamp.tz_convert("UTC").tz_localize(None)
     return int(stamp.value)
+
+
+def timestamp_epoch_s(stamp: pd.Timestamp) -> float:
+    """Return one timestamp as float seconds since the Unix epoch.
+
+    Parameters
+    ----------
+    stamp : pandas.Timestamp
+        Timestamp, timezone-aware or naive.
+
+    Returns
+    -------
+    float
+        Seconds since 1970-01-01T00:00:00Z.
+    """
+    return timestamp_epoch_ns(stamp) / NS_PER_S

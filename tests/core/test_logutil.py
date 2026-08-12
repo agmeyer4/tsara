@@ -1,4 +1,4 @@
-"""Tests for tsara.logutil (library-vs-application logging configuration).
+"""Tests for tsara.core.logutil (library-vs-application logging configuration).
 
 setup_logging() mutates a process-global object (the "tsara" logger
 singleton), so every test here uses the clean_tsara_logger fixture to
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from tsara.logutil import PACKAGE_LOGGER_NAME, setup_logging
+from tsara.core.logutil import PACKAGE_LOGGER_NAME, setup_logging
 
 # ---------------------------------------------------------------------------
 # Fixtures
