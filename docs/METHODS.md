@@ -595,8 +595,21 @@ was chosen for. The two branches are continuous to <1e-6 in the log-shape.
 
 Kernels are normalized to unit peak on a dense reference grid with a
 refinement pass, so `sampled_peak_amplitude ≤ true_amplitude` holds exactly
-rather than to within a normalization artifact. Support is truncated at 4σ
-(and +6τ for the EMG tail), keeping rendering O(events × window).
+rather than to within a normalization artifact (verified at 0 violations
+across the shipped example's catalog). Support is truncated at 4σ (and +6τ
+for the EMG tail), keeping rendering O(events × window); the resulting step
+at the support edge is 3.4e-4 of peak for a Gaussian and 8.4e-4 for the
+example's EMG — 0.07σ of measurement noise for a median plume and 0.34σ for
+the largest, so far below any hysteresis threshold that smoothing it away
+would buy nothing.
+
+**Record-edge asymmetry (harness limitation).** Event centers are drawn
+strictly inside the record, so a plume landing near the end is truncated but
+a record can never *open* part-way through a plume whose peak already passed.
+Real records routinely do. This matters only to stages with distinct
+boundary behaviour — Phase 5 baselines and Phase 6 detection both operate on
+half-empty windows at the edges — and is recorded in `schedule_events` with
+the change that would lift it, should either phase need the case.
 
 ### 8.3 Backgrounds
 

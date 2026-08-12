@@ -401,9 +401,22 @@ def schedule_events(config: SyntheticConfig, rng: np.random.Generator) -> list[R
     realistic near-source condition and the case in which naive baselines and
     signal-MAD noise estimates both fail.
 
-    Events are deliberately allowed to be centered near (and slightly beyond)
-    the record edges, producing partially truncated plumes — another
-    condition real records always contain and detectors must survive.
+    Centers fall strictly inside ``[start, start + duration)``. An event
+    landing within its own support of the end therefore has its tail cut off,
+    which is realistic. The start edge is **not** symmetric: because no center
+    is ever drawn before the record begins, a generated record can never open
+    part-way through a plume whose peak already passed — a condition real
+    records routinely contain.
+
+    That asymmetry is a known limitation of the harness rather than a
+    modelling claim. It matters most to stages with distinct edge behaviour —
+    Phase 5's rolling baselines and Phase 6's detection both work with
+    half-empty windows at the record boundary — so if either needs the
+    already-in-progress case, widen the draw to
+    ``[-support_before, span + support_after)`` and scale ``n_events`` for the
+    wider window. Events falling entirely outside would then produce catalog
+    rows with ``sampled_peak_amplitude`` NaN, the same flag already used for
+    an event lost inside a data gap.
 
     Parameters
     ----------
