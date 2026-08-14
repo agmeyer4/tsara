@@ -16,6 +16,7 @@ from tsara.core.timebase import (
     timestamp_epoch_ns,
     timestamp_epoch_s,
     to_utc_naive,
+    to_utc_naive_stamp,
 )
 
 EPOCH_NS_2026 = 1767225600_000_000_000  # 2026-01-01T00:00:00Z
@@ -49,6 +50,29 @@ def test_epoch_ns_agrees_across_timezone_spellings() -> None:
 def test_epoch_s_is_nanoseconds_scaled() -> None:
     index = pd.date_range("2026-01-01", periods=2, freq="30s")
     assert epoch_s(index)[1] - epoch_s(index)[0] == pytest.approx(30.0)
+
+
+def test_naive_stamp_is_returned_unchanged() -> None:
+    stamp = pd.Timestamp("2026-01-01")
+    assert to_utc_naive_stamp(stamp) == stamp
+    assert to_utc_naive_stamp(stamp).tz is None
+
+
+def test_aware_stamp_is_converted_to_naive_utc() -> None:
+    converted = to_utc_naive_stamp(pd.Timestamp("2026-01-01", tz="UTC"))
+    assert converted.tz is None
+    assert converted == pd.Timestamp("2026-01-01")
+
+
+def test_non_utc_stamp_is_shifted_to_utc() -> None:
+    converted = to_utc_naive_stamp(pd.Timestamp("2026-01-01 02:00:00", tz="Etc/GMT-2"))
+    assert converted == pd.Timestamp("2026-01-01 00:00:00")
+
+
+def test_scalar_and_index_normalization_agree() -> None:
+    """The pair exists so catalog scalars and stream clocks stay comparable."""
+    aware = pd.date_range("2026-01-01", periods=3, freq="1s", tz="Etc/GMT-2")
+    assert to_utc_naive_stamp(aware[1]) == to_utc_naive(aware)[1]
 
 
 def test_timestamp_helpers_handle_a_naive_stamp() -> None:

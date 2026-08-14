@@ -761,6 +761,104 @@ def test_stream_time_axis_is_timezone_naive(noisy_config: SyntheticConfig) -> No
     assert times.tz is None
 
 
+def test_ground_truth_windows_can_slice_their_own_stream(noisy_config: SyntheticConfig) -> None:
+    """The harness's central operation, and the one the tz rule exists for.
+
+    Scoring any later phase means taking a ground-truth event window and
+    pulling the stream samples inside it. If the catalog's timestamps kept the
+    config's timezone while the clocks were normalized to naive UTC, pandas
+    would raise `TypeError: Cannot compare tz-naive and tz-aware ...` here —
+    and `noisy_config`, like the shipped example, declares a tz-aware start.
+    """
+    dataset = generate(noisy_config)
+    stream = dataset.streams["analyzer"]
+    event = dataset.ground_truth.events[0]
+
+    assert event.peak_time.tz is None
+    window = stream.sel(time=slice(event.start_time, event.end_time))
+    assert window.sizes["time"] > 0
+    # And the window really does bracket the peak on the stream's own clock.
+    assert window["time"].values[0] <= np.datetime64(event.peak_time)
+    assert np.datetime64(event.peak_time) <= window["time"].values[-1]
+
+
+def test_ground_truth_is_identical_across_timezone_spellings() -> None:
+    """The catalog, not only the streams, must be spelling-independent."""
+    aware = SyntheticConfig(
+        name="tz_truth",
+        start=datetime(2026, 1, 1, tzinfo=UTC),
+        duration="30min",
+        seed=5,
+        platform={"kind": "stationary", "latitude": 40.0, "longitude": -111.0},  # type: ignore[arg-type]
+        instruments={
+            "inst": InstrumentSpec(
+                native_rate="1s",
+                species={
+                    "ch4": SpeciesSpec(
+                        background=ParametricBackground(kind="parametric", offset=1900.0),
+                        units="ppb",
+                    )
+                },
+            )
+        },
+        sources={
+            "pad": {  # type: ignore[dict-item]
+                "rate_per_hour": 30.0,
+                "shape": GaussianShape(kind="gaussian", sigma="10s"),
+                "reference_species": "ch4",
+                "amplitude": UniformAmplitude(kind="uniform", low=50.0, high=150.0),
+            }
+        },
+    )
+    naive = aware.model_copy(update={"start": datetime(2026, 1, 1)})
+
+    aware_events = generate(aware).ground_truth.events
+    naive_events = generate(naive).ground_truth.events
+    assert len(aware_events) > 0
+    for from_aware, from_naive in zip(aware_events, naive_events):
+        assert from_aware.peak_time == from_naive.peak_time
+        assert from_aware.peak_time.tz is None
+        assert from_naive.peak_time.tz is None
+
+
+def test_every_stream_uses_nanosecond_time_resolution() -> None:
+    """One dataset, one time representation — regardless of jitter.
+
+    The jitter branch casts to `datetime64[ns]`, while an unjittered clock
+    would otherwise inherit its unit from the config's start (microseconds,
+    for a `datetime.datetime`). Mixed resolutions in one dataset would also
+    make save/load change dtypes, since netCDF stores nanoseconds.
+    """
+    config = SyntheticConfig(
+        name="units",
+        start=datetime(2026, 1, 1, tzinfo=UTC),
+        duration="5min",
+        seed=3,
+        platform={"kind": "stationary", "latitude": 40.0, "longitude": -111.0},  # type: ignore[arg-type]
+        instruments={
+            "plain": InstrumentSpec(
+                native_rate="1s",
+                species={
+                    "ch4": SpeciesSpec(
+                        background=ParametricBackground(kind="parametric", offset=1900.0)
+                    )
+                },
+            ),
+            "jittered": InstrumentSpec(
+                native_rate="1s",
+                timestamp_jitter="100ms",
+                species={
+                    "co2": SpeciesSpec(
+                        background=ParametricBackground(kind="parametric", offset=410.0)
+                    )
+                },
+            ),
+        },
+    )
+    streams = generate(config).streams
+    assert {str(stream["time"].dtype) for stream in streams.values()} == {"datetime64[ns]"}
+
+
 def test_an_event_inside_a_data_gap_has_no_sampled_peak() -> None:
     """A plume the instrument was down for must record NaN, not a fake peak.
 

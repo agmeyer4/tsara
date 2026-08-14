@@ -788,9 +788,37 @@ coordinate and would propagate silently into the ground truth. Polar platforms
 are outside the supported domain; the longitude-scale floor keeps the
 arithmetic finite there but does not make it meaningful.
 
-All timestamps are normalized to tz-naive UTC at construction, so tz-aware and
-tz-naive configs produce byte-identical streams and every persisted file
-carries one consistent time representation.
+**One time representation, everywhere.** Timestamps enter from two directions —
+as clocks (`DatetimeIndex`, built in `generator._build_times`) and as event
+boundaries (scalar `Timestamp`, born in `plumes.schedule_events`) — and both
+are normalized to **tz-naive UTC at nanosecond resolution** through
+`tsara.core.timebase`. Both halves matter and both are load-bearing:
+
+* *Timezone.* pandas raises `TypeError` on any comparison between an aware and
+  a naive timestamp, so if the catalog kept the config's timezone while the
+  clocks were normalized, the harness's central operation — slicing a stream
+  with a ground-truth event window to score a detector against it — would fail
+  outright on any config declaring a `Z` suffix, which the shipped example
+  does. A tz-aware axis also cannot be encoded to netCDF.
+* *Resolution.* Left to itself, a clock inherits its unit from the config's
+  start (microseconds, for a `datetime.datetime`) while the jitter branch casts
+  explicitly to nanoseconds — so one dataset could hold streams at two
+  resolutions depending on which instruments declared jitter, and netCDF
+  (which stores nanoseconds) would change the dtype on every save/load. The
+  catalog is pinned the same way, on both the populated and empty paths, so a
+  plume-free control run stays concatenable with a plume-dense one.
+
+The consequence is that tz-aware and tz-naive configs produce byte-identical
+streams *and* byte-identical catalogs, and every persisted file carries the
+same time representation it had in memory.
+
+**Names are filenames.** Species *and* instrument names must be valid Python
+identifiers (`config.base.validate_stream_name`). For species the reason is
+that names become `xarray` variables; for instruments it is stronger — they
+become `streams/<name>.nc` inside a bundle, so a name carrying a path
+separator would send the write into a directory that was never created and
+fail only at save time, after a full generate, with a backend error naming
+neither the instrument nor the rule it broke.
 
 **Known limitation:** plume timing is *not* derived from track geometry —
 there is no dispersion model placing sources in space and computing when the

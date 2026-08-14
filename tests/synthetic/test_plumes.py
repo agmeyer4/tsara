@@ -398,6 +398,23 @@ def test_empty_ground_truth_frame_has_typed_columns() -> None:
     assert len(GroundTruth.from_frame(frame)) == 0
 
 
+def test_empty_and_populated_frames_share_one_time_representation() -> None:
+    """The control case must be concatenable with every other case.
+
+    The empty path has to impose dtypes by hand, so it is the one place the
+    representation can drift. tz-naive nanoseconds on both sides keeps a
+    plume-free run comparable with a plume-dense one.
+    """
+    empty = GroundTruth(events=()).to_frame()
+    populated = GroundTruth(events=(_event(),)).to_frame()
+    for column in ("start_time", "peak_time", "end_time"):
+        assert empty[column].dt.tz is None
+        assert populated[column].dt.tz is None
+        assert empty[column].dtype == populated[column].dtype
+    combined = pd.concat([empty, populated], ignore_index=True)
+    assert len(GroundTruth.from_frame(combined)) == 1
+
+
 def test_from_frame_rejects_missing_columns() -> None:
     frame = GroundTruth(events=(_event(),)).to_frame().drop(columns=["true_amplitude"])
     with pytest.raises(ValueError, match="missing columns"):

@@ -121,6 +121,37 @@ def test_empty_catalog_round_trips(noise_free_config: SyntheticConfig, tmp_path:
     assert len(restored.ground_truth) == 0
 
 
+def test_round_trip_preserves_the_time_dtype(noisy_config: SyntheticConfig, tmp_path: Path) -> None:
+    """Save/load must not silently change the time representation.
+
+    netCDF stores nanoseconds, so any stream built at a coarser resolution
+    would come back with a different dtype than it went in with — making a
+    loaded bundle subtly unequal to the dataset that produced it.
+    """
+    original = generate(noisy_config)
+    restored = SyntheticDataset.load(original.save(tmp_path / "run"))
+    before = original.streams["analyzer"]["time"]
+    after = restored.streams["analyzer"]["time"]
+    assert before.dtype == after.dtype == np.dtype("datetime64[ns]")
+    assert np.array_equal(before.values, after.values)
+
+
+def test_round_trip_keeps_ground_truth_windows_usable(
+    noisy_config: SyntheticConfig, tmp_path: Path
+) -> None:
+    """Slicing a stream by a truth window must survive persistence.
+
+    Parquet preserves whatever timezone the catalog carried, so a bundle
+    written from an aware catalog would reload still unable to index its own
+    streams.
+    """
+    restored = SyntheticDataset.load(generate(noisy_config).save(tmp_path / "run"))
+    event = restored.ground_truth.events[0]
+    assert event.peak_time.tz is None
+    window = restored.streams["analyzer"].sel(time=slice(event.start_time, event.end_time))
+    assert window.sizes["time"] > 0
+
+
 def test_saving_twice_overwrites_in_place(noisy_config: SyntheticConfig, tmp_path: Path) -> None:
     dataset = generate(noisy_config)
     first = dataset.save(tmp_path / "run")

@@ -54,6 +54,7 @@ from tsara.core.timebase import epoch_s as _epoch_s
 from tsara.core.timebase import timestamp_epoch_ns as _stamp_ns
 from tsara.core.timebase import timestamp_epoch_s as _stamp_s
 from tsara.core.timebase import to_utc_naive as _to_utc_naive
+from tsara.core.timebase import to_utc_naive_stamp as _to_utc_naive_stamp
 from tsara.synthetic.background import TsaraSyntheticError, render_background
 from tsara.synthetic.config import (
     TRUTH_PREFIX,
@@ -204,7 +205,10 @@ def generate(
     import pandas as pd
 
     rng = np.random.default_rng(config.seed)
-    start = pd.Timestamp(config.start)
+    # Normalized here as well as inside `_build_times`, so that `start`/`end`
+    # are already on TSARA's one time representation everywhere they are used
+    # rather than only where a clock happens to be built.
+    start = _to_utc_naive_stamp(pd.Timestamp(config.start))
     end = start + pd.Timedelta(config.duration)
 
     # 1. Physical events first — shared across every instrument and species.
@@ -325,11 +329,23 @@ def _build_times(
     # different streams for the same instants, and (b) fail to encode to
     # netCDF at save time. Doing it here means every downstream stage, and
     # every persisted file, sees one consistent time representation.
+    #
+    # `as_unit("ns")` pins the resolution as well as the timezone. Without it
+    # the unit is inherited from `start`: a config whose start came from a
+    # `datetime.datetime` yields microseconds, while the jitter branch below
+    # casts to nanoseconds explicitly — so one dataset could carry streams of
+    # two different resolutions depending on which instruments declared
+    # jitter, and netCDF (which stores ns) would silently change the dtype on
+    # every save/load. Nanoseconds span 1677-2262, comfortably beyond any
+    # atmospheric record.
+    #
     # Never empty: `duration` is validated strictly positive, so the range
     # always contains at least the start instant even when `native_rate` is
     # coarser than the whole record. Only dropouts can empty it, which is
     # checked after they are applied.
-    times = _to_utc_naive(pd.date_range(start=start, end=end, freq=native_rate, inclusive="left"))
+    times = _to_utc_naive(
+        pd.date_range(start=start, end=end, freq=native_rate, inclusive="left")
+    ).as_unit("ns")
 
     if jitter is not None:
         jitter_ns = float(pd.Timedelta(jitter).value)
@@ -535,9 +551,7 @@ def _render_instrument(
             )
 
     dataset = xr.Dataset(
-        data_vars={
-            name: (dims, values, attrs) for name, (dims, values, attrs) in data_vars.items()
-        },
+        data_vars=data_vars,
         coords={"time": times},
         attrs=_stream_attrs(config, instrument_name, instrument),
     )

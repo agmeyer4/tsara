@@ -20,6 +20,50 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+def validate_stream_name(value: str, *, field: str) -> None:
+    """Validate a name that becomes an xarray key *and* a filename.
+
+    Two kinds of TSARA name need this rule, for two reasons that happen to
+    coincide:
+
+    * **Species names** become ``xarray`` variable names, where a
+      non-identifier defeats attribute access (``ds.ch4``) and reads badly in
+      every downstream selection.
+    * **Instrument (stream) names** become files inside a bundle,
+      ``streams/<name>.nc``. A name containing a path separator sends the
+      write into a directory that was never created, and the failure surfaces
+      only at save time — after a full generate or ingest — as a bare
+      ``PermissionError``/``FileNotFoundError`` from the netCDF backend that
+      never mentions which instrument caused it. Naming an instrument after
+      the archive path it came from is an easy mistake to make; this turns it
+      into an immediate, named config error instead.
+
+    The Python identifier rule is stricter than either use strictly requires,
+    which is the point: one rule, checkable in one call, that is obviously
+    sufficient for both.
+
+    Parameters
+    ----------
+    value : str
+        Candidate name.
+    field : str
+        Dotted field name used in the error message, e.g.
+        ``'SyntheticConfig.instruments'``.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is not a valid Python identifier.
+    """
+    if not value.isidentifier():
+        raise ValueError(
+            f"{field}: '{value}' must be a valid identifier (letters, digits, "
+            "underscores; not starting with a digit). Names become xarray "
+            "variables and bundle filenames, so separators, spaces and dots "
+            "are not usable."
+        )
+
+
 def validate_positive_timedelta(value: str, *, field: str) -> None:
     """Validate a pandas-style strictly positive timedelta string ('30s', '10min').
 

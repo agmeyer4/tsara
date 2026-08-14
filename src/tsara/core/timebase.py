@@ -45,6 +45,33 @@ def to_utc_naive(times: pd.DatetimeIndex) -> pd.DatetimeIndex:
     return times
 
 
+def to_utc_naive_stamp(stamp: pd.Timestamp) -> pd.Timestamp:
+    """Return one timestamp as tz-naive UTC.
+
+    The scalar counterpart of :func:`to_utc_naive`. It exists because
+    timestamps enter TSARA from two directions — as clocks (indexes) and as
+    event boundaries (scalars) — and the two must land on the same
+    representation or they cannot be compared at all: pandas raises
+    ``TypeError`` on any comparison between an aware and a naive timestamp.
+    Normalizing both through this module is what lets a ground-truth event
+    window be used to slice a stream.
+
+    Parameters
+    ----------
+    stamp : pandas.Timestamp
+        Timestamp, timezone-aware or naive. Naive input is assumed to already
+        be UTC and is returned unchanged.
+
+    Returns
+    -------
+    pandas.Timestamp
+        Timezone-naive timestamp on the UTC timeline.
+    """
+    if stamp.tz is not None:
+        return stamp.tz_convert("UTC").tz_localize(None)
+    return stamp
+
+
 def epoch_ns(times: pd.DatetimeIndex) -> npt.NDArray[np.int64]:
     """Return integer nanoseconds since the Unix epoch.
 
@@ -101,9 +128,7 @@ def timestamp_epoch_ns(stamp: pd.Timestamp) -> int:
     int
         Nanoseconds since 1970-01-01T00:00:00Z.
     """
-    if stamp.tz is not None:
-        stamp = stamp.tz_convert("UTC").tz_localize(None)
-    return int(stamp.value)
+    return int(to_utc_naive_stamp(stamp).value)
 
 
 def timestamp_epoch_s(stamp: pd.Timestamp) -> float:

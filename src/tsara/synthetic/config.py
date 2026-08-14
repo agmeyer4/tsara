@@ -55,6 +55,7 @@ from pydantic import Field, ValidationInfo, field_validator, model_validator
 from tsara.config.base import StrictModel as _StrictModel
 from tsara.config.base import validate_positive_timedelta as _validate_duration
 from tsara.config.base import validate_signed_timedelta as _validate_signed
+from tsara.config.base import validate_stream_name as _validate_stream_name
 from tsara.config.manifest import (
     DeclaredUncertainty,
     ReportedUncertainty,
@@ -514,11 +515,7 @@ class InstrumentSpec(_StrictModel):
     ) -> dict[str, SpeciesSpec]:
         """Require identifiers, as the manifest does: names become xarray variables."""
         for name in value:
-            if not name.isidentifier():
-                raise ValueError(
-                    f"Canonical species name '{name}' must be a valid identifier "
-                    "(letters, digits, underscores; not starting with a digit)."
-                )
+            _validate_stream_name(name, field=f"InstrumentSpec.species['{name}']")
         return value
 
     @model_validator(mode="after")
@@ -963,6 +960,13 @@ class MobileTrack(_StrictModel):
         _validate_duration(value, field=f"MobileTrack.{info.field_name}")
         return value
 
+    @field_validator("gps_instrument")
+    @classmethod
+    def _gps_name_is_usable(cls, value: str) -> str:
+        """Require a usable name: the GPS stream is written as a file too."""
+        _validate_stream_name(value, field="MobileTrack.gps_instrument")
+        return value
+
 
 PlatformSpec = Annotated[StationarySite | MobileTrack, Field(discriminator="kind")]
 
@@ -1011,6 +1015,22 @@ class SyntheticConfig(_StrictModel):
     @classmethod
     def _valid_durations(cls, value: str, info: ValidationInfo) -> str:
         _validate_duration(value, field=f"SyntheticConfig.{info.field_name}")
+        return value
+
+    @field_validator("instruments")
+    @classmethod
+    def _instrument_names_are_usable(
+        cls, value: dict[str, InstrumentSpec]
+    ) -> dict[str, InstrumentSpec]:
+        """Instrument names become ``streams/<name>.nc`` inside a bundle.
+
+        Same rule the species names get, and for the stronger reason: an
+        unusable species name produces an awkward variable, whereas an
+        unusable instrument name produces a save that fails long after
+        generation with a backend error naming only a path.
+        """
+        for name in value:
+            _validate_stream_name(name, field=f"SyntheticConfig.instruments['{name}']")
         return value
 
     @model_validator(mode="after")

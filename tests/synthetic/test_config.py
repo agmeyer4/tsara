@@ -472,6 +472,43 @@ def test_source_cannot_emit_a_non_gas_species(synthetic_dict: dict[str, Any]) ->
         SyntheticConfig.model_validate(synthetic_dict)
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "03_instrument_aligned/WYO_picarro",  # a path pasted in as a name
+        "WYO picarro",
+        "picarro.v2",
+        "..",
+    ],
+)
+def test_instrument_name_must_be_usable_as_a_filename(
+    synthetic_dict: dict[str, Any], name: str
+) -> None:
+    """Rejected at validation, not at save.
+
+    Instrument names become `streams/<name>.nc`. Before this rule a name
+    containing a separator survived a whole `generate()` and then died in the
+    netCDF backend with an error naming only a path.
+    """
+    synthetic_dict["instruments"] = {name: synthetic_dict["instruments"]["analyzer"]}
+    with pytest.raises(ValidationError, match="valid identifier"):
+        SyntheticConfig.model_validate(synthetic_dict)
+
+
+def test_gps_instrument_name_must_be_usable_as_a_filename(
+    synthetic_dict: dict[str, Any],
+) -> None:
+    """The GPS stream is written as a file under its own name too."""
+    synthetic_dict["platform"] = {
+        "kind": "mobile",
+        "gps_instrument": "gps/primary",
+        "start_latitude": 40.0,
+        "start_longitude": -111.0,
+    }
+    with pytest.raises(ValidationError, match="valid identifier"):
+        SyntheticConfig.model_validate(synthetic_dict)
+
+
 def test_gps_instrument_name_may_not_collide(synthetic_dict: dict[str, Any]) -> None:
     synthetic_dict["platform"] = {
         "kind": "mobile",

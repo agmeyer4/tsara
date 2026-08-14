@@ -106,11 +106,17 @@ def save_synthetic(dataset: SyntheticDataset, path: str | Path) -> Path:
     dataset.ground_truth.to_frame().to_parquet(bundle / BUNDLE_GROUND_TRUTH, index=False)
 
     for name, stream in dataset.streams.items():
+        # Stream names are validated as Python identifiers by the config
+        # layer, so they are safe as filenames: no separators, no '..', no
+        # spaces. That validation is what lets this be a bare f-string.
         target = streams_dir / f"{name}.nc"
-        # Booleans and None are not valid netCDF attribute types; the
-        # generator already emits ints/strings/floats, but a defensive
-        # normalization keeps a future attr addition from failing at save
-        # time with an opaque backend error.
+        # Invariant relied on here: every attr the generator emits is a
+        # netCDF-safe scalar (str, int, or float). Booleans and None are not
+        # valid netCDF attribute types, which is why `circular` is written as
+        # int(...) and why no optional field is emitted as a bare None. A new
+        # attr that breaks the invariant fails here, at save, with a backend
+        # error that does not name the offending key — so keep new attrs to
+        # those three types.
         stream.to_netcdf(target, engine="netcdf4")
 
     (bundle / BUNDLE_MANIFEST).write_text(

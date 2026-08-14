@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
+from tsara.core.timebase import to_utc_naive_stamp as _to_utc_naive_stamp
 from tsara.synthetic.config import (
     AmplitudeSpec,
     GaussianShape,
@@ -433,7 +434,14 @@ def schedule_events(config: SyntheticConfig, rng: np.random.Generator) -> list[R
     """
     import pandas as pd
 
-    start = pd.Timestamp(config.start)
+    # Normalize to tz-naive UTC here, at the one point where a catalog
+    # timestamp is born: every event time below is this value plus a
+    # Timedelta, so fixing the representation once fixes the whole catalog.
+    # It must match the streams' clocks (normalized identically in
+    # `generator._build_times`), because the harness's central operation is
+    # slicing a stream with a ground-truth event window — and pandas raises
+    # TypeError on any comparison between an aware and a naive timestamp.
+    start = _to_utc_naive_stamp(pd.Timestamp(config.start))
     span = pd.Timedelta(config.duration)
     span_hours = span.total_seconds() / 3600.0
     span_s = span.total_seconds()
@@ -755,12 +763,24 @@ class GroundTruth:
             for event in self.events
         ]
         frame = pd.DataFrame.from_records(records, columns=list(GROUND_TRUTH_COLUMNS))
+
+        # Pin the time columns on BOTH paths, not just the empty one. Left to
+        # itself pandas infers the unit from the values it was handed — so a
+        # populated catalog inherits whatever resolution `config.start` had
+        # (microseconds, for a `datetime.datetime`) while an empty one gets
+        # whatever `astype` defaults to. Two catalogs from the same package
+        # would then differ in dtype purely by whether they contained events,
+        # and could not be concatenated without an upcast. Nanoseconds match
+        # the stream clocks (`generator._build_times`) and netCDF's storage
+        # unit, so the whole bundle speaks one time representation.
+        for column in ("start_time", "peak_time", "end_time"):
+            frame[column] = frame[column].astype("datetime64[ns]")
+
         if frame.empty:
-            # An empty frame from an empty record list has object dtypes,
-            # which Parquet round-trips inconsistently. Impose the schema so
-            # a plume-free control dataset saves and loads like any other.
-            for column in ("start_time", "peak_time", "end_time"):
-                frame[column] = pd.to_datetime(frame[column], utc=True)
+            # An empty frame from an empty record list has object dtypes for
+            # everything else, which Parquet round-trips inconsistently.
+            # Impose the rest of the schema so a plume-free control dataset
+            # saves and loads like any other.
             for column in (
                 "true_amplitude",
                 "sampled_peak_amplitude",
