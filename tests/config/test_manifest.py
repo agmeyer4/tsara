@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -23,7 +24,7 @@ from tsara.config.manifest import (
 # ---------------------------------------------------------------------------
 
 
-def test_valid_stationary_manifest_parses(stationary_manifest_dict):
+def test_valid_stationary_manifest_parses(stationary_manifest_dict: dict[str, Any]) -> None:
     manifest = Manifest.model_validate(stationary_manifest_dict)
     assert manifest.name == "test_site"
     assert isinstance(manifest.platform, StationaryPlatform)
@@ -32,19 +33,21 @@ def test_valid_stationary_manifest_parses(stationary_manifest_dict):
     assert isinstance(manifest.instruments["picarro"].loader, CSVLoader)
 
 
-def test_valid_mobile_manifest_parses(mobile_manifest_dict):
+def test_valid_mobile_manifest_parses(mobile_manifest_dict: dict[str, Any]) -> None:
     manifest = Manifest.model_validate(mobile_manifest_dict)
     assert isinstance(manifest.platform, MobilePlatform)
     assert manifest.platform.gps_instrument == "gps"
 
 
-def test_gas_species_property_collects_across_instruments(mobile_manifest_dict):
+def test_gas_species_property_collects_across_instruments(
+    mobile_manifest_dict: dict[str, Any],
+) -> None:
     manifest = Manifest.model_validate(mobile_manifest_dict)
     # ch4 + co2 from picarro; GPS/met variables must NOT appear.
     assert set(manifest.gas_species) == {"ch4", "co2"}
 
 
-def test_defaults_applied(stationary_manifest_dict):
+def test_defaults_applied(stationary_manifest_dict: dict[str, Any]) -> None:
     manifest = Manifest.model_validate(stationary_manifest_dict)
     var = manifest.instruments["picarro"].variables["co2"]
     assert var.role == "gas"
@@ -53,17 +56,17 @@ def test_defaults_applied(stationary_manifest_dict):
     assert var.qaqc == ()
 
 
-def test_manifest_is_frozen(stationary_manifest_dict):
+def test_manifest_is_frozen(stationary_manifest_dict: dict[str, Any]) -> None:
     """Configs are immutable facts about a run."""
     manifest = Manifest.model_validate(stationary_manifest_dict)
     with pytest.raises(ValidationError):
-        manifest.name = "mutated"
+        manifest.name = "mutated"  # type: ignore[misc]  # read-only: that is the assertion
 
 
-def test_template_fields_extracted():
+def test_template_fields_extracted() -> None:
     loader = CSVLoader(
         path_template="{institution}/{campaign}/%Y/*.csv",
-        time={"column": "t", "format": "unix"},
+        time={"column": "t", "format": "unix"},  # type: ignore[arg-type]
     )
     assert loader.template_fields == ("institution", "campaign")
 
@@ -73,51 +76,54 @@ def test_template_fields_extracted():
 # ---------------------------------------------------------------------------
 
 
-def test_single_template_string_coerced_to_tuple():
+def test_single_template_string_coerced_to_tuple() -> None:
     """The singular `path_template: "..."` shorthand lands in the tuple field."""
     loader = CSVLoader(
         path_template="a/%Y/*.csv",
-        time={"column": "t", "format": "unix"},
+        time={"column": "t", "format": "unix"},  # type: ignore[arg-type]
     )
     assert loader.path_templates == ("a/%Y/*.csv",)
 
 
-def test_multiple_templates_accepted():
+def test_multiple_templates_accepted() -> None:
     loader = CSVLoader(
         path_templates=["layout_a/{campaign}/%Y/*.csv", "layout_b/{site}/*.csv"],
-        time={"column": "t", "format": "unix"},
+        time={"column": "t", "format": "unix"},  # type: ignore[arg-type]
     )
     assert len(loader.path_templates) == 2
     # Fields are the deduplicated union across templates, in order.
     assert loader.template_fields == ("campaign", "site")
 
 
-def test_duplicate_templates_rejected():
+def test_duplicate_templates_rejected() -> None:
     with pytest.raises(ValidationError, match="duplicate"):
         CSVLoader(
             path_templates=["a/*.csv", "a/*.csv"],
-            time={"column": "t", "format": "unix"},
+            time={"column": "t", "format": "unix"},  # type: ignore[arg-type]
         )
 
 
-def test_any_bad_template_in_list_rejected():
+def test_any_bad_template_in_list_rejected() -> None:
     """One absolute path among several relative ones must still fail."""
     with pytest.raises(ValidationError, match="relative"):
         CSVLoader(
             path_templates=["good/%Y/*.csv", "/bad/abs/*.csv"],
-            time={"column": "t", "format": "unix"},
+            time={"column": "t", "format": "unix"},  # type: ignore[arg-type]
         )
 
 
-def test_empty_template_list_rejected():
+def test_empty_template_list_rejected() -> None:
     with pytest.raises(ValidationError):
-        CSVLoader(path_templates=[], time={"column": "t", "format": "unix"})
+        CSVLoader(path_templates=[], time={"column": "t", "format": "unix"})  # type: ignore[arg-type]
 
 
-def test_blank_template_entry_rejected():
+def test_blank_template_entry_rejected() -> None:
     """A whitespace-only entry is a distinct failure from an empty *list*."""
     with pytest.raises(ValidationError, match="non-empty"):
-        CSVLoader(path_templates=["   ", "b/%Y/*.csv"], time={"column": "t", "format": "unix"})
+        CSVLoader(
+            path_templates=["   ", "b/%Y/*.csv"],
+            time={"column": "t", "format": "unix"},  # type: ignore[arg-type]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +131,7 @@ def test_blank_template_entry_rejected():
 # ---------------------------------------------------------------------------
 
 
-def test_icartt_revision_policy_defaults_to_latest():
+def test_icartt_revision_policy_defaults_to_latest() -> None:
     """'latest' is the safe default: ingesting all revisions double-counts."""
     from tsara.config.manifest import ICARTTLoader
 
@@ -133,14 +139,14 @@ def test_icartt_revision_policy_defaults_to_latest():
     assert loader.revision_policy == "latest"
 
 
-def test_icartt_unknown_revision_policy_rejected():
+def test_icartt_unknown_revision_policy_rejected() -> None:
     from tsara.config.manifest import ICARTTLoader
 
     with pytest.raises(ValidationError, match="revision_policy"):
-        ICARTTLoader(path_template="voc/%Y/*.ict", revision_policy="newest")
+        ICARTTLoader(path_template="voc/%Y/*.ict", revision_policy="newest")  # type: ignore[arg-type]
 
 
-def test_csv_loader_has_no_revision_policy(stationary_manifest_dict):
+def test_csv_loader_has_no_revision_policy(stationary_manifest_dict: dict[str, Any]) -> None:
     """revision_policy is ICARTT-specific; CSV filenames aren't standardized."""
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["loader"]["revision_policy"] = "latest"
@@ -153,14 +159,14 @@ def test_csv_loader_has_no_revision_policy(stationary_manifest_dict):
 # ---------------------------------------------------------------------------
 
 
-def test_unknown_top_level_key_rejected(stationary_manifest_dict):
+def test_unknown_top_level_key_rejected(stationary_manifest_dict: dict[str, Any]) -> None:
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["basepath"] = "/oops"  # typo'd duplicate of base_path
     with pytest.raises(ValidationError, match="basepath"):
         Manifest.model_validate(bad)
 
 
-def test_unknown_nested_key_rejected(stationary_manifest_dict):
+def test_unknown_nested_key_rejected(stationary_manifest_dict: dict[str, Any]) -> None:
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["variables"]["ch4"]["unitts"] = "ppm"
     with pytest.raises(ValidationError, match="unitts"):
@@ -176,14 +182,16 @@ def test_unknown_nested_key_rejected(stationary_manifest_dict):
     ("field", "value"),
     [("latitude", 91.0), ("latitude", -91.0), ("longitude", 181.0), ("longitude", -181.0)],
 )
-def test_stationary_coordinates_bounds(stationary_manifest_dict, field, value):
+def test_stationary_coordinates_bounds(
+    stationary_manifest_dict: dict[str, Any], field: str, value: float
+) -> None:
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["platform"][field] = value
     with pytest.raises(ValidationError, match=field):
         Manifest.model_validate(bad)
 
 
-def test_platform_kind_discriminates(stationary_manifest_dict):
+def test_platform_kind_discriminates(stationary_manifest_dict: dict[str, Any]) -> None:
     """A stationary platform must not accept mobile-only fields."""
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["platform"]["gps_instrument"] = "gps"
@@ -191,21 +199,21 @@ def test_platform_kind_discriminates(stationary_manifest_dict):
         Manifest.model_validate(bad)
 
 
-def test_mobile_missing_gps_instrument_rejected(mobile_manifest_dict):
+def test_mobile_missing_gps_instrument_rejected(mobile_manifest_dict: dict[str, Any]) -> None:
     bad = copy.deepcopy(mobile_manifest_dict)
     bad["platform"]["gps_instrument"] = "nonexistent"
     with pytest.raises(ValidationError, match="nonexistent"):
         Manifest.model_validate(bad)
 
 
-def test_mobile_missing_lat_variable_rejected(mobile_manifest_dict):
+def test_mobile_missing_lat_variable_rejected(mobile_manifest_dict: dict[str, Any]) -> None:
     bad = copy.deepcopy(mobile_manifest_dict)
     del bad["instruments"]["gps"]["variables"]["latitude"]
     with pytest.raises(ValidationError, match="latitude"):
         Manifest.model_validate(bad)
 
 
-def test_mobile_wrong_gps_role_rejected(mobile_manifest_dict):
+def test_mobile_wrong_gps_role_rejected(mobile_manifest_dict: dict[str, Any]) -> None:
     """Referenced GPS variable exists but carries the wrong role."""
     bad = copy.deepcopy(mobile_manifest_dict)
     bad["instruments"]["gps"]["variables"]["latitude"]["role"] = "aux"
@@ -213,7 +221,9 @@ def test_mobile_wrong_gps_role_rejected(mobile_manifest_dict):
         Manifest.model_validate(bad)
 
 
-def test_mobile_altitude_variable_accepted_when_present(mobile_manifest_dict):
+def test_mobile_altitude_variable_accepted_when_present(
+    mobile_manifest_dict: dict[str, Any],
+) -> None:
     """alt_variable is optional; when given it must pass the same
     exists-and-has-the-right-role check already covered for lat/lon."""
     ok = copy.deepcopy(mobile_manifest_dict)
@@ -224,10 +234,12 @@ def test_mobile_altitude_variable_accepted_when_present(mobile_manifest_dict):
         "units": "m",
     }
     manifest = Manifest.model_validate(ok)
-    assert manifest.platform.alt_variable == "altitude"
+    platform = manifest.platform
+    assert isinstance(platform, MobilePlatform)  # narrows the union for alt_variable
+    assert platform.alt_variable == "altitude"
 
 
-def test_mobile_missing_alt_variable_rejected(mobile_manifest_dict):
+def test_mobile_missing_alt_variable_rejected(mobile_manifest_dict: dict[str, Any]) -> None:
     bad = copy.deepcopy(mobile_manifest_dict)
     bad["platform"]["alt_variable"] = "elevation"  # never declared on gps
     with pytest.raises(ValidationError, match="elevation"):
@@ -239,7 +251,7 @@ def test_mobile_missing_alt_variable_rejected(mobile_manifest_dict):
 # ---------------------------------------------------------------------------
 
 
-def test_circular_gas_rejected(stationary_manifest_dict):
+def test_circular_gas_rejected(stationary_manifest_dict: dict[str, Any]) -> None:
     """circular=true is only physically meaningful for met variables."""
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["variables"]["ch4"]["circular"] = True
@@ -247,7 +259,7 @@ def test_circular_gas_rejected(stationary_manifest_dict):
         Manifest.model_validate(bad)
 
 
-def test_non_identifier_canonical_name_rejected(stationary_manifest_dict):
+def test_non_identifier_canonical_name_rejected(stationary_manifest_dict: dict[str, Any]) -> None:
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["variables"]["ch4-dry"] = {
         "column": "X",
@@ -257,7 +269,9 @@ def test_non_identifier_canonical_name_rejected(stationary_manifest_dict):
         Manifest.model_validate(bad)
 
 
-def test_duplicate_raw_column_within_instrument_rejected(stationary_manifest_dict):
+def test_duplicate_raw_column_within_instrument_rejected(
+    stationary_manifest_dict: dict[str, Any],
+) -> None:
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["variables"]["ch4_copy"] = {
         "column": "CH4_dry",  # same raw column as ch4
@@ -267,7 +281,9 @@ def test_duplicate_raw_column_within_instrument_rejected(stationary_manifest_dic
         Manifest.model_validate(bad)
 
 
-def test_duplicate_canonical_name_across_instruments_rejected(mobile_manifest_dict):
+def test_duplicate_canonical_name_across_instruments_rejected(
+    mobile_manifest_dict: dict[str, Any],
+) -> None:
     bad = copy.deepcopy(mobile_manifest_dict)
     # GPS instrument also claims to produce 'ch4' — collides with picarro's.
     bad["instruments"]["gps"]["variables"]["ch4"] = {"column": "CH4", "units": "ppb"}
@@ -275,7 +291,9 @@ def test_duplicate_canonical_name_across_instruments_rejected(mobile_manifest_di
         Manifest.model_validate(bad)
 
 
-def test_instrument_requires_at_least_one_variable(stationary_manifest_dict):
+def test_instrument_requires_at_least_one_variable(
+    stationary_manifest_dict: dict[str, Any],
+) -> None:
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["variables"] = {}
     with pytest.raises(ValidationError):
@@ -287,13 +305,13 @@ def test_instrument_requires_at_least_one_variable(stationary_manifest_dict):
 # ---------------------------------------------------------------------------
 
 
-def test_identity_conversion_rejected():
+def test_identity_conversion_rejected() -> None:
     """scale=1, offset=0 must be spelled as 'no convert block at all'."""
     with pytest.raises(ValidationError, match="no-op"):
         UnitConversion(from_unit="ppb", to_unit="ppb")
 
 
-def test_offset_only_conversion_allowed():
+def test_offset_only_conversion_allowed() -> None:
     conv = UnitConversion(from_unit="degC", to_unit="K", offset=273.15)
     assert conv.scale == 1.0
 
@@ -303,14 +321,14 @@ def test_offset_only_conversion_allowed():
 # ---------------------------------------------------------------------------
 
 
-def test_range_rule_requires_a_bound(stationary_manifest_dict):
+def test_range_rule_requires_a_bound(stationary_manifest_dict: dict[str, Any]) -> None:
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["variables"]["ch4"]["qaqc"] = [{"kind": "range"}]
     with pytest.raises(ValidationError, match="min.*max|at least one"):
         Manifest.model_validate(bad)
 
 
-def test_range_rule_min_below_max(stationary_manifest_dict):
+def test_range_rule_min_below_max(stationary_manifest_dict: dict[str, Any]) -> None:
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["variables"]["ch4"]["qaqc"] = [
         {"kind": "range", "min": 10.0, "max": 5.0}
@@ -319,7 +337,7 @@ def test_range_rule_min_below_max(stationary_manifest_dict):
         Manifest.model_validate(bad)
 
 
-def test_flag_rule_requires_exactly_one_list(stationary_manifest_dict):
+def test_flag_rule_requires_exactly_one_list(stationary_manifest_dict: dict[str, Any]) -> None:
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["variables"]["ch4"]["qaqc"] = [
         {"kind": "flag", "flag_column": "QC", "good_values": [0], "bad_values": [1]}
@@ -328,7 +346,7 @@ def test_flag_rule_requires_exactly_one_list(stationary_manifest_dict):
         Manifest.model_validate(bad)
 
 
-def test_spike_rule_validates_window(stationary_manifest_dict):
+def test_spike_rule_validates_window(stationary_manifest_dict: dict[str, Any]) -> None:
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["variables"]["ch4"]["qaqc"] = [
         {"kind": "spike", "window": "not-a-duration"}
@@ -337,7 +355,7 @@ def test_spike_rule_validates_window(stationary_manifest_dict):
         Manifest.model_validate(bad)
 
 
-def test_unknown_qaqc_kind_rejected(stationary_manifest_dict):
+def test_unknown_qaqc_kind_rejected(stationary_manifest_dict: dict[str, Any]) -> None:
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["variables"]["ch4"]["qaqc"] = [{"kind": "magic"}]
     with pytest.raises(ValidationError):
@@ -349,7 +367,7 @@ def test_unknown_qaqc_kind_rejected(stationary_manifest_dict):
 # ---------------------------------------------------------------------------
 
 
-def test_declared_component_all_zero_rejected(stationary_manifest_dict):
+def test_declared_component_all_zero_rejected(stationary_manifest_dict: dict[str, Any]) -> None:
     """absolute=0 and relative=0 declares perfect measurement for that component."""
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["variables"]["ch4"]["uncertainty"] = {
@@ -359,7 +377,7 @@ def test_declared_component_all_zero_rejected(stationary_manifest_dict):
         Manifest.model_validate(bad)
 
 
-def test_uncertainty_with_no_components_rejected(stationary_manifest_dict):
+def test_uncertainty_with_no_components_rejected(stationary_manifest_dict: dict[str, Any]) -> None:
     """Neither random nor systematic declares nothing at all."""
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["variables"]["ch4"]["uncertainty"] = {}
@@ -367,7 +385,7 @@ def test_uncertainty_with_no_components_rejected(stationary_manifest_dict):
         Manifest.model_validate(bad)
 
 
-def test_declared_random_component_parses(stationary_manifest_dict):
+def test_declared_random_component_parses(stationary_manifest_dict: dict[str, Any]) -> None:
     ok = copy.deepcopy(stationary_manifest_dict)
     ok["instruments"]["picarro"]["variables"]["ch4"]["uncertainty"] = {
         "random": {"mode": "declared", "absolute": 0.5, "relative": 0.02}
@@ -380,7 +398,7 @@ def test_declared_random_component_parses(stationary_manifest_dict):
     assert spec.systematic is None
 
 
-def test_reported_component_requires_column(stationary_manifest_dict):
+def test_reported_component_requires_column(stationary_manifest_dict: dict[str, Any]) -> None:
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["variables"]["ch4"]["uncertainty"] = {
         "random": {"mode": "reported"}
@@ -389,7 +407,7 @@ def test_reported_component_requires_column(stationary_manifest_dict):
         Manifest.model_validate(bad)
 
 
-def test_reported_component_parses(stationary_manifest_dict):
+def test_reported_component_parses(stationary_manifest_dict: dict[str, Any]) -> None:
     """EM27-style per-point sigma column, e.g. a per-retrieval error column."""
     ok = copy.deepcopy(stationary_manifest_dict)
     ok["instruments"]["picarro"]["variables"]["ch4"]["uncertainty"] = {
@@ -402,7 +420,9 @@ def test_reported_component_parses(stationary_manifest_dict):
     assert spec.random.column == "CH4_1SIGMA"
 
 
-def test_both_components_and_decorrelation_timescale_parse(stationary_manifest_dict):
+def test_both_components_and_decorrelation_timescale_parse(
+    stationary_manifest_dict: dict[str, Any],
+) -> None:
     """A per-point random column plus a declared, constant systematic term."""
     ok = copy.deepcopy(stationary_manifest_dict)
     ok["instruments"]["picarro"]["variables"]["ch4"]["uncertainty"] = {
@@ -418,7 +438,9 @@ def test_both_components_and_decorrelation_timescale_parse(stationary_manifest_d
     assert spec.decorrelation_timescale == "5min"
 
 
-def test_explicit_null_decorrelation_timescale_accepted(stationary_manifest_dict):
+def test_explicit_null_decorrelation_timescale_accepted(
+    stationary_manifest_dict: dict[str, Any],
+) -> None:
     """Explicitly passing null is equivalent to omitting the field entirely."""
     ok = copy.deepcopy(stationary_manifest_dict)
     ok["instruments"]["picarro"]["variables"]["ch4"]["uncertainty"] = {
@@ -431,7 +453,7 @@ def test_explicit_null_decorrelation_timescale_accepted(stationary_manifest_dict
     assert spec.decorrelation_timescale is None
 
 
-def test_bad_decorrelation_timescale_rejected(stationary_manifest_dict):
+def test_bad_decorrelation_timescale_rejected(stationary_manifest_dict: dict[str, Any]) -> None:
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["variables"]["ch4"]["uncertainty"] = {
         "random": {"mode": "declared", "absolute": 0.5},
@@ -441,7 +463,7 @@ def test_bad_decorrelation_timescale_rejected(stationary_manifest_dict):
         Manifest.model_validate(bad)
 
 
-def test_unknown_uncertainty_mode_rejected(stationary_manifest_dict):
+def test_unknown_uncertainty_mode_rejected(stationary_manifest_dict: dict[str, Any]) -> None:
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["variables"]["ch4"]["uncertainty"] = {
         "random": {"mode": "magic", "absolute": 0.5}
@@ -455,28 +477,28 @@ def test_unknown_uncertainty_mode_rejected(stationary_manifest_dict):
 # ---------------------------------------------------------------------------
 
 
-def test_absolute_path_template_rejected(stationary_manifest_dict):
+def test_absolute_path_template_rejected(stationary_manifest_dict: dict[str, Any]) -> None:
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["loader"]["path_template"] = "/abs/path/*.dat"
     with pytest.raises(ValidationError, match="relative"):
         Manifest.model_validate(bad)
 
 
-def test_reserved_template_field_rejected(stationary_manifest_dict):
+def test_reserved_template_field_rejected(stationary_manifest_dict: dict[str, Any]) -> None:
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["loader"]["path_template"] = "{species}/%Y/*.dat"
     with pytest.raises(ValidationError, match="reserved"):
         Manifest.model_validate(bad)
 
 
-def test_csv_loader_requires_time(stationary_manifest_dict):
+def test_csv_loader_requires_time(stationary_manifest_dict: dict[str, Any]) -> None:
     bad = copy.deepcopy(stationary_manifest_dict)
     del bad["instruments"]["picarro"]["loader"]["time"]
     with pytest.raises(ValidationError, match="time"):
         Manifest.model_validate(bad)
 
 
-def test_icartt_loader_forbids_time(stationary_manifest_dict):
+def test_icartt_loader_forbids_time(stationary_manifest_dict: dict[str, Any]) -> None:
     """ICARTT defines its own time axis; a time block is a user error."""
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["loader"] = {

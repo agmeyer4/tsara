@@ -836,6 +836,13 @@ so ground truth and detections are directly comparable on disk), and
 `streams/<instrument>.nc`. Streams self-describe as synthetic in their attrs —
 a synthetic file mistaken for a measurement is a scientific hazard.
 
+The module-level entry points are `save_bundle` / `load_bundle`, deliberately
+*not* `save_synthetic` / `load_synthetic`: the latter name already belongs to
+`tsara.config.loader.load_synthetic`, which reads the YAML *config* describing
+a dataset to manufacture rather than the manufactured dataset itself. Both take
+a path and return something plausible, so sharing a name would have made the
+meaning of a notebook line depend on which import happened to be in scope.
+
 
 ---
 

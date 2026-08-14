@@ -38,7 +38,7 @@ bundle
 from __future__ import annotations
 
 from tsara.synthetic.background import TsaraSyntheticError
-from tsara.synthetic.bundle import TsaraBundleError, load_synthetic, save_synthetic
+from tsara.synthetic.bundle import TsaraBundleError, load_bundle, save_bundle
 from tsara.synthetic.config import (
     BootstrapBackground,
     DropoutSpec,
@@ -92,7 +92,7 @@ __all__ = [
     "TsaraSyntheticError",
     "UniformAmplitude",
     "generate",
-    "load_synthetic",
+    "load_bundle",
     "profile_series",
-    "save_synthetic",
+    "save_bundle",
 ]

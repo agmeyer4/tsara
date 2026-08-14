@@ -659,7 +659,9 @@ def test_plume_dense_configuration_produces_overlapping_events(
     # Overlap: at least one pair of ch4 events shares time.
     frame = dataset.ground_truth.to_frame()
     ch4 = frame[frame["species"] == "ch4"].sort_values("start_time")
-    overlaps = (ch4["start_time"].values[1:] < ch4["end_time"].values[:-1]).sum()
+    starts = ch4["start_time"].to_numpy()
+    ends = ch4["end_time"].to_numpy()
+    overlaps = int((starts[1:] < ends[:-1]).sum())
     assert overlaps > 0
 
 

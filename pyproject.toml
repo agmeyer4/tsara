@@ -92,6 +92,13 @@ Repository = "https://github.com/agmeyer4/tsara"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# PEP 561: ship the `py.typed` marker so that type checkers run by *users* of
+# TSARA actually read our annotations. Without it, `import tsara` is treated as
+# untyped no matter how strictly the source is annotated — the annotations are
+# there, but invisible to anyone outside this repo.
+[tool.setuptools.package-data]
+tsara = ["py.typed"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # -ra: summarize skipped/failed reasons; keeps CI/HPC logs readable.
@@ -122,7 +129,18 @@ strict = true
 # needs this plugin to type-check correctly; without it mypy misreads which
 # constructor arguments are actually required.
 plugins = ["pydantic.mypy"]
-files = ["src/tsara"]
+# Tests are checked too. They are the largest body of code in the repo and the
+# place type errors hide most easily, because a test that type-checks wrongly
+# still passes. Checking them is also what keeps the annotation standard from
+# splitting into eras: `src` strictly typed, `tests` gradually not.
+files = ["src/tsara", "tests"]
+# Needed because tests/ is not a package: without these, tests/conftest.py and
+# tests/synthetic/conftest.py both claim the module name "conftest" and mypy
+# refuses to check either. Deriving module names from the repo root instead
+# makes them tests.conftest and tests.synthetic.conftest.
+explicit_package_bases = true
+namespace_packages = true
+mypy_path = "src"
 
 [tool.coverage.run]
 source = ["tsara"]

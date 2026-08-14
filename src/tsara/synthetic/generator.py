@@ -139,7 +139,7 @@ class SyntheticDataset:
     def save(self, path: str | Path) -> Path:
         """Write this dataset as a TSARA bundle directory.
 
-        Delegates to :func:`tsara.synthetic.bundle.save_synthetic`; see there
+        Delegates to :func:`tsara.synthetic.bundle.save_bundle`; see there
         for the on-disk layout.
 
         Parameters
@@ -152,9 +152,9 @@ class SyntheticDataset:
         pathlib.Path
             The bundle directory.
         """
-        from tsara.synthetic.bundle import save_synthetic
+        from tsara.synthetic.bundle import save_bundle
 
-        return save_synthetic(self, path)
+        return save_bundle(self, path)
 
     @classmethod
     def load(cls, path: str | Path) -> SyntheticDataset:
@@ -170,9 +170,9 @@ class SyntheticDataset:
         SyntheticDataset
             The round-tripped dataset.
         """
-        from tsara.synthetic.bundle import load_synthetic
+        from tsara.synthetic.bundle import load_bundle
 
-        return load_synthetic(path)
+        return load_bundle(path)
 
 
 def generate(

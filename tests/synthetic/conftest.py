@@ -126,26 +126,12 @@ def source_dict() -> dict[str, Any]:
     }
 
 
-@pytest.fixture()
-def synthetic_dict() -> dict[str, Any]:
-    """Raw dict for a valid minimal SyntheticConfig, for validation tests."""
-    return {
-        "name": "cfg",
-        "start": "2026-01-01T00:00:00Z",
-        "duration": "1h",
-        "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
-        "instruments": {
-            "analyzer": {
-                "native_rate": "1s",
-                "species": {
-                    "ch4": {
-                        "background": {"kind": "parametric", "offset": 1900.0},
-                        "units": "ppb",
-                    }
-                },
-            }
-        },
-    }
+# `synthetic_dict` deliberately lives in the ROOT conftest, not here: both
+# tests/config (loader round-trips) and tests/synthetic (schema validation)
+# need it, and a second copy at this level would shadow the root one for
+# everything under tests/synthetic/. The two were byte-identical, so nothing
+# depended on the shadowing — but the next edit to either would have made the
+# same config mean different things in different directories.
 
 
 @pytest.fixture()

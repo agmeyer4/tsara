@@ -14,8 +14,8 @@ from tsara.synthetic.bundle import (
     BUNDLE_MANIFEST,
     BUNDLE_STREAMS_DIR,
     TsaraBundleError,
-    load_synthetic,
-    save_synthetic,
+    load_bundle,
+    save_bundle,
 )
 from tsara.synthetic.config import SyntheticConfig
 from tsara.synthetic.generator import SyntheticDataset, generate
@@ -157,7 +157,7 @@ def test_saving_twice_overwrites_in_place(noisy_config: SyntheticConfig, tmp_pat
     first = dataset.save(tmp_path / "run")
     second = dataset.save(tmp_path / "run")
     assert first == second
-    assert len(load_synthetic(second).streams) == 1
+    assert len(load_bundle(second).streams) == 1
 
 
 def test_manifest_records_bundle_contents(noisy_config: SyntheticConfig, tmp_path: Path) -> None:
@@ -170,7 +170,7 @@ def test_manifest_records_bundle_contents(noisy_config: SyntheticConfig, tmp_pat
 
 
 def test_save_accepts_a_string_path(noisy_config: SyntheticConfig, tmp_path: Path) -> None:
-    bundle = save_synthetic(generate(noisy_config), str(tmp_path / "run"))
+    bundle = save_bundle(generate(noisy_config), str(tmp_path / "run"))
     assert bundle.is_dir()
 
 
@@ -188,13 +188,13 @@ def test_saving_over_a_file_is_rejected(noisy_config: SyntheticConfig, tmp_path:
 
 def test_loading_a_missing_directory_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(TsaraBundleError, match="does not exist"):
-        load_synthetic(tmp_path / "absent")
+        load_bundle(tmp_path / "absent")
 
 
 def test_loading_a_directory_without_a_manifest_is_rejected(tmp_path: Path) -> None:
     (tmp_path / "empty").mkdir()
     with pytest.raises(TsaraBundleError, match="not a TSARA bundle"):
-        load_synthetic(tmp_path / "empty")
+        load_bundle(tmp_path / "empty")
 
 
 def test_incompatible_bundle_version_is_rejected(
@@ -206,25 +206,25 @@ def test_incompatible_bundle_version_is_rejected(
     manifest["bundle_format_version"] = 99
     (bundle / BUNDLE_MANIFEST).write_text(json.dumps(manifest))
     with pytest.raises(TsaraBundleError, match="format version 99"):
-        load_synthetic(bundle)
+        load_bundle(bundle)
 
 
 def test_missing_config_is_reported(noisy_config: SyntheticConfig, tmp_path: Path) -> None:
     bundle = generate(noisy_config).save(tmp_path / "run")
     (bundle / BUNDLE_CONFIG).unlink()
     with pytest.raises(TsaraBundleError, match=BUNDLE_CONFIG):
-        load_synthetic(bundle)
+        load_bundle(bundle)
 
 
 def test_missing_ground_truth_is_reported(noisy_config: SyntheticConfig, tmp_path: Path) -> None:
     bundle = generate(noisy_config).save(tmp_path / "run")
     (bundle / BUNDLE_GROUND_TRUTH).unlink()
     with pytest.raises(TsaraBundleError, match=BUNDLE_GROUND_TRUTH):
-        load_synthetic(bundle)
+        load_bundle(bundle)
 
 
 def test_missing_stream_file_is_reported(noisy_config: SyntheticConfig, tmp_path: Path) -> None:
     bundle = generate(noisy_config).save(tmp_path / "run")
     (bundle / BUNDLE_STREAMS_DIR / "analyzer.nc").unlink()
     with pytest.raises(TsaraBundleError, match="analyzer.nc' is missing"):
-        load_synthetic(bundle)
+        load_bundle(bundle)

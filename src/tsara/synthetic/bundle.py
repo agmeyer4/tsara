@@ -27,6 +27,18 @@ product gains persistence in the phase that introduces it (CLAUDE.md §5), so
 that intermediates are inspectable in a notebook, long HPC runs can resume
 after a crash, and a generated dataset can be handed to a collaborator as a
 single directory.
+
+Why ``load_bundle`` and not ``load_synthetic``
+----------------------------------------------
+That name is already taken by :func:`tsara.config.loader.load_synthetic`,
+which reads a *config* — the YAML description of a dataset to manufacture —
+while this one reads a *dataset*, the manufactured result. Both would accept
+a ``str | Path`` and return something plausible-looking, so a notebook line
+like ``load_synthetic("run/")`` would have meant entirely different things
+depending on which import was in scope. "Bundle" is the noun this directory
+convention already uses everywhere else (:class:`TsaraBundleError`, the
+``BUNDLE_*`` constants, CLAUDE.md §5), and it generalizes: later phases will
+save bundles that are not synthetic at all.
 """
 
 from __future__ import annotations
@@ -68,7 +80,7 @@ class TsaraBundleError(TsaraError):
     """
 
 
-def save_synthetic(dataset: SyntheticDataset, path: str | Path) -> Path:
+def save_bundle(dataset: SyntheticDataset, path: str | Path) -> Path:
     """Write a :class:`~tsara.synthetic.generator.SyntheticDataset` to disk.
 
     Parameters
@@ -144,8 +156,8 @@ def save_synthetic(dataset: SyntheticDataset, path: str | Path) -> Path:
     return bundle
 
 
-def load_synthetic(path: str | Path) -> SyntheticDataset:
-    """Read a bundle written by :func:`save_synthetic`.
+def load_bundle(path: str | Path) -> SyntheticDataset:
+    """Read a bundle written by :func:`save_bundle`.
 
     Streams are loaded eagerly (``load()``) rather than left lazily bound to
     open file handles, so the returned object stays valid after the files

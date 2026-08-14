@@ -85,7 +85,7 @@ def validate_positive_timedelta(value: str, *, field: str) -> None:
         Candidate duration string.
     field : str
         Dotted field name used in the error message, e.g.
-        ``'GridConfig.freq'``.
+        ``'OutputGridConfig.freq'``.
     """
     import pandas as pd
 
