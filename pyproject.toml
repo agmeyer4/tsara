@@ -79,6 +79,21 @@ dev = [
     "mypy>=1.8",
     "types-PyYAML>=6.0",
     "pandas-stubs>=2.0",
+    # Notebook tooling. `ipykernel` is what lets this environment appear as a
+    # kernel in VS Code / JupyterLab; `nbformat`/`nbconvert` allow a notebook
+    # to be built and executed non-interactively, which is how the walkthrough
+    # notebooks get verified rather than assumed to run.
+    "ipykernel>=6.25",
+    "nbformat>=5.9",
+    "nbconvert>=7.0",
+]
+# Plotting. Deliberately a separate extra rather than a hard dependency: TSARA
+# computes and persists results without ever drawing anything, and a headless
+# HPC batch run should not have to install a plotting stack. When the `tsara.viz`
+# module lands, matplotlib becomes its optional runtime requirement and this is
+# the extra that supplies it.
+viz = [
+    "matplotlib>=3.7",
 ]
 
 [project.urls]
