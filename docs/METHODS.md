@@ -632,8 +632,9 @@ Two documented limitations:
   structure survives; between-block low-frequency structure is discarded to
   avoid step discontinuities at the stitching seams. Slow structure is
   supplied by the optional parametric `base` instead. On records with strong
-  slow structure the discarded fraction is large — measured at ~3× reduction
-  in robust spread on this project's real Picarro CH₄ (ρ₁ ≈ 0.997).
+  slow structure the discarded fraction can be large: a residual dominated by
+  between-block drift (ρ₁ near 1) can lose several-fold of its robust spread
+  to centring alone.
 - Mean-centring equalizes block *levels*, so no step in the mean appears where
   two blocks meet, but the samples either side of a seam remain independent
   draws: a seam carries a sample-to-sample step of order the residual σ,
@@ -679,8 +680,10 @@ complexity. Revisit only if Phase 3's QA/QC masking begins feeding
 hole-punched series into `profile_series`.
 
 `residual_sigma / noise_sigma` is a useful diagnostic in its own right: values
-far above 1 indicate a plume-dense record rather than a noisy one (measured at
-~34 on this project's real Picarro CH₄).
+far above 1 indicate a plume-dense record rather than a noisy one — an ambient
+trace-gas archive with no plume-free stretches can easily sit an order of
+magnitude or more above 1, since broad plumes leak through a simple quantile
+baseline while `diff_mad` stays immune to them by construction (§2.5).
 
 **τ is ill-conditioned near ρ₁ → 1**, which is a distinct problem from the
 interpretive caveat above and applies even when ρ₁ is measured perfectly.
@@ -688,9 +691,10 @@ Differentiating $\tau = -\Delta t/\ln\rho$ gives
 
 $$\frac{d\tau/\tau}{d\rho/\rho} = \frac{-1}{\rho\ln\rho}$$
 
-an amplification of ~334× at ρ₁ = 0.997. At the Picarro's Δt = 2 s that is
-τ = 666 s for ρ₁ = 0.997 versus 499 s for ρ₁ = 0.996 — a one-part-in-a-thousand
-shift moving the answer by a quarter. `decorrelation_timescale_s` is therefore
+an amplification of ~334× at ρ₁ = 0.997 — a value plume-dense ambient records
+can plausibly reach. At a typical Δt = 2 s that is τ = 666 s for ρ₁ = 0.997
+versus 499 s for ρ₁ = 0.996 — a one-part-in-a-thousand shift moving the answer
+by a quarter. `decorrelation_timescale_s` is therefore
 an order-of-magnitude indicator on strongly autocorrelated records, never a
 calibrated timescale, and must not enter an N_eff calculation without an
 uncertainty of its own. This bears directly on the open N_eff estimator

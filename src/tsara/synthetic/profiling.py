@@ -124,10 +124,11 @@ class RealDataProfile:
             \frac{d\tau/\tau}{d\rho/\rho} = \frac{-1}{\rho \ln \rho}
 
         so the relative error in ``tau`` is amplified by a factor of about
-        334 at ``rho1 = 0.997`` — the value measured on the project's real
-        Picarro CH4. Concretely, at ``dt = 2 s``: ``rho1 = 0.997`` gives
-        ``tau = 666 s``, while ``rho1 = 0.996`` gives ``tau = 499 s``. A
-        one-part-in-a-thousand shift moves the answer by a quarter.
+        334 at ``rho1 = 0.997`` — a value plume-dense ambient records can
+        plausibly reach (METHODS.md §8.4). Concretely, at ``dt = 2 s``:
+        ``rho1 = 0.997`` gives ``tau = 666 s``, while ``rho1 = 0.996`` gives
+        ``tau = 499 s``. A one-part-in-a-thousand shift moves the answer by
+        a quarter.
 
         Treat this field as an order-of-magnitude indicator on strongly
         autocorrelated records, never as a calibrated timescale, and do not

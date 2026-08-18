@@ -122,9 +122,8 @@ def test_real_profile_drives_a_bootstrap_background(real_series: pd.Series) -> N
     # record's own robust spread. It is legitimately *smaller*: blocks are
     # mean-centred, which by construction discards between-block
     # low-frequency structure (see METHODS.md §8.3). On a record with strong
-    # slow structure the reduction is large — measured at ~3x on this
-    # project's real Picarro CH4 — so this asserts the inequality that must
-    # hold rather than an equality that must not.
+    # slow structure the reduction can be large, so this asserts the
+    # inequality that must hold rather than an equality that must not.
     from tsara.synthetic.profiling import MAD_TO_SIGMA
 
     robust_sigma = MAD_TO_SIGMA * np.median(np.abs(values - np.median(values)))
