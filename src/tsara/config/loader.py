@@ -12,13 +12,15 @@ Three entry points:
   ``analysis:`` keys (the form the CLI consumes), returning a
   :class:`TsaraConfig` that also cross-validates the two halves (e.g. the
   regression reference species must actually be a declared gas).
+* :func:`load_synthetic` — a YAML file describing a synthetic dataset to
+  manufacture (Phase 2).
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import yaml
 from pydantic import ValidationError, model_validator
@@ -26,7 +28,10 @@ from pydantic import ValidationError, model_validator
 from tsara.config.analysis import AnalysisConfig
 from tsara.config.base import StrictModel as _StrictModel
 from tsara.config.manifest import Manifest
-from tsara.exceptions import TsaraConfigError
+from tsara.core.exceptions import TsaraConfigError
+
+if TYPE_CHECKING:  # pragma: no cover
+    from tsara.synthetic.config import SyntheticConfig
 
 logger = logging.getLogger(__name__)
 
@@ -222,4 +227,46 @@ def load_config(path: str | Path) -> TsaraConfig:
     if resolved_manifest is not config.manifest:
         config = config.model_copy(update={"manifest": resolved_manifest})
     logger.info("Loaded combined config for campaign '%s'", config.manifest.name)
+    return config
+
+
+def load_synthetic(path: str | Path) -> SyntheticConfig:
+    """Load and validate a synthetic-dataset YAML file.
+
+    Synthetic configs are deliberately loadable through the same door as
+    manifests and analysis settings: a generated dataset should be
+    specifiable, reviewable, and diffable as a checked-in text file, not only
+    constructible in Python.
+
+    Note there is no ``base_path`` resolution here — a synthetic config
+    references no files by design. Real-data profiles for bootstrap
+    backgrounds are named, not embedded, and are supplied to
+    :func:`tsara.synthetic.generate` at call time, which is what keeps these
+    files free of real-data-derived numbers.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Path to the synthetic-config YAML.
+
+    Returns
+    -------
+    SyntheticConfig
+        Frozen, validated synthetic dataset specification.
+
+    Raises
+    ------
+    TsaraConfigError
+        If the file is missing, is not valid YAML, or fails validation.
+    """
+    # Imported here, not at module scope, for two reasons: it breaks the
+    # import cycle (tsara.synthetic reads tsara.__version__ for provenance
+    # attrs), and it keeps `import tsara` from pulling in the whole synthetic
+    # subpackage — the same responsiveness concern that defers pandas in
+    # tsara.config.base.
+    from tsara.synthetic.config import SyntheticConfig
+
+    path = Path(path)
+    config: SyntheticConfig = _validate(SyntheticConfig, _read_yaml(path), path)
+    logger.info("Loaded synthetic config '%s' from %s", config.name, path)
     return config

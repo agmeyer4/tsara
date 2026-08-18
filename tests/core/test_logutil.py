@@ -1,4 +1,4 @@
-"""Tests for tsara.logutil (library-vs-application logging configuration).
+"""Tests for tsara.core.logutil (library-vs-application logging configuration).
 
 setup_logging() mutates a process-global object (the "tsara" logger
 singleton), so every test here uses the clean_tsara_logger fixture to
@@ -9,11 +9,12 @@ into the next test, and into the rest of the suite.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from tsara.logutil import PACKAGE_LOGGER_NAME, setup_logging
+from tsara.core.logutil import PACKAGE_LOGGER_NAME, setup_logging
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -21,7 +22,7 @@ from tsara.logutil import PACKAGE_LOGGER_NAME, setup_logging
 
 
 @pytest.fixture()
-def clean_tsara_logger():
+def clean_tsara_logger() -> Iterator[logging.Logger]:
     """Snapshot the 'tsara' logger's state and restore it after the test.
 
     Only handlers *added during the test* are removed (and closed, so file
@@ -47,12 +48,12 @@ def clean_tsara_logger():
 # ---------------------------------------------------------------------------
 
 
-def test_level_applied_as_int(clean_tsara_logger):
+def test_level_applied_as_int(clean_tsara_logger: logging.Logger) -> None:
     logger = setup_logging(level=logging.DEBUG)
     assert logger.level == logging.DEBUG
 
 
-def test_level_applied_as_string(clean_tsara_logger):
+def test_level_applied_as_string(clean_tsara_logger: logging.Logger) -> None:
     """The stdlib itself validates level names; setup_logging adds no
     parsing of its own, so passing 'WARNING' straight through must work."""
     logger = setup_logging(level="WARNING")
@@ -64,7 +65,7 @@ def test_level_applied_as_string(clean_tsara_logger):
 # ---------------------------------------------------------------------------
 
 
-def test_repeated_calls_do_not_duplicate_handlers(clean_tsara_logger):
+def test_repeated_calls_do_not_duplicate_handlers(clean_tsara_logger: logging.Logger) -> None:
     setup_logging()
     count_after_first_call = len(clean_tsara_logger.handlers)
 
@@ -74,7 +75,9 @@ def test_repeated_calls_do_not_duplicate_handlers(clean_tsara_logger):
     assert len(clean_tsara_logger.handlers) == count_after_first_call
 
 
-def test_repeated_calls_with_logfile_do_not_duplicate_handlers(clean_tsara_logger, tmp_path: Path):
+def test_repeated_calls_with_logfile_do_not_duplicate_handlers(
+    clean_tsara_logger: logging.Logger, tmp_path: Path
+) -> None:
     logfile = tmp_path / "tsara.log"
     setup_logging(logfile=logfile)
     count_after_first_call = len(clean_tsara_logger.handlers)
@@ -84,7 +87,7 @@ def test_repeated_calls_with_logfile_do_not_duplicate_handlers(clean_tsara_logge
     assert len(clean_tsara_logger.handlers) == count_after_first_call
 
 
-def test_user_attached_handlers_survive_repeated_setup(clean_tsara_logger):
+def test_user_attached_handlers_survive_repeated_setup(clean_tsara_logger: logging.Logger) -> None:
     """setup_logging must remove only the handlers *it* previously attached,
     never a handler the host application attached itself."""
     user_handler = logging.NullHandler()
@@ -101,14 +104,16 @@ def test_user_attached_handlers_survive_repeated_setup(clean_tsara_logger):
 # ---------------------------------------------------------------------------
 
 
-def test_does_not_propagate_to_root(clean_tsara_logger):
+def test_does_not_propagate_to_root(clean_tsara_logger: logging.Logger) -> None:
     """Prevents double-logging in a host application that configures its own
     root logger."""
     setup_logging()
     assert clean_tsara_logger.propagate is False
 
 
-def test_console_handler_writes_to_stderr(clean_tsara_logger, capsys):
+def test_console_handler_writes_to_stderr(
+    clean_tsara_logger: logging.Logger, capsys: pytest.CaptureFixture[str]
+) -> None:
     """pytest's caplog fixture only captures records that reach the *root*
     logger's handler; since setup_logging sets propagate=False, records
     never get there no matter which logger= is passed to caplog.at_level
@@ -122,7 +127,9 @@ def test_console_handler_writes_to_stderr(clean_tsara_logger, capsys):
     assert "via console handler" in captured.err
 
 
-def test_logfile_receives_formatted_messages(clean_tsara_logger, tmp_path: Path):
+def test_logfile_receives_formatted_messages(
+    clean_tsara_logger: logging.Logger, tmp_path: Path
+) -> None:
     logfile = tmp_path / "tsara.log"
     setup_logging(level=logging.INFO, logfile=logfile)
 

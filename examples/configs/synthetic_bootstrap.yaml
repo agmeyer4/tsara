@@ -1,0 +1,140 @@
+# ============================================================================
+# TSARA synthetic dataset example — backgrounds resampled from REAL data.
+# ----------------------------------------------------------------------------
+# The companion to synthetic_example.yaml, which uses purely analytic
+# backgrounds. This one demonstrates the other half of the BackgroundConfig
+# union: `kind: bootstrap`, where the background's *fluctuations* are
+# block-resampled from a real measurement record (METHODS.md §8.3/§8.4).
+#
+# WHY YOU WOULD WANT THIS
+# -----------------------
+# A parametric background assumes a noise shape. Real analyzer records have
+# skew, non-Gaussian tails, drift correlated with cavity temperature, and
+# other quirks no analytic model reproduces. Bootstrapping replays the real
+# fluctuations, so a baseline or detection algorithm is tested against the
+# statistical texture of YOUR instrument rather than a textbook one.
+#
+# Resampling happens in contiguous *blocks*, not point by point: drawing
+# individual points would destroy the autocorrelation and hand back white
+# noise, which is exactly the structure that makes real baselines hard.
+#
+# HOW REAL DATA GETS IN (it is never bundled, and never committed)
+# ----------------------------------------------------------------
+# This file names a profile; it does not contain one. The numbers live in a
+# RealDataProfile object you build at call time from a live data mount:
+#
+#     import pandas as pd
+#     from tsara.config.loader import load_synthetic
+#     from tsara.synthetic import generate, profile_series
+#
+#     # Whatever gets you a Series with a DatetimeIndex. Ingestion is not
+#     # required — profiling deliberately depends on nothing but pandas.
+#     df = pd.concat(
+#         pd.read_parquet(f)
+#         for f in sorted(glob.glob(".../03_instrument_aligned/WYO_picarro/*.parquet"))
+#     ).sort_index()
+#
+#     picarro = profile_series(df["CH4_sync"], name="picarro_ch4", block_length=512)
+#     print(picarro.summary())     # inspect before you trust it
+#
+#     dataset = generate(
+#         load_synthetic("synthetic_bootstrap.yaml"),
+#         profiles={"picarro_ch4": picarro},   # <- keyed by the name below
+#     )
+#
+# Because the config stores only the *name*, it stays losslessly
+# YAML-round-trippable and no real-data-derived number can ever end up inside
+# a committed file.
+#
+# WHAT TO CHECK ON THE PROFILE BEFORE USING IT
+# --------------------------------------------
+#   * residual_sigma / noise_sigma >> 1  means the record is plume-dense, so
+#     real plume energy has leaked into the substrate. That is useful as an
+#     adversarial test but means the substrate is not pure noise.
+#   * lag1_autocorr describes the SUBSTRATE, not instrument noise, and its
+#     implied tau is ill-conditioned as rho1 -> 1 (METHODS.md §8.4). Do not
+#     feed either into an N_eff calculation.
+#   * sample_period_s should be within ~2x of the instrument rate below, or
+#     the replayed noise colour is stretched (the generator warns).
+# ============================================================================
+
+name: synthetic_bootstrap_example
+description: >
+  Stationary site whose CH4 background is block-bootstrapped from a real
+  Picarro record, with CO2 left parametric for contrast. Demonstrates the
+  real-data seam without bundling any real data.
+
+start: 2026-02-03T17:00:00Z
+duration: 4h
+seed: 20260203
+
+platform:
+  kind: stationary
+  latitude: 40.0561
+  longitude: -110.0234
+  altitude_m: 1580.0
+
+instruments:
+
+  picarro:
+    # Match the real instrument's rate: blocks are replayed sample-for-sample,
+    # so a profile built at 2 s replayed onto a 0.2 s grid would reproduce the
+    # right shape at ten times the real duration.
+    native_rate: 2s
+    species:
+
+      ch4:
+        units: ppb
+        background:
+          kind: bootstrap
+          # Must match a key in the `profiles` mapping passed to generate().
+          profile: picarro_ch4
+          # Blocks are mean-centred, so only WITHIN-block (high-frequency)
+          # structure survives resampling. Slow structure is supplied here
+          # instead. Omit `base` entirely to sit on the profile's own median
+          # level as a flat offset.
+          base:
+            kind: parametric
+            offset: 1950.0
+            diurnal_amplitude: 25.0
+            drift_per_day: 0.5
+          # Amplify the real fluctuations without changing their correlation
+          # structure — useful for asking "at what noise level does my
+          # detector start to fail?" 1.0 replays them as measured.
+          scale: 1.0
+        uncertainty:
+          random:
+            absolute: 0.7        # ~ the real Picarro's 2 s precision
+        quantization: 0.1
+
+      co2:
+        units: ppm
+        # Left parametric on purpose: the two kinds are interchangeable per
+        # species, so one instrument can mix them.
+        background:
+          kind: parametric
+          offset: 418.0
+          diurnal_amplitude: 6.0
+        uncertainty:
+          random:
+            absolute: 0.05
+          systematic:
+            relative: 0.001
+
+sources:
+
+  well_pad:
+    rate_per_hour: 4.0
+    reference_species: ch4
+    shape:
+      kind: emg
+      sigma: 15s
+      tau: 30s
+    amplitude:
+      kind: lognormal
+      median: 90.0
+      sigma_log: 0.6
+    ratios:
+      co2:
+        mean: 0.004
+        relative_spread: 0.30

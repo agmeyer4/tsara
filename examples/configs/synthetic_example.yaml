@@ -1,0 +1,184 @@
+# ============================================================================
+# TSARA synthetic dataset example — a mobile survey with two analyzers.
+# ----------------------------------------------------------------------------
+# Load with:
+#     from tsara.config.loader import load_synthetic
+#     from tsara.synthetic import generate
+#     dataset = generate(load_synthetic("synthetic_example.yaml"))
+#     dataset.save("my_bundle")
+#
+# Every number here is GROUND TRUTH: the generator records exactly what it
+# injected, and later pipeline stages are scored against that record. See
+# docs/METHODS.md §8.
+# ============================================================================
+
+name: synthetic_mobile_example
+description: >
+  Mobile survey of an oil-and-gas basin: a fast CH4/C2H6 analyzer and a
+  slower CO2/CH4 analyzer on separate clocks, driving a circuit past two
+  source types with different chemical signatures.
+
+start: 2026-06-15T14:00:00Z
+duration: 6h
+# Fixed seed => byte-identical output on every run. Change it to draw a
+# different realization of the same statistical world.
+seed: 20260615
+
+# --- Platform --------------------------------------------------------------
+# A mobile track is emitted as its OWN stream at its OWN rate, which is the
+# canonical multi-rate alignment case (METHODS.md §1.2): position may be
+# interpolated onto gas timestamps; the gases themselves may not be.
+platform:
+  kind: mobile
+  gps_instrument: gps
+  gps_rate: 1s
+  start_latitude: 40.0561
+  start_longitude: -110.0234
+  speed_m_s: 13.0
+  # 'circuit' revisits the same coordinates each lap, producing genuinely
+  # clusterable repeat encounters for the Phase 8 source-complex stage.
+  # 'random_walk' is the unstructured-survey alternative.
+  pattern: circuit
+  radius_m: 1500.0
+
+# --- Instruments -----------------------------------------------------------
+instruments:
+
+  # A fast analyzer with a full two-component error budget.
+  aeris:
+    native_rate: 0.5s
+    # Real clocks are not perfect grids; must stay under half native_rate.
+    timestamp_jitter: 0.05s
+    dropouts:
+      rate_per_day: 12.0
+      duration: 90s
+    species:
+      ch4:
+        units: ppb
+        background:
+          kind: parametric
+          offset: 1950.0
+          diurnal_amplitude: 25.0     # boundary-layer breathing
+          diurnal_phase_hours: 4.0
+          random_walk_std: 8.0        # unpredictable slow wander
+        uncertainty:
+          random:
+            absolute: 1.5
+            # Publish a per-point sigma column, EM27-style. Reading it back
+            # is the manifest's `reported` uncertainty mode.
+            report_as: ch4_precision
+          systematic:
+            relative: 0.004           # calibration scale error; never averages down
+          # Known tau: the only way to test an N_eff estimator (METHODS.md §3.4).
+          decorrelation_timescale: 20s
+        # Logger reports at 0.1 ppb steps -- the adversarial case for every
+        # median-based noise estimator (METHODS.md §2.5).
+        quantization: 0.1
+
+      c2h6:
+        units: ppb
+        background:
+          kind: parametric
+          offset: 1.2
+        uncertainty:
+          random:
+            absolute: 0.08
+
+  # A slower analyzer on an independent clock.
+  picarro:
+    native_rate: 2s
+    species:
+      co2:
+        units: ppm
+        background:
+          kind: parametric
+          offset: 418.0
+          diurnal_amplitude: 6.0
+          drift_per_day: 0.4
+        uncertainty:
+          random:
+            absolute: 0.05
+          systematic:
+            relative: 0.001
+
+  # Meteorology, including a circular variable for Phase 4 circular stats.
+  met:
+    native_rate: 10s
+    species:
+      wind_dir:
+        role: met
+        circular: true
+        units: degrees
+        background:
+          kind: parametric
+          offset: 210.0
+          random_walk_std: 900.0
+      wind_speed:
+        role: aux
+        units: m s-1
+        background:
+          kind: parametric
+          offset: 4.0
+          random_walk_std: 3.0
+
+# --- Sources ---------------------------------------------------------------
+# A source is a PHYSICAL event emitting several species together at a known
+# ratio. Events are drawn once and shared across instruments, so the same
+# leak appears consistently on every clock.
+sources:
+
+  # Thermogenic: high ethane-to-methane, the classic oil-and-gas signature.
+  well_pad:
+    rate_per_hour: 5.0
+    reference_species: ch4
+    shape:
+      # Exponentially-modified Gaussian: sharp rise, long tail. The
+      # physically motivated shape, and the one that makes baseline
+      # placement genuinely hard.
+      kind: emg
+      sigma: 12s
+      tau: 25s
+    amplitude:
+      # Right-skewed: many modest encounters, a few large ones.
+      kind: lognormal
+      median: 120.0
+      sigma_log: 0.7
+    ratios:
+      c2h6:
+        mean: 0.062              # true delta-C2H6 / delta-CH4
+        relative_spread: 0.18    # event-to-event variability; 0 = fixed ratio
+      co2:
+        mean: 0.004
+        relative_spread: 0.30
+    # A short sharp blip riding on the broad plume, with its OWN chemistry --
+    # a distinct source encountered inside the parent (METHODS.md §8.1).
+    nested:
+      probability: 0.25
+      shape:
+        kind: gaussian
+        sigma: 3s
+      amplitude_factor: 0.45
+      ratios:
+        c2h6:
+          mean: 0.005            # nearly ethane-free => biogenic-like child
+          relative_spread: 0.20
+
+  # Combustion: CO2-dominated, essentially no ethane, and the co-emitted
+  # species arrive slightly later (separate stacks) -- the misalignment the
+  # Phase 8 smoothing stage exists to repair.
+  compressor:
+    rate_per_hour: 2.0
+    reference_species: co2
+    shape:
+      kind: gaussian
+      sigma: 30s
+    amplitude:
+      kind: uniform
+      low: 3.0
+      high: 25.0
+    ratios:
+      ch4:
+        mean: 8.0
+        relative_spread: 0.25
+    inter_species_lag:
+      ch4: 20s                   # negative values are legal: arrives earlier

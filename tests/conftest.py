@@ -9,11 +9,17 @@ test.
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeAlias
 
 import pytest
 import yaml
+
+#: The callable `write_yaml` hands back. Named rather than spelled inline at
+#: every use site so that the tests reading it stay about configuration, and
+#: so the signature has one place to change.
+WriteYaml: TypeAlias = Callable[..., Path]
 
 
 @pytest.fixture()
@@ -96,7 +102,7 @@ def analysis_dict() -> dict[str, Any]:
 
 
 @pytest.fixture()
-def write_yaml(tmp_path: Path):
+def write_yaml(tmp_path: Path) -> WriteYaml:
     """Return a helper that writes a dict to a YAML file and returns its path.
 
     Centralizing this keeps loader tests focused on behavior, not file
@@ -109,3 +115,25 @@ def write_yaml(tmp_path: Path):
         return path
 
     return _write
+
+
+@pytest.fixture()
+def synthetic_dict() -> dict[str, Any]:
+    """Minimal valid synthetic-dataset configuration."""
+    return {
+        "name": "cfg",
+        "start": "2026-01-01T00:00:00Z",
+        "duration": "1h",
+        "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
+        "instruments": {
+            "analyzer": {
+                "native_rate": "1s",
+                "species": {
+                    "ch4": {
+                        "background": {"kind": "parametric", "offset": 1900.0},
+                        "units": "ppb",
+                    }
+                },
+            }
+        },
+    }
