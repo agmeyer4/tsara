@@ -173,6 +173,23 @@ Every product carries an `uncertainty_source` label per species:
 `declared | reported | empirical`. A reader of any TSARA output can always
 determine what pedigree of uncertainty produced each interval.
 
+Provenance is recorded **per component**, because real manifests mix modes
+freely (the shipped example pairs a *reported* random component with a
+*declared* systematic one). The species-level label is then `mixed` when the
+two components disagree. Two further component values are needed to keep §2.3
+honest, and they are not interchangeable:
+
+| Component value | Meaning |
+|---|---|
+| `declared` | computed at ingestion from `absolute`/`relative` |
+| `reported` | read at ingestion from the instrument's per-point sigma column |
+| `empirical` | deferred to the stage holding the analysis config, which owns the estimator name and window (§2.5) |
+| `zero` | a budget was given and *deliberately* omitted this component ("an omitted `systematic` is zero", §2.2) |
+| `unknown` | no budget at all. The random component falls back to `empirical`; the systematic component cannot, since `diff_mad` is structurally blind to it (§2.5) |
+
+Collapsing `zero` into `unknown` would let an undeclared calibration become a
+silent claim of perfect calibration, which is exactly what §2.3 forbids.
+
 ### 2.5 The empirical noise estimator (`diff_mad`)
 
 When noise must be estimated from the data itself, the default estimator is
