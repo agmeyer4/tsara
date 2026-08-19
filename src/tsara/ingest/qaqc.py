@@ -228,14 +228,14 @@ def _evaluate_spike(rule: SpikeRule, values: pd.Series) -> pd.Series:
     default ``n_mad=6`` corresponds to roughly 4σ.
     """
     if not values.index.is_monotonic_increasing:
-        # Not defensive padding: a substantial minority of the real parquet
-        # files this package targets carry an occasional backward step in
-        # their time index. pandas' own message for this ("index values must
-        # be monotonic") names neither the variable nor the file, and a
-        # time-based rolling window is the first thing in the pipeline to
-        # notice. Sorting is the orchestration stage's job — deliberately,
+        # Not defensive padding. Archive records really do step backwards
+        # sometimes — logger clock corrections, buffered writes, merge steps
+        # in an upstream processing chain — and a time-based rolling window
+        # is the first thing in the pipeline to notice. pandas' own message
+        # ("index values must be monotonic") names neither the variable nor
+        # the file. Sorting is the orchestration stage's job — deliberately,
         # since it is a cross-file concern — so this reports rather than
-        # silently reorders, which would hide a real clock problem.
+        # silently reordering, which would hide a real clock problem.
         raise TsaraIngestError(
             "Spike rule needs a monotonically increasing time index, but this "
             "record's timestamps go backwards somewhere. Concatenate and sort "

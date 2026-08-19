@@ -152,10 +152,11 @@ def _normalize_index(frame: pd.DataFrame, name: str) -> pd.DatetimeIndex:
             "TSARA is tz-naive UTC internally."
         )
     if not index.is_monotonic_increasing:
-        # Real archives contain files whose timestamps step backwards, so
-        # this is a reachable state rather than a formality. Sorting is the
-        # orchestration stage's job; catching it here keeps a rolling QA/QC
-        # window from failing later with a message that names nothing.
+        # A reachable state rather than a formality: archive records do
+        # step backwards sometimes, and files concatenated in path order are
+        # not in time order at all. Sorting is the orchestration stage's job;
+        # catching it here keeps a rolling QA/QC window from failing later
+        # with a message that names nothing.
         raise TsaraIngestError(
             f"Stream '{name}' has timestamps that are not monotonically "
             "increasing. Sort the concatenated table before building a stream."

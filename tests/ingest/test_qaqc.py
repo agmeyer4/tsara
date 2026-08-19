@@ -172,7 +172,7 @@ def test_perfectly_flat_data_has_no_scale_so_nothing_is_masked() -> None:
 
 
 def test_spike_refuses_a_non_monotonic_time_index() -> None:
-    """A real archive property, not a hypothetical: many files step backwards.
+    """A reachable state, not a hypothetical: archive records do step backwards.
 
     pandas' own error names neither the variable nor the file, and this is
     the first stage in the pipeline that would trip over it.

@@ -336,7 +336,7 @@ def test_non_datetime_index_is_refused() -> None:
 
 
 def test_unsorted_index_is_refused() -> None:
-    """A quarter of the real parquet archive steps backwards somewhere."""
+    """Concatenated files arrive in path order, which is not time order."""
     frame = _frame().iloc[np.array([0, 2, 1, 3])]
     with pytest.raises(TsaraIngestError, match="not monotonically"):
         _build(frame, _instrument())
