@@ -14,6 +14,7 @@ from tsara.config.manifest import (
     InstrumentConfig,
     Manifest,
     MobilePlatform,
+    ParquetLoader,
     ReportedUncertainty,
     StationaryPlatform,
     TimeParsing,
@@ -707,3 +708,42 @@ def test_icartt_loader_is_not_column_checked() -> None:
 def test_explicit_null_column_names_is_the_same_as_omitting_it() -> None:
     """YAML authors write `column_names: null` as often as they omit the key."""
     assert _csv(column_names=None).column_names is None
+
+
+# ---------------------------------------------------------------------------
+# ParquetLoader
+# ---------------------------------------------------------------------------
+
+
+def test_parquet_loader_time_is_optional() -> None:
+    """Parquet stores its index, so there is usually nothing to parse."""
+    loader = ParquetLoader(path_template="*.parquet")
+    assert loader.format == "parquet"
+    assert loader.time is None
+
+
+def test_parquet_loader_accepts_a_time_block() -> None:
+    """For files that store time as an ordinary column instead."""
+    loader = ParquetLoader.model_validate(
+        {"path_template": "*.parquet", "time": {"column": "TIMESTAMP", "format": "iso8601"}}
+    )
+    assert loader.time is not None
+    assert loader.time.columns == ("TIMESTAMP",)
+
+
+def test_parquet_loader_takes_part_in_the_format_union(
+    stationary_manifest_dict: dict[str, Any],
+) -> None:
+    """A new format must reach the manifest through the discriminator alone."""
+    spec = copy.deepcopy(stationary_manifest_dict)
+    spec["instruments"]["picarro"]["loader"] = {
+        "format": "parquet",
+        "path_template": "picarro/%Y/%m/*.parquet",
+    }
+    manifest = Manifest.model_validate(spec)
+    assert isinstance(manifest.instruments["picarro"].loader, ParquetLoader)
+
+
+def test_parquet_loader_rejects_unknown_keys() -> None:
+    with pytest.raises(ValidationError):
+        ParquetLoader.model_validate({"path_template": "*.parquet", "delimiter": ","})

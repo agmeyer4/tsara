@@ -10,16 +10,9 @@ the manifest — so this module's job is to implement the manifest faithfully
 and to fail loudly and specifically when a file does not match what the
 manifest claims.
 
-The two hard parts are both about time
----------------------------------------
-1. **Building the timestamp** from one column of epoch seconds, or one
-   column of formatted text, or several columns that must be rejoined first
-   (see :class:`~tsara.config.manifest.TimeParsing`).
-2. **Getting it to UTC exactly once.** Timestamps enter TSARA here, and
-   ``docs/METHODS.md`` requires everything downstream to be tz-naive UTC at
-   nanosecond resolution. This module is the only place in ingestion that
-   performs that conversion, so there is one implementation to get right
-   rather than one per format.
+Building the timestamp — and getting it to UTC exactly once — is shared with
+every other reader and lives in :mod:`tsara.ingest.timeparse`; what remains
+here is the delimited-text parsing itself.
 """
 
 from __future__ import annotations
@@ -30,9 +23,10 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import pandas as pd
 
-from tsara.config.manifest import CSVLoader, TimeParsing
-from tsara.ingest.base import TIME_INDEX_NAME, RawTable, TsaraIngestError, to_utc_naive_ns
+from tsara.config.manifest import CSVLoader
+from tsara.ingest.base import TIME_INDEX_NAME, RawTable, TsaraIngestError
 from tsara.ingest.registry import register_reader
+from tsara.ingest.timeparse import build_time_index
 
 if TYPE_CHECKING:  # pragma: no cover
     from pathlib import Path
@@ -42,15 +36,6 @@ if TYPE_CHECKING:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 __all__ = ["read_csv"]
-
-#: Sentinel accepted by ``TimeParsing.format`` meaning "epoch seconds".
-_UNIX = "unix"
-
-#: Sentinel accepted by ``TimeParsing.format`` meaning "ISO 8601". Mapped to
-#: pandas' own ``'ISO8601'`` token, which parses the whole family of ISO
-#: spellings (with or without ``T``, offset, or fractional seconds) rather
-#: than locking to one of them.
-_ISO = "iso8601"
 
 #: Separator that pandas' fast C parser understands natively. Any *other*
 #: multi-character separator is a general regex and needs the Python engine.
@@ -88,7 +73,7 @@ def read_csv(path: Path, loader: LoaderConfig, /) -> RawTable:
         )
 
     frame = _read_frame(path, loader)
-    times = _build_time_index(frame, loader.time, path)
+    times = build_time_index(frame, loader.time, path)
 
     # Rows whose timestamp did not parse cannot be placed on a time axis at
     # all. Dropping them is the only coherent option, but doing it silently
@@ -218,109 +203,3 @@ def _positional_names(path: Path, loader: CSVLoader) -> list[str]:
     # Generated names use the 'column_' prefix (not 'col_') to stay clearly
     # distinct from anything an instrument would plausibly emit itself.
     return declared + [f"column_{i}" for i in range(len(declared), width)]
-
-
-def _build_time_index(frame: pd.DataFrame, spec: TimeParsing, path: Path) -> pd.DatetimeIndex:
-    """Construct the tz-naive UTC nanosecond time index for a parsed frame.
-
-    Parameters
-    ----------
-    frame : pandas.DataFrame
-        Parsed file contents.
-    spec : TimeParsing
-        Manifest description of where time lives and how it is written.
-    path : pathlib.Path
-        Source file, for error messages.
-
-    Returns
-    -------
-    pandas.DatetimeIndex
-        Timestamps aligned to ``frame``'s rows, possibly containing ``NaT``
-        for rows that did not parse (the caller decides what to do with them).
-
-    Raises
-    ------
-    TsaraIngestError
-        If a declared time column is not present in the file.
-    """
-    missing = [name for name in spec.columns if name not in frame.columns]
-    if missing:
-        raise TsaraIngestError(
-            f"'{path}' has no column(s) {missing} declared in loader.time. "
-            f"Columns found: {list(frame.columns)}."
-        )
-
-    if spec.format == _UNIX:
-        # Epoch seconds are UTC by definition, so `timezone` cannot apply.
-        # Saying otherwise is a misunderstanding worth surfacing, but not
-        # worth refusing a run over.
-        if spec.timezone.upper() != "UTC":
-            logger.warning(
-                "loader.time.timezone=%r is ignored for format='unix': epoch "
-                "seconds are UTC by definition (%s).",
-                spec.timezone,
-                path,
-            )
-        # errors='coerce' turns unparseable entries into NaT rather than
-        # aborting the file; the caller reports and drops them.
-        seconds = pd.to_numeric(frame[spec.columns[0]], errors="coerce")
-        epoch = pd.DatetimeIndex(pd.to_datetime(seconds, unit="s", errors="coerce"))
-        # Routed through the same normalizer as the text path, and not
-        # returned directly: pandas infers the *unit* from `unit='s'` and
-        # hands back a datetime64[s] index, which violates the RawTable
-        # nanosecond contract. Passing 'UTC' makes the timezone step a no-op
-        # (epoch seconds are already UTC) while still pinning resolution.
-        return to_utc_naive_ns(epoch, "UTC", path)
-
-    raw = _joined_time_strings(frame, spec)
-    parsed = pd.to_datetime(raw, format=_pandas_format(spec.format), errors="coerce")
-    return to_utc_naive_ns(pd.DatetimeIndex(parsed), spec.timezone, path)
-
-
-def _joined_time_strings(frame: pd.DataFrame, spec: TimeParsing) -> pd.Series:
-    """Return one string per row to be parsed as a timestamp.
-
-    For the single-column case this is the column itself, converted to
-    string. For several columns it is their values joined by ``spec.join`` —
-    the ``DATE`` + ``TIME`` split that gas analyzers commonly write.
-
-    Parameters
-    ----------
-    frame : pandas.DataFrame
-        Parsed file contents.
-    spec : TimeParsing
-        Manifest time description.
-
-    Returns
-    -------
-    pandas.Series
-        String representation of each row's timestamp.
-    """
-    columns = [frame[name].astype("string") for name in spec.columns]
-    joined = columns[0]
-    for column in columns[1:]:
-        joined = joined.str.cat(column, sep=spec.join)
-    # `.str.cat` propagates NA, so a row missing either half becomes NA and
-    # then NaT — exactly the intended treatment for an incomplete timestamp.
-    return joined
-
-
-def _pandas_format(declared: str | None) -> str | None:
-    """Translate a manifest format string into what pandas expects.
-
-    Parameters
-    ----------
-    declared : str or None
-        The manifest's ``format``: a strftime pattern, the ``'iso8601'``
-        sentinel, or ``None`` for inference.
-
-    Returns
-    -------
-    str or None
-        Format token to hand to :func:`pandas.to_datetime`.
-    """
-    if declared is None:
-        return None
-    if declared.lower() == _ISO:
-        return "ISO8601"
-    return declared

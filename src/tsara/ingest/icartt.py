@@ -72,8 +72,9 @@ import numpy as np
 import pandas as pd
 
 from tsara.config.manifest import ICARTTLoader
-from tsara.ingest.base import RawTable, TsaraIngestError, to_utc_naive_ns
+from tsara.ingest.base import RawTable, TsaraIngestError
 from tsara.ingest.registry import register_reader
+from tsara.ingest.timeparse import to_utc_naive_ns
 
 if TYPE_CHECKING:  # pragma: no cover
     from pathlib import Path

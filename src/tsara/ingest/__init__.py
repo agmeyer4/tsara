@@ -17,6 +17,11 @@ Shape of the subpackage
     Delimited text: comma, tab, or whitespace-padded logger output.
 ``icartt``
     The NASA/NOAA FFI-1001 format, plus its filename revision conventions.
+``parquet_reader``
+    Apache Parquet, the usual storage for a campaign's processed stages.
+``timeparse``
+    Shared across readers: where time lives in a file, and how it reaches
+    UTC exactly once at nanosecond resolution.
 
 Importing this package imports the built-in reader modules, which is what
 registers them. Readers provided by other packages must be imported by
@@ -33,6 +38,7 @@ from __future__ import annotations
 # and the public surface is the registry functions below.
 from tsara.ingest import csv_reader as _csv_reader  # noqa: F401
 from tsara.ingest import icartt as _icartt  # noqa: F401
+from tsara.ingest import parquet_reader as _parquet_reader  # noqa: F401
 from tsara.ingest.base import RawTable, TsaraIngestError
 from tsara.ingest.icartt import (
     IcarttFilename,

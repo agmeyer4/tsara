@@ -624,9 +624,42 @@ class ICARTTLoader(_BaseLoader):
     )
 
 
-#: Tagged union dispatched on 'format'. New formats (Phase 3+) extend this
-#: union and register a reader; the manifest schema needs no other change.
-LoaderConfig = Annotated[CSVLoader | ICARTTLoader, Field(discriminator="format")]
+class ParquetLoader(_BaseLoader):
+    """Loader for Apache Parquet files.
+
+    Why parquet is a first-class format rather than an afterthought: a
+    campaign's *processed* stages are commonly stored as parquet even when
+    the instruments wrote text. The archive this package targets keeps its
+    entire instrument-aligned stage that way, so parquet is the only route
+    to that data.
+
+    Why ``time`` is optional here but required for CSV
+    -------------------------------------------------
+    Parquet stores a dataframe's index as part of the file, so a parquet
+    written by pandas usually *already has* its ``DatetimeIndex`` — there is
+    nothing to parse and no format string to get wrong. That is the default:
+    leave ``time`` unset and the file's own index is used. Set it only for
+    files that store time as an ordinary column instead, which is the same
+    :class:`TimeParsing` block CSV uses.
+
+    A text format can never do this, which is why ``CSVLoader.time`` is
+    mandatory: a CSV has no index, only columns.
+    """
+
+    format: Literal["parquet"] = "parquet"
+    time: TimeParsing | None = Field(
+        default=None,
+        description=(
+            "How to build the datetime index from column(s). Omit (the "
+            "default) to use the index already stored in the file, which is "
+            "the usual case for parquet written by pandas."
+        ),
+    )
+
+
+#: Tagged union dispatched on 'format'. New formats extend this union and
+#: register a reader; the manifest schema needs no other change.
+LoaderConfig = Annotated[CSVLoader | ICARTTLoader | ParquetLoader, Field(discriminator="format")]
 
 
 # ---------------------------------------------------------------------------

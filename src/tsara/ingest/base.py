@@ -68,7 +68,6 @@ __all__ = [
     "Reader",
     "TsaraIngestError",
     "check_raw_table",
-    "to_utc_naive_ns",
 ]
 
 #: Name TSARA gives the time index everywhere, from raw table to final stream.
@@ -209,64 +208,3 @@ def check_raw_table(table: RawTable, *, reader_name: str) -> RawTable:
             f"names {duplicated}; column selection would be ambiguous."
         )
     return table
-
-
-def to_utc_naive_ns(times: pd.DatetimeIndex, timezone: str, path: Path) -> pd.DatetimeIndex:
-    """Normalize parsed timestamps to tz-naive UTC at nanosecond resolution.
-
-    Shared by every reader, because "get to UTC exactly once, correctly" is
-    the one piece of time handling that must not be reimplemented per format.
-
-    Two distinct cases, which is why this cannot be a single pandas call:
-
-    * The parsed values are **already tz-aware** — the file carried explicit
-      offsets (common in ISO 8601). The declared ``timezone`` is then
-      redundant and must not be applied a second time; the offsets win.
-    * The parsed values are **naive** — the file wrote local wall-clock time
-      and said so only in its documentation. The declared ``timezone`` is
-      the missing information, so it is attached and converted.
-
-    Resolution is pinned to nanoseconds at the end because netCDF stores ns:
-    an index left at µs or s would change dtype across a save/load round trip
-    and break later exact comparisons against event boundaries. pandas is a
-    live source of such indexes — ``to_datetime(unit="s")`` returns
-    ``datetime64[s]`` — so the pin is load-bearing, not defensive.
-
-    Parameters
-    ----------
-    times : pandas.DatetimeIndex
-        Parsed timestamps, aware or naive.
-    timezone : str
-        IANA zone to attach to naive timestamps.
-    path : pathlib.Path
-        Source file, for error messages.
-
-    Returns
-    -------
-    pandas.DatetimeIndex
-        Tz-naive UTC, ``datetime64[ns]``, named ``time``.
-
-    Raises
-    ------
-    TsaraIngestError
-        If localization fails — which for a real zone means the file contains
-        a wall-clock time that is ambiguous or nonexistent under daylight
-        saving. That is a genuine data problem, not something to paper over.
-    """
-    import pandas as pd
-
-    if times.tz is not None:
-        result = times.tz_convert("UTC").tz_localize(None)
-    elif timezone.upper() == "UTC":
-        result = times
-    else:
-        try:
-            result = times.tz_localize(timezone).tz_convert("UTC").tz_localize(None)
-        except Exception as exc:
-            raise TsaraIngestError(
-                f"Could not interpret timestamps in '{path}' as timezone "
-                f"'{timezone}': {exc}. Daylight-saving transitions make some "
-                "local wall-clock times ambiguous or nonexistent; recording "
-                "in UTC avoids this entirely."
-            ) from exc
-    return pd.DatetimeIndex(result.astype("datetime64[ns]"), name=TIME_INDEX_NAME)
