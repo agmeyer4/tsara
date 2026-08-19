@@ -867,6 +867,220 @@ meaning of a notebook line depend on which import happened to be in scope.
 
 ---
 
+## 9. Ingestion (Phase 3)
+
+Ingestion turns a validated `Manifest` into one native-rate
+`xarray.Dataset` per instrument. Nothing here resamples anything: streams
+stay on each instrument's own timestamps until Phase 4 pairs them (§1.1).
+
+### 9.1 The reader seam
+
+Ingestion has two halves with different shapes. Reading a file is
+format-specific and irreducibly fiddly; everything after it — masking, unit
+conversion, uncertainty resolution, assembly — depends only on the manifest.
+The seam between them is the `RawTable` contract: a reader's whole job is
+
+```
+(path, loader config) -> RawTable
+```
+
+where the returned frame is indexed by **tz-naive UTC nanosecond**
+timestamps and keeps every column under **the name the raw file uses**.
+Canonical renaming is a manifest concern handled downstream; a reader that
+renamed columns would have to be taught the manifest, which is the coupling
+the seam exists to prevent. The contract is enforced at runtime for every
+reader, TSARA's own and anyone else's.
+
+Readers are selected by name from a registry (`@register_reader("csv")`),
+the same convention this document fixes for noise and regression estimators.
+Registered names: `csv`, `icartt`, `parquet`.
+
+### 9.2 What each reader must get right
+
+**`csv`** — comma, tab, whitespace-run and general regex delimiters;
+headerless files whose column names come from the manifest as a *prefix*
+(a wide instrument log should not require enumerating every spectral bin);
+multi-line preambles; declared missing-value tokens.
+
+**`icartt`** — TSARA's own FFI-1001 parser, because the PyPI `icartt`
+package is GPL-3.0 and unmaintained. Owning it also buys tolerance for what
+real archives contain: non-UTF-8 bytes, per-variable missing sentinels in
+several spellings, ragged rows (skipped and counted), and files that
+contradict their own header by declaring seconds-past-midnight and then
+writing datetime strings. **The time axis is therefore built from the
+values, not the labels** — numeric means seconds past midnight, anything
+else is parsed as timestamps — because archives spell that unit at least a
+dozen ways, including names that falsely suggest a different epoch.
+
+Scale factors are applied *after* missing-value sentinels are masked. The
+reverse order turns a `-9999` sentinel into `-9999 * scale`, which no longer
+matches the declared sentinel and enters the data as a plausible number.
+
+**`parquet`** — the usual storage for a campaign's processed stages. Because
+parquet stores the dataframe index, its `time:` block is optional: the
+normal case has no timestamp to parse. Storing the index does not make the
+reader trivial, though — stored indexes are timezone-aware and appear at
+both microsecond and nanosecond resolution, and neither satisfies the
+contract untouched.
+
+### 9.3 ICARTT revision selection
+
+Archives hold several revisions of one day's data, and ingesting all of them
+double-counts the same air. `revision_policy: latest` keeps the newest of
+each. Three properties of the real filename convention make this less
+obvious than it looks:
+
+1. Revisions are **alphabetic as well as numeric**. Per the specification,
+   alphabetic (`RA`, `RB`) is preliminary field data and numeric (`R0`,
+   `R1`) is final, so any `R#` supersedes any `R<letter>`.
+2. A **trailing comment field** follows the revision and distinguishes
+   genuinely different products — processing levels, separate drives on one
+   day. It is part of a file's identity, not decoration.
+3. `dataID` and `locationID` are **not reliably one token each**, so the
+   parse locates the `YYYYMMDD` field rather than counting underscores.
+
+De-duplication therefore keys on `(everything-before-the-date, date,
+comment)`. Keying without the comment collapses distinct products into one
+another and silently discards real data.
+
+### 9.4 Order of operations per variable
+
+Fixed, and each step depends on the previous one:
+
+| Step | Why here |
+|---|---|
+| convert units | so everything downstream reads canonical numbers |
+| apply QA/QC | bounds are written in the units the author thinks in |
+| resolve uncertainty | `absolute` is declared in canonical units (§2.2) |
+
+`range` bounds are physical statements in canonical units — the shipped
+example converts ppm→ppb and then bounds in ppb, so masking before
+conversion would compare ppb bounds against ppm numbers and reject the whole
+record. `spike` is invariant either way, since the rolling median and MAD
+both scale linearly. `flag` reads a separate instrument status column, which
+is never a converted quantity.
+
+Rules **mask rather than delete**. Rows are the instrument's clock, and a
+rolling window that closes over a removed sample computes a different answer
+than one that sees a gap; "no valid measurement" and "no measurement
+attempted" must stay distinguishable. Counts are reported per rule, because
+a range rule masking everything means the bounds are in the wrong units
+while a flag rule masking everything means the polarity is inverted, and one
+combined number cannot tell them apart.
+
+### 9.5 The `spike` rule, and its deliberate blind spot
+
+A rolling median/MAD (Hampel) test with a **centered** window: a spike is
+symmetric in time, and a trailing window would flag the leading edge of a
+real plume as readily as a glitch. The threshold is `n_mad` times the raw
+MAD, so for Gaussian noise the default `n_mad = 6` is roughly 4σ.
+
+**A zero MAD masks nothing.** When enough of a window shares one value the
+MAD collapses, and the threshold with it, which would reject every sample
+differing from the local median at all. On real analyzer records a
+substantial fraction of rolling windows have zero MAD, so acting on that
+zero scale rejects several percent of good data as spikes. The cost is a
+documented blind spot: a glitch in *perfectly* constant data is not masked,
+because such data offers no scale to judge it against. Real measurements
+always carry local variation.
+
+Note this rule targets sub-second instrument glitches and is a poor fit for
+gas species in plume-dense records, where sharp real features are exactly
+what it removes.
+
+### 9.6 Uncertainty at ingestion, and what it refuses to invent
+
+Ingestion knows the manifest; it does not know the analysis config. So it
+computes exactly the budgets a manifest can state — `declared` and
+`reported` — and **labels** everything else. The empirical estimator's name
+and window belong to `DetectionConfig` (§2.5), so computing it here would
+mean reading a config this stage has no business reading. The obligation is
+recorded instead, which is the shape of §2.3's promise.
+
+A `reported` column is scaled by `convert.scale` and never by
+`convert.offset`: an uncertainty is a difference on the axis, so the origin
+cancels. Applying the offset would add 273.15 to every sigma in a °C→K
+conversion. A negative reported sigma is masked — in practice an undeclared
+missing-value sentinel rather than a real spread.
+
+### 9.7 Assembly, and the substitutability requirement
+
+A stream built from an archive must be shaped exactly like one the generator
+manufactures, because every later phase consumes both through one code path
+and synthetic truth is the only correctness arbiter available (§9.9). The
+variable-name convention (`sigma_rand_<name>`, `sigma_sys_<name>`) therefore
+lives in one module both producers build from, rather than in two matching
+string literals — a coupling that would break silently, since a rename would
+not fail anything until a later stage found no sigma and fell back to an
+empirical estimate, which is a *plausible* answer rather than an error.
+
+**Platforms.** A stationary site has one position, so attaching it to any
+clock is exact and free. A mobile platform's position lives on the GPS
+instrument's clock, and putting it onto a gas instrument's clock is
+*interpolation* — permitted for smooth auxiliary fields, but only under the
+`max_interp_gap` guard, which belongs to Phase 4 (§1.2). Ingestion therefore
+loads GPS as an ordinary stream, records the binding in attrs, and leaves
+the join to the stage that owns the guard, so the interpolation rule stays
+enforced in exactly one place.
+
+### 9.8 Orchestration
+
+`crawl → read → concatenate → sort → de-duplicate → assemble`.
+
+**Concatenate before assembling.** QA/QC windows and uncertainty are
+campaign-level quantities; evaluated per file they would give a different
+answer at every file boundary, so an archive split into hourly files would
+mask differently than the same data in daily files.
+
+**Sort.** Files crawled across several directory layouts arrive in path
+order, not time order, and an instrument's own timestamps cannot be assumed
+sorted either — logger clock corrections, buffered writes and merge steps in
+an upstream processing chain all produce records that step backwards
+occasionally. Everything downstream assumes a monotonic axis.
+
+**Duplicate timestamps keep the first, and say how many were dropped.** A
+policy, not a truth: overlapping files may genuinely disagree, averaging
+would silently invent a value, and erroring would reject archives that
+legitimately overlap.
+
+**A file that will not read is logged and skipped; an instrument that loses
+every file is an error.** Aborting a campaign on the first bad file is the
+wrong trade for a few thousand files on a cluster.
+
+### 9.9 The round-trip harness
+
+The only check that bears on whether ingestion is *correct* rather than
+self-consistent. `export_raw()` writes a generated dataset as raw CSV plus
+the manifest describing it — using the same `TrueUncertainty ->
+UncertaintySpec` seam the generator was built with — so that synthetic data
+travels the road real data does: written to files, crawled, parsed,
+converted, masked, reassembled. The generator's answer key then supplies
+expectations that ingestion had no part in writing.
+
+Only observable variables are exported; the `truth_`-prefixed answer key
+stays behind, and a test asserts no exported header contains it.
+
+Two limits stated honestly:
+
+- **CSV only.** A round trip constrains the reader only when the writer is
+  trivially correct. An ICARTT writer would be more TSARA-authored code, and
+  a trip through it would show writer and reader agreeing with each other
+  rather than either matching FFI-1001.
+- **Values compare to ~1 ULP, not bitwise.** pandas' default CSV parser is
+  not round-trip exact. Far below any measurement resolution, and fully
+  deterministic, but not zero.
+
+The harness also exposed a genuine asymmetry worth recording: a *relative*
+uncertainty term is a fraction of something, and the two sides necessarily
+choose differently. The generator scales the **true** signal, because that
+is what produced the error it injected; ingestion can only scale the
+**reading**, because a manifest describes a file and the true value is
+exactly what is unavailable. The two agree to the fractional size of the
+error itself — second order, and the standard reading of "percent of
+reading" in an instrument specification.
+
+---
+
 ## References
 
 - JCGM 100:2008. *Evaluation of measurement data — Guide to the expression of

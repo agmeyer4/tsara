@@ -1,0 +1,158 @@
+# ============================================================================
+# TSARA manifest example: a MULTI-FORMAT campaign
+# ----------------------------------------------------------------------------
+# The stationary and mobile examples show the common shapes. This one exists
+# to show the awkward ones, because real archives are mostly awkward: an
+# instrument whose files sit under several directory layouts, a logger that
+# splits the timestamp across two columns, a headerless file hundreds of
+# columns wide, a processed stage stored as parquet, and an ICARTT tree with
+# several revisions of the same day.
+#
+#     from tsara import load_manifest
+#     from tsara.ingest import ingest_campaign
+#     streams = ingest_campaign(load_manifest("manifest_multiformat_example.yaml"))
+# ============================================================================
+
+name: multiformat_demo
+description: >
+  Demonstration manifest covering every loader TSARA ships and the path- and
+  column-level awkwardness real campaign archives contain.
+
+base_path: ../data
+
+platform:
+  kind: stationary
+  latitude: 40.7660
+  longitude: -111.8475
+  altitude_m: 1300.0
+
+instruments:
+
+  # --- Whitespace-delimited logger, timestamp split across two columns ------
+  picarro:
+    description: Cavity ring-down analyzer writing space-padded .dat files.
+    loader:
+      format: csv
+      # Several layouts at once: the campaign was reorganized mid-season, and
+      # both trees are still on disk. The crawler searches all of them and
+      # de-duplicates, so adding a layout is a YAML edit.
+      path_templates:
+        - "picarro/%Y/%m/%d/*.dat"
+        - "archive/picarro_backup/*.dat"
+      # '\s+' matches runs of spaces, which is how these files are aligned.
+      delimiter: '\s+'
+      time:
+        # Two columns, rejoined with `join` before parsing. The singular
+        # `column:` spelling is still valid for the ordinary one-column case.
+        columns: [DATE, TIME]
+        join: " "
+        format: "%Y-%m-%d %H:%M:%S.%f"
+        timezone: UTC
+    variables:
+      ch4:
+        column: CH4_dry
+        role: gas
+        units: ppm
+        convert: {from_unit: ppm, to_unit: ppb, scale: 1000.0}
+        uncertainty:
+          random: {mode: declared, absolute: 0.7, relative: 0.0005}
+          systematic: {mode: declared, relative: 0.002}
+          decorrelation_timescale: 5min
+        qaqc:
+          # Bounds are written in CANONICAL units: QA/QC runs after the
+          # ppm -> ppb conversion above (METHODS.md 9.4).
+          - {kind: range, min: 1500.0, max: 100000.0}
+          - {kind: flag, flag_column: ALARM_STATUS, good_values: [0]}
+      cavity_pressure:
+        column: CavityPressure
+        role: aux
+        units: torr
+
+  # --- Headerless instrument, far wider than the part anyone wants ----------
+  particle_counter:
+    description: >
+      Optical particle counter writing data on line 1 with no header at all;
+      the column meanings live in the manual, which is what a manifest is for.
+    loader:
+      format: csv
+      path_template: "opc/*.csv"
+      # `header_row: null` says there is no header line. `column_names` then
+      # names a PREFIX -- surplus columns become column_3, column_4, ... so a
+      # 30-bin instrument does not need 30 YAML entries to read the first few.
+      header_row: null
+      column_names: [timestamp, total_count, bin_0p3um]
+      time: {column: timestamp, format: iso8601}
+    variables:
+      pm_total:
+        column: total_count
+        role: aux
+        units: counts
+
+  # --- Processed stage stored as parquet ------------------------------------
+  aeris:
+    description: Ethane analyzer, instrument-aligned stage stored as parquet.
+    loader:
+      format: parquet
+      # One instrument nesting a level deeper than its siblings is common.
+      path_template: "aligned/aeris/*/*.parquet"
+      # No `time:` block: parquet stores the dataframe index, so there is
+      # usually no timestamp to parse. Declare one only for files that keep
+      # time in an ordinary column instead.
+    variables:
+      c2h6:
+        column: C2H6_ppb
+        role: gas
+        units: ppb
+        uncertainty:
+          # The instrument publishes its own per-point 1-sigma. That column is
+          # scaled by `convert.scale` if present, but never by `convert.offset`
+          # -- a spread has no origin (METHODS.md 2.2).
+          random: {mode: reported, column: C2H6_1SIGMA}
+          systematic: {mode: declared, relative: 0.03}
+
+  # --- ICARTT tree with several revisions per day ---------------------------
+  voc_pfp:
+    description: Whole-air VOC canister suite distributed as ICARTT.
+    loader:
+      format: icartt
+      # {field} placeholders are harvested from the matched paths as campaign
+      # metadata; `institution` is pinned below, which also narrows the scan.
+      path_template: "{institution}/{platform_id}/%Y/*.ict"
+      # Archives hold R0 preliminary alongside R1 final. 'latest' keeps the
+      # newest of each distinct product -- distinct meaning same instrument,
+      # same day AND same trailing comment field, since files differing only
+      # after the revision (processing levels, separate drives) are different
+      # data rather than revisions of one another (METHODS.md 9.3).
+      revision_policy: latest
+    metadata:
+      institution: noaa
+    variables:
+      benzene:
+        column: Benzene_ppbv
+        role: gas
+        units: ppbv
+      toluene:
+        column: Toluene_ppbv
+        role: gas
+        units: ppbv
+
+  # --- Met, including a circular variable -----------------------------------
+  met:
+    description: Sonic anemometer.
+    loader:
+      format: csv
+      path_template: "met/*.csv"
+      na_values: ["NAN", "-9999"]
+      time: {column: TIMESTAMP, format: iso8601}
+    variables:
+      wind_dir:
+        column: WD_deg
+        role: met
+        units: degrees
+        # Circular variables are averaged with circular statistics rather than
+        # arithmetically, so that 359 deg and 1 deg average to 0, not 180.
+        circular: true
+      wind_speed:
+        column: WS_ms
+        role: met
+        units: m s-1
