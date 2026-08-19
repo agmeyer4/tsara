@@ -10,6 +10,9 @@ Shape of the subpackage
 ``base``
     The :class:`~tsara.ingest.base.RawTable` contract that separates
     format-specific reading from format-independent everything-else.
+``crawler``
+    Finding an instrument's files from path templates, and harvesting
+    metadata out of where they sit in the archive.
 ``registry``
     Name-based reader dispatch (``@register_reader("csv")``), the same
     pattern ``docs/METHODS.md`` fixes for noise and regression estimators.
@@ -40,6 +43,7 @@ from tsara.ingest import csv_reader as _csv_reader  # noqa: F401
 from tsara.ingest import icartt as _icartt  # noqa: F401
 from tsara.ingest import parquet_reader as _parquet_reader  # noqa: F401
 from tsara.ingest.base import RawTable, TsaraIngestError
+from tsara.ingest.crawler import FileMatch, compile_template, crawl
 from tsara.ingest.icartt import (
     IcarttFilename,
     IcarttHeader,
@@ -51,12 +55,15 @@ from tsara.ingest.icartt import (
 from tsara.ingest.registry import available_readers, get_reader, read_file, register_reader
 
 __all__ = [
+    "FileMatch",
     "IcarttFilename",
     "IcarttHeader",
     "IcarttVariable",
     "RawTable",
     "TsaraIngestError",
     "available_readers",
+    "compile_template",
+    "crawl",
     "get_reader",
     "parse_icartt_filename",
     "parse_icartt_header",
