@@ -51,7 +51,12 @@ from typing import TYPE_CHECKING
 import yaml
 
 from tsara import __version__
-from tsara.core.exceptions import TsaraError
+from tsara.core.bundle import (
+    BUNDLE_FORMAT_VERSION,
+    BUNDLE_MANIFEST,
+    BUNDLE_STREAMS_DIR,
+    TsaraBundleError,
+)
 from tsara.synthetic.config import SyntheticConfig
 from tsara.synthetic.plumes import GroundTruth
 
@@ -60,24 +65,22 @@ if TYPE_CHECKING:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-#: Filenames inside a bundle. Centralized so readers and writers cannot drift.
-BUNDLE_MANIFEST = "bundle.json"
+#: Re-exported so that callers of this module see one bundle vocabulary
+#: rather than having to know which names are shared with other stages.
+__all__ = [
+    "BUNDLE_CONFIG",
+    "BUNDLE_FORMAT_VERSION",
+    "BUNDLE_GROUND_TRUTH",
+    "BUNDLE_MANIFEST",
+    "BUNDLE_STREAMS_DIR",
+    "TsaraBundleError",
+    "load_bundle",
+    "save_bundle",
+]
+
+#: Files this stage adds on top of the shared layout (tsara.core.bundle).
 BUNDLE_CONFIG = "config.yaml"
 BUNDLE_GROUND_TRUTH = "ground_truth.parquet"
-BUNDLE_STREAMS_DIR = "streams"
-
-#: Bumped only when the layout changes incompatibly, so a future reader can
-#: refuse (or migrate) an old bundle rather than misinterpreting it.
-BUNDLE_FORMAT_VERSION = 1
-
-
-class TsaraBundleError(TsaraError):
-    """Raised when a TSARA bundle cannot be written or read.
-
-    Distinct from a config error: the configuration may be valid while the
-    *directory* is missing, incomplete, or written by an incompatible
-    version.
-    """
 
 
 def save_bundle(dataset: SyntheticDataset, path: str | Path) -> Path:

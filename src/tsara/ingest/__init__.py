@@ -22,6 +22,10 @@ Shape of the subpackage
     The NASA/NOAA FFI-1001 format, plus its filename revision conventions.
 ``parquet_reader``
     Apache Parquet, the usual storage for a campaign's processed stages.
+``campaign``
+    The whole run: manifest in, one stream per instrument out.
+``bundle``
+    Saving and reloading those streams as a TSARA bundle directory.
 ``streams``
     Assembling a raw table into the native-rate ``xarray.Dataset`` that
     later phases consume, shaped exactly like a synthetic one.
@@ -49,6 +53,8 @@ from tsara.ingest import csv_reader as _csv_reader  # noqa: F401
 from tsara.ingest import icartt as _icartt  # noqa: F401
 from tsara.ingest import parquet_reader as _parquet_reader  # noqa: F401
 from tsara.ingest.base import RawTable, TsaraIngestError
+from tsara.ingest.bundle import load_streams, save_streams
+from tsara.ingest.campaign import StreamCollection, ingest_campaign
 from tsara.ingest.crawler import FileMatch, compile_template, crawl
 from tsara.ingest.icartt import (
     IcarttFilename,
@@ -59,8 +65,8 @@ from tsara.ingest.icartt import (
     select_latest_revisions,
 )
 from tsara.ingest.qaqc import MaskReport, apply_qaqc
-from tsara.ingest.streams import build_stream
 from tsara.ingest.registry import available_readers, get_reader, read_file, register_reader
+from tsara.ingest.streams import build_stream
 from tsara.ingest.uncertainty import ResolvedUncertainty, resolve_uncertainty
 from tsara.ingest.units import canonical_units, convert_spread, convert_values
 
@@ -72,6 +78,7 @@ __all__ = [
     "MaskReport",
     "RawTable",
     "ResolvedUncertainty",
+    "StreamCollection",
     "TsaraIngestError",
     "apply_qaqc",
     "available_readers",
@@ -82,10 +89,13 @@ __all__ = [
     "convert_values",
     "crawl",
     "get_reader",
+    "ingest_campaign",
+    "load_streams",
     "parse_icartt_filename",
     "parse_icartt_header",
     "read_file",
     "register_reader",
     "resolve_uncertainty",
+    "save_streams",
     "select_latest_revisions",
 ]
