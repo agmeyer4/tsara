@@ -349,15 +349,43 @@ class TimeParsing(_StrictModel):
 
     ICARTT files don't need this — their time axis is defined by the format
     specification itself (seconds from a header-declared date).
+
+    Why a *list* of columns: loggers routinely split one timestamp across
+    several fields. A Picarro ``DataLog_User`` file, for instance, carries
+    ``DATE`` and ``TIME`` as separate whitespace-delimited columns; the
+    timestamp only exists once they are rejoined. Such a file is unreadable
+    if a schema can name only one column, and the workaround (depend on a
+    redundant epoch column) fails on the loggers that don't emit one. The
+    singular ``column:`` spelling remains valid shorthand for the common
+    one-column case, exactly as ``path_template`` does for
+    :attr:`_BaseLoader.path_templates`.
     """
 
-    column: str = Field(description="Column holding the timestamp (or epoch seconds).")
+    columns: tuple[str, ...] = Field(
+        min_length=1,
+        validation_alias=AliasChoices("columns", "column"),
+        description=(
+            "Column(s) holding the timestamp (or epoch seconds). A bare "
+            "string is accepted for the single-column case; several columns "
+            "are concatenated in the order given, separated by `join`, "
+            "before parsing (e.g. ['DATE', 'TIME'])."
+        ),
+    )
+    join: str = Field(
+        default=" ",
+        description=(
+            "Separator used to concatenate multiple time columns before "
+            "parsing. Ignored when a single column is given."
+        ),
+    )
     format: str | None = Field(
         default=None,
         description=(
             "strftime pattern (e.g. '%Y-%m-%d %H:%M:%S'), or the sentinels "
             "'unix' (epoch seconds) / 'iso8601'. None lets pandas infer — "
-            "convenient but slower and riskier; prefer explicit formats."
+            "convenient but slower and riskier; prefer explicit formats. "
+            "The pattern must describe the *joined* string when several "
+            "columns are given."
         ),
     )
     timezone: str = Field(
@@ -367,6 +395,45 @@ class TimeParsing(_StrictModel):
             "processing is UTC internally; anything else is converted."
         ),
     )
+
+    @field_validator("columns", mode="before")
+    @classmethod
+    def _coerce_single_column(cls, value: object) -> object:
+        """Accept a bare string as shorthand for a one-element list."""
+        if isinstance(value, str):
+            return (value,)
+        return value
+
+    @field_validator("columns")
+    @classmethod
+    def _sane_columns(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Reject blank and repeated column names."""
+        for name in value:
+            if not name.strip():
+                raise ValueError("TimeParsing.columns entries must be non-empty column names.")
+        if len(set(value)) != len(value):
+            raise ValueError(
+                "TimeParsing.columns contains duplicates; each entry must name "
+                "a distinct column of the raw file."
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _unix_is_single_column(self) -> TimeParsing:
+        """Epoch seconds are one number, so 'unix' cannot span columns.
+
+        Concatenating two numeric fields and reading the result as epoch
+        seconds would silently produce a wildly wrong date rather than an
+        error, so this combination is refused at config load.
+        """
+        if self.format == "unix" and len(self.columns) > 1:
+            raise ValueError(
+                "TimeParsing: format='unix' expects a single column of epoch "
+                f"seconds, but {len(self.columns)} columns were given "
+                f"({list(self.columns)}). Use an explicit strftime pattern to "
+                "combine separate date and time fields."
+            )
+        return self
 
 
 class _BaseLoader(_StrictModel):
@@ -439,18 +506,93 @@ class _BaseLoader(_StrictModel):
 
 
 class CSVLoader(_BaseLoader):
-    """Loader for delimited text files (CSV/TSV and friends)."""
+    r"""Loader for delimited text files (CSV/TSV and friends).
+
+    "CSV" is read loosely here: the same reader covers comma-, tab- and
+    whitespace-delimited logger output, which in practice arrives with
+    extensions like ``.dat`` and ``.txt`` as often as ``.csv``. Set
+    ``delimiter: '\s+'`` for the fixed-width-looking, space-padded files
+    that gas analyzers commonly write.
+
+    Headerless files are supported via ``header_row: null`` plus an explicit
+    ``column_names`` list — some instruments (e.g. Aeris Spectralite logs)
+    begin emitting data on line 1 with the column meanings living only in a
+    manual, which is precisely the knowledge a manifest exists to record.
+    """
 
     format: Literal["csv"] = "csv"
     time: TimeParsing = Field(description="Datetime index construction (required for CSV).")
-    delimiter: str = Field(default=",", description="Field separator.")
-    header_row: int = Field(default=0, ge=0, description="0-based row index of column names.")
+    delimiter: str = Field(
+        default=",",
+        description=(
+            "Field separator. Accepts a regular expression, so '\\s+' handles "
+            "space- or tab-padded logger output with runs of whitespace."
+        ),
+    )
+    header_row: int | None = Field(
+        default=0,
+        ge=0,
+        description=(
+            "0-based row index of the column-name line, or null for a file "
+            "with no header at all (which then requires `column_names`)."
+        ),
+    )
+    column_names: tuple[str, ...] | None = Field(
+        default=None,
+        description=(
+            "Column names for a headerless file, in file order. Required "
+            "when `header_row` is null, and forbidden otherwise."
+        ),
+    )
     na_values: tuple[str, ...] = Field(
         default=(), description="Extra strings to treat as missing, e.g. ['-9999', 'NULL']."
     )
     comment: str | None = Field(
         default=None, max_length=1, description="Comment-line prefix character to skip."
     )
+
+    @field_validator("column_names")
+    @classmethod
+    def _sane_column_names(cls, value: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        """Reject empty lists, blank names, and duplicates."""
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("column_names must name at least one column when given.")
+        for name in value:
+            if not name.strip():
+                raise ValueError("column_names entries must be non-empty column names.")
+        if len(set(value)) != len(value):
+            raise ValueError(
+                "column_names contains duplicates; positional names must be "
+                "distinct or later columns would be unreachable."
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _header_and_names_agree(self) -> CSVLoader:
+        """Tie ``header_row`` and ``column_names`` into one coherent statement.
+
+        The two fields answer the same question — "where do column names come
+        from?" — so exactly one of them must supply the answer. Allowing both
+        would mean silently overriding a header that is present, which is
+        indistinguishable at read time from a manifest whose author
+        miscounted the header row; refusing the combination turns that into
+        an immediate config error instead of a column mis-mapping that
+        surfaces as nonsense concentrations.
+        """
+        if self.header_row is None and self.column_names is None:
+            raise ValueError(
+                "CSVLoader: header_row=null declares a file with no header "
+                "line, so column_names must list the columns in file order."
+            )
+        if self.header_row is not None and self.column_names is not None:
+            raise ValueError(
+                "CSVLoader: column_names applies only to headerless files. "
+                "Either set header_row=null (the file has no header) or drop "
+                "column_names (the header line supplies the names)."
+            )
+        return self
 
 
 class ICARTTLoader(_BaseLoader):
@@ -550,6 +692,51 @@ class InstrumentConfig(_StrictModel):
                     f"column '{var.column}'."
                 )
             seen[var.column] = name
+        return self
+
+    @model_validator(mode="after")
+    def _headerless_columns_are_declared(self) -> InstrumentConfig:
+        """For a headerless CSV, every referenced column must be declared.
+
+        Normally a mistyped column name is caught when the file is read and
+        pandas reports the header it actually found. A headerless file has no
+        such fallback: ``column_names`` *is* the schema, so a typo there
+        produces a ``KeyError`` deep inside ingestion — after the crawler has
+        already walked the archive — naming a column the user cannot see in
+        any file. Checking the reference here fails in seconds at config
+        load, which is the same bargain the mobile-GPS cross-reference makes.
+
+        Only the headerless case can be checked: when a header line exists,
+        the authoritative name list lives in the data files, not the manifest.
+        """
+        loader = self.loader
+        if not isinstance(loader, CSVLoader) or loader.column_names is None:
+            return self
+
+        declared = set(loader.column_names)
+        # Everything in the manifest that names a raw column of this file.
+        referenced: dict[str, str] = {}
+        for column in loader.time.columns:
+            referenced[column] = "loader.time.columns"
+        for name, var in self.variables.items():
+            referenced[var.column] = f"variables.{name}.column"
+            if var.uncertainty is not None:
+                for component in ("random", "systematic"):
+                    spec = getattr(var.uncertainty, component)
+                    # Only ReportedUncertainty reads a column; declared does not.
+                    if isinstance(spec, ReportedUncertainty):
+                        referenced[spec.column] = f"variables.{name}.uncertainty.{component}.column"
+            for rule in var.qaqc:
+                if isinstance(rule, FlagRule):
+                    referenced[rule.flag_column] = f"variables.{name}.qaqc flag_column"
+
+        missing = {col: where for col, where in referenced.items() if col not in declared}
+        if missing:
+            detail = "; ".join(f"'{col}' ({where})" for col, where in sorted(missing.items()))
+            raise ValueError(
+                f"Headerless CSV declares column_names={list(loader.column_names)}, "
+                f"but these referenced columns are not among them: {detail}."
+            )
         return self
 
 

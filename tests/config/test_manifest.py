@@ -11,10 +11,12 @@ from pydantic import ValidationError
 from tsara.config.manifest import (
     CSVLoader,
     DeclaredUncertainty,
+    InstrumentConfig,
     Manifest,
     MobilePlatform,
     ReportedUncertainty,
     StationaryPlatform,
+    TimeParsing,
     UncertaintySpec,
     UnitConversion,
 )
@@ -508,3 +510,200 @@ def test_icartt_loader_forbids_time(stationary_manifest_dict: dict[str, Any]) ->
     }
     with pytest.raises(ValidationError, match="time"):
         Manifest.model_validate(bad)
+
+
+# ---------------------------------------------------------------------------
+# TimeParsing: one column or several
+# ---------------------------------------------------------------------------
+
+
+def test_singular_column_is_shorthand_for_a_one_tuple() -> None:
+    """Back-compatible spelling, mirroring path_template -> path_templates."""
+    spec = TimeParsing.model_validate({"column": "EPOCH_TIME", "format": "unix"})
+    assert spec.columns == ("EPOCH_TIME",)
+
+
+def test_plural_columns_are_accepted() -> None:
+    """The Picarro DataLog shape: DATE and TIME as separate fields."""
+    spec = TimeParsing.model_validate({"columns": ["DATE", "TIME"], "format": "%Y-%m-%d %H:%M:%S"})
+    assert spec.columns == ("DATE", "TIME")
+    assert spec.join == " "
+
+
+def test_time_columns_may_not_be_empty() -> None:
+    with pytest.raises(ValidationError):
+        TimeParsing.model_validate({"columns": []})
+
+
+@pytest.mark.parametrize("name", ["", "   "])
+def test_blank_time_column_name_rejected(name: str) -> None:
+    with pytest.raises(ValidationError, match="non-empty"):
+        TimeParsing.model_validate({"columns": [name]})
+
+
+def test_duplicate_time_columns_rejected() -> None:
+    with pytest.raises(ValidationError, match="duplicates"):
+        TimeParsing.model_validate({"columns": ["DATE", "DATE"]})
+
+
+def test_unix_format_refuses_multiple_columns() -> None:
+    """Joining two numbers and reading them as epoch seconds fails silently."""
+    with pytest.raises(ValidationError, match="single column of epoch"):
+        TimeParsing.model_validate({"columns": ["A", "B"], "format": "unix"})
+
+
+def test_unix_format_allows_one_column() -> None:
+    assert TimeParsing.model_validate({"column": "t", "format": "unix"}).columns == ("t",)
+
+
+# ---------------------------------------------------------------------------
+# CSVLoader: headerless files
+# ---------------------------------------------------------------------------
+
+
+def _csv(**kwargs: Any) -> CSVLoader:
+    kwargs.setdefault("path_template", "*.csv")
+    kwargs.setdefault("time", {"column": "t", "format": "unix"})
+    return CSVLoader(**kwargs)
+
+
+def test_header_row_defaults_to_zero() -> None:
+    loader = _csv()
+    assert loader.header_row == 0
+    assert loader.column_names is None
+
+
+def test_headerless_requires_column_names() -> None:
+    with pytest.raises(ValidationError, match="column_names must list"):
+        _csv(header_row=None)
+
+
+def test_column_names_requires_headerless() -> None:
+    """Both would mean silently overriding a header that is present."""
+    with pytest.raises(ValidationError, match="applies only to headerless"):
+        _csv(header_row=0, column_names=["t", "ch4"])
+
+
+def test_headerless_with_names_is_valid() -> None:
+    loader = _csv(header_row=None, column_names=["t", "ch4"])
+    assert loader.header_row is None
+    assert loader.column_names == ("t", "ch4")
+
+
+def test_empty_column_names_rejected() -> None:
+    with pytest.raises(ValidationError, match="at least one column"):
+        _csv(header_row=None, column_names=[])
+
+
+@pytest.mark.parametrize("name", ["", "  "])
+def test_blank_column_name_rejected(name: str) -> None:
+    with pytest.raises(ValidationError, match="non-empty column names"):
+        _csv(header_row=None, column_names=["t", name])
+
+
+def test_duplicate_column_names_rejected() -> None:
+    with pytest.raises(ValidationError, match="duplicates"):
+        _csv(header_row=None, column_names=["t", "t"])
+
+
+# ---------------------------------------------------------------------------
+# Headerless cross-reference check (InstrumentConfig)
+# ---------------------------------------------------------------------------
+
+
+def _headerless_instrument(**loader_kwargs: Any) -> dict[str, Any]:
+    """An instrument reading a headerless file, with one gas variable."""
+    loader: dict[str, Any] = {
+        "format": "csv",
+        "path_template": "*.txt",
+        "header_row": None,
+        "column_names": ["t", "CH4"],
+        "time": {"column": "t", "format": "unix"},
+    }
+    loader.update(loader_kwargs)
+    return {
+        "loader": loader,
+        "variables": {"ch4": {"column": "CH4", "role": "gas", "units": "ppb"}},
+    }
+
+
+def test_headerless_instrument_with_consistent_columns_is_valid() -> None:
+    assert InstrumentConfig.model_validate(_headerless_instrument()) is not None
+
+
+def test_headerless_unknown_variable_column_is_rejected() -> None:
+    """The typo that would otherwise surface as a KeyError mid-ingestion."""
+    spec = _headerless_instrument()
+    spec["variables"]["ch4"]["column"] = "CH_4"
+    with pytest.raises(ValidationError, match=r"'CH_4' \(variables\.ch4\.column\)"):
+        InstrumentConfig.model_validate(spec)
+
+
+def test_headerless_unknown_time_column_is_rejected() -> None:
+    spec = _headerless_instrument()
+    spec["loader"]["time"] = {"column": "Timestamp", "format": "unix"}
+    with pytest.raises(ValidationError, match=r"loader\.time\.columns"):
+        InstrumentConfig.model_validate(spec)
+
+
+def test_headerless_unknown_reported_sigma_column_is_rejected() -> None:
+    spec = _headerless_instrument()
+    spec["variables"]["ch4"]["uncertainty"] = {"random": {"mode": "reported", "column": "CH4_ERR"}}
+    with pytest.raises(ValidationError, match=r"uncertainty\.random\.column"):
+        InstrumentConfig.model_validate(spec)
+
+
+def test_headerless_declared_uncertainty_needs_no_column() -> None:
+    """Only ReportedUncertainty reads a column; declared must not be checked."""
+    spec = _headerless_instrument()
+    spec["variables"]["ch4"]["uncertainty"] = {
+        "random": {"mode": "declared", "absolute": 0.7},
+        "systematic": {"mode": "declared", "relative": 0.01},
+    }
+    assert InstrumentConfig.model_validate(spec) is not None
+
+
+def test_headerless_unknown_flag_column_is_rejected() -> None:
+    spec = _headerless_instrument()
+    spec["variables"]["ch4"]["qaqc"] = [{"kind": "flag", "flag_column": "QC", "good_values": [0]}]
+    with pytest.raises(ValidationError, match="qaqc flag_column"):
+        InstrumentConfig.model_validate(spec)
+
+
+def test_headerless_known_flag_column_is_accepted() -> None:
+    spec = _headerless_instrument(column_names=["t", "CH4", "QC"])
+    spec["variables"]["ch4"]["qaqc"] = [{"kind": "flag", "flag_column": "QC", "good_values": [0]}]
+    assert InstrumentConfig.model_validate(spec) is not None
+
+
+def test_non_flag_qaqc_rules_are_not_column_checked() -> None:
+    """Range and spike rules name no column, so they cannot be inconsistent."""
+    spec = _headerless_instrument()
+    spec["variables"]["ch4"]["qaqc"] = [
+        {"kind": "range", "min": 1700.0},
+        {"kind": "spike", "window": "5s", "n_mad": 6.0},
+    ]
+    assert InstrumentConfig.model_validate(spec) is not None
+
+
+def test_headerful_csv_columns_are_not_cross_checked() -> None:
+    """With a header, the authoritative name list lives in the data files."""
+    spec = _headerless_instrument()
+    spec["loader"]["header_row"] = 0
+    del spec["loader"]["column_names"]
+    spec["variables"]["ch4"]["column"] = "anything_at_all"
+    assert InstrumentConfig.model_validate(spec) is not None
+
+
+def test_icartt_loader_is_not_column_checked() -> None:
+    """The headerless check applies to CSV only; ICARTT declares its own names."""
+    spec = {
+        "loader": {"format": "icartt", "path_template": "*.ict"},
+        "variables": {"ch4": {"column": "CH4", "role": "gas", "units": "ppb"}},
+    }
+    assert InstrumentConfig.model_validate(spec) is not None
+
+
+def test_explicit_null_column_names_is_the_same_as_omitting_it() -> None:
+    """YAML authors write `column_names: null` as often as they omit the key."""
+    assert _csv(column_names=None).column_names is None

@@ -23,7 +23,7 @@ SRC = Path(__file__).resolve().parent.parent / "src" / "tsara"
 
 #: Every module that re-exports a public surface. Adding a subpackage with an
 #: ``__all__`` means adding it here.
-PACKAGES_WITH_EXPORTS = ["tsara", "tsara.synthetic"]
+PACKAGES_WITH_EXPORTS = ["tsara", "tsara.ingest", "tsara.synthetic"]
 
 
 def _tsara_imports(module_path: Path) -> list[str]:
