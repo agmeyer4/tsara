@@ -49,6 +49,7 @@ import numpy as np
 
 from tsara import __version__
 from tsara.core.geodesy import positions_at
+from tsara.core.naming import sigma_rand_name, sigma_sys_name
 from tsara.core.timebase import epoch_ns as _epoch_ns
 from tsara.core.timebase import epoch_s as _epoch_s
 from tsara.core.timebase import timestamp_epoch_ns as _stamp_ns
@@ -529,13 +530,13 @@ def _render_instrument(
             {"units": species.units, "description": "True plume enhancement (answer key)."},
         )
         if applied.sigma_rand is not None:
-            data_vars[f"{TRUTH_PREFIX}sigma_rand_{species_name}"] = (
+            data_vars[f"{TRUTH_PREFIX}{sigma_rand_name(species_name)}"] = (
                 "time",
                 applied.sigma_rand,
                 {"units": species.units, "description": "True random 1-sigma (answer key)."},
             )
         if applied.sigma_sys is not None:
-            data_vars[f"{TRUTH_PREFIX}sigma_sys_{species_name}"] = (
+            data_vars[f"{TRUTH_PREFIX}{sigma_sys_name(species_name)}"] = (
                 "time",
                 applied.sigma_sys,
                 {"units": species.units, "description": "True systematic 1-sigma (answer key)."},
