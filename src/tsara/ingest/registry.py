@@ -58,7 +58,7 @@ _READERS: dict[str, Reader] = {}
 R = TypeVar("R", bound=Reader)
 
 
-def register_reader(name: str) -> Callable[[R], R]:
+def register_reader(name: str, *, replace: bool = False) -> Callable[[R], R]:
     """Register a file reader under a ``loader.format`` name.
 
     Used as a decorator::
@@ -71,10 +71,29 @@ def register_reader(name: str) -> Callable[[R], R]:
     :data:`~tsara.config.manifest.LoaderConfig` member, since that string is
     what the manifest supplies at dispatch time.
 
+    Re-registering a name
+    ---------------------
+    Registration refuses to overwrite by default, because a *silent* overwrite
+    makes ingestion depend on module import order — importing a plugin twice
+    would change which code reads your files, with nothing to see. That
+    argument condemns silence, not overwriting, so ``replace=True`` is
+    available for the case where the caller means it and says so.
+
+    The case that needs it is interactive: re-running a notebook cell that
+    defines a reader, or ``importlib.reload`` on a plugin module, re-executes
+    the decorator. Without an override those raise, and the only way forward
+    is a kernel restart. TSARA is meant to be driven step-by-step from a
+    notebook, so making that a dead end would be a real cost. An override is
+    logged at warning level: stated intent is fine, but it should still be
+    visible in a run log when someone is working out why a file parsed oddly.
+
     Parameters
     ----------
     name : str
         Format name, e.g. ``'csv'``.
+    replace : bool, optional
+        Replace an existing reader registered under ``name``. Default
+        ``False``, which raises instead.
 
     Returns
     -------
@@ -85,29 +104,36 @@ def register_reader(name: str) -> Callable[[R], R]:
     Raises
     ------
     ValueError
-        If ``name`` is blank or already registered. Silently replacing an
-        existing reader would make ingestion depend on module import order —
-        a class of bug that is very hard to see and very easy to create by
-        importing a plugin twice.
+        If ``name`` is blank, or already registered and ``replace`` is False.
     """
     if not name or not name.strip():
         raise ValueError("Reader name must be a non-empty string.")
 
     def decorator(func: R) -> R:
-        if name in _READERS:
-            existing = _READERS[name]
-            raise ValueError(
-                f"A reader is already registered for format '{name}' "
-                f"({getattr(existing, '__module__', '?')}."
-                f"{getattr(existing, '__qualname__', '?')}). Choose a different "
-                "name rather than overriding, so that ingestion never depends "
-                "on import order."
+        existing = _READERS.get(name)
+        if existing is not None:
+            if not replace:
+                raise ValueError(
+                    f"A reader is already registered for format '{name}' "
+                    f"({_describe(existing)}). Pass replace=True if you meant to "
+                    "override it, so that ingestion never depends on import order."
+                )
+            logger.warning(
+                "Replacing the reader registered for format '%s': %s -> %s",
+                name,
+                _describe(existing),
+                _describe(func),
             )
         _READERS[name] = func
         logger.debug("Registered reader '%s' -> %s", name, getattr(func, "__qualname__", func))
         return func
 
     return decorator
+
+
+def _describe(func: Reader) -> str:
+    """Return ``module.qualname`` for a reader, for use in messages."""
+    return f"{getattr(func, '__module__', '?')}.{getattr(func, '__qualname__', '?')}"
 
 
 def available_readers() -> tuple[str, ...]:

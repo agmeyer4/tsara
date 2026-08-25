@@ -902,6 +902,68 @@ headerless files whose column names come from the manifest as a *prefix*
 (a wide instrument log should not require enumerating every spectral bin);
 multi-line preambles; declared missing-value tokens.
 
+Two delimited-text decisions are load-bearing enough to state explicitly.
+
+**Data rows wider than the header.** Two different file shapes produce
+records with more fields than the header names, and both are common enough
+in real logger output to be handled rather than documented as unsupported.
+In one campaign archive surveyed, 21% of delimited-text files were affected;
+within each affected instrument family *every* file was, which is the usual
+pattern — this is a property of the logger, not of the day.
+
+*The shapes.* Either the logger terminates each record with the separator,
+leaving an empty surplus field; or its header is genuinely one or more names
+short, with real measurements recorded under no name at all. They look
+identical to a parser and differ only in whether the surplus field is empty.
+
+*Why it cannot be ignored.* pandas resolves a header/data width mismatch by
+promoting column 0 to the index. Every remaining name then lands on its
+neighbour's values and the final column is dropped — silently. A species
+read that way reports the channel beside it, with nothing raised anywhere.
+
+*The treatment,* in two parts:
+
+1. `index_col=False`, unconditionally. TSARA always builds its time index
+   afterwards from a *named* column, so an inferred index is never wanted
+   whatever the file's shape. This stops the shift but, on its own, makes
+   pandas discard the unnamed surplus.
+2. Surplus columns are **named, not dropped** — `column_N`, continuing the
+   convention headerless files already use, so a manifest addresses such a
+   column the same way in both cases. An empty trailing field becomes an
+   all-NaN column that costs nothing; an unnamed real column is preserved.
+   A well-formed file is left completely alone, because supplying an
+   explicit name list would also disable pandas' duplicate-name mangling.
+
+The width is measured by tokenizing the header line and the first data line
+*separately*. Reading the first few rows with `header=None` does not work on
+a file with a preamble: pandas fixes the field count from the first row it
+sees, so a two-column preamble above a 25-column table decides the width for
+everything below it.
+
+**Known limit:** a file whose *interior* rows are malformed — a logger
+interrupted mid-write, or two records run together where a newline was never
+emitted — is still rejected in full, because the width is established from
+the first data row. Rows like that are rare (in the surveyed archive, 15
+lines in 29,522, costing one file of 24) but they cost the whole file rather
+than the affected rows. Recovering them needs bad-line handling with a
+reported count, which the `icartt` reader already does for ragged rows.
+
+**`header_row` counts lines after blank and comment lines are discarded**,
+not physical line numbers. A file with two preamble lines, a blank line, and
+then its header on physical line 4 needs `header_row: 2`. This follows from
+`skip_blank_lines`/`comment` being applied first and is easy to get wrong by
+one; it fails loudly (the error lists the column names actually found), but
+the field description says so to save the round trip.
+
+**Float parsing is left at pandas' default**, not `float_precision="round_trip"`.
+The default parser is not guaranteed bitwise round-trip exact — it can differ
+in the last unit in the last place — and the exact parser is available for
+about a third more parse time. Measured on a real campaign archive across
+three instrument families, over a million parsed values showed **zero**
+differences between the two, so the guarantee buys nothing observable on
+real instrument output, whose precision is far coarser than the ULP in
+question. Revisit only if a specific dataset is shown to be affected.
+
 **`icartt`** — TSARA's own FFI-1001 parser, because the PyPI `icartt`
 package is GPL-3.0 and unmaintained. Owning it also buys tolerance for what
 real archives contain: non-UTF-8 bytes, per-variable missing sentinels in

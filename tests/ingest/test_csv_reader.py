@@ -238,6 +238,138 @@ def test_header_row_below_a_preamble(tmp_path: Path) -> None:
     assert list(table.frame.columns) == ["t", "ch4"]
 
 
+def test_header_row_counts_lines_after_blanks_are_dropped(tmp_path: Path) -> None:
+    """The counting rule the field description now spells out.
+
+    Shaped like a real TEOM export: two preamble lines, a blank line, then
+    the header on physical line 4. Because blank lines are discarded before
+    pandas counts, the working value is 2 rather than the 3 a physical line
+    count would suggest.
+    """
+    path = _write(tmp_path, "serial,variant\nA1,Dichot\n\nt,ch4\n2026-01-01 00:00:00,1900.0\n")
+    table = read_csv(path, _loader(header_row=2))
+    assert list(table.frame.columns) == ["t", "ch4"]
+
+
+def test_a_trailing_delimiter_does_not_shift_the_columns(tmp_path: Path) -> None:
+    """Every data row carrying one more field than the header names.
+
+    This is the single most common malformation in the delimited-text files
+    a field campaign produces -- loggers that terminate each record with the
+    separator. Left alone, pandas resolves the mismatch by promoting column 0
+    to the index, so every name lands on its neighbour's values and the last
+    column is all-NaN. Nothing raises. A species would then be read from the
+    channel beside it, which is why this is tested against a real file's
+    shape rather than a synthetic convenience.
+    """
+    path = _write(
+        tmp_path,
+        "t,a,b,c\n2026-01-01 00:00:00,10.0,21.0,31.0,\n2026-01-01 00:00:01,11.0,22.0,32.0,\n",
+    )
+    table = read_csv(path, _loader())
+
+    # The timestamps stayed in their column and became the index ...
+    assert table.frame.index[0] == pd.Timestamp("2026-01-01 00:00:00")
+    # ... and every name still sits on its own values.
+    assert table.frame["a"].tolist() == [10.0, 11.0]
+    assert table.frame["b"].tolist() == [21.0, 22.0]
+    assert table.frame["c"].tolist() == [31.0, 32.0]
+    # The surplus position is kept and named rather than dropped, so a file
+    # that later turns out to have meant something by it is still readable.
+    assert table.frame["column_4"].isna().all()
+
+
+def test_a_trailing_delimiter_in_a_headerless_file(tmp_path: Path) -> None:
+    """The width probe and the real read must agree about the extra field.
+
+    They are two separate `read_csv` calls, so if only one of them ignored
+    the trailing delimiter the generated `names` list would be the wrong
+    length -- a mis-mapping rather than an error.
+    """
+    path = _write(tmp_path, "2026-01-01 00:00:00,10.0,21.0,\n2026-01-01 00:00:01,11.0,22.0,\n")
+    table = read_csv(
+        path,
+        _loader(header_row=None, column_names=["t", "a"], time={"column": "t", "format": None}),
+    )
+    assert table.frame["a"].tolist() == [10.0, 11.0]
+    assert table.frame["column_2"].tolist() == [21.0, 22.0]
+
+
+def test_data_wider_than_the_header_is_named_not_dropped(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A header one name short of its data, with real values underneath.
+
+    Distinct from the trailing-separator case above, and the one that costs
+    data: `index_col=False` alone keeps the named columns and discards the
+    rest. Since only a name is missing, TSARA supplies one.
+    """
+    path = _write(
+        tmp_path,
+        "t,a\n2026-01-01 00:00:00,10.0,0.3\n2026-01-01 00:00:01,11.0,0.4\n",
+    )
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.csv_reader"):
+        table = read_csv(path, _loader())
+
+    assert list(table.frame.columns) == ["t", "a", "column_2"]
+    assert table.frame["a"].tolist() == [10.0, 11.0]
+    assert table.frame["column_2"].tolist() == [0.3, 0.4]
+    assert "beyond its 2 header name(s)" in caplog.text
+
+
+def test_wider_data_is_detected_below_a_preamble(tmp_path: Path) -> None:
+    """The width probe must count lines the way `header_row` does.
+
+    Reading the first rows with `header=None` would not work here: pandas
+    fixes the field count from the first row it sees, so the two-column
+    preamble would decide the width for the whole file.
+    """
+    path = _write(
+        tmp_path,
+        "serial,variant\nA1,Dichot\n\nt,a\n2026-01-01 00:00:00,10.0,0.3\n",
+    )
+    table = read_csv(path, _loader(header_row=2))
+    assert list(table.frame.columns) == ["t", "a", "column_2"]
+    assert table.frame["column_2"].tolist() == [0.3]
+
+
+def test_a_header_wider_than_its_data_is_left_alone(tmp_path: Path) -> None:
+    """Only surplus *data* is named; a short row is pandas' business."""
+    path = _write(tmp_path, "t,a,b\n2026-01-01 00:00:00,10.0\n")
+    table = read_csv(path, _loader())
+    assert list(table.frame.columns) == ["t", "a", "b"]
+
+
+def test_duplicate_header_names_are_still_mangled(tmp_path: Path) -> None:
+    """A well-formed file must not lose pandas' duplicate-name handling.
+
+    Passing an explicit `names` list disables mangling, which would turn a
+    duplicated column into a RawTable contract violation. This is why the
+    widening probe returns None -- rather than the header names -- when the
+    file is well formed.
+    """
+    path = _write(tmp_path, "t,x,x\n2026-01-01 00:00:00,1.0,2.0\n")
+    table = read_csv(path, _loader())
+    assert list(table.frame.columns) == ["t", "x", "x.1"]
+
+
+def test_an_undecodable_file_fails_in_the_reader_not_the_probe(tmp_path: Path) -> None:
+    """The width probe must never be the thing that reports an error.
+
+    macOS leaves `._`-prefixed resource forks on network shares, and they
+    match the same glob as the data. They are binary, so the probe cannot
+    decode them; it must decline quietly and let the real read produce the
+    error that names the file.
+    """
+    path = tmp_path / "f.csv"
+    path.write_bytes(b"t,ch4\n2026-01-01 00:00:00,\xb0\xb0\n")
+    # Raw here because the registry, not the reader, is what attaches the
+    # filename to a non-TSARA exception; the point of the test is that the
+    # probe neither swallows the failure nor pre-empts it with its own.
+    with pytest.raises(UnicodeDecodeError):
+        read_csv(path, _loader())
+
+
 def test_comment_lines_are_skipped(tmp_path: Path) -> None:
     path = _write(tmp_path, "# instrument notes\nt,ch4\n2026-01-01 00:00:00,1900.0\n")
     table = read_csv(path, _loader(comment="#"))
@@ -303,6 +435,34 @@ def test_nonexistent_local_time_is_an_error(tmp_path: Path) -> None:
     path = _write(tmp_path, "t,ch4\n2026-03-08 02:30:00,1900.0\n")
     with pytest.raises(TsaraIngestError, match="ambiguous or nonexistent"):
         read_csv(path, _loader(time={"column": "t", "timezone": "America/Denver"}))
+
+
+def test_ignored_timezone_is_reported_when_the_file_carries_offsets(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A declaration that had no effect should not pass in silence.
+
+    The file's offsets rightly win, but the manifest author believed they
+    were supplying missing information. Saying so costs a log line and is
+    the cheapest place to notice a belief that may be wrong elsewhere too.
+    """
+    path = _write(tmp_path, "t,ch4\n2026-01-01T00:00:00+02:00,1900.0\n")
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.timeparse"):
+        read_csv(
+            path,
+            _loader(time={"column": "t", "format": "iso8601", "timezone": "America/Denver"}),
+        )
+    assert "explicit UTC offsets" in caplog.text
+
+
+def test_a_utc_declaration_with_offsets_stays_quiet(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """UTC is the default, so it is not evidence of a mistaken belief."""
+    path = _write(tmp_path, "t,ch4\n2026-01-01T00:00:00+02:00,1900.0\n")
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.timeparse"):
+        read_csv(path, _loader(time={"column": "t", "format": "iso8601"}))
+    assert caplog.text == ""
 
 
 def test_timezone_is_ignored_for_epoch_seconds(

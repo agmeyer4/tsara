@@ -196,6 +196,20 @@ def to_utc_naive_ns(times: pd.DatetimeIndex, timezone: str, path: Path) -> pd.Da
     import pandas as pd
 
     if times.tz is not None:
+        # The file won, which is correct -- an explicit offset is a statement
+        # by the instrument, a manifest zone is a statement about it. But a
+        # declared zone that had no effect should not pass in silence: the
+        # author believed they were supplying the missing information, and if
+        # their belief is wrong somewhere else in the manifest, this is the
+        # cheapest place to notice. The `unix` branch above warns for the
+        # same reason; leaving this one quiet made the two inconsistent.
+        if timezone.upper() != "UTC":
+            logger.warning(
+                "loader.time.timezone=%r is ignored for '%s': the file's "
+                "timestamps carry explicit UTC offsets, which take precedence.",
+                timezone,
+                path,
+            )
         result = times.tz_convert("UTC").tz_localize(None)
     elif timezone.upper() == "UTC":
         result = times

@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -105,6 +106,62 @@ def test_duplicate_registration_is_refused(isolated_registry: None) -> None:
         @register_reader("fake")
         def _second(path: Path, loader: LoaderConfig, /) -> RawTable:
             return _good_table(path)
+
+
+def test_the_refusal_points_at_the_way_out(isolated_registry: None) -> None:
+    """The error must name the override, not misdirect to a rename.
+
+    "Choose a different name" is wrong advice for the case that actually
+    produces this error in practice -- a re-run notebook cell -- where the
+    name is not the problem.
+    """
+
+    @register_reader("fake")
+    def _first(path: Path, loader: LoaderConfig, /) -> RawTable:
+        return _good_table(path)
+
+    with pytest.raises(ValueError, match="replace=True"):
+
+        @register_reader("fake")
+        def _second(path: Path, loader: LoaderConfig, /) -> RawTable:
+            return _good_table(path)
+
+
+def test_replace_allows_a_deliberate_override(
+    isolated_registry: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Re-running a cell that defines a reader must not need a kernel restart.
+
+    The guarantee being preserved is that no override is *silent*: the
+    replacement happens, and it is visible in the log.
+    """
+
+    @register_reader("fake")
+    def _first(path: Path, loader: LoaderConfig, /) -> RawTable:
+        return _good_table(path)
+
+    with caplog.at_level("WARNING", logger="tsara.ingest.registry"):
+
+        @register_reader("fake", replace=True)
+        def _second(path: Path, loader: LoaderConfig, /) -> RawTable:
+            return _good_table(path)
+
+    assert get_reader("fake") is _second
+    assert "Replacing the reader registered for format 'fake'" in caplog.text
+
+
+def test_replace_on_an_unused_name_is_not_an_error(isolated_registry: None) -> None:
+    """A first registration with replace=True registers, and logs nothing.
+
+    This is the state a notebook cell is in on its *first* run, so it must
+    not warn -- otherwise every such reader warns once for no reason.
+    """
+
+    @register_reader("brand_new", replace=True)
+    def _reader(path: Path, loader: LoaderConfig, /) -> RawTable:
+        return _good_table(path)
+
+    assert get_reader("brand_new") is _reader
 
 
 @pytest.mark.parametrize("name", ["", "   "])
@@ -238,6 +295,23 @@ def test_check_rejects_duplicate_columns() -> None:
     )
     frame = pd.DataFrame([[1.0, 2.0]], index=index, columns=["x", "x"])
     with pytest.raises(TsaraIngestError, match="duplicate column"):
+        check_raw_table(RawTable(frame=frame, path=Path("f.csv")), reader_name="csv")
+
+
+def test_check_rejects_nat_in_the_index() -> None:
+    """A NaT places a row at an undefined point on the timeline.
+
+    Silent in exactly the way the tz-aware index is: it sorts, slices and
+    bins without complaint. No shipped reader can produce one -- all three
+    drop unparseable timestamps -- so this guards readers registered from
+    outside TSARA, the population the contract claims to police.
+    """
+    # Built from a numpy array rather than `to_datetime([... , None])`:
+    # pandas-stubs rejects a list containing None as its argument type.
+    values = np.array(["2026-01-01", "NaT"], dtype="datetime64[ns]")
+    index = pd.DatetimeIndex(values, name=TIME_INDEX_NAME)
+    frame = pd.DataFrame({"x": [1.0, 2.0]}, index=index)
+    with pytest.raises(TsaraIngestError, match="NaT timestamp"):
         check_raw_table(RawTable(frame=frame, path=Path("f.csv")), reader_name="csv")
 
 

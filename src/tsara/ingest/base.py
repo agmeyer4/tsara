@@ -178,8 +178,10 @@ def check_raw_table(table: RawTable, *, reader_name: str) -> RawTable:
     ------
     TsaraIngestError
         If the index is not a tz-naive nanosecond ``DatetimeIndex`` named
-        ``time``, or the frame carries duplicate column names.
+        ``time``, contains ``NaT``, or the frame carries duplicate column
+        names.
     """
+    import numpy as np
     import pandas as pd
 
     frame = table.frame
@@ -208,6 +210,22 @@ def check_raw_table(table: RawTable, *, reader_name: str) -> RawTable:
         raise TsaraIngestError(
             f"Reader '{reader_name}' returned {table.path} with index name "
             f"{index.name!r}; RawTable requires it to be {TIME_INDEX_NAME!r}."
+        )
+    # A NaT is the same class of failure as the tz-aware index above: it
+    # survives sorting, slicing and binning without complaint, then places
+    # rows at an undefined point on the timeline. Every reader TSARA ships
+    # drops unparseable timestamps itself, so this clause exists for readers
+    # registered from outside -- which is exactly the population the contract
+    # claims to police and the only one that could otherwise violate it.
+    if index.hasnans:
+        raise TsaraIngestError(
+            f"Reader '{reader_name}' returned {table.path} with "
+            # Counted through numpy: pandas-stubs types `.isna()` as
+            # Index[bool], which has no `.sum()` as far as mypy is concerned.
+            f"{int(np.count_nonzero(np.asarray(index.isna())))} NaT "
+            "timestamp(s) in the index. Rows "
+            "whose timestamp could not be parsed must be dropped by the "
+            "reader, not carried forward."
         )
     if frame.columns.has_duplicates:
         duplicated = sorted(set(frame.columns[frame.columns.duplicated()]))

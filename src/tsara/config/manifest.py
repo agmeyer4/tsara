@@ -533,7 +533,10 @@ class CSVLoader(_BaseLoader):
         default=0,
         ge=0,
         description=(
-            "0-based row index of the column-name line, or null for a file "
+            "0-based index of the column-name line, counted AFTER blank and "
+            "comment lines are discarded -- not its physical line number. A "
+            "file whose header sits on physical line 4 with one blank line "
+            "above it therefore needs `header_row: 2`. Use null for a file "
             "with no header at all (which then requires `column_names`)."
         ),
     )
