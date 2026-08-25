@@ -54,6 +54,7 @@ from tsara import __version__
 from tsara.core.bundle import (
     BUNDLE_FORMAT_VERSION,
     BUNDLE_MANIFEST,
+    BUNDLE_STAGE_KEY,
     BUNDLE_STREAMS_DIR,
     TsaraBundleError,
 )
@@ -72,6 +73,7 @@ __all__ = [
     "BUNDLE_FORMAT_VERSION",
     "BUNDLE_GROUND_TRUTH",
     "BUNDLE_MANIFEST",
+    "BUNDLE_STAGE_KEY",
     "BUNDLE_STREAMS_DIR",
     "TsaraBundleError",
     "load_bundle",
@@ -81,6 +83,9 @@ __all__ = [
 #: Files this stage adds on top of the shared layout (tsara.core.bundle).
 BUNDLE_CONFIG = "config.yaml"
 BUNDLE_GROUND_TRUTH = "ground_truth.parquet"
+
+#: Value of the shared ``stage`` key for bundles this module writes.
+_STAGE = "synthetic"
 
 
 def save_bundle(dataset: SyntheticDataset, path: str | Path) -> Path:
@@ -139,7 +144,7 @@ def save_bundle(dataset: SyntheticDataset, path: str | Path) -> Path:
             {
                 "bundle_format_version": BUNDLE_FORMAT_VERSION,
                 "tsara_version": __version__,
-                "stage": "synthetic",
+                BUNDLE_STAGE_KEY: _STAGE,
                 "config_name": dataset.config.name,
                 "streams": sorted(dataset.streams),
                 "n_ground_truth_rows": len(dataset.ground_truth),
@@ -201,6 +206,17 @@ def load_bundle(path: str | Path) -> SyntheticDataset:
         raise TsaraBundleError(
             f"Bundle '{bundle}' has format version {found_version!r}, but this "
             f"TSARA understands version {BUNDLE_FORMAT_VERSION}."
+        )
+
+    # Checked before the stage-specific files, so that pointing this loader
+    # at another stage's bundle says so plainly instead of reporting a
+    # missing 'config.yaml' -- a message that reads like a corrupt synthetic
+    # bundle rather than a perfectly good bundle of the wrong kind.
+    found_stage = manifest.get(BUNDLE_STAGE_KEY)
+    if found_stage != _STAGE:
+        raise TsaraBundleError(
+            f"Bundle '{bundle}' was written by the '{found_stage}' stage, not "
+            f"'{_STAGE}'. Use that stage's loader instead."
         )
 
     config_path = bundle / BUNDLE_CONFIG

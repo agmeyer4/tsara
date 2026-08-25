@@ -39,6 +39,7 @@ from tsara.config.manifest import Manifest
 from tsara.core.bundle import (
     BUNDLE_FORMAT_VERSION,
     BUNDLE_MANIFEST,
+    BUNDLE_STAGE_KEY,
     BUNDLE_STREAMS_DIR,
     TsaraBundleError,
 )
@@ -104,7 +105,7 @@ def save_streams(collection: StreamCollection, path: str | Path) -> Path:
             {
                 "bundle_format_version": BUNDLE_FORMAT_VERSION,
                 "tsara_version": __version__,
-                "stage": _STAGE,
+                BUNDLE_STAGE_KEY: _STAGE,
                 "campaign": collection.manifest.name,
                 "streams": sorted(collection.streams),
             },
@@ -180,7 +181,7 @@ def _read_descriptor(bundle: Path) -> dict[str, Any]:
             f"Bundle '{bundle}' has format version {version!r}, but this TSARA "
             f"reads version {BUNDLE_FORMAT_VERSION}."
         )
-    stage = descriptor.get("stage")
+    stage = descriptor.get(BUNDLE_STAGE_KEY)
     if stage != _STAGE:
         raise TsaraBundleError(
             f"Bundle '{bundle}' was written by the '{stage}' stage, not "

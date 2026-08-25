@@ -122,3 +122,35 @@ def test_the_two_synthetic_loaders_are_distinct_names() -> None:
     # the thing that actually has to stay true.
     assert tsara.load_synthetic.__module__ == "tsara.config.loader"
     assert tsara.synthetic.load_bundle.__module__ == "tsara.synthetic.bundle"
+
+
+def test_the_ingest_time_index_name_is_the_stream_time_coordinate() -> None:
+    """The reader contract and the finished stream must name one axis.
+
+    ``ingest.base.TIME_INDEX_NAME`` is what every reader's raw index is
+    checked against; ``core.naming.TIME_COORD`` is what the stream assembler
+    names the finished coordinate. They were once two independent literals
+    that both happened to say ``"time"`` -- the precise coupling
+    ``tsara.core.naming`` exists to remove, reproduced one directory over.
+    Identity, not equality, is the thing worth asserting: equal literals is
+    the state this guards against.
+    """
+    from tsara.core.naming import TIME_COORD
+    from tsara.ingest.base import TIME_INDEX_NAME
+
+    assert TIME_INDEX_NAME is TIME_COORD
+
+
+def test_the_two_bundle_writers_declare_different_stages() -> None:
+    """Both layouts share a skeleton, so the stage key is what separates them.
+
+    A synthetic bundle and an ingest bundle are both a ``bundle.json`` at
+    format version 1 beside a ``streams/`` directory. Nothing in the shared
+    skeleton distinguishes them, which is why each loader checks the stage
+    before touching its own files -- and why the two stage values must not
+    collide.
+    """
+    from tsara.ingest.bundle import _STAGE as ingest_stage
+    from tsara.synthetic.bundle import _STAGE as synthetic_stage
+
+    assert ingest_stage != synthetic_stage

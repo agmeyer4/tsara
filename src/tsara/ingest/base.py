@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from tsara.core.exceptions import TsaraError
+from tsara.core.naming import TIME_COORD
 
 if TYPE_CHECKING:  # pragma: no cover
     import pandas as pd
@@ -71,8 +72,15 @@ __all__ = [
 ]
 
 #: Name TSARA gives the time index everywhere, from raw table to final stream.
-#: Centralized so a reader and the stream assembler cannot disagree about it.
-TIME_INDEX_NAME = "time"
+#:
+#: Bound to :data:`tsara.core.naming.TIME_COORD` rather than spelled again,
+#: because the stream assembler names the finished axis from *that* constant
+#: (:mod:`tsara.ingest.streams`). Two literals that merely happen to match
+#: would let a rename split the reader contract from the stream it feeds --
+#: the exact coupling :mod:`tsara.core.naming` exists to remove. The separate
+#: name is kept because a reader is checked against a raw *index*, not against
+#: a finished coordinate, and the contract reads better for saying so.
+TIME_INDEX_NAME = TIME_COORD
 
 
 class TsaraIngestError(TsaraError):

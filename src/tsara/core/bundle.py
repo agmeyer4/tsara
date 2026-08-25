@@ -23,6 +23,7 @@ from tsara.core.exceptions import TsaraError
 __all__ = [
     "BUNDLE_FORMAT_VERSION",
     "BUNDLE_MANIFEST",
+    "BUNDLE_STAGE_KEY",
     "BUNDLE_STREAMS_DIR",
     "TsaraBundleError",
 ]
@@ -36,6 +37,16 @@ BUNDLE_STREAMS_DIR = "streams"
 #: Bumped only when the layout changes incompatibly, so a future reader can
 #: refuse (or migrate) an old bundle rather than misinterpreting it.
 BUNDLE_FORMAT_VERSION = 1
+
+#: Key in ``bundle.json`` naming the stage that wrote the bundle.
+#:
+#: The shared skeleton above is deliberately identical across stages, so the
+#: skeleton alone cannot tell a synthetic bundle from an ingest one -- both
+#: are a ``bundle.json`` at format version 1 beside a ``streams/`` directory.
+#: This key is what makes them distinguishable, which means every loader must
+#: agree on its spelling; that is the definition of something belonging here
+#: rather than in either stage.
+BUNDLE_STAGE_KEY = "stage"
 
 
 class TsaraBundleError(TsaraError):

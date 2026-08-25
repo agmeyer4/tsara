@@ -49,7 +49,14 @@ import numpy as np
 
 from tsara import __version__
 from tsara.core.geodesy import positions_at
-from tsara.core.naming import sigma_rand_name, sigma_sys_name
+from tsara.core.naming import (
+    ALTITUDE_COORD,
+    LATITUDE_COORD,
+    LONGITUDE_COORD,
+    TIME_COORD,
+    sigma_rand_name,
+    sigma_sys_name,
+)
 from tsara.core.timebase import epoch_ns as _epoch_ns
 from tsara.core.timebase import epoch_s as _epoch_s
 from tsara.core.timebase import timestamp_epoch_ns as _stamp_ns
@@ -518,32 +525,32 @@ def _render_instrument(
         if species.quantization is not None:
             attrs["quantization"] = float(species.quantization)
 
-        data_vars[species_name] = ("time", observable, attrs)
+        data_vars[species_name] = (TIME_COORD, observable, attrs)
         data_vars[f"{TRUTH_PREFIX}background_{species_name}"] = (
-            "time",
+            TIME_COORD,
             background,
             {"units": species.units, "description": "True background (answer key)."},
         )
         data_vars[f"{TRUTH_PREFIX}enhancement_{species_name}"] = (
-            "time",
+            TIME_COORD,
             enhancement,
             {"units": species.units, "description": "True plume enhancement (answer key)."},
         )
         if applied.sigma_rand is not None:
             data_vars[f"{TRUTH_PREFIX}{sigma_rand_name(species_name)}"] = (
-                "time",
+                TIME_COORD,
                 applied.sigma_rand,
                 {"units": species.units, "description": "True random 1-sigma (answer key)."},
             )
         if applied.sigma_sys is not None:
             data_vars[f"{TRUTH_PREFIX}{sigma_sys_name(species_name)}"] = (
-                "time",
+                TIME_COORD,
                 applied.sigma_sys,
                 {"units": species.units, "description": "True systematic 1-sigma (answer key)."},
             )
         for column, values in applied.reported.items():
             data_vars[column] = (
-                "time",
+                TIME_COORD,
                 values,
                 {
                     "units": species.units,
@@ -553,7 +560,7 @@ def _render_instrument(
 
     dataset = xr.Dataset(
         data_vars=data_vars,
-        coords={"time": times},
+        coords={TIME_COORD: times},
         attrs=_stream_attrs(config, instrument_name, instrument),
     )
     _attach_platform_coords(dataset, config, times, track)
@@ -675,6 +682,15 @@ def _event_position(
     -------
     dict
         ``{"latitude": ..., "longitude": ...}``.
+
+    Notes
+    -----
+    These keys are :class:`~tsara.synthetic.plumes.GroundTruthEvent` *field
+    names* -- the result is splatted into its constructor -- not stream
+    coordinates, so they are deliberately spelled out rather than taken from
+    :mod:`tsara.core.naming`. Binding them to ``LATITUDE_COORD`` would tie a
+    dataclass signature to a netCDF coordinate name and break the catalog if
+    either were ever renamed independently.
     """
     import pandas as pd
 
@@ -716,18 +732,18 @@ def _build_gps_stream(
 
     return xr.Dataset(
         data_vars={
-            "latitude": (
-                "time",
+            LATITUDE_COORD: (
+                TIME_COORD,
                 latitude,
                 {"units": "degrees_north", "role": "gps_lat"},
             ),
-            "longitude": (
-                "time",
+            LONGITUDE_COORD: (
+                TIME_COORD,
                 longitude,
                 {"units": "degrees_east", "role": "gps_lon"},
             ),
         },
-        coords={"time": times},
+        coords={TIME_COORD: times},
         attrs={
             "tsara_version": __version__,
             "tsara_stage": "synthetic",
@@ -802,14 +818,14 @@ def _attach_platform_coords(
         Mobile track, if any.
     """
     if isinstance(config.platform, StationarySite):
-        dataset.coords["latitude"] = config.platform.latitude
-        dataset.coords["longitude"] = config.platform.longitude
+        dataset.coords[LATITUDE_COORD] = config.platform.latitude
+        dataset.coords[LONGITUDE_COORD] = config.platform.longitude
         if config.platform.altitude_m is not None:
-            dataset.coords["altitude"] = config.platform.altitude_m
+            dataset.coords[ALTITUDE_COORD] = config.platform.altitude_m
         return
 
     assert track is not None
     track_times, latitude, longitude = track
     lat, lon = positions_at(times, track_times, latitude, longitude)
-    dataset.coords["latitude"] = ("time", lat)
-    dataset.coords["longitude"] = ("time", lon)
+    dataset.coords[LATITUDE_COORD] = (TIME_COORD, lat)
+    dataset.coords[LONGITUDE_COORD] = (TIME_COORD, lon)
