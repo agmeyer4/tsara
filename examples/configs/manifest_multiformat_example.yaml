@@ -95,6 +95,14 @@ instruments:
       format: parquet
       # One instrument nesting a level deeper than its siblings is common.
       path_template: "aligned/aeris/*/*.parquet"
+      # Templates are include-only, so an archive that quarantines rejected
+      # files in place -- 'aeris/Eng/bad/*.parquet' beside 'aeris/Eng/*.parquet'
+      # -- needs a way to say "not that". Note the single '*' above already
+      # excludes them by not descending; `exclude` is what you need the moment
+      # a template uses '**', which is the usual answer to varying depth.
+      exclude:
+        - "**/bad/**"
+        - "**/bad_timestamp/**"
       # No `time:` block: parquet stores the dataframe index, so there is
       # usually no timestamp to parse. Declare one only for files that keep
       # time in an ordinary column instead.

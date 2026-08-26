@@ -37,7 +37,24 @@ and mixes three kinds of token:
 ``*``, ``**``, ``?``, ``[abc]``
     Ordinary glob wildcards. ``*`` stays within one path segment; ``**``
     spans segments, which is the escape hatch for archives whose depth
-    varies.
+    varies. Negated classes use the glob spelling ``[!abc]``, not the regex
+    ``[^abc]``.
+
+Why there is also an exclude list
+---------------------------------
+Templates are include-only, and that is not enough for archives that
+**quarantine data in place**. The target archive's instrument-aligned stage
+keeps rejected files in ``bad/`` and ``bad_timestamp/`` subdirectories
+sitting directly beneath the good ones — 187 of its 608 files. A ``**``
+template, which is exactly what the varying-depth advice above recommends,
+sweeps all of them in without a word. Careful per-directory templates avoid
+it, since ``Eng/*.parquet`` does not cross into ``Eng/bad/``, but only if
+you already know the quarantine is there.
+
+``_BaseLoader.exclude`` takes patterns in the same syntax and removes what
+they match, reporting the count. Saying "not that" is a layout fact, so it
+belongs in the manifest alongside the layout facts that find files in the
+first place.
 
 Why both a glob and a regex
 ---------------------------
@@ -232,11 +249,30 @@ def compile_template(
             close = template.find("]", index)
             if close == -1:
                 raise TsaraIngestError(f"Unterminated '[' in path template '{template}'.")
-            # A character class means the same thing to glob and to re, so it
-            # passes through to both untouched.
             group = template[index : close + 1]
+            # A character class means ALMOST the same thing to glob and to re.
+            # The exception is negation, and it is silent: glob spells it
+            # '[!abc]' while re spells it '[^abc]'. Passing the class through
+            # untouched made '[!x]*.csv' glob-match 'a1.csv' and then be
+            # rejected by its own harvesting regex, which reads '[!x]' as a
+            # literal '!' or 'x' -- so the template found nothing and the
+            # crawl reported "no files found" for a pattern that was correct.
+            if group.startswith("[!"):
+                regex_parts.append("[^" + group[2:])
+            elif group.startswith("[^"):
+                # The reverse divergence, refused rather than translated:
+                # '[^abc]' is negation to re but a literal class containing
+                # '^' to glob, so the two halves would disagree whichever way
+                # it were interpreted. Naming the supported spelling is more
+                # use than silently picking one.
+                raise TsaraIngestError(
+                    f"Character class '{group}' in path template '{template}' uses the "
+                    "regex spelling of negation. Path templates are glob patterns: "
+                    f"write '[!{group[2:-1]}]' instead."
+                )
+            else:
+                regex_parts.append(group)
             glob_parts.append(group)
-            regex_parts.append(group)
             index = close + 1
 
         elif char == "/":
@@ -260,8 +296,12 @@ def crawl(
     """Find every file an instrument's loader describes.
 
     Searches all of the loader's templates, merges the results, removes
-    duplicates, and applies format-specific selection (currently ICARTT's
-    revision policy).
+    duplicates and anything the loader's ``exclude`` patterns match, and
+    applies format-specific selection (currently ICARTT's revision policy).
+
+    AppleDouble resource forks (``._*``) are skipped unconditionally: they
+    are macOS metadata, not data, and ``pathlib.Path.glob`` matches them
+    where ``glob.glob`` would not.
 
     Parameters
     ----------
@@ -284,17 +324,23 @@ def crawl(
     Raises
     ------
     TsaraIngestError
-        If ``base_path`` is not a directory, a template is malformed, or no
-        template matched anything at all.
+        If ``base_path`` is not a directory, a template is malformed, no
+        template matched anything at all, or every matched file was removed
+        by an ``exclude`` pattern.
     """
     base = Path(base_path)
     if not base.is_dir():
         raise TsaraIngestError(f"Manifest base_path '{base}' is not an existing directory.")
 
     fixed = dict(metadata or {})
+    # Compiled once rather than per template: exclusion is a property of the
+    # instrument, not of the layout that happened to find the file.
+    exclusions = [compile_template(pattern, fixed)[1] for pattern in loader.exclude]
     # Keyed by path so a file described by two templates is ingested once.
     # First template wins, matching the declaration order in the manifest.
     matches: dict[Path, FileMatch] = {}
+    n_excluded = 0
+    n_resource_forks = 0
 
     for template in loader.path_templates:
         pattern, regex = compile_template(template, fixed)
@@ -302,13 +348,34 @@ def crawl(
         for path in base.glob(pattern):
             if not path.is_file():
                 continue
+            if path.name.startswith("._"):
+                # AppleDouble resource forks. `pathlib.Path.glob` matches
+                # dotfiles where `glob.glob` does not, so an archive touched
+                # by macOS hands every '*.csv' template a shadow '._*.csv'
+                # of binary metadata, which then fails the read and reports
+                # itself as an unreadable data file. 18 of these sit in the
+                # target archive's aerosol directories.
+                #
+                # Only this prefix, not every dotfile: '._' is unambiguously
+                # a resource fork, whereas a leading dot in general is just
+                # a hidden file and could in principle be real data someone
+                # deliberately pointed a template at.
+                n_resource_forks += 1
+                continue
             relative = path.relative_to(base).as_posix()
             matched = regex.fullmatch(relative)
             if matched is None:
                 # Survived the glob but not the stricter regex — e.g. a
                 # `{field}` that would have to match an empty segment.
                 continue
+            # Counted before exclusion, so that "this template matched
+            # nothing" keeps meaning "this layout is not present" rather
+            # than "everything it found was excluded", which is a different
+            # problem with a different fix.
             found += 1
+            if any(exclusion.fullmatch(relative) for exclusion in exclusions):
+                n_excluded += 1
+                continue
             if path in matches:
                 _warn_if_ambiguous(matches[path], template, matched.groupdict())
                 continue
@@ -321,7 +388,25 @@ def crawl(
         if found == 0:
             logger.warning("Path template '%s' matched no files under %s.", template, base)
 
+    if n_resource_forks:
+        logger.debug(
+            "Skipped %d AppleDouble resource fork(s) ('._*') under %s.", n_resource_forks, base
+        )
+    if n_excluded:
+        # Info, not debug: a run that quietly drops a third of an archive
+        # should say so at the level people actually read.
+        logger.info(
+            "Excluded %d matched file(s) under %s via %s.", n_excluded, base, list(loader.exclude)
+        )
+
     if not matches:
+        if n_excluded:
+            raise TsaraIngestError(
+                f"Every one of the {n_excluded} file(s) matched under '{base}' by "
+                f"{list(loader.path_templates)} was removed by exclude patterns "
+                f"{list(loader.exclude)}. The templates are finding data; the "
+                "exclusions are too broad."
+            )
         raise TsaraIngestError(
             f"No files found under '{base}' for any of the templates "
             f"{list(loader.path_templates)}. Check base_path, the template "

@@ -37,6 +37,12 @@ def _parquet(**kwargs: Any) -> ParquetLoader:
     return ParquetLoader(**kwargs)
 
 
+def _csv(**kwargs: Any) -> CSVLoader:
+    """Build a CSVLoader with a time block, which the crawler never consults."""
+    kwargs.setdefault("time", {"column": "t", "format": "iso8601"})
+    return CSVLoader(**kwargs)
+
+
 def _names(matches: list[FileMatch]) -> list[str]:
     return [match.path.name for match in matches]
 
@@ -383,3 +389,137 @@ def test_double_star_must_be_a_whole_component(template: str) -> None:
     """glob only treats '**' as recursive when it stands alone."""
     with pytest.raises(TsaraIngestError, match="whole path component"):
         compile_template(template)
+
+
+# ---------------------------------------------------------------------------
+# Walkthrough stage 5: exclusion, resource forks, and negated classes
+# ---------------------------------------------------------------------------
+
+
+def test_exclude_removes_quarantined_subdirectories(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The layout that motivated `exclude`, in miniature.
+
+    The target archive's instrument-aligned stage keeps rejected files in
+    ``bad/`` and ``bad_timestamp/`` directories sitting directly beneath the
+    good ones — 187 of its 608 files. Templates are otherwise include-only,
+    so the '**' pattern recommended for varying depth swept every one of
+    them in silently.
+    """
+    _touch(
+        tmp_path,
+        "aeris/Eng/good1.parquet",
+        "aeris/Eng/good2.parquet",
+        "aeris/Eng/bad/reject1.parquet",
+        "aeris/Raw/bad_timestamp/reject2.parquet",
+    )
+    swept = crawl(tmp_path, _parquet(path_template="**/*.parquet"))
+    assert len(swept) == 4  # the problem
+
+    with caplog.at_level(logging.INFO, logger="tsara.ingest.crawler"):
+        kept = crawl(
+            tmp_path,
+            _parquet(path_template="**/*.parquet", exclude=["**/bad/**", "**/bad_timestamp/**"]),
+        )
+    assert set(_names(kept)) == {"good1.parquet", "good2.parquet"}
+    assert "Excluded 2 matched file(s)" in caplog.text
+
+
+def test_exclude_accepts_a_bare_string(tmp_path: Path) -> None:
+    """Same shorthand `path_template` already allows."""
+    _touch(tmp_path, "a/keep.ict", "a/skip/drop.ict")
+    found = crawl(tmp_path, _icartt(path_template="**/*.ict", exclude="**/skip/**"))
+    assert _names(found) == ["keep.ict"]
+
+
+def test_exclude_rejects_an_empty_pattern() -> None:
+    with pytest.raises(ValueError, match="non-empty path patterns"):
+        ICARTTLoader(path_template="*.ict", exclude=["  "])
+
+
+def test_excluding_everything_is_an_error_that_says_so(tmp_path: Path) -> None:
+    """Distinct from 'no files found': the templates worked, the filter did not.
+
+    Reported separately because the two have opposite fixes — widen the
+    template, or narrow the exclusion.
+    """
+    _touch(tmp_path, "a/bad/x.ict", "a/bad/y.ict")
+    with pytest.raises(TsaraIngestError, match="exclusions are too broad"):
+        crawl(tmp_path, _icartt(path_template="**/*.ict", exclude=["**/bad/**"]))
+
+
+def test_a_template_matching_only_excluded_files_still_reports_matches(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """'Matched no files' must keep meaning 'this layout is absent'.
+
+    A template whose every hit is excluded found the layout perfectly well;
+    saying it matched nothing would send the reader after the wrong bug.
+    """
+    _touch(tmp_path, "a/keep.ict", "b/bad/drop.ict")
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.crawler"):
+        crawl(
+            tmp_path,
+            _icartt(path_templates=["a/*.ict", "b/**/*.ict"], exclude=["**/bad/**"]),
+        )
+    assert "matched no files" not in caplog.text
+
+
+def test_appledouble_resource_forks_are_skipped(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """macOS metadata is not data, and pathlib.glob hands it over anyway.
+
+    `pathlib.Path.glob` matches dotfiles where `glob.glob` does not, so a
+    '*.csv' template over a Mac-touched archive picks up a binary '._*.csv'
+    shadow for every real file. 18 sit in the target archive's aerosol
+    directories, each one an unreadable "data file" in the run log.
+    """
+    _touch(tmp_path, "grimm/2024-02-22.csv", "grimm/._2024-02-22.csv")
+    loader = _csv(path_template="grimm/*.csv")
+
+    with caplog.at_level(logging.DEBUG, logger="tsara.ingest.crawler"):
+        found = crawl(tmp_path, loader)
+
+    assert _names(found) == ["2024-02-22.csv"]
+    assert "Skipped 1 AppleDouble resource fork" in caplog.text
+
+
+def test_ordinary_dotfiles_are_not_skipped(tmp_path: Path) -> None:
+    """Only '._' is unambiguously a resource fork.
+
+    A leading dot on its own just means hidden, and a template pointed at one
+    deliberately should still find it.
+    """
+    _touch(tmp_path, "d/.hidden.ict")
+    found = crawl(tmp_path, _icartt(path_template="d/*.ict"))
+    assert _names(found) == [".hidden.ict"]
+
+
+def test_glob_negated_character_class_reaches_the_regex(tmp_path: Path) -> None:
+    """`[!x]` is glob negation; the harvesting regex must agree.
+
+    Passed through untouched it read as a literal '!' or 'x', so the glob
+    matched the file and the regex then threw it away — a correct template
+    reporting "no files found".
+    """
+    pattern, regex = compile_template("[!x]*.ict")
+    assert pattern == "[!x]*.ict"
+    assert regex.pattern == r"[^x][^/]*\.ict"
+
+    _touch(tmp_path, "a1.ict", "x1.ict")
+    found = crawl(tmp_path, _icartt(path_template="[!x]*.ict"))
+    assert _names(found) == ["a1.ict"]
+
+
+def test_regex_spelling_of_negation_is_refused() -> None:
+    """'[^x]' negates in re but is a literal class in glob, so it cannot work."""
+    with pytest.raises(TsaraIngestError, match=r"write '\[!x\]'"):
+        compile_template("[^x]*.ict")
+
+
+def test_ordinary_character_classes_still_pass_through() -> None:
+    pattern, regex = compile_template("[0-9]*.ict")
+    assert pattern == "[0-9]*.ict"
+    assert regex.pattern == r"[0-9][^/]*\.ict"

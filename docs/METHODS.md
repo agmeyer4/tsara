@@ -895,6 +895,55 @@ Readers are selected by name from a registry (`@register_reader("csv")`),
 the same convention this document fixes for noise and regression estimators.
 Registered names: `csv`, `icartt`, `parquet`.
 
+### 9.1.1 Finding the files: path templates, and saying "not that"
+
+Directory and naming conventions are **data, not code** (CLAUDE.md §5). A
+path template describes one layout; a loader carries a list of them, because
+one instrument's files routinely span several conventions at once. Each
+template compiles to a *pair* — a glob to drive the filesystem walk, since
+only the filesystem can enumerate what exists, and a regex to harvest
+`{field}` values, since a glob cannot report which text a wildcard consumed.
+The regex is the stricter of the two and so doubles as a second filter.
+
+That pairing only works while the two halves agree, and there is one place
+they silently did not: negation. Glob spells it `[!abc]`, regex spells it
+`[^abc]`, and the class was passed through to both untouched — so `[!x]*.csv`
+glob-matched `a1.csv` and was then discarded by its own harvesting regex,
+which read `[!x]` as a literal `!` or `x`. A correct template reported "no
+files found". The glob spelling is now translated for the regex, and the
+regex spelling is refused with a message naming the supported one, because
+`[^abc]` cannot be made to mean the same thing to both halves.
+
+**Templates are include-only, and that is not sufficient.** Archives
+quarantine data in place: the target archive's instrument-aligned stage
+keeps rejected files in `bad/` and `bad_timestamp/` subdirectories sitting
+directly beneath the good ones, **187 of its 608 files**. A `**` template —
+exactly what varying archive depth calls for — sweeps every one of them in
+without a word. Per-directory templates avoid it, since `Eng/*.parquet` does
+not descend into `Eng/bad/`, but only if the quarantine is already known
+about. `_BaseLoader.exclude` therefore takes patterns in the same syntax and
+removes what they match, reporting the count at INFO: a run that drops a
+third of an archive should say so at a level people read. Excluding
+*everything* a template found is reported as its own error, since "the
+templates found nothing" and "the exclusions removed everything" have
+opposite fixes.
+
+**AppleDouble resource forks (`._*`) are skipped unconditionally.**
+`pathlib.Path.glob` matches dotfiles where `glob.glob` does not, so a
+Mac-touched archive hands every `*.csv` template a binary `._*.csv` shadow
+of each real file, which then fails the read and reports itself as an
+unreadable data file — 18 of them in the target archive's aerosol
+directories. Only this prefix is skipped, not every dotfile: `._` is
+unambiguously macOS metadata, whereas a leading dot in general only means
+hidden, and could be data someone deliberately pointed a template at.
+
+**Known gap, deliberately not closed here.** The same archive publishes a
+`quality_manifest.yaml` marking individual files `good`/`bad`. 31 of its 34
+`bad` entries already sit in quarantine directories, so honouring the file
+would add only 3 files beyond what `exclude` catches — too little to justify
+a file-level accept/reject mechanism inside Phase 3. It is recorded as an
+open design flag instead.
+
 ### 9.2 What each reader must get right
 
 **`csv`** — comma, tab, whitespace-run and general regex delimiters;

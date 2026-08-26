@@ -463,6 +463,22 @@ class _BaseLoader(_StrictModel):
         ),
     )
 
+    exclude: tuple[str, ...] = Field(
+        default=(),
+        validation_alias=AliasChoices("exclude", "excludes"),
+        description=(
+            "Path patterns, in the same syntax as path_templates, naming files "
+            "the crawler must NOT ingest even when a template matches them. "
+            "Templates are otherwise include-only, which is a problem for "
+            "archives that quarantine data in place: a tree holding "
+            "'<instrument>/Eng/*.parquet' alongside '<instrument>/Eng/bad/*.parquet' "
+            "gives a '**' template no way to say 'not that', and the rejected "
+            "files are ingested silently. Write e.g. '**/bad/**' to exclude "
+            "them. Excluded files are counted and reported, never dropped "
+            "without a word."
+        ),
+    )
+
     max_dropped_fraction: float = Field(
         default=0.5,
         ge=0.0,
@@ -486,6 +502,22 @@ class _BaseLoader(_StrictModel):
         """Accept a bare string as shorthand for a one-element list."""
         if isinstance(value, str):
             return (value,)
+        return value
+
+    @field_validator("exclude", mode="before")
+    @classmethod
+    def _coerce_single_exclude(cls, value: object) -> object:
+        """Accept a bare string as shorthand for a one-element list."""
+        if isinstance(value, str):
+            return (value,)
+        return value
+
+    @field_validator("exclude")
+    @classmethod
+    def _sane_excludes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for pattern in value:
+            if not pattern or pattern.strip() == "":
+                raise ValueError("exclude entries must be non-empty path patterns.")
         return value
 
     @field_validator("path_templates")
