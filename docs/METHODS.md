@@ -974,6 +974,59 @@ values, not the labels** — numeric means seconds past midnight, anything
 else is parsed as timestamps — because archives spell that unit at least a
 dozen ways, including names that falsely suggest a different epoch.
 
+Keying off the values raises the question of what to do when the values
+disagree with each other, and the answer has to be a **majority vote**, not
+an existence test. Asking "is *any* value numeric?" lets one token decide a
+whole file: two PTR-MS VOC files in the surveyed archive hold ten thousand
+datetime strings alongside exactly two numeric tokens that leaked in from a
+mis-declared header block, and the existence test sent both down the
+seconds-past-midnight branch, where every genuine timestamp then failed to
+convert and was discarded. The result was 2 surviving rows out of 10,235,
+across 35 VOC species, reported only as a warning. Counting both
+interpretations and taking the larger costs a second parse **only for
+genuinely mixed columns** — all-numeric and none-numeric short-circuit
+first — and ties favour the spec-compliant seconds reading, since a tie
+means the evidence does not actually distinguish them.
+
+**`NLHEAD` is checked against arithmetic before it is trusted.** The first
+twelve lines are fixed by the format and each of the `NV` dependent
+variables needs its own definition line, so any valid header is at least
+`12 + NV` lines and a file claiming fewer is provably wrong about itself.
+Two archive files declare `NLHEAD = 36` with `NV = 35`; trusting that admits
+header text into the data block, which is exactly where the stray numerics
+above come from. The floor is raised to `12 + NV` with a warning naming the
+arithmetic. This is a partial repair by construction — those files' true
+header is longer still (70 lines), so a residue of comment text remains, and
+it is the majority vote plus ragged-row skipping that contain it. It is a
+no-op for every other file in the archive.
+
+The complementary diagnostic — walking the two comment blocks and comparing
+where they end against `NLHEAD` — is logged at **debug**, not warning. On
+the surveyed archive it fires on 44 of 1055 files and correctly diagnoses
+none of them: 43 are PTR-MS files carrying one extra, blank-named definition
+line that offsets the walk harmlessly. A warning that is a false positive
+every time it fires teaches its reader to ignore warnings.
+
+**Column names are chosen by the width of the data, not by `NV`.** An
+FFI-1001 file states its column names twice — the variable definitions, and
+the last normal comment line, which the format designates as the data column
+header — and the two disagree often enough to need a rule. The rule "trust
+`NV`" is right 1054 times in 1055 and wrong once, and the once is a hard
+failure rather than a degradation: a file declaring `NV = 1` with its
+independent *and* its single dependent variable both named `Time_UTC` yields
+a duplicated name list, which pandas refuses outright with an untyped
+exception escaping a reader contracted to raise `TsaraIngestError`, while
+that file's column-header line carries the 7 correct names its 7-field rows
+need. So the arbiter is the modal field count of the data rows, preferring
+the declared header line, then the definitions. Measurement is what makes
+this safe: on the 1011 files where *both* lists match the row width their
+contents are byte-identical, so the preference is provably content-neutral
+across the archive. Where neither matches, the disagreement is about the
+rows rather than the names — the uniformly-too-wide case that `index_col=False`
+already handles — so the file is not refused. Duplicate names are mangled
+`name`, `name.1` as pandas would, since a real ground-site file repeats two
+of its own column names and an unmangled list cannot be read at all.
+
 Scale factors are applied *after* missing-value sentinels are masked. The
 reverse order turns a `-9999` sentinel into `-9999 * scale`, which no longer
 matches the declared sentinel and enters the data as a plausible number.
@@ -1004,6 +1057,35 @@ obvious than it looks:
 De-duplication therefore keys on `(everything-before-the-date, date,
 comment)`. Keying without the comment collapses distinct products into one
 another and silently discards real data.
+
+**The blind spot, and why it reports rather than decides.** Selection can
+only compare files whose names carry a `YYYYMMDD` token; a name without one
+is kept unconditionally, since an unparseable name is not evidence of
+duplication. But 147 of the 1122 names in the surveyed archive have no date
+token, and 39 of those basenames exist in two or three directories at once —
+a dated directory, a `Calibrated Data/` directory, and a `Calibrated Data
+(Updated)/` directory holding the same filename. A recursive template then
+ingests every copy. Whether that is triple-counted air or three genuinely
+distinct products is a question only the data owner can answer, so the
+selector warns and names the repeats instead of guessing.
+
+### 9.3.1 Row loss as an error, not a warning
+
+Every reader discards rows it cannot place on a time axis, and every reader
+already refused a file where *no* row survived. That left the gap exactly
+where it hurts most: a file yielding 2 rows out of 10,235 is a misparse, but
+it produced only a warning, and three stages later it is indistinguishable
+from "this instrument barely ran that day". Warnings scroll past in a run
+over a thousand files.
+
+`LoaderConfig.max_dropped_fraction` (default `0.5`) generalizes the
+all-or-nothing rule to a threshold, applied by a single helper shared by all
+three readers so the policy cannot drift between formats. The default has
+wide headroom by measurement rather than by assumption: with the parsing
+fixes above in place, the worst-affected file in the surveyed archive loses
+0.29% of its rows and only four files lose anything at all, while the
+pathology the threshold exists to catch loses 99.98%. Setting it to `1.0`
+restores warn-only behaviour for archives where heavy loss is expected.
 
 ### 9.4 Order of operations per variable
 

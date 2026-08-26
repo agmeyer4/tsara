@@ -9,6 +9,7 @@ guarantees, not the dictionary.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -18,7 +19,13 @@ import pytest
 
 from tsara.config.manifest import CSVLoader
 from tsara.ingest import registry
-from tsara.ingest.base import TIME_INDEX_NAME, RawTable, TsaraIngestError, check_raw_table
+from tsara.ingest.base import (
+    TIME_INDEX_NAME,
+    RawTable,
+    TsaraIngestError,
+    check_dropped_rows,
+    check_raw_table,
+)
 from tsara.ingest.registry import available_readers, get_reader, read_file, register_reader
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -318,3 +325,65 @@ def test_check_rejects_nat_in_the_index() -> None:
 def test_raw_table_defaults_to_empty_attrs() -> None:
     """A CSV declares no self-provenance; ICARTT will."""
     assert _good_table(Path("f.csv")).attrs == {}
+
+
+# ---------------------------------------------------------------------------
+# The shared row-loss policy
+# ---------------------------------------------------------------------------
+
+
+def test_check_dropped_rows_is_silent_when_nothing_was_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    logger = logging.getLogger("tsara.ingest.test")
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.test"):
+        check_dropped_rows(
+            n_dropped=0,
+            n_total=10,
+            path=Path("f.ict"),
+            reason="timestamp did not parse",
+            max_fraction=0.5,
+            logger=logger,
+        )
+    assert caplog.text == ""
+
+
+def test_check_dropped_rows_warns_below_the_threshold(caplog: pytest.LogCaptureFixture) -> None:
+    logger = logging.getLogger("tsara.ingest.test")
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.test"):
+        check_dropped_rows(
+            n_dropped=1,
+            n_total=10,
+            path=Path("f.ict"),
+            reason="timestamp did not parse",
+            max_fraction=0.5,
+            logger=logger,
+        )
+    assert "Dropped 1 of 10 rows" in caplog.text
+
+
+def test_check_dropped_rows_raises_above_the_threshold() -> None:
+    with pytest.raises(TsaraIngestError, match="exceeds max_dropped_fraction"):
+        check_dropped_rows(
+            n_dropped=9,
+            n_total=10,
+            path=Path("f.ict"),
+            reason="timestamp did not parse",
+            max_fraction=0.5,
+            logger=logging.getLogger("tsara.ingest.test"),
+        )
+
+
+def test_check_dropped_rows_treats_an_empty_total_as_total_loss() -> None:
+    """Guards the division. Dropping rows from a table with no rows is not a
+    state any shipped reader can reach, but the helper is public and must not
+    raise ZeroDivisionError for an out-of-tree one."""
+    with pytest.raises(TsaraIngestError, match="100.0%"):
+        check_dropped_rows(
+            n_dropped=3,
+            n_total=0,
+            path=Path("f.ict"),
+            reason="timestamp did not parse",
+            max_fraction=0.5,
+            logger=logging.getLogger("tsara.ingest.test"),
+        )

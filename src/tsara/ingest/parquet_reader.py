@@ -42,7 +42,7 @@ import numpy as np
 import pandas as pd
 
 from tsara.config.manifest import ParquetLoader
-from tsara.ingest.base import TIME_INDEX_NAME, RawTable, TsaraIngestError
+from tsara.ingest.base import TIME_INDEX_NAME, RawTable, TsaraIngestError, check_dropped_rows
 from tsara.ingest.registry import register_reader
 from tsara.ingest.timeparse import build_time_index, to_utc_naive_ns
 
@@ -111,8 +111,13 @@ def read_parquet(path: Path, loader: LoaderConfig, /) -> RawTable:
                 f"No row in '{path}' produced a valid timestamp. The declared "
                 "time columns or format do not match this file."
             )
-        logger.warning(
-            "Dropped %d of %d rows from %s: timestamp did not parse.", n_bad, len(times), path
+        check_dropped_rows(
+            n_dropped=n_bad,
+            n_total=len(times),
+            path=path,
+            reason="timestamp did not parse",
+            max_fraction=loader.max_dropped_fraction,
+            logger=logger,
         )
         frame = frame.loc[valid]
         times = times[valid]

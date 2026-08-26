@@ -463,6 +463,23 @@ class _BaseLoader(_StrictModel):
         ),
     )
 
+    max_dropped_fraction: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Largest fraction of a file's rows that may be discarded (for a "
+            "missing or unparseable timestamp, or a wrong field count) before "
+            "the read is treated as a misparse and raises instead of warning. "
+            "Readers have always refused a file where *every* row failed; this "
+            "generalizes that to near-total loss, which is the case that "
+            "actually hurts — a file yielding 2 rows of 10,000 looks downstream "
+            "like a quiet instrument rather than a broken parse. Raise it "
+            "toward 1.0 for archives where heavy row loss is genuinely "
+            "expected; 1.0 restores warn-only behaviour."
+        ),
+    )
+
     @field_validator("path_templates", mode="before")
     @classmethod
     def _coerce_single_template(cls, value: object) -> object:
@@ -619,8 +636,11 @@ class ICARTTLoader(_BaseLoader):
             "filenames follow 'dataID_locationID_YYYYMMDD[_R#].ict', and "
             "archives routinely hold several revisions of one day (R0 "
             "preliminary, R1 final, ...). 'latest' keeps only the highest "
-            "revision per (dataID, locationID, date) — the safe default, "
-            "since ingesting all revisions double-counts the same air. "
+            "revision per (identifier, date, trailing comment) — the safe "
+            "default, since ingesting all revisions double-counts the same "
+            "air. The trailing comment is part of the key deliberately: "
+            "'_L1'/'_L2' processing levels and '_Drive01'/'_Stationary01' "
+            "are different products, not revisions of each other. "
             "'all' ingests everything (only for revision-comparison "
             "studies; expect duplicate timestamps downstream)."
         ),

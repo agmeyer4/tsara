@@ -59,6 +59,8 @@ from tsara.core.exceptions import TsaraError
 from tsara.core.naming import TIME_COORD
 
 if TYPE_CHECKING:  # pragma: no cover
+    import logging
+
     import pandas as pd
 
     from tsara.config.manifest import LoaderConfig
@@ -68,6 +70,7 @@ __all__ = [
     "RawTable",
     "Reader",
     "TsaraIngestError",
+    "check_dropped_rows",
     "check_raw_table",
 ]
 
@@ -234,3 +237,62 @@ def check_raw_table(table: RawTable, *, reader_name: str) -> RawTable:
             f"names {duplicated}; column selection would be ambiguous."
         )
     return table
+
+
+def check_dropped_rows(
+    *,
+    n_dropped: int,
+    n_total: int,
+    path: Path,
+    reason: str,
+    max_fraction: float,
+    logger: logging.Logger,
+) -> None:
+    """Report discarded rows, and refuse the file if too many were lost.
+
+    Every reader discards rows it cannot place on a time axis, and every
+    reader already refused a file where *no* row survived. That left a gap
+    exactly where it hurts most: a file that yields 2 rows out of 10,235 is
+    a misparse, not a thin dataset, but it produced only a warning — and
+    three stages later it is indistinguishable from "this instrument barely
+    ran that day". Warnings scroll past in a run over a thousand files;
+    a raised error does not.
+
+    This generalizes the old all-or-nothing rule to a threshold the manifest
+    sets (``LoaderConfig.max_dropped_fraction``), and is shared by all three
+    readers so the policy cannot drift between formats.
+
+    Parameters
+    ----------
+    n_dropped : int
+        Rows discarded.
+    n_total : int
+        Rows considered, before discarding.
+    path : pathlib.Path
+        File being read, for the message.
+    reason : str
+        Short phrase completing "Dropped N of M rows from PATH: ..." — e.g.
+        ``"timestamp did not parse"``.
+    max_fraction : float
+        Largest tolerable ``n_dropped / n_total``. Exceeding it raises.
+    logger : logging.Logger
+        The *calling reader's* logger, so the message is attributed to the
+        module that read the file rather than to this one.
+
+    Raises
+    ------
+    TsaraIngestError
+        If more than ``max_fraction`` of the rows were discarded.
+    """
+    if n_dropped <= 0:
+        return
+    fraction = n_dropped / n_total if n_total else 1.0
+    if fraction > max_fraction:
+        raise TsaraIngestError(
+            f"Dropped {n_dropped} of {n_total} rows ({fraction:.1%}) from '{path}': "
+            f"{reason}. That exceeds max_dropped_fraction={max_fraction:.1%}, so this "
+            "is being treated as a misparse rather than a successful read. Check the "
+            "loader configuration against the file, or raise max_dropped_fraction if "
+            "the loss is genuinely expected."
+        )
+    logger.warning("Dropped %d of %d rows from %s: %s.", n_dropped, n_total, path, reason)

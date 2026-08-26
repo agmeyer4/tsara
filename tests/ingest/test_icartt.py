@@ -179,12 +179,25 @@ def test_non_numeric_comment_count_is_tolerated(tmp_path: Path) -> None:
     assert header.n_header_lines == header_len
 
 
-def test_comment_block_mismatch_warns_but_trusts_nlhead(
+def test_comment_block_mismatch_logs_debug_and_trusts_nlhead(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """A comment-count mismatch is reported, but only at DEBUG.
+
+    It was a warning until the Phase-3 walkthrough measured it: on the target
+    archive it fires on 44 of 1055 files and diagnoses none of them, because
+    43 PTR-MS files carry one extra blank-named definition line that offsets
+    the walk harmlessly. The provable case (NLHEAD smaller than 12 + NV) is a
+    warning instead — see the test below.
+    """
     lines = _build().splitlines()
     lines[14] = "0"  # understate the special-comment count
     with caplog.at_level(logging.WARNING, logger="tsara.ingest.icartt"):
+        parse_icartt_header(lines, Path("f.ict"))
+    assert caplog.text == ""
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="tsara.ingest.icartt"):
         parse_icartt_header(lines, Path("f.ict"))
     assert "trusting NLHEAD" in caplog.text
 
@@ -300,7 +313,8 @@ def test_malformed_rows_are_skipped_and_counted(
         table = read_icartt(path, LOADER)
 
     assert len(table.frame) == 2
-    assert "Skipped 1 of 3 malformed data row(s)" in caplog.text
+    assert "Dropped 1 of 3 rows" in caplog.text
+    assert "malformed data row (wrong field count)" in caplog.text
 
 
 def test_unparseable_timestamps_are_dropped_and_counted(
@@ -544,3 +558,211 @@ def test_nan_missing_sentinel_masks_nothing(tmp_path: Path) -> None:
     )
     frame = read_icartt(path, LOADER).frame
     assert frame["CH4_ppb"].iloc[0] == -9999.0
+
+
+# ---------------------------------------------------------------------------
+# Walkthrough stage 4: the four parse fixes measured against the real archive
+# ---------------------------------------------------------------------------
+
+
+def test_mixed_time_column_follows_the_majority_not_a_stray_value(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A couple of stray numerics must not redefine a datetime time axis.
+
+    This is the archive's most expensive misparse reproduced in miniature.
+    Two PTR-MS VOC files hold thousands of datetime strings plus exactly two
+    numeric tokens that leaked in from a mis-declared header block. The old
+    test — "is *any* value numeric?" — sent them down the seconds-past-
+    midnight branch, where every real timestamp then failed to convert and
+    was dropped, leaving 2 rows out of 10,235 behind a mere warning.
+    """
+    rows = [f"2024-08-15 19:{m:02d}:00, 1900.0, 415.0" for m in range(10)]
+    rows += ["1, 1901.0, 415.5", "19, 1902.0, 416.0"]  # the two stray numerics
+    path = _write(tmp_path, _build(rows=rows))
+
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.icartt"):
+        frame = read_icartt(path, LOADER).frame
+
+    # The ten datetime rows survive; only the two numeric intruders drop out.
+    assert len(frame) == 10
+    assert frame.index[0] == pd.Timestamp("2024-08-15 19:00:00")
+    assert "is mixed" in caplog.text
+    assert "Reading it as timestamps (majority)" in caplog.text
+
+
+def test_mixed_time_column_with_numeric_majority_reads_as_seconds(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The same vote, decided the other way, keeps the spec-compliant reading."""
+    rows = [f"{42480 + i}.0, 1900.0, 415.0" for i in range(10)]
+    rows += ["not-a-time, 1901.0, 415.5"]
+    path = _write(tmp_path, _build(rows=rows))
+
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.icartt"):
+        frame = read_icartt(path, LOADER).frame
+
+    assert len(frame) == 10
+    assert frame.index[0] == pd.Timestamp("2024-08-15") + pd.Timedelta(seconds=42480)
+    assert "Reading it as seconds past midnight (majority)" in caplog.text
+
+
+def test_unmixed_time_columns_do_not_warn(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """The two unambiguous cases short-circuit before the vote."""
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.icartt"):
+        read_icartt(_write(tmp_path, _build(), name="a.ict"), LOADER)
+        read_icartt(
+            _write(
+                tmp_path,
+                _build(rows=["2024-08-15 19:00:00, 1.0, 2.0", "2024-08-15 19:00:01, 1.0, 2.0"]),
+                name="b.ict",
+            ),
+            LOADER,
+        )
+    assert "is mixed" not in caplog.text
+
+
+def test_column_names_follow_the_data_width_not_nv(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The one hard failure in the archive: NV is wrong, the header line is not.
+
+    A real file declares NV=1 with its independent *and* its single dependent
+    variable both named ``Time_UTC``, while its column-header line carries the
+    7 names its 7-field rows need. Trusting NV handed pandas a duplicated
+    ``names=`` list, which it refuses with an untyped ``ValueError``.
+    """
+    lines = _build().splitlines()
+    # NV=1, one definition, and a column-header line that matches the rows.
+    lines[9] = "1"
+    lines[10] = "1"
+    lines[11] = "-9999"
+    lines[12] = "Time_Start, seconds, Duplicated on purpose"
+    del lines[13]
+    lines[0] = f"{len(lines) - 2}, 1001"
+    path = _write(tmp_path, "\n".join(lines) + "\n")
+
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.icartt"):
+        frame = read_icartt(path, LOADER).frame
+
+    assert list(frame.columns) == ["Time_Start", "CH4_ppb", "CO2_ppm"]
+    assert len(frame) == 2
+    assert "using the variable definitions" not in caplog.text
+
+
+def test_duplicate_column_names_are_mangled_pandas_style(tmp_path: Path) -> None:
+    """A real ground-site file repeats two of its own column names.
+
+    Mangling rather than refusing: TSARA cannot know which ``NO_ppb`` is
+    which, but the manifest maps raw names to canonical ones, so a
+    distinguishable name is all the reader owes the next stage. Left
+    unmangled, pandas refuses the read outright.
+    """
+    lines = _build().splitlines()
+    lines[-3] = "Time_Start, CH4_ppb, CH4_ppb"  # column header repeats a name
+    path = _write(tmp_path, "\n".join(lines) + "\n")
+
+    frame = read_icartt(path, LOADER).frame
+    assert list(frame.columns) == ["Time_Start", "CH4_ppb", "CH4_ppb.1"]
+
+
+def test_nlhead_smaller_than_its_variable_definitions_is_corrected(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """NLHEAD can be arithmetically impossible, and then it must not be trusted.
+
+    Two archive files declare NLHEAD=36 with NV=35, but 12 fixed lines plus 35
+    definition lines cannot fit in 36. Trusting the number admits header text
+    into the data block, which is where the stray numerics of the mixed-time
+    test above come from.
+    """
+    lines = _build().splitlines()
+    lines[0] = "13, 1001"  # 12 + NV = 14, so 13 is provably impossible
+    path = _write(tmp_path, "\n".join(lines) + "\n")
+
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.icartt"):
+        header = parse_icartt_header(path.read_text().splitlines(), path)
+
+    assert header.n_header_lines == 14
+    assert "provably wrong" in caplog.text
+
+
+def test_impossible_nlhead_longer_than_the_file_is_an_error(tmp_path: Path) -> None:
+    """Clamping NLHEAD up must not walk off the end of a truncated file."""
+    lines = _build().splitlines()[:13]
+    lines[0] = "1, 1001"
+    path = _write(tmp_path, "\n".join(lines) + "\n")
+
+    with pytest.raises(TsaraIngestError, match="needs at least a 14-line header"):
+        parse_icartt_header(path.read_text().splitlines(), path)
+
+
+def test_near_total_row_loss_is_an_error_not_a_warning(tmp_path: Path) -> None:
+    """A read returning a handful of rows is a misparse, not a thin dataset.
+
+    Downstream, "2 rows" and "this instrument barely ran" are indistinguishable,
+    and a warning in a thousand-file run scrolls past unread.
+    """
+    rows = ["42480.0, 1900.0, 415.0"] + ["oops, 1, 2, 3, 4"] * 20
+    path = _write(tmp_path, _build(rows=rows))
+
+    with pytest.raises(TsaraIngestError, match="exceeds max_dropped_fraction"):
+        read_icartt(path, LOADER)
+
+    # ...and the threshold is the manifest's call, not a hard-coded rule.
+    tolerant = ICARTTLoader(path_template="*.ict", max_dropped_fraction=1.0)
+    assert len(read_icartt(path, tolerant).frame) == 1
+
+
+def test_repeated_basenames_after_revision_selection_warn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Date-less names bypass de-duplication, so at least say so.
+
+    39 basenames in the target archive exist in two or three directories at
+    once (a dated directory, ``Calibrated Data/``, and ``Calibrated Data
+    (Updated)/``). They carry no ``YYYYMMDD`` token, so revision selection
+    cannot compare them and keeps them all — correctly, but silently, and a
+    recursive template then ingests every copy.
+    """
+    paths = [
+        Path("MIRO/20240809/Miro_Data_0809.ict"),
+        Path("MIRO/Calibrated Data/Miro_Data_0809.ict"),
+        Path("MIRO/Calibrated Data (Updated)/Miro_Data_0809.ict"),
+    ]
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.icartt"):
+        selected = select_latest_revisions(paths)
+
+    assert len(selected) == 3  # kept, as they must be
+    assert "appear in more than one directory" in caplog.text
+    assert "Miro_Data_0809.ict" in caplog.text
+
+
+def test_distinct_basenames_do_not_warn(caplog: pytest.LogCaptureFixture) -> None:
+    paths = [Path("a/Miro_Data_0809.ict"), Path("b/Miro_Data_0810.ict")]
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.icartt"):
+        select_latest_revisions(paths)
+    assert "appear in more than one directory" not in caplog.text
+
+
+def test_names_matching_neither_the_rows_nor_nv_fall_back_to_definitions(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The residual case: the row width settles nothing, so NV decides again.
+
+    No file in the target archive reaches here — every one of the 1055 matches
+    on at least one list — but the branch is what keeps a width disagreement
+    from being fatal. Uniformly-too-wide rows land here and are handled by
+    ``index_col=False`` truncating the surplus, which is the behaviour the
+    reader has always promised.
+    """
+    lines = _build(rows=["42480.0, 1900.0, 415.0, 99, 98"]).splitlines()
+    lines[-2] = "Time_Start, CH4_ppb"  # 2 declared names vs 3 variables vs 5 fields
+    path = _write(tmp_path, "\n".join(lines) + "\n")
+
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.icartt"):
+        with pytest.warns(pd.errors.ParserWarning):
+            frame = read_icartt(path, LOADER).frame
+
+    assert list(frame.columns) == ["Time_Start", "CH4_ppb", "CO2_ppm"]
+    assert "matching neither" in caplog.text

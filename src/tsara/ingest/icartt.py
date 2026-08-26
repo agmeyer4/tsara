@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING, Any
@@ -72,7 +73,7 @@ import numpy as np
 import pandas as pd
 
 from tsara.config.manifest import ICARTTLoader
-from tsara.ingest.base import RawTable, TsaraIngestError
+from tsara.ingest.base import RawTable, TsaraIngestError, check_dropped_rows
 from tsara.ingest.registry import register_reader
 from tsara.ingest.timeparse import to_utc_naive_ns
 
@@ -339,7 +340,54 @@ def select_latest_revisions(paths: list[Path]) -> list[Path]:
     dropped = len(paths) - len(keep) - len(best)
     if dropped:
         logger.info("revision_policy='latest' superseded %d ICARTT file(s).", dropped)
-    return sorted(keep + [path for _, path in best.values()])
+
+    selected = sorted(keep + [path for _, path in best.values()])
+    _warn_on_repeated_basenames(selected, n_unparsed=len(keep))
+    return selected
+
+
+def _warn_on_repeated_basenames(selected: list[Path], *, n_unparsed: int) -> None:
+    """Warn when the selected set holds one filename in several directories.
+
+    The blind spot this covers: revision selection can only compare files
+    whose names carry a ``YYYYMMDD`` token, and files without one are kept
+    unconditionally — correctly, since an unparseable name is not evidence
+    of duplication. But "kept unconditionally" and "kept silently" are
+    different things. 147 of the 1122 names in the target archive have no
+    date token, and 39 of those basenames exist in two or three directories
+    at once (``Miro_Data_0809.ict`` appears under a dated directory, under
+    ``Calibrated Data/``, and again under ``Calibrated Data (Updated)/``).
+
+    A recursive template then ingests all three copies of the same day. If
+    they are genuinely different products the counts are right; if they are
+    successive reprocessings of one day, the campaign silently triple-counts
+    that air, and nothing downstream can tell which happened — the files
+    look like ordinary distinct inputs by the time they are concatenated.
+    Whether it is duplication is a question only the data owner can answer,
+    so this reports rather than decides.
+
+    Parameters
+    ----------
+    selected : list of pathlib.Path
+        Files revision selection chose.
+    n_unparsed : int
+        How many of them had no parseable ICARTT filename, quoted in the
+        message so the cause is visible alongside the symptom.
+    """
+    counts = Counter(path.name for path in selected)
+    repeated = sorted(name for name, count in counts.items() if count > 1)
+    if not repeated:
+        return
+    logger.warning(
+        "%d basename(s) appear in more than one directory among the %d selected "
+        "ICARTT file(s) (e.g. %s). %d selected name(s) carry no YYYYMMDD token and "
+        "so cannot be de-duplicated by revision; if any of these are copies of the "
+        "same data rather than distinct products, that data will be counted twice.",
+        len(repeated),
+        len(selected),
+        ", ".join(repeated[:3]),
+        n_unparsed,
+    )
 
 
 def _read_text(path: Path) -> list[str]:
@@ -430,6 +478,42 @@ def parse_icartt_header(lines: list[str], path: Path) -> IcarttHeader:
     except (ValueError, IndexError) as exc:
         raise TsaraIngestError(f"Malformed ICARTT header in '{path}': {exc}") from exc
 
+    # NLHEAD is a self-declaration, and a file can declare something
+    # arithmetically impossible. The first twelve lines are fixed by the
+    # format and each of the NV dependent variables needs a definition line
+    # of its own, so any valid header is at least 12 + NV lines. A file
+    # claiming fewer has a wrong NLHEAD, full stop — and the consequence is
+    # not cosmetic: trusting it admits header text into the data block,
+    # where stray tokens go on to corrupt type inference for the whole file.
+    #
+    # Two files in the target archive do exactly this (NLHEAD=36, NV=35, so
+    # 47 lines are required), and both are structurally identical to 41
+    # sibling files that correctly declare 70. Clamping up to 12 + NV does
+    # not fully repair them -- their true header is longer still -- but it
+    # removes eleven junk lines, and the residue is caught downstream by the
+    # modal-width name check and the majority-vote time branch. Raising the
+    # floor is a no-op for every other file in the archive.
+    minimum_header = 12 + n_vars
+    if n_header < minimum_header:
+        logger.warning(
+            "%s declares NLHEAD=%d, but NV=%d needs at least %d header lines "
+            "(12 fixed + %d variable definitions), so NLHEAD is provably wrong. "
+            "Reading data from line %d instead; expect residual header text in "
+            "the first rows.",
+            path,
+            n_header,
+            n_vars,
+            minimum_header,
+            n_vars,
+            minimum_header + 1,
+        )
+        n_header = minimum_header
+        if len(lines) < n_header:
+            raise TsaraIngestError(
+                f"'{path}' needs at least a {n_header}-line header for its "
+                f"{n_vars} declared variables but has only {len(lines)} lines."
+            )
+
     independent = _variable_from_line(lines[8], scale=1.0, missing=float("nan"))
     variables = tuple(
         _variable_from_line(lines[12 + i], scale=scales[i], missing=missings[i])
@@ -443,7 +527,15 @@ def parse_icartt_header(lines: list[str], path: Path) -> IcarttHeader:
     special, index = _read_comment_block(lines, index)
     normal, index = _read_comment_block(lines, index)
     if index != n_header:
-        logger.warning(
+        # Deliberately debug, not warning. Measured against the target
+        # archive this mismatch fires on 44 of 1055 files and is right about
+        # none of them: 43 are PTR-MS files carrying one extra, blank-named
+        # definition line, which offsets the walk without making the file
+        # unreadable. A warning that is a false positive every time it fires
+        # trains readers to ignore warnings. The genuinely diagnosable case
+        # -- NLHEAD too small to be possible -- is checked above, where the
+        # arithmetic proves it rather than merely suggesting it.
+        logger.debug(
             "%s: comment blocks end at line %d but NLHEAD is %d; trusting NLHEAD.",
             path,
             index,
@@ -527,34 +619,148 @@ def read_icartt(path: Path, loader: LoaderConfig, /) -> RawTable:
     lines = _read_text(path)
     header = parse_icartt_header(lines, path)
 
-    frame = _read_data(lines, header, path)
+    frame = _read_data(lines, header, path, loader.max_dropped_fraction)
     frame = _apply_scales_and_missing(frame, header)
 
-    times = _build_time_index(frame, header, path)
+    times = _build_time_index(frame, header, path, loader.max_dropped_fraction)
     frame = frame.set_axis(times, axis=0)
     return RawTable(frame=frame, path=path, attrs=_provenance(header))
 
 
-def _read_data(lines: list[str], header: IcarttHeader, path: Path) -> pd.DataFrame:
+def _modal_field_count(body: list[str]) -> int:
+    """Most common comma-separated field count among the data lines.
+
+    This is the one statement about a file's shape that comes from the data
+    rather than from the header's claims about the data, which is exactly
+    why it is worth computing: when the two name lists disagree, the rows
+    themselves are the tie-breaker. The *mode* rather than the maximum or
+    the first row's width, because real archives contain truncated lines
+    (one file here loses 14 rows of 84,362 to a logger interrupted
+    mid-number) and a header whose text has leaked into the data block.
+    """
+    widths = Counter(len(line.split(",")) for line in body if line.strip())
+    # Counter.most_common breaks ties by first insertion, i.e. by first
+    # appearance in the file — deterministic, which is all that is needed.
+    return widths.most_common(1)[0][0] if widths else 0
+
+
+def _mangle_duplicates(names: list[str]) -> list[str]:
+    """Disambiguate repeated names the way ``pandas.read_csv`` does.
+
+    A duplicate is not merely untidy here: :func:`~tsara.ingest.base.check_raw_table`
+    rejects a frame with duplicate columns (selection would be ambiguous),
+    and ``pandas.read_csv`` refuses a duplicated ``names=`` list outright
+    with an untyped ``ValueError`` — which would escape a reader whose
+    contract promises :class:`~tsara.ingest.base.TsaraIngestError`. Renaming
+    the later occurrences keeps the data readable and the failure typed.
+    """
+    seen: Counter[str] = Counter()
+    out: list[str] = []
+    for name in names:
+        count = seen[name]
+        seen[name] += 1
+        out.append(name if count == 0 else f"{name}.{count}")
+    return out
+
+
+def _choose_column_names(body: list[str], header: IcarttHeader, path: Path) -> list[str]:
+    """Pick the column-name list that matches the data's actual width.
+
+    An FFI-1001 file states its column names twice, and the two statements
+    disagree often enough to need a rule. The **declared** names are the last
+    normal comment line, which the format designates as the data column
+    header; the **definitions** are the NV variable-definition lines.
+
+    The old rule was "use the declared names, unless their count disagrees
+    with NV, in which case NV is authoritative". Measured against the 1055
+    ICARTT files in the target archive that is right 1054 times and wrong
+    once — and the once is a hard failure rather than a degradation. One file
+    declares NV=1 with its independent *and* its single dependent variable
+    both named ``Time_UTC``; the count check sees 2 names against 7-field
+    rows, discards the perfectly good 7-name column-header line, and hands
+    pandas a duplicated ``names=`` list, which it refuses with an untyped
+    ``ValueError`` — escaping a reader contracted to raise
+    :class:`~tsara.ingest.base.TsaraIngestError`.
+
+    So the arbiter becomes the data rather than NV: prefer whichever list is
+    as wide as the rows actually are. Measurement is what makes this safe to
+    change. On the 1011 files where *both* lists match the row width their
+    contents are byte-identical, so preferring the declared names on a tie
+    changes nothing anywhere in the archive while keeping the format's own
+    designated statement of the column names authoritative. 43 files match on
+    definitions alone, 1 on the declared header alone, and **none** match on
+    neither.
+
+    When neither list matches, the width disagreement is about the *rows*,
+    not the names — the archive's uniformly-too-wide files, where every row
+    carries surplus trailing fields that ``index_col=False`` correctly
+    discards. That case must not be refused, so it falls through to the
+    original NV-based rule and is left to the reader's existing protections:
+    surplus fields are dropped by pandas, and wholesale row loss is caught by
+    ``max_dropped_fraction``.
+
+    Parameters
+    ----------
+    body : list of str
+        Data lines below the header.
+    header : IcarttHeader
+        Parsed header supplying both candidate name lists.
+    path : pathlib.Path
+        Source file, for messages.
+
+    Returns
+    -------
+    list of str
+        Column names, with any duplicates mangled.
+    """
+    definitions = [header.independent_variable.name] + [v.name for v in header.variables]
+    declared = list(header.column_names)
+    modal = _modal_field_count(body)
+
+    if len(declared) == modal:
+        # Covers both the ordinary case and the tie; see the docstring for
+        # why a tie is provably content-neutral on the target archive.
+        return _mangle_duplicates(declared)
+
+    if len(definitions) == modal:
+        logger.warning(
+            "%s: the column-header line lists %d names but the data rows have %d "
+            "fields, which the %d variable definitions match; using the variable "
+            "definitions.",
+            path,
+            len(declared),
+            modal,
+            len(definitions),
+        )
+        return _mangle_duplicates(definitions)
+
+    # Neither list is as wide as the rows. The names are not the problem here,
+    # so fall back to the original rule and let the reader's row-level
+    # protections handle the width mismatch.
+    expected = 1 + len(header.variables)
+    if len(declared) == expected:
+        return _mangle_duplicates(declared)
+    logger.warning(
+        "%s: column header lists %d names but the header declares %d variables, "
+        "and the data rows have %d fields matching neither; using the variable "
+        "definitions.",
+        path,
+        len(declared),
+        expected,
+        modal,
+    )
+    return _mangle_duplicates(definitions)
+
+
+def _read_data(
+    lines: list[str], header: IcarttHeader, path: Path, max_dropped_fraction: float
+) -> pd.DataFrame:
     """Parse the data block below the header into a DataFrame."""
     body = lines[header.n_header_lines :]
     if not any(line.strip() for line in body):
         raise TsaraIngestError(f"'{path}' has a valid header but no data rows.")
 
-    names: list[str] = list(header.column_names)
-    expected = 1 + len(header.variables)
-    if len(names) != expected:
-        # A column-header line that disagrees with NV is common enough in
-        # real archives to handle rather than refuse: the authoritative names
-        # are the variable definitions, which NV guarantees the count of.
-        logger.warning(
-            "%s: column header lists %d names but the header declares %d variables; "
-            "using the variable definitions.",
-            path,
-            len(names),
-            expected,
-        )
-        names = [header.independent_variable.name] + [v.name for v in header.variables]
+    names = _choose_column_names(body, header, path)
 
     from io import StringIO
 
@@ -592,11 +798,13 @@ def _read_data(lines: list[str], header: IcarttHeader, path: Path) -> pd.DataFra
 
     n_skipped = n_nonblank - len(frame)
     if n_skipped > 0:
-        logger.warning(
-            "Skipped %d of %d malformed data row(s) in %s (wrong field count).",
-            n_skipped,
-            n_nonblank,
-            path,
+        check_dropped_rows(
+            n_dropped=n_skipped,
+            n_total=n_nonblank,
+            path=path,
+            reason="malformed data row (wrong field count)",
+            max_fraction=max_dropped_fraction,
+            logger=logger,
         )
     return frame
 
@@ -623,7 +831,9 @@ def _apply_scales_and_missing(frame: pd.DataFrame, header: IcarttHeader) -> pd.D
     return frame
 
 
-def _build_time_index(frame: pd.DataFrame, header: IcarttHeader, path: Path) -> pd.DatetimeIndex:
+def _build_time_index(
+    frame: pd.DataFrame, header: IcarttHeader, path: Path, max_dropped_fraction: float
+) -> pd.DatetimeIndex:
     """Build the time index from the independent variable column.
 
     Keys off the *values*, not the declared name or units, because the
@@ -641,14 +851,53 @@ def _build_time_index(frame: pd.DataFrame, header: IcarttHeader, path: Path) -> 
 
     raw = frame[name]
     seconds = pd.to_numeric(raw, errors="coerce")
-    if bool(seconds.notna().any()):
+    n_numeric = int(seconds.notna().sum())
+    n_rows = len(raw)
+    parsed: pd.Series | None = None
+
+    if n_numeric == n_rows:
+        # Unambiguous: every value is a number. No datetime parse needed.
+        use_seconds = True
+    elif n_numeric == 0:
+        # Unambiguous the other way: nothing is numeric.
+        use_seconds = False
+    else:
+        # Genuinely mixed, so count both interpretations and take the
+        # majority. The rule this replaces asked only whether *any* value
+        # was numeric, which let a single stray token decide the file: two
+        # PTR-MS VOC files in the target archive hold 10,201 and 7,817
+        # datetime strings alongside exactly 2 numeric tokens leaked in from
+        # a mis-declared header block, and the old test sent both down the
+        # seconds-past-midnight branch. Every datetime row then failed to
+        # convert and was dropped, reducing 10,235 rows to 2 -- 35 VOC
+        # species, the archive's most valuable data, cut to nothing behind a
+        # warning. Only mixed columns pay for the second parse; the two
+        # unambiguous cases above short-circuit before reaching here.
+        parsed = pd.to_datetime(raw, errors="coerce", format="mixed")
+        n_datetime = int(np.asarray(pd.notna(parsed)).sum())
+        # Ties favour seconds, keeping the spec-compliant reading as the
+        # default when the evidence does not actually distinguish them.
+        use_seconds = n_numeric >= n_datetime
+        logger.warning(
+            "%s: independent variable '%s' is mixed — %d of %d values parse as "
+            "numeric seconds and %d as timestamps. Reading it as %s (majority).",
+            path,
+            name,
+            n_numeric,
+            n_rows,
+            n_datetime,
+            "seconds past midnight" if use_seconds else "timestamps",
+        )
+
+    if use_seconds:
         # The spec-compliant path: seconds elapsed since midnight UTC on the
         # header's data date. Values may exceed 86400 for records crossing
         # midnight, which Timedelta handles without special-casing.
         base = pd.Timestamp(header.data_date)
         times = pd.DatetimeIndex(base + pd.to_timedelta(seconds, unit="s"))
     else:
-        parsed = pd.to_datetime(raw, errors="coerce", format="mixed")
+        if parsed is None:
+            parsed = pd.to_datetime(raw, errors="coerce", format="mixed")
         times = pd.DatetimeIndex(parsed)
         if not bool(np.asarray(times.notna()).any()):
             raise TsaraIngestError(
@@ -662,8 +911,13 @@ def _build_time_index(frame: pd.DataFrame, header: IcarttHeader, path: Path) -> 
     valid = np.asarray(times.notna())
     n_bad = int((~valid).sum())
     if n_bad:
-        logger.warning(
-            "Dropped %d of %d rows from %s: timestamp did not parse.", n_bad, len(times), path
+        check_dropped_rows(
+            n_dropped=n_bad,
+            n_total=len(times),
+            path=path,
+            reason="timestamp did not parse",
+            max_fraction=max_dropped_fraction,
+            logger=logger,
         )
         frame.drop(frame.index[~valid], inplace=True)
         times = times[valid]
