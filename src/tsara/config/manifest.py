@@ -132,34 +132,30 @@ class FlagRule(_StrictModel):
     def _exactly_one_list(self) -> FlagRule:
         if (self.good_values is None) == (self.bad_values is None):
             raise ValueError("FlagRule requires exactly one of 'good_values' or 'bad_values'.")
+        # An empty list validates fine and then does something drastic and
+        # silent: `good_values: []` matches nothing, so every sample is "not
+        # good" and the whole record is masked, while `bad_values: []` is a
+        # no-op rule that looks active in the manifest. Neither is ever what
+        # was meant. This mirrors UnitConversion refusing the identity
+        # conversion -- a rule that cannot do anything useful is a mistake
+        # worth catching at config load rather than after a pipeline run.
+        if self.good_values is not None and not self.good_values:
+            raise ValueError(
+                "FlagRule 'good_values' is empty, which would mask every sample "
+                "(nothing can be in an empty list). List the flag values that "
+                "mean good, or use 'bad_values' instead."
+            )
+        if self.bad_values is not None and not self.bad_values:
+            raise ValueError(
+                "FlagRule 'bad_values' is empty, so the rule would mask nothing. "
+                "List the flag values that mean bad, or remove the rule."
+            )
         return self
-
-
-class SpikeRule(_StrictModel):
-    """Mask isolated electronic spikes via a rolling-MAD outlier test.
-
-    A sample is masked when it deviates from the rolling median by more than
-    ``n_mad`` × the rolling median absolute deviation. MAD is used instead
-    of standard deviation because the statistic must be robust to the very
-    spikes it is hunting. NOTE: deliberately distinct from plume detection —
-    this is for sub-second instrument glitches, and the window should be far
-    shorter than any real atmospheric feature.
-    """
-
-    kind: Literal["spike"] = "spike"
-    window: str = Field(description="Rolling window as a pandas timedelta string, e.g. '5s'.")
-    n_mad: float = Field(default=6.0, gt=0, description="Deviation threshold in MADs.")
-
-    @field_validator("window")
-    @classmethod
-    def _valid_timedelta(cls, value: str) -> str:
-        _validate_duration(value, field="SpikeRule.window")
-        return value
 
 
 #: Tagged union — Pydantic dispatches on the 'kind' literal, giving precise
 #: per-kind validation errors instead of trying every alternative blindly.
-QAQCRule = Annotated[RangeRule | FlagRule | SpikeRule, Field(discriminator="kind")]
+QAQCRule = Annotated[RangeRule | FlagRule, Field(discriminator="kind")]
 
 
 # ---------------------------------------------------------------------------

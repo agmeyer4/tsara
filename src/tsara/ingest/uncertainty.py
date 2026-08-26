@@ -262,13 +262,24 @@ def _reported_sigma(
             f"Columns present: {list(frame.columns)[:10]}."
         )
 
-    reported = pd.to_numeric(frame[component.column], errors="coerce")
-    sigma = convert_spread(np.asarray(reported, dtype="float64"), conversion)
+    reported = np.asarray(pd.to_numeric(frame[component.column], errors="coerce"), dtype="float64")
 
     # A negative spread is not a spread. In practice this is a missing-value
     # sentinel (-9999) in a column whose na_values were never declared, so
     # masking it is both the safe reading and the informative one.
-    negative = sigma < 0
+    #
+    # This MUST happen before the unit conversion, not after. `convert_spread`
+    # takes an absolute value -- correctly, since a negative `scale` is a
+    # legitimate sign-convention flip whose magnitude must survive -- so a
+    # test applied afterwards sees nothing negative to find. The guard then
+    # worked only for variables with no conversion, i.e. it failed precisely
+    # where the manifest was doing more work: a -9999 under a ppm->ppb
+    # conversion became a silent 9,999,000 ppb "1-sigma". For a random
+    # component that merely drives the point's inverse-variance weight to
+    # nothing; for a systematic component, combined as a weighted mean of
+    # sigmas rather than in inverse variance, one such value dominates the
+    # entire bin.
+    negative = reported < 0
     n_negative = int(np.count_nonzero(negative))
     if n_negative:
         logger.warning(
@@ -280,7 +291,9 @@ def _reported_sigma(
             n_negative,
             path,
         )
-        sigma = np.where(negative, np.nan, sigma)
+        reported = np.where(negative, np.nan, reported)
+
+    sigma = convert_spread(reported, conversion)
 
     # An uncertainty without a surviving measurement is meaningless, and
     # carrying one would let a masked sample re-enter a weighted fit.

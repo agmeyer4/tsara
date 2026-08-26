@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tsara.config.manifest import FlagRule, QAQCRule, RangeRule, SpikeRule
+from tsara.config.manifest import FlagRule, QAQCRule, RangeRule
 from tsara.ingest.base import TsaraIngestError
 from tsara.ingest.qaqc import apply_qaqc, masked_fraction
 
@@ -130,106 +130,21 @@ def test_string_flag_values() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Spike
+# Order independence
 # ---------------------------------------------------------------------------
 
 
-def test_spike_masks_an_isolated_glitch() -> None:
-    """A glitch riding on real noise, which is the only case that occurs."""
-    rng = np.random.default_rng(1)
-    clean = list(100 + rng.normal(0, 1, 41))
-    clean[20] = 500.0
-    values = _series(clean)
-    rule = SpikeRule(window="11s", n_mad=6.0)
-    masked, reports = apply_qaqc(values, [rule], _frame(values), variable="x", path=PATH)
+def test_rules_tolerate_an_unsorted_index() -> None:
+    """Every remaining rule is pointwise, so record order cannot change them.
 
-    assert bool(masked.isna().iloc[20])
-    # Not asserted as exactly one: with n_mad measured against the UNSCALED
-    # MAD, the default 6.0 is about 4 sigma, so ordinary noise contributes a
-    # few false positives. The property that matters is that the glitch goes
-    # and the record survives.
-    assert reports[0].n_masked <= 3
-    assert masked.notna().sum() >= len(values) - 3
-
-
-def test_perfectly_flat_data_has_no_scale_so_nothing_is_masked() -> None:
-    """A deliberate limitation, and the safe side of a real trade-off.
-
-    In perfectly constant data the rolling MAD is zero, so no robust scale
-    exists and "how many MADs away" is undefined. Masking on a zero scale
-    would reject every sample differing from the local median at all —
-    measured against real analyzer records, that rejects several percent of
-    good data as spikes, because a substantial fraction of rolling windows
-    on real records have zero MAD. Real measurements always carry some local
-    variation, so a genuine glitch has a nonzero scale to be judged against
-    (see the test above); it is only the synthetic flat case that is exempt.
+    This used to be true only of `range` and `flag`, with the rolling `spike`
+    test needing a monotonic index and raising without one. With that rule
+    removed (see the qaqc module docstring), order independence is a property
+    of QA/QC as a whole -- sorting is purely the orchestration stage's job.
     """
-    values = _series([1.0, 1.0, 1.0, 50.0, 1.0, 1.0, 1.0])
-    rule = SpikeRule(window="5s", n_mad=6.0)
-    masked, reports = apply_qaqc(values, [rule], _frame(values), variable="x", path=PATH)
-    assert masked.notna().all()
-    assert reports[0].n_masked == 0
-
-
-def test_spike_refuses_a_non_monotonic_time_index() -> None:
-    """A reachable state, not a hypothetical: archive records do step backwards.
-
-    pandas' own error names neither the variable nor the file, and this is
-    the first stage in the pipeline that would trip over it.
-    """
-    values = _series([1.0, 2.0, 3.0])
-    shuffled = values.iloc[np.array([0, 2, 1])]
-    with pytest.raises(TsaraIngestError, match="monotonically increasing"):
-        apply_qaqc(
-            shuffled,
-            [SpikeRule(window="5s")],
-            _frame(shuffled),
-            variable="ch4",
-            path=PATH,
-        )
-
-
-def test_non_spike_rules_tolerate_an_unsorted_index() -> None:
-    """Only the rolling test needs order; range and flag are pointwise."""
     values = _series([1.0, 2.0, 3.0]).iloc[np.array([0, 2, 1])]
     masked, _ = apply_qaqc(values, [RangeRule(min=2.5)], _frame(values), variable="x", path=PATH)
     assert int(masked.notna().sum()) == 1
-
-
-def test_spike_leaves_clean_data_alone() -> None:
-    rng = np.random.default_rng(0)
-    values = _series(list(100 + rng.normal(0, 1, 200)))
-    rule = SpikeRule(window="21s", n_mad=6.0)
-    masked, _ = apply_qaqc(values, [rule], _frame(values), variable="x", path=PATH)
-    assert masked.notna().all()
-
-
-def test_spike_is_scale_invariant() -> None:
-    """Median and MAD both scale linearly, so conversion cannot change the test."""
-    raw = [1.0, 1.0, 1.0, 50.0, 1.0, 1.0, 1.0]
-    rule = SpikeRule(window="5s", n_mad=6.0)
-    a, _ = apply_qaqc(_series(raw), [rule], _frame(_series(raw)), variable="x", path=PATH)
-    scaled = [v * 1000.0 for v in raw]
-    b, _ = apply_qaqc(_series(scaled), [rule], _frame(_series(scaled)), variable="x", path=PATH)
-    assert a.isna().tolist() == b.isna().tolist()
-
-
-def test_zero_mad_masks_nothing() -> None:
-    """Quantized data collapses the MAD; acting on it would reject everything."""
-    values = _series([1.0] * 10 + [1.01] + [1.0] * 10)
-    rule = SpikeRule(window="5s", n_mad=6.0)
-    masked, reports = apply_qaqc(values, [rule], _frame(values), variable="x", path=PATH)
-    assert masked.notna().all()
-    assert reports[0].n_masked == 0
-
-
-def test_spike_window_is_centered() -> None:
-    """A trailing window would flag the leading edge of a real feature."""
-    # A sustained step, not a glitch: a centered window sees both sides.
-    values = _series([1.0] * 10 + [5.0] * 10)
-    rule = SpikeRule(window="9s", n_mad=6.0)
-    masked, _ = apply_qaqc(values, [rule], _frame(values), variable="x", path=PATH)
-    assert masked.notna().sum() >= 18
 
 
 # ---------------------------------------------------------------------------

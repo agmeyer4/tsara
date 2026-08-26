@@ -1149,9 +1149,8 @@ Fixed, and each step depends on the previous one:
 `range` bounds are physical statements in canonical units — the shipped
 example converts ppm→ppb and then bounds in ppb, so masking before
 conversion would compare ppb bounds against ppm numbers and reject the whole
-record. `spike` is invariant either way, since the rolling median and MAD
-both scale linearly. `flag` reads a separate instrument status column, which
-is never a converted quantity.
+record. `flag` reads a separate instrument status column, which is never a
+converted quantity.
 
 Rules **mask rather than delete**. Rows are the instrument's clock, and a
 rolling window that closes over a removed sample computes a different answer
@@ -1161,25 +1160,75 @@ a range rule masking everything means the bounds are in the wrong units
 while a flag rule masking everything means the polarity is inverted, and one
 combined number cannot tell them apart.
 
-### 9.5 The `spike` rule, and its deliberate blind spot
+A `flag` rule must list at least one value. An empty `good_values` validates
+trivially and then masks the *entire* record, since nothing can be a member
+of an empty list; an empty `bad_values` is a rule that looks active in the
+manifest and does nothing. Both are refused at config load, on the same
+principle that refuses the identity `UnitConversion`.
 
-A rolling median/MAD (Hampel) test with a **centered** window: a spike is
-symmetric in time, and a trailing window would flag the leading edge of a
-real plume as readily as a glitch. The threshold is `n_mad` times the raw
-MAD, so for Gaussian noise the default `n_mad = 6` is roughly 4σ.
+**One ordering constraint lives inside the uncertainty step, not between the
+steps.** A `reported` sigma column is checked for negative values — almost
+always an undeclared `-9999` missing-value sentinel — and that check must
+run *before* the unit conversion is applied to it. `convert_spread` takes an
+absolute value, correctly, because a negative `scale` is a legitimate
+sign-convention flip whose magnitude must survive; so a negativity test
+applied afterwards has nothing left to find. Ordered the wrong way, the
+guard protected only variables with no conversion — failing precisely where
+the manifest was doing more work — and a `-9999` under a ppm→ppb conversion
+entered the budget as a silent 9,999,000 ppb "1σ". For a random component
+that drives the point's inverse-variance weight to zero; for a systematic
+component, combined as a weighted mean of sigmas (§3.3) rather than in
+inverse variance, a single such value dominates the entire bin.
 
-**A zero MAD masks nothing.** When enough of a window shares one value the
-MAD collapses, and the threshold with it, which would reject every sample
-differing from the local median at all. On real analyzer records a
-substantial fraction of rolling windows have zero MAD, so acting on that
-zero scale rejects several percent of good data as spikes. The cost is a
-documented blind spot: a glitch in *perfectly* constant data is not masked,
-because such data offers no scale to judge it against. Real measurements
-always carry local variation.
+### 9.5 Why there is no spike rule
 
-Note this rule targets sub-second instrument glitches and is a poor fit for
-gas species in plume-dense records, where sharp real features are exactly
-what it removes.
+There was one, and it was removed on 2026-08-26 (owner decision, Phase-3
+walkthrough). It is documented here rather than deleted silently, because
+"we considered an outlier filter and rejected it" is a methodological
+statement a reader of this package needs.
+
+The rule was a centered rolling median/MAD (Hampel) test, thresholding at
+`n_mad` times the raw MAD, intended for sub-second electronic glitches and
+kept deliberately distinct from plume detection. The problem is that its
+operating definition — *a short excursion, large relative to a local robust
+scale* — is also the definition of a plume in mobile trace-gas data. The two
+are not merely similar; on this data they are the same test.
+
+Measurement settled it. On real 2-second analyzer records:
+
+| window | windows with zero MAD | plume samples masked | quiet samples masked | enrichment |
+|---|---|---|---|---|
+| 5 s | 71.2 % | 1.26 % | 1.11 % | 1.14× |
+| 11 s | 49.7 % | 3.88 % | 3.61 % | 1.08× |
+| 31 s | 14.3 % | 6.40 % | 4.92 % | 1.30× |
+| 61 s | 5.4 % | 6.85 % | 2.62 % | **2.61×** |
+| 300 s | 0.0 % | 5.88 % | 2.82 % | 2.08× |
+
+The window is bounded on both sides and the safe range between them is
+narrow and undiscoverable. Too short, and the rolling MAD degenerates to
+zero across most of the record, so the rule silently declines to test
+anything while still reporting a plausible masked count. Too long, and it
+masks plume samples at up to 2.6× the quiet-air rate — it has stopped being
+a glitch filter and become a plume clipper.
+
+The decisive number is the width of real features. In the same records,
+**27–29 % of clear enhancement events are two samples wide or fewer**, and
+even among events exceeding 100σ over baseline, 18 % are that narrow. A
+filter tuned to reject 1–2 sample excursions cannot distinguish a glitch
+from the signal this package exists to find. No choice of `window` and
+`n_mad` escapes that, because the ambiguity is in the data, not the
+parameters.
+
+What replaces it: nothing, deliberately. Genuine instrument glitches are
+better rejected where the information to identify them actually exists — an
+instrument status `flag` column, a physical `range` bound, or a later stage
+that already knows what a plume looks like and can judge an excursion in
+that context. An outlier filter that runs *before* anything understands the
+signal is guessing.
+
+A consequence worth noting: with the rolling rule gone, every remaining
+QA/QC rule is pointwise, so QA/QC no longer depends on record order at all.
+Sorting is purely the orchestration stage's concern.
 
 ### 9.6 Uncertainty at ingestion, and what it refuses to invent
 

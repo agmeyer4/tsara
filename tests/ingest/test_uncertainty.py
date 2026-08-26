@@ -281,3 +281,52 @@ def test_decorrelation_timescale_defaults_to_none() -> None:
     values = _series([1900.0])
     spec = _spec(random={"mode": "declared", "absolute": 0.7})
     assert _resolve(values, spec, _frame(values)).decorrelation_timescale is None
+
+
+def test_negative_sentinel_is_masked_even_under_a_unit_conversion(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The guard has to run before the conversion, not after.
+
+    `convert_spread` takes an absolute value — correctly, since a negative
+    `scale` is a legitimate sign-convention flip. A `sigma < 0` test applied
+    afterwards therefore finds nothing, so the sentinel guard worked only for
+    variables with no conversion: precisely the wrong way round, since it
+    failed where the manifest was doing more work. A -9999 under a ppm->ppb
+    conversion silently became a 9,999,000 ppb "1-sigma", which drives a
+    random component's inverse-variance weight to nothing and, for a
+    systematic component combined as a weighted mean of sigmas, dominates the
+    whole bin.
+    """
+    values = _series([1.9, 1.95, 2.0])
+    frame = _frame(values, SIG=[0.002, -9999.0, 0.003])
+    spec = _spec(random={"mode": "reported", "column": "SIG"})
+    conversion = UnitConversion(from_unit="ppm", to_unit="ppb", scale=1000.0)
+
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.uncertainty"):
+        resolved = _resolve(values, spec, frame, conversion=conversion)
+
+    assert resolved.random is not None
+    assert bool(np.isnan(resolved.random[1]))
+    # The surviving points still take the scale, so the fix did not disable it.
+    assert resolved.random[0] == pytest.approx(2.0)
+    assert resolved.random[2] == pytest.approx(3.0)
+    assert "negative value" in caplog.text
+
+
+def test_negative_sentinel_masking_survives_a_negative_scale() -> None:
+    """A sign-convention flip must still yield a positive spread.
+
+    Masking negatives *before* conversion could have broken this: the check
+    is about the reported sentinel, not about the sign the conversion
+    produces, and a legitimate negative scale still has to come out positive.
+    """
+    values = _series([1.0, 2.0])
+    frame = _frame(values, SIG=[0.5, -9999.0])
+    spec = _spec(random={"mode": "reported", "column": "SIG"})
+    conversion = UnitConversion(from_unit="a", to_unit="b", scale=-2.0)
+    resolved = _resolve(values, spec, frame, conversion=conversion)
+
+    assert resolved.random is not None
+    assert resolved.random[0] == pytest.approx(1.0)
+    assert bool(np.isnan(resolved.random[1]))

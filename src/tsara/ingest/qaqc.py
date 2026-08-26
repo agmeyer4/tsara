@@ -1,4 +1,4 @@
-"""Masking bad samples: range limits, instrument flags, and spikes.
+"""Masking bad samples: range limits and instrument flags.
 
 Masking, not deleting
 ---------------------
@@ -20,16 +20,36 @@ with a real consequence, so it is worth stating plainly:
   this, converting ppm→ppb and then bounding in ppb. Running the rule before
   conversion would compare ppb bounds against ppm numbers and mask the
   entire record.
-* ``spike`` is unaffected either way: both the rolling median and the
-  rolling MAD scale linearly, so the ratio the test thresholds on is
-  invariant under any affine conversion. It is ordered with the others
-  because there is no reason to make the order matter.
 * ``flag`` reads a *different* column — an instrument status word — which is
   never a converted quantity. It is looked up in the raw frame directly.
 
 Rules compose by union: a sample rejected by any rule is masked, and the
 count each rule rejected is reported separately so that "the range rule
 removed 40 % of this record" is visible rather than buried in a total.
+
+Why there is no spike rule
+--------------------------
+There was one — a centered rolling median/MAD (Hampel) test for sub-second
+electronic glitches, kept deliberately distinct from plume detection. It was
+removed during the Phase-3 walkthrough (2026-08-26, owner decision) because
+on this package's own subject matter it cannot work.
+
+A Hampel filter rejects short excursions that are large relative to a local
+robust scale. That is exactly the description of a **plume** in mobile
+trace-gas data. Measured on real 2-second analyzer records, 27-29 % of clear
+enhancement events are two samples wide or fewer, and even among events
+exceeding 100 sigma over baseline, 18 % are that narrow. A filter tuned to
+reject 1-2 sample excursions therefore cannot distinguish a glitch from the
+signal the package exists to find, and the measurement bore that out: at a
+61-second window the rule masked plume samples 2.6 times more often than
+quiet-air samples.
+
+Removing it is the honest resolution. A rule whose safe operating window is
+narrow, undocumented, and bounded on one side by "silently tests almost
+nothing" and on the other by "clips real plumes" is a trap, not a tool.
+Genuine instrument glitches are better handled where the information to
+identify them exists: an instrument status ``flag`` column, a physical
+``range`` bound, or a later stage that already knows what a plume looks like.
 """
 
 from __future__ import annotations
@@ -41,7 +61,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
-from tsara.config.manifest import FlagRule, RangeRule, SpikeRule
+from tsara.config.manifest import FlagRule, RangeRule
 from tsara.ingest.base import TsaraIngestError
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -68,7 +88,7 @@ class MaskReport:
     Attributes
     ----------
     kind : str
-        The rule's ``kind`` discriminator (``range``/``flag``/``spike``).
+        The rule's ``kind`` discriminator (``range`` or ``flag``).
     n_masked : int
         Samples this rule newly rejected — counted against samples that were
         still valid when it ran, so overlapping rules do not double-count.
@@ -159,9 +179,7 @@ def _evaluate(
     """Return a boolean Series marking samples this rule rejects."""
     if isinstance(rule, RangeRule):
         return _evaluate_range(rule, values)
-    if isinstance(rule, FlagRule):
-        return _evaluate_flag(rule, values, frame, variable=variable, path=path)
-    return _evaluate_spike(rule, values)
+    return _evaluate_flag(rule, values, frame, variable=variable, path=path)
 
 
 def _evaluate_range(rule: RangeRule, values: pd.Series) -> pd.Series:
@@ -198,60 +216,6 @@ def _evaluate_flag(
         # flag, since an unknown status is not evidence of a good sample.
         return pd.Series(~flags.isin(rule.good_values).to_numpy(), index=values.index)
     return pd.Series(flags.isin(rule.bad_values or []).to_numpy(), index=values.index)
-
-
-def _evaluate_spike(rule: SpikeRule, values: pd.Series) -> pd.Series:
-    """Reject isolated glitches with a rolling median/MAD (Hampel) test.
-
-    Two implementation notes that matter scientifically:
-
-    * **The window is centered.** A spike is symmetric in time; a trailing
-      window would compare each sample only with its past and would flag the
-      *leading edge of a real plume* as readily as a glitch.
-    * **A zero MAD masks nothing.** When enough of a window shares one value
-      the MAD collapses to zero, and the threshold with it, which would
-      reject every sample differing from the local median at all. This is
-      not a corner case: on real analyzer records a substantial fraction of
-      rolling windows have zero MAD, and acting on that zero scale rejects
-      several percent of perfectly good data as "spikes". Refusing to act on
-      a degenerate scale is the safe reading, and it mirrors the
-      quantization guard the noise estimators use (``docs/METHODS.md`` §2.5).
-
-      The cost is a documented blind spot: a glitch in *perfectly* constant
-      data is not masked, because such data offers no scale to judge it
-      against. Real measurements always carry local variation, so a real
-      glitch always has one.
-
-    The threshold is ``n_mad`` × the raw MAD, exactly as
-    :class:`~tsara.config.manifest.SpikeRule` documents. Note that this is
-    *not* scaled to sigma units: for Gaussian noise MAD ≈ 0.6745·σ, so the
-    default ``n_mad=6`` corresponds to roughly 4σ.
-    """
-    if not values.index.is_monotonic_increasing:
-        # Not defensive padding. Archive records really do step backwards
-        # sometimes — logger clock corrections, buffered writes, merge steps
-        # in an upstream processing chain — and a time-based rolling window
-        # is the first thing in the pipeline to notice. pandas' own message
-        # ("index values must be monotonic") names neither the variable nor
-        # the file. Sorting is the orchestration stage's job — deliberately,
-        # since it is a cross-file concern — so this reports rather than
-        # silently reordering, which would hide a real clock problem.
-        raise TsaraIngestError(
-            "Spike rule needs a monotonically increasing time index, but this "
-            "record's timestamps go backwards somewhere. Concatenate and sort "
-            "the instrument's files before applying QA/QC."
-        )
-
-    window = pd.Timedelta(rule.window)
-    # min_periods=1 keeps the record's first and last samples testable rather
-    # than silently exempt; a short window there simply yields a wider MAD.
-    rolling = values.rolling(window, center=True, min_periods=1)
-    median = rolling.median()
-    deviation = (values - median).abs()
-    mad = deviation.rolling(window, center=True, min_periods=1).median()
-
-    threshold = rule.n_mad * mad
-    return (deviation > threshold) & (mad > 0)
 
 
 def _warn_if_mostly_masked(

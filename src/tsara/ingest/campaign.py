@@ -9,12 +9,14 @@ the one order that is correct:
 
 Why concatenate before assembling, rather than per file
 -------------------------------------------------------
-QA/QC windows and uncertainty are *campaign-level* quantities. A rolling
-spike test evaluated per file gives a different answer at every file
-boundary, and an archive split into hourly files would produce different
-masking than the same data in daily files. So all of an instrument's files
-become one table first, and every per-variable decision is made once against
-the whole record.
+Several per-variable decisions are *campaign-level* quantities, and any of
+them evaluated per file would give a different answer at every file
+boundary — an archive split into hourly files would not agree with the same
+data in daily files. De-duplication is inherently cross-file; so is the
+empirical noise estimate a later phase computes from this record; so is any
+rolling statistic. Rather than sort out which rules happen to be pointwise
+today, all of an instrument's files become one table first, and every
+per-variable decision is made once against the whole record.
 
 Sorting is not a formality
 --------------------------

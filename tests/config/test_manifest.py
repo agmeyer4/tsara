@@ -349,12 +349,28 @@ def test_flag_rule_requires_exactly_one_list(stationary_manifest_dict: dict[str,
         Manifest.model_validate(bad)
 
 
-def test_spike_rule_validates_window(stationary_manifest_dict: dict[str, Any]) -> None:
+def test_empty_good_values_is_rejected(stationary_manifest_dict: dict[str, Any]) -> None:
+    """An empty list validates trivially and then masks the entire record.
+
+    Nothing can be a member of an empty list, so every sample is "not good".
+    The schema already refuses the analogous no-op UnitConversion; a rule that
+    cannot do anything sensible belongs in the same category.
+    """
     bad = copy.deepcopy(stationary_manifest_dict)
     bad["instruments"]["picarro"]["variables"]["ch4"]["qaqc"] = [
-        {"kind": "spike", "window": "not-a-duration"}
+        {"kind": "flag", "flag_column": "QC", "good_values": []}
     ]
-    with pytest.raises(ValidationError, match="timedelta"):
+    with pytest.raises(ValidationError, match="would mask every sample"):
+        Manifest.model_validate(bad)
+
+
+def test_empty_bad_values_is_rejected(stationary_manifest_dict: dict[str, Any]) -> None:
+    """The mirror case: a rule that looks active in the manifest and does nothing."""
+    bad = copy.deepcopy(stationary_manifest_dict)
+    bad["instruments"]["picarro"]["variables"]["ch4"]["qaqc"] = [
+        {"kind": "flag", "flag_column": "QC", "bad_values": []}
+    ]
+    with pytest.raises(ValidationError, match="would mask nothing"):
         Manifest.model_validate(bad)
 
 
@@ -678,12 +694,9 @@ def test_headerless_known_flag_column_is_accepted() -> None:
 
 
 def test_non_flag_qaqc_rules_are_not_column_checked() -> None:
-    """Range and spike rules name no column, so they cannot be inconsistent."""
+    """A range rule names no column, so it cannot be inconsistent with one."""
     spec = _headerless_instrument()
-    spec["variables"]["ch4"]["qaqc"] = [
-        {"kind": "range", "min": 1700.0},
-        {"kind": "spike", "window": "5s", "n_mad": 6.0},
-    ]
+    spec["variables"]["ch4"]["qaqc"] = [{"kind": "range", "min": 1700.0}]
     assert InstrumentConfig.model_validate(spec) is not None
 
 
