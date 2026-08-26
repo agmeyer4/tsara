@@ -24,6 +24,7 @@ that true by construction instead of by coincidence.
 from __future__ import annotations
 
 __all__ = [
+    "LOD_COUNT_KEY",
     "ALTITUDE_COORD",
     "LATITUDE_COORD",
     "LONGITUDE_COORD",
@@ -81,3 +82,16 @@ def sigma_sys_name(variable: str) -> str:
         e.g. ``'sigma_sys_ch4'``.
     """
     return f"{SIGMA_SYS_PREFIX}{variable}"
+
+
+#: Attr key under which a reader reports per-raw-column counts of samples
+#: masked as out-of-detection-range.
+#:
+#: Lives here for the same reason the sigma prefixes do: two modules have to
+#: spell it identically or the information silently disappears. A reader
+#: writes it into ``RawTable.attrs``, campaign orchestration sums it across
+#: files, and stream assembly pops it back out to attach each count to the
+#: variable it censors. Keeping it in :mod:`tsara.core.naming` also avoids an
+#: import cycle, since ingestion's orchestration and assembly modules already
+#: depend on each other in one direction.
+LOD_COUNT_KEY = "icartt_lod_masked"

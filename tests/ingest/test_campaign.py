@@ -9,17 +9,25 @@ piece can observe.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import pytest
 
-from tsara.config.manifest import Manifest
+from tsara.config.manifest import InstrumentConfig, Manifest, StationaryPlatform
 from tsara.core.bundle import BUNDLE_MANIFEST, BUNDLE_STREAMS_DIR, TsaraBundleError
+from tsara.core.naming import LOD_COUNT_KEY
 from tsara.ingest.base import TsaraIngestError
 from tsara.ingest.bundle import BUNDLE_MANIFEST_CONFIG, load_streams, save_streams
-from tsara.ingest.campaign import StreamCollection, ingest_campaign
+from tsara.ingest.campaign import (
+    StreamCollection,
+    _merge_file_attrs,
+    ingest_campaign,
+)
+from tsara.ingest.streams import build_stream
 
 
 def _write_csv(path: Path, rows: list[tuple[str, float]]) -> None:
@@ -46,6 +54,25 @@ def _manifest(base: Path, **overrides: Any) -> Manifest:
     }
     spec.update(overrides)
     return Manifest.model_validate(spec)
+
+
+def _frame() -> pd.DataFrame:
+    """A minimal one-column table for exercising build_stream directly."""
+    index = pd.to_datetime(["2026-01-01 00:00:00", "2026-01-01 00:00:01"])
+    return pd.DataFrame({"CH4": [1900.0, 1901.0]}, index=index)
+
+
+def _instrument() -> InstrumentConfig:
+    return InstrumentConfig.model_validate(
+        {
+            "loader": {
+                "format": "csv",
+                "path_template": "*.csv",
+                "time": {"column": "t", "format": "%Y-%m-%d %H:%M:%S"},
+            },
+            "variables": {"ch4": {"column": "CH4", "role": "gas", "units": "ppb"}},
+        }
+    )
 
 
 def _archive(tmp_path: Path) -> Path:
@@ -329,3 +356,170 @@ def test_collection_is_reconstructed_as_the_same_type(tmp_path: Path) -> None:
     collection = ingest_campaign(_manifest(_archive(tmp_path)))
     save_streams(collection, tmp_path / "bundle")
     assert isinstance(load_streams(tmp_path / "bundle"), StreamCollection)
+
+
+# ---------------------------------------------------------------------------
+# Reconciling what the files said about themselves
+# ---------------------------------------------------------------------------
+
+
+def test_agreeing_file_attrs_are_carried_through() -> None:
+    merged = _merge_file_attrs([{"icartt_pi": "Lin, John"}, {"icartt_pi": "Lin, John"}])
+    assert merged["icartt_pi"] == "Lin, John"
+
+
+def test_disagreeing_file_attrs_say_so_rather_than_picking() -> None:
+    """Silently choosing one would put a false statement in a self-describing file."""
+    merged = _merge_file_attrs([{"icartt_revision": "R0"}, {"icartt_revision": "R1"}])
+    assert merged["icartt_revision"] == "R0; R1"
+
+
+def test_many_distinct_values_are_summarised_not_listed() -> None:
+    """An ICARTT data date differs per file; a 1000-file instrument must not
+    write a 1000-item attr."""
+    per_file: list[Mapping[str, object]] = [
+        {"icartt_data_date": f"2024-08-{d:02d}"} for d in range(1, 21)
+    ]
+    merged = _merge_file_attrs(per_file)
+    value = merged["icartt_data_date"]
+    assert isinstance(value, str)
+    assert value.startswith("2024-08-01 ... 2024-08-20")
+    assert "20 distinct values" in value
+
+
+def test_lod_counts_are_summed_across_files_not_reconciled() -> None:
+    """A tally over files is the tally over the concatenated record."""
+    merged = _merge_file_attrs(
+        [
+            {LOD_COUNT_KEY: {"Benzene_PPBV": 10, "Toluene_PPBV": 2}},
+            {LOD_COUNT_KEY: {"Benzene_PPBV": 5}},
+        ]
+    )
+    assert merged[LOD_COUNT_KEY] == {"Benzene_PPBV": 15, "Toluene_PPBV": 2}
+
+
+def test_no_file_attrs_merges_to_nothing() -> None:
+    assert _merge_file_attrs([]) == {}
+
+
+def test_file_attrs_reach_the_saved_stream(tmp_path: Path) -> None:
+    """The whole point: a stream found on disk explains itself (CLAUDE.md 5)."""
+    base = _archive(tmp_path)
+    stream = ingest_campaign(_manifest(base))["picarro"]
+    # A CSV declares nothing about itself, so nothing is invented for it.
+    assert "icartt_pi" not in stream.attrs
+    assert stream.attrs["tsara_stage"] == "ingest"
+
+
+def test_tsara_attrs_win_a_name_collision(tmp_path: Path) -> None:
+    """What the package did is not negotiable; a header field is whatever
+    the producer wrote."""
+    dataset = build_stream(
+        _frame(),
+        _instrument(),
+        name="x",
+        platform=StationaryPlatform(kind="stationary", latitude=0.0, longitude=0.0),
+        file_attrs={"tsara_stage": "not-really", "icartt_pi": "Someone"},
+    )
+    assert dataset.attrs["tsara_stage"] == "ingest"
+    assert dataset.attrs["icartt_pi"] == "Someone"
+
+
+# ---------------------------------------------------------------------------
+# Duplicate timestamps: naming the cause rather than guessing it
+# ---------------------------------------------------------------------------
+
+
+def test_duplicates_within_one_file_are_reported_as_such(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Measured on the real PTR-MS set: all 7,242 were within-file and none
+    from overlap, while the message asked 'Overlapping files?'."""
+    base = tmp_path / "data"
+    _write_csv(
+        base / "picarro" / "a.csv",
+        [("2026-01-01 00:00:00", 1900.0), ("2026-01-01 00:00:00", 1901.0)],
+    )
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.campaign"):
+        ingest_campaign(_manifest(base))
+
+    assert "1 duplicated within a single file" in caplog.text
+    assert "0 from overlap between files" in caplog.text
+
+
+def test_duplicates_across_files_are_reported_as_such(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    base = tmp_path / "data"
+    _write_csv(base / "picarro" / "a.csv", [("2026-01-01 00:00:00", 1900.0)])
+    _write_csv(base / "picarro" / "b.csv", [("2026-01-01 00:00:00", 9999.0)])
+
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.campaign"):
+        ingest_campaign(_manifest(base))
+
+    assert "0 duplicated within a single file" in caplog.text
+    assert "1 from overlap between files" in caplog.text
+    assert "path templates" in caplog.text
+
+
+def test_within_file_duplicates_are_counted_exactly_when_unsorted(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Counted per file before concatenation, so a file that is internally
+    out of order does not get its duplicates blamed on overlap."""
+    base = tmp_path / "data"
+    _write_csv(
+        base / "picarro" / "a.csv",
+        [
+            ("2026-01-01 00:00:00", 1900.0),
+            ("2026-01-01 00:00:05", 1901.0),
+            ("2026-01-01 00:00:00", 1902.0),
+        ],
+    )
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.campaign"):
+        ingest_campaign(_manifest(base))
+
+    assert "1 duplicated within a single file" in caplog.text
+    assert "0 from overlap between files" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Bundles do not accumulate streams that are no longer theirs
+# ---------------------------------------------------------------------------
+
+
+def test_resaving_a_subset_removes_the_stale_stream_file(tmp_path: Path) -> None:
+    base = _archive(tmp_path)
+    _write_csv(base / "other" / "x.csv", [("2026-01-01 00:00:00", 5.0)])
+    manifest = _manifest(base)
+    spec = manifest.model_dump(mode="json")
+    spec["instruments"]["other"] = {
+        "loader": {
+            "format": "csv",
+            "path_template": "other/*.csv",
+            "time": {"column": "t", "format": "%Y-%m-%d %H:%M:%S"},
+        },
+        "variables": {"co2": {"column": "CH4", "role": "gas", "units": "ppm"}},
+    }
+    full = ingest_campaign(Manifest.model_validate(spec))
+    bundle = save_streams(full, tmp_path / "bundle")
+    assert (bundle / BUNDLE_STREAMS_DIR / "other.nc").is_file()
+
+    subset = StreamCollection(streams={"picarro": full["picarro"]}, manifest=full.manifest)
+    save_streams(subset, bundle)
+
+    assert not (bundle / BUNDLE_STREAMS_DIR / "other.nc").exists()
+    assert (bundle / BUNDLE_STREAMS_DIR / "picarro.nc").is_file()
+    assert set(load_streams(bundle).streams) == {"picarro"}
+
+
+def test_unrelated_files_in_the_streams_directory_are_left_alone(tmp_path: Path) -> None:
+    base = _archive(tmp_path)
+    collection = ingest_campaign(_manifest(base))
+    bundle = save_streams(collection, tmp_path / "bundle")
+    note = bundle / BUNDLE_STREAMS_DIR / "README.txt"
+    note.write_text("mine", encoding="utf-8")
+
+    save_streams(collection, bundle)
+
+    assert note.is_file()

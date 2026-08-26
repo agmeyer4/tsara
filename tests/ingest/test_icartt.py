@@ -766,3 +766,123 @@ def test_names_matching_neither_the_rows_nor_nv_fall_back_to_definitions(
 
     assert list(frame.columns) == ["Time_Start", "CH4_ppb", "CO2_ppm"]
     assert "matching neither" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Limit-of-detection sentinels
+# ---------------------------------------------------------------------------
+#
+# These matter more than their line count suggests. Measured over the 2024
+# archive, 10.03% of every numeric value is an LOD sentinel, and in the
+# PTR-MS VOC files it reaches 67-70% of samples -- far enough past half that
+# the *median* of a real benzene record was the sentinel rather than a
+# concentration, so a rolling low-quantile baseline would have called
+# -88888 ppbv the background (docs/METHODS.md 9.2.1).
+
+
+def test_llod_sentinel_is_masked(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        _build(
+            special=["SPECIAL COMMENTS:", "LLOD_FLAG: -8888"],
+            rows=["42480.0, 1900.0, 415.0", "42481.0, -8888, 415.5"],
+        ),
+    )
+    table = read_icartt(path, LOADER)
+    assert np.isnan(table.frame["CH4_ppb"].to_numpy()[1])
+    assert table.attrs["icartt_lod_masked"] == {"CH4_ppb": 1}
+
+
+def test_ulod_sentinel_is_masked_too(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        _build(
+            special=["SPECIAL COMMENTS:", "ULOD_FLAG: -7777"],
+            rows=["42480.0, -7777, 415.0", "42481.0, 1901.0, 415.5"],
+        ),
+    )
+    assert np.isnan(read_icartt(path, LOADER).frame["CH4_ppb"].to_numpy()[0])
+
+
+def test_lod_sentinel_is_masked_before_scaling(tmp_path: Path) -> None:
+    """Scaling first would turn -8888 into a plausible-looking number, which
+    is exactly how a sentinel becomes silent data."""
+    path = _write(
+        tmp_path,
+        _build(
+            scales=[1000.0, 1.0],
+            special=["SPECIAL COMMENTS:", "LLOD_FLAG: -8888"],
+            rows=["42480.0, -8888, 415.0"],
+        ),
+    )
+    assert np.isnan(read_icartt(path, LOADER).frame["CH4_ppb"].to_numpy()[0])
+
+
+def test_non_numeric_lod_flags_are_ignored(tmp_path: Path) -> None:
+    """'N/A' and 'NaN' both mean the flag is unused."""
+    path = _write(
+        tmp_path,
+        _build(special=["SPECIAL COMMENTS:", "LLOD_FLAG: N/A", "ULOD_FLAG: NaN"]),
+    )
+    table = read_icartt(path, LOADER)
+    assert "icartt_lod_masked" not in table.attrs
+    assert not table.frame["CH4_ppb"].isna().any()
+
+
+def test_per_variable_lod_flags_are_matched_by_position(tmp_path: Path) -> None:
+    """A list as long as NV names one sentinel per variable."""
+    path = _write(
+        tmp_path,
+        _build(
+            special=["SPECIAL COMMENTS:", "LLOD_FLAG: -8888, -7777"],
+            rows=["42480.0, -8888, -7777", "42481.0, -7777, -8888"],
+        ),
+    )
+    frame = read_icartt(path, LOADER).frame
+    # Row 0 carries each variable's *own* sentinel; row 1 has them swapped,
+    # so a positional match masks exactly the diagonal.
+    assert np.isnan(frame["CH4_ppb"].to_numpy()[0])
+    assert np.isnan(frame["CO2_ppm"].to_numpy()[0])
+    assert frame["CH4_ppb"].to_numpy()[1] == -7777.0
+    assert frame["CO2_ppm"].to_numpy()[1] == -8888.0
+
+
+def test_a_single_lod_flag_applies_to_every_variable(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        _build(
+            special=["SPECIAL COMMENTS:", "LLOD_FLAG: -8888"],
+            rows=["42480.0, -8888, -8888"],
+        ),
+    )
+    frame = read_icartt(path, LOADER).frame
+    assert np.isnan(frame["CH4_ppb"].to_numpy()[0])
+    assert np.isnan(frame["CO2_ppm"].to_numpy()[0])
+
+
+def test_lod_masking_is_reported(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A species mostly below detection is a fact worth knowing before a
+    ratio is fitted to it."""
+    path = _write(
+        tmp_path,
+        _build(
+            special=["SPECIAL COMMENTS:", "LLOD_FLAG: -8888"],
+            rows=["42480.0, -8888, 415.0"],
+        ),
+    )
+    with caplog.at_level(logging.INFO, logger="tsara.ingest.icartt"):
+        read_icartt(path, LOADER)
+    assert "out-of-detection-range" in caplog.text
+    assert "CH4_ppb:1" in caplog.text
+
+
+def test_metadata_is_scraped_from_the_whole_header(tmp_path: Path) -> None:
+    """The comment blocks are located by 12 + NV arithmetic that a malformed
+    variable count invalidates. Measured: the 43 PTR-MS files in the archive
+    carry an extra blank-named definition line, which offset the walk and
+    left the metadata EMPTY -- on exactly the files declaring the LOD flags
+    with the highest below-detection fractions in the archive."""
+    text = _build(special=["SPECIAL COMMENTS:", "LLOD_FLAG: -8888", "REVISION: R2"])
+    header = parse_icartt_header(text.splitlines(), Path("f.ict"))
+    assert header.metadata["LLOD_FLAG"] == "-8888"
+    assert header.metadata["REVISION"] == "R2"

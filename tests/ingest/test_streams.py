@@ -21,7 +21,7 @@ from tsara.config.manifest import (
     MobilePlatform,
     StationaryPlatform,
 )
-from tsara.core.naming import sigma_rand_name, sigma_sys_name
+from tsara.core.naming import LOD_COUNT_KEY, sigma_rand_name, sigma_sys_name
 from tsara.ingest.base import TsaraIngestError
 from tsara.ingest.streams import build_stream
 
@@ -400,3 +400,36 @@ def test_many_source_files_are_summarised_in_messages(
 def test_no_sources_still_builds() -> None:
     stream = _build(_frame(), _instrument(), sources=[])
     assert stream.attrs["n_source_files"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Below-detection counts travel to the variable they censor
+# ---------------------------------------------------------------------------
+
+
+def test_lod_count_is_attached_to_the_variable_it_censors() -> None:
+    """Keyed on the raw column name, which is the only name a reader knows;
+    stream assembly is where it becomes a fact about a canonical species."""
+    stream = _build(_frame(), _instrument(), file_attrs={LOD_COUNT_KEY: {"CH4_dry": 17}})
+    assert stream["ch4"].attrs["n_lod_masked"] == 17
+
+
+def test_no_lod_count_means_no_attr() -> None:
+    """Absence must not read as a claim that nothing was below detection."""
+    assert "n_lod_masked" not in _build(_frame(), _instrument())["ch4"].attrs
+
+
+def test_a_zero_lod_count_is_not_recorded() -> None:
+    stream = _build(_frame(), _instrument(), file_attrs={LOD_COUNT_KEY: {"CH4_dry": 0}})
+    assert "n_lod_masked" not in stream["ch4"].attrs
+
+
+def test_lod_counts_for_other_columns_are_ignored() -> None:
+    stream = _build(_frame(), _instrument(), file_attrs={LOD_COUNT_KEY: {"Other": 4}})
+    assert "n_lod_masked" not in stream["ch4"].attrs
+
+
+def test_declared_file_attrs_reach_the_dataset() -> None:
+    """A stream found on disk has to explain itself (CLAUDE.md 5)."""
+    stream = _build(_frame(), _instrument(), file_attrs={"icartt_pi": "Hu, Lu"})
+    assert stream.attrs["icartt_pi"] == "Hu, Lu"

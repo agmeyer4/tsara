@@ -100,6 +100,8 @@ def save_streams(collection: StreamCollection, path: str | Path) -> Path:
         # int and why optional attrs are omitted rather than written as None.
         stream.to_netcdf(streams_dir / f"{name}.nc", engine="netcdf4")
 
+    _remove_orphan_streams(streams_dir, set(collection.streams))
+
     (bundle / BUNDLE_MANIFEST).write_text(
         json.dumps(
             {
@@ -117,6 +119,26 @@ def save_streams(collection: StreamCollection, path: str | Path) -> Path:
 
     logger.info("Wrote ingest bundle to %s (%d streams).", bundle, len(collection.streams))
     return bundle
+
+
+def _remove_orphan_streams(streams_dir: Path, keep: set[str]) -> None:
+    """Delete stream files the collection being saved no longer contains.
+
+    Saving is not always a fresh write: ``ingest_campaign(..., instruments=[...])``
+    exists precisely so a campaign can be re-run for a subset, and writing
+    that subset over an existing bundle otherwise leaves the previous run's
+    files behind. Nothing misreads them — :func:`load_streams` takes its
+    list from ``bundle.json`` — but the directory then contradicts its own
+    descriptor, and stale numbers that no longer correspond to the saved
+    manifest sit in a bundle whose whole purpose is to record what ran.
+
+    Only ``*.nc`` files directly in ``streams/`` are considered, so anything
+    else a user has put there is left alone.
+    """
+    for existing in streams_dir.glob("*.nc"):
+        if existing.is_file() and existing.stem not in keep:
+            logger.info("Removing stale stream file %s.", existing)
+            existing.unlink()
 
 
 def load_streams(path: str | Path) -> StreamCollection:

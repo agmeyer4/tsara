@@ -95,8 +95,8 @@ __all__ = [
 ]
 
 #: Keys ICARTT files conventionally put in their special-comment block as
-#: ``KEY: value``. Harvested into header metadata so downstream stages can
-#: see limit-of-detection flags and provenance without re-reading the file.
+#: ``KEY: value``. Scraped into header metadata so downstream stages can see
+#: limit-of-detection flags and provenance without re-reading the file.
 _METADATA_LINE = re.compile(r"^([A-Z][A-Z0-9_]*)\s*:\s*(.*)$")
 
 #: Revision token in an ICARTT filename: ``R`` followed by a single letter
@@ -170,8 +170,11 @@ class IcarttHeader:
         Data column names: the independent variable followed by the
         dependent ones, taken from the last normal comment line.
     metadata : dict
-        ``KEY: value`` pairs harvested from the comment blocks (e.g.
-        ``ULOD_FLAG``, ``LLOD_FLAG``, ``PLATFORM``, ``REVISION``).
+        ``KEY: value`` pairs scraped from the whole header (e.g.
+        ``ULOD_FLAG``, ``LLOD_FLAG``, ``PLATFORM``, ``REVISION``). Scraped
+        rather than read from the comment blocks because those are located
+        by ``12 + NV`` arithmetic that a malformed variable count silently
+        invalidates; see :func:`_metadata_scan_region`.
     """
 
     n_header_lines: int
@@ -494,6 +497,7 @@ def parse_icartt_header(lines: list[str], path: Path) -> IcarttHeader:
     # modal-width name check and the majority-vote time branch. Raising the
     # floor is a no-op for every other file in the archive.
     minimum_header = 12 + n_vars
+    nlhead_understated = n_header < minimum_header
     if n_header < minimum_header:
         logger.warning(
             "%s declares NLHEAD=%d, but NV=%d needs at least %d header lines "
@@ -548,8 +552,19 @@ def parse_icartt_header(lines: list[str], path: Path) -> IcarttHeader:
     header_line = normal[-1] if normal else lines[n_header - 1]
     column_names = tuple(_split(header_line))
 
+    # Scraped from the WHOLE header rather than from the two comment blocks
+    # above, because the blocks are located by arithmetic (12 + NV) that a
+    # malformed variable count silently invalidates. Measured: the 43 PTR-MS
+    # files in the 2024 archive carry one extra, blank-named definition line,
+    # which pushes the walk one line short; both blocks are then read from
+    # the wrong place and the metadata comes back EMPTY -- on exactly the
+    # files that declare the LOD flags with the highest below-detection
+    # fractions in the archive. A key/value scrape has no such dependency:
+    # a `KEY: value` line means the same thing wherever in the header it
+    # sits, so scanning all of it is strictly more robust and cannot read
+    # less. Bounded by n_header so no data row can be mistaken for metadata.
     metadata: dict[str, str] = {}
-    for line in (*special, *normal):
+    for line in _metadata_scan_region(lines, n_header, nlhead_understated):
         match = _METADATA_LINE.match(line.strip())
         if match:
             metadata[match[1]] = match[2].strip()
@@ -620,11 +635,20 @@ def read_icartt(path: Path, loader: LoaderConfig, /) -> RawTable:
     header = parse_icartt_header(lines, path)
 
     frame = _read_data(lines, header, path, loader.max_dropped_fraction)
-    frame = _apply_scales_and_missing(frame, header)
+    frame, lod_counts = _apply_scales_and_missing(frame, header)
+    if lod_counts:
+        # Logged, because a species that is mostly below detection is a fact
+        # about the campaign worth knowing before a ratio is fitted to it,
+        # not a quiet detail of the parse.
+        logger.info(
+            "%s: masked out-of-detection-range samples: %s.",
+            path,
+            ", ".join(f"{name}:{count}" for name, count in sorted(lod_counts.items())),
+        )
 
     times = _build_time_index(frame, header, path, loader.max_dropped_fraction)
     frame = frame.set_axis(times, axis=0)
-    return RawTable(frame=frame, path=path, attrs=_provenance(header))
+    return RawTable(frame=frame, path=path, attrs=_provenance(header, lod_counts))
 
 
 def _modal_field_count(body: list[str]) -> int:
@@ -809,14 +833,133 @@ def _read_data(
     return frame
 
 
-def _apply_scales_and_missing(frame: pd.DataFrame, header: IcarttHeader) -> pd.DataFrame:
-    """Mask declared missing-value sentinels, then apply scale factors.
+#: How far past a provably-wrong NLHEAD to keep looking for header text.
+#: Generous enough to clear any real comment block (the longest in the 2024
+#: archive is 23 lines) and small enough that a file with no residue costs
+#: one failed match per line rather than a scan of the whole record.
+_RESIDUAL_HEADER_LIMIT = 200
+
+
+def _metadata_scan_region(lines: list[str], n_header: int, nlhead_understated: bool) -> list[str]:
+    """Return the lines to scrape ``KEY: value`` metadata from.
+
+    Normally the header, and nothing else. The exception is a file whose
+    ``NLHEAD`` is provably too small: clamping it up to ``12 + NV`` recovers
+    a *lower bound* on the header, not the header, so the comment block —
+    LOD flags included — can still sit past the bound, in lines the reader
+    otherwise treats as data.
+
+    Two files in the 2024 archive are exactly this shape, and between them
+    they were the last 19,398 unmasked LOD sentinels once the block-walk
+    scrape was fixed.
+
+    The window is scanned to its end rather than stopped at the first
+    non-metadata line, because the residue does not begin with metadata: it
+    opens with the leftover variable definitions and comment counts that the
+    clamp could not account for, so any early stop would halt before
+    reaching the ``KEY: value`` block. Scanning into data rows is harmless —
+    :data:`_METADATA_LINE` is anchored on an uppercase key followed by a
+    colon, and an ICARTT data row begins with a numeric time field — so the
+    cost of over-scanning is a few failed matches, while the cost of
+    under-scanning is an unmasked sentinel in a concentration.
+    """
+    if not nlhead_understated:
+        return lines[:n_header]
+    return list(lines[: n_header + _RESIDUAL_HEADER_LIMIT])
+
+
+def _lod_sentinels(header: IcarttHeader) -> dict[str, tuple[float, ...]]:
+    """Map each dependent variable to the LOD sentinels that apply to it.
+
+    ICARTT marks out-of-detection-range samples with sentinels that are
+    *not* the ``VMISS`` missing value: ``LLOD_FLAG`` for below the lower
+    limit of detection and ``ULOD_FLAG`` for above the upper one. They are
+    declared in the special-comment block rather than on a fixed header
+    line, so they need parsing rather than indexing.
+
+    Three shapes occur in real archives, and all three are handled:
+
+    * a single value applying to every variable (``LLOD_FLAG: -8888``);
+    * one value per dependent variable (a 16-item comma-separated list);
+    * a non-numeric placeholder (``N/A``, ``NaN``) meaning "not used".
+
+    When the item count matches ``NV`` the mapping is per-variable;
+    otherwise the union of the declared values applies to all of them.
+    Taking the union is the conservative reading: these sentinels are
+    chosen precisely to be impossible measurements, so masking one that a
+    given variable never uses costs nothing, while failing to mask one that
+    it does use puts a large negative number into a concentration.
+    """
+    declared: list[tuple[float, ...]] = []
+    for key in ("LLOD_FLAG", "ULOD_FLAG"):
+        raw = header.metadata.get(key)
+        if raw is None:
+            continue
+        values: list[float] = []
+        for token in raw.split(","):
+            try:
+                value = float(token.strip())
+            except ValueError:
+                # 'N/A' and 'NaN' both mean the flag is unused. NaN is
+                # excluded deliberately as well as accidentally: it can
+                # never compare equal, so it could not mask anything.
+                continue
+            if not np.isnan(value):
+                values.append(value)
+        if values:
+            declared.append(tuple(values))
+
+    if not declared:
+        return {}
+
+    names = [variable.name for variable in header.variables]
+    per_variable: dict[str, list[float]] = {name: [] for name in names}
+    for sentinels in declared:
+        if len(sentinels) == len(names):
+            for name, value in zip(names, sentinels, strict=True):
+                per_variable[name].append(value)
+        else:
+            for name in names:
+                per_variable[name].extend(sentinels)
+    return {name: tuple(dict.fromkeys(values)) for name, values in per_variable.items() if values}
+
+
+def _apply_scales_and_missing(
+    frame: pd.DataFrame, header: IcarttHeader
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Mask declared sentinels, then apply scale factors.
 
     Order matters and is not interchangeable: ``VSCAL`` applies to real
     measurements only. Scaling first would turn a ``-9999`` sentinel into
     ``-9999 * scale``, which no longer equals the declared sentinel and
     would silently enter the data as a plausible-looking number.
+
+    Both kinds of sentinel are masked here — ``VMISS`` for missing data and
+    the ``LLOD_FLAG``/``ULOD_FLAG`` values for out-of-detection-range
+    samples. Leaving the latter in place was measured against the 2024
+    archive as the more dangerous option by a wide margin: 10.03% of every
+    numeric value there is an LOD sentinel, and for the PTR-MS VOCs — the
+    species this package exists to fingerprint sources with — it reaches
+    67-70% of samples, far enough past half that the *median* of a real
+    benzene record is the sentinel rather than a concentration. A rolling
+    low-quantile baseline would therefore have called ``-88888 ppbv`` the
+    background (``docs/METHODS.md`` §9.2.1).
+
+    Masking is not the same as discarding the information: the per-variable
+    counts returned here, and the flag values themselves, travel on into the
+    stream so a later phase can substitute LOD/2 or fit a censored model.
+
+    Returns
+    -------
+    frame : pandas.DataFrame
+        The frame, sentinel-masked and scaled.
+    lod_counts : dict of str to int
+        Number of samples masked as out-of-detection-range, per variable.
+        Only variables with at least one such sample appear.
     """
+    lod_by_variable = _lod_sentinels(header)
+    lod_counts: dict[str, int] = {}
+
     for variable in header.variables:
         if variable.name not in frame.columns:
             continue
@@ -825,10 +968,16 @@ def _apply_scales_and_missing(frame: pd.DataFrame, header: IcarttHeader) -> pd.D
             # Compared with a tolerance because sentinels are written in
             # several spellings of the same number (-9999, -9999.0, -9.999e50).
             column = column.mask(np.isclose(column, variable.missing, rtol=1e-9, atol=0.0))
+        for sentinel in lod_by_variable.get(variable.name, ()):
+            flagged = np.isclose(column, sentinel, rtol=1e-9, atol=0.0)
+            n_flagged = int(flagged.sum())
+            if n_flagged:
+                lod_counts[variable.name] = lod_counts.get(variable.name, 0) + n_flagged
+                column = column.mask(flagged)
         if variable.scale != 1.0:
             column = column * variable.scale
         frame[variable.name] = column
-    return frame
+    return frame, lod_counts
 
 
 def _build_time_index(
@@ -924,14 +1073,16 @@ def _build_time_index(
     return times
 
 
-def _provenance(header: IcarttHeader) -> dict[str, Any]:
+def _provenance(header: IcarttHeader, lod_counts: dict[str, int] | None = None) -> dict[str, Any]:
     """Extract the header fields worth carrying alongside the data.
 
     Limit-of-detection flags are included deliberately. ICARTT files mark
-    below-detection samples with a distinct sentinel (``LLOD_FLAG``), which
-    is scientifically *not* the same as missing data — it is an upper bound.
-    TSARA does not yet act on that distinction, so the flags are carried
-    forward here rather than discarded, leaving a later stage free to
+    out-of-detection-range samples with sentinels distinct from ``VMISS``,
+    which is scientifically *not* the same as missing data — a below-LOD
+    benzene is an upper bound, whereas a dropout is no information at all.
+    :func:`_apply_scales_and_missing` masks those samples so they cannot
+    reach a baseline as numbers, and the flags and per-variable counts are
+    carried here so a later stage can still tell the two apart and
     substitute LOD/2 or fit a censored model without re-reading every file.
     """
     provenance: dict[str, Any] = {
@@ -946,4 +1097,9 @@ def _provenance(header: IcarttHeader) -> dict[str, Any]:
     for key in ("REVISION", "PLATFORM", "LOCATION", "ULOD_FLAG", "LLOD_FLAG", "LLOD_VALUE"):
         if key in header.metadata:
             provenance[f"icartt_{key.lower()}"] = header.metadata[key]
+    if lod_counts:
+        # Under the raw column names, because that is the only vocabulary a
+        # reader has: the manifest's canonical names are not visible here.
+        # Stream assembly translates them when it knows the mapping.
+        provenance["icartt_lod_masked"] = dict(lod_counts)
     return provenance

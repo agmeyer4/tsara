@@ -41,6 +41,8 @@ guard. That keeps the interpolation rule enforced in exactly one place.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -52,6 +54,7 @@ from tsara.config.manifest import MobilePlatform, StationaryPlatform
 from tsara.core.naming import (
     ALTITUDE_COORD,
     LATITUDE_COORD,
+    LOD_COUNT_KEY,
     LONGITUDE_COORD,
     TIME_COORD,
     sigma_rand_name,
@@ -81,6 +84,7 @@ def build_stream(
     platform: PlatformConfig,
     campaign: str = "",
     sources: Sequence[Path] = (),
+    file_attrs: Mapping[str, object] | None = None,
 ) -> xr.Dataset:
     """Turn one instrument's combined raw table into a native-rate stream.
 
@@ -102,6 +106,15 @@ def build_stream(
         ``Manifest.name``, recorded in attrs.
     sources : Sequence of pathlib.Path, optional
         Files that contributed, recorded as provenance.
+    file_attrs : Mapping, optional
+        What the source files declared about *themselves*, reconciled
+        across them by
+        :func:`~tsara.ingest.campaign._merge_file_attrs` — an ICARTT
+        header's PI, mission, revision and limit-of-detection flags, for
+        instance. Written into the stream's attrs so a saved product
+        explains itself without its source archive (CLAUDE.md §5). Counts
+        of samples masked as out-of-detection-range are routed to the
+        variable they describe instead of the dataset.
 
     Returns
     -------
@@ -115,15 +128,28 @@ def build_stream(
         declared column is absent from the data.
     """
     index = _normalize_index(frame, name)
+    declared = dict(file_attrs or {})
+    lod_counts = declared.pop(LOD_COUNT_KEY, None)
+    lod_by_column = dict(lod_counts) if isinstance(lod_counts, Mapping) else {}
 
     data_vars: dict[str, Any] = {}
     for canonical, variable in instrument.variables.items():
-        _add_variable(data_vars, frame, canonical, variable, instrument_name=name, sources=sources)
+        _add_variable(
+            data_vars,
+            frame,
+            canonical,
+            variable,
+            instrument_name=name,
+            sources=sources,
+            lod_by_column=lod_by_column,
+        )
 
     dataset = xr.Dataset(
         data_vars=data_vars,
         coords={TIME_COORD: index},
-        attrs=_stream_attrs(name, instrument, platform, campaign=campaign, sources=sources),
+        attrs=_stream_attrs(
+            name, instrument, platform, campaign=campaign, sources=sources, declared=declared
+        ),
     )
     _attach_platform_coords(dataset, platform)
     return dataset
@@ -172,6 +198,7 @@ def _add_variable(
     *,
     instrument_name: str,
     sources: Sequence[Path],
+    lod_by_column: Mapping[str, int] = MappingProxyType({}),
 ) -> None:
     """Convert, mask and resolve one variable, adding it and its sigmas."""
     if variable.column not in frame.columns:
@@ -218,6 +245,12 @@ def _add_variable(
         attrs["description"] = variable.description
     if resolved.decorrelation_timescale is not None:
         attrs["decorrelation_timescale"] = resolved.decorrelation_timescale
+    # Recorded per variable rather than per stream because that is the
+    # scope of the fact: a below-detection count belongs to the species it
+    # censors. Keyed on the RAW column name, the only name a reader knows.
+    n_below_lod = lod_by_column.get(variable.column)
+    if n_below_lod:
+        attrs["n_lod_masked"] = int(n_below_lod)
     if reports:
         # One compact string rather than an attr per rule: two rules of the
         # same kind would collide as attr names, and this stays readable in
@@ -274,6 +307,7 @@ def _stream_attrs(
     *,
     campaign: str,
     sources: Sequence[Path],
+    declared: Mapping[str, object] = MappingProxyType({}),
 ) -> dict[str, Any]:
     """Build the self-describing attrs every stream carries.
 
@@ -282,7 +316,11 @@ def _stream_attrs(
     came from. For a mobile platform this is also where the GPS binding is
     recorded, so Phase 4 can find the track without re-reading the manifest.
     """
-    attrs: dict[str, Any] = {
+    # The file's own claims go in first so that TSARA's statements about
+    # the run always win a name collision: what the package did is not
+    # negotiable, whereas a header field is whatever the producer wrote.
+    attrs: dict[str, Any] = {str(key): value for key, value in declared.items()}
+    attrs |= {
         "tsara_version": __version__,
         "tsara_stage": "ingest",
         "instrument": name,

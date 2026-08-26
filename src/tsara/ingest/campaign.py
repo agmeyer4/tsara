@@ -42,11 +42,13 @@ and the total is reported per instrument.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from tsara.core.naming import LOD_COUNT_KEY
 from tsara.ingest.base import TsaraIngestError
 from tsara.ingest.crawler import crawl
 from tsara.ingest.registry import read_file
@@ -107,6 +109,71 @@ class _Ingested:
 
     frame: pd.DataFrame
     sources: list[Path] = field(default_factory=list)
+    #: What the files said about themselves, reconciled across all of them.
+    #: See :func:`_merge_file_attrs`.
+    file_attrs: dict[str, object] = field(default_factory=dict)
+
+
+#: How many differing values of one attr key to list before summarizing.
+#: Chosen so a handful of revisions or processing levels stays fully
+#: readable while a per-file key (an ICARTT data date) is condensed.
+_MAX_DISTINCT_ATTR_VALUES = 8
+
+
+def _merge_file_attrs(per_file: list[Mapping[str, object]]) -> dict[str, object]:
+    """Reconcile what each file declared about itself into one mapping.
+
+    A reader returns :attr:`~tsara.ingest.base.RawTable.attrs` per file, and
+    an instrument is usually many files. Most keys are campaign constants —
+    the PI, the mission, the LOD flag values — and simply agree. The
+    interesting case is when they do not, and the rule here is to *say so*
+    rather than to pick: a silent choice between two PIs, or two different
+    LOD flags, would put a false statement in a saved product that claims to
+    be self-describing (CLAUDE.md §5).
+
+    Counts (:data:`LOD_COUNT_KEY`) are summed instead, since a tally over
+    files is exactly the tally over the concatenated record.
+    """
+    merged: dict[str, object] = {}
+    totals: dict[str, int] = {}
+    values: dict[str, list[object]] = {}
+
+    for attrs in per_file:
+        for key, value in attrs.items():
+            if key == LOD_COUNT_KEY and isinstance(value, Mapping):
+                for column, count in value.items():
+                    totals[str(column)] = totals.get(str(column), 0) + int(count)
+                continue
+            seen = values.setdefault(key, [])
+            if value not in seen:
+                seen.append(value)
+
+    for key, distinct in values.items():
+        if len(distinct) == 1:
+            merged[key] = distinct[0]
+        else:
+            # Joined, not dropped: that four files in a campaign carry
+            # different revision strings is a fact worth reading in
+            # `ncdump -h`, and it is the kind of thing nobody thinks to
+            # check until an analysis disagrees with a colleague's.
+            #
+            # Summarized past a threshold, because some keys differ in every
+            # file by design -- an ICARTT data date does -- and a thousand-file
+            # instrument would otherwise write a thousand-item attr that is
+            # unreadable in `ncdump -h` and useless as provenance. The first
+            # and last of the sorted values plus a count says the same thing
+            # in a line, and still makes the disagreement visible.
+            ordered_values = sorted(str(item) for item in distinct)
+            if len(ordered_values) > _MAX_DISTINCT_ATTR_VALUES:
+                merged[key] = (
+                    f"{ordered_values[0]} ... {ordered_values[-1]} "
+                    f"({len(ordered_values)} distinct values)"
+                )
+            else:
+                merged[key] = "; ".join(ordered_values)
+    if totals:
+        merged[LOD_COUNT_KEY] = totals
+    return merged
 
 
 def ingest_campaign(
@@ -149,6 +216,7 @@ def ingest_campaign(
             platform=manifest.platform,
             campaign=manifest.name,
             sources=ingested.sources,
+            file_attrs=ingested.file_attrs,
         )
         logger.info(
             "Instrument '%s': %d samples from %d file(s).",
@@ -180,6 +248,7 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
 
     frames: list[pd.DataFrame] = []
     sources: list[Path] = []
+    file_attrs: list[Mapping[str, object]] = []
     failures = 0
     for match in matches:
         try:
@@ -193,6 +262,11 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
             continue
         frames.append(table.frame)
         sources.append(match.path)
+        # Kept, not discarded: this is what the file said about *itself*
+        # (PI, mission, revision, LOD flags), as distinct from what the
+        # manifest says about it. Dropping it here used to make the reader's
+        # careful header harvest unreachable by every later stage.
+        file_attrs.append(table.attrs)
 
     if not frames:
         raise TsaraIngestError(
@@ -207,11 +281,19 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
             len(matches),
         )
 
+    # Counted here, where the per-file boundaries still exist. After
+    # concatenation the two causes are indistinguishable.
+    n_within = sum(int(f.index.duplicated(keep="first").sum()) for f in frames)
+
     combined = frames[0] if len(frames) == 1 else pd.concat(frames)
-    return _Ingested(frame=_order(combined, name), sources=sources)
+    return _Ingested(
+        frame=_order(combined, name, n_within=n_within),
+        sources=sources,
+        file_attrs=_merge_file_attrs(file_attrs),
+    )
 
 
-def _order(frame: pd.DataFrame, name: str) -> pd.DataFrame:
+def _order(frame: pd.DataFrame, name: str, *, n_within: int = 0) -> pd.DataFrame:
     """Sort by time and drop duplicate timestamps.
 
     A stable sort is used so that rows sharing a timestamp keep the order
@@ -224,17 +306,40 @@ def _order(frame: pd.DataFrame, name: str) -> pd.DataFrame:
     one real measurement and saying how many were dropped is the option that
     neither fabricates nor hides. If a campaign ever needs "last wins" or a
     per-instrument choice, this is the single place it would be configured.
+
+    The warning distinguishes the two causes rather than guessing between
+    them, because they call for opposite responses and the guess was wrong
+    on the archive this was built for. Measured on the 43-file PTR-MS set:
+    all 7,242 dropped rows were duplicated *within* a single file and none
+    came from overlap between files, yet the message asked "Overlapping
+    files?" — pointing at the crawler and the revision policy, both
+    innocent. Within-file duplicates mean the instrument wrote two records
+    under one timestamp (there, a nominally 1 Hz logger with 1 s
+    resolution), so the fix is a resolution or averaging decision; overlap
+    between files means the archive really does hold the same period twice,
+    and the fix is in the manifest's path templates.
     """
     ordered = frame.sort_index(kind="stable")
 
     duplicated = ordered.index.duplicated(keep="first")
     n_duplicate = int(duplicated.sum())
     if n_duplicate:
+        # `n_within` is counted per file before concatenation, which is
+        # what makes the split exact rather than heuristic: a timestamp
+        # repeated inside one file is still duplicated in the combined
+        # table, so it is the part of the total that overlap cannot
+        # explain, and the remainder is the part it can.
+        n_across = n_duplicate - n_within
         logger.warning(
             "Instrument '%s': dropped %d row(s) sharing a timestamp with an "
-            "earlier row (kept the first of each). Overlapping files?",
+            "earlier row (kept the first of each): %d duplicated within a "
+            "single file%s, %d from overlap between files%s.",
             name,
             n_duplicate,
+            n_within,
+            " (the instrument logged two records under one timestamp)" if n_within else "",
+            n_across,
+            " (check the manifest's path templates)" if n_across else "",
         )
         ordered = ordered.loc[~duplicated]
     return ordered

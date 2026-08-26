@@ -1087,6 +1087,69 @@ reader trivial, though — stored indexes are timezone-aware and appear at
 both microsecond and nanosecond resolution, and neither satisfies the
 contract untouched.
 
+### 9.2.1 Two kinds of sentinel: missing versus below detection
+
+ICARTT files declare **two** unrelated families of sentinel, and conflating
+them is the difference between a stream that can be analyzed and one that
+cannot.
+
+`VMISS` (header line 12, one per variable) marks *missing* data. TSARA has
+always masked it, before applying `VSCAL`, for the reason given in §9.2.
+
+`ULOD_FLAG` and `LLOD_FLAG` are declared in the special-comment block and
+mark samples that fell **outside the instrument's detection range**. These
+are scientifically not missing: a below-LOD benzene is an upper bound, while
+a dropout is no information at all. That distinction is real, and for a long
+while it was the argument for carrying the flags forward untouched and
+leaving the values in place.
+
+Measurement settled it the other way. Over the 2024 archive:
+
+| quantity | value |
+|---|---|
+| files declaring a numeric LOD sentinel | 913 of 1122 |
+| distinct sentinel magnitudes in use | `-8888`, `-88888`, `-8.888e50` |
+| LOD sentinel values present in the data | 23,814,123 |
+| share of every numeric value in the archive | **10.03%** |
+| share within the PTR-MS VOC files | **33-56%** |
+
+For a real PTR-MS record, benzene was 67% sentinel and propyne 70%, which is
+far enough past half that the **median of the record was the sentinel** rather
+than a concentration. A rolling low-quantile baseline (§6) would therefore
+have reported a background of `-88888 ppbv`, and every enhancement ratio
+built on it would have been meaningless. Leaving the values in place was not
+a conservative choice; it was a silent one.
+
+So the sentinels are masked to NaN alongside `VMISS`, and — because masking
+must not destroy the information that motivated keeping them — the flag
+values and a **per-variable count of masked samples** travel on into the
+stream, where the count is attached to the species it censors as
+`n_lod_masked`. A later phase can still substitute LOD/2 or fit a censored
+model, which is what the original caveat was protecting, without any file
+being re-read.
+
+Three declaration shapes occur and all are handled: one value for every
+variable, one value per variable (a list as long as `NV`, matched by
+position), and a non-numeric placeholder (`N/A`, `NaN`) meaning the flag is
+unused. When a list is neither length the union of the declared values
+applies to all variables — the conservative reading, since these values are
+chosen precisely to be impossible measurements.
+
+**A parsing prerequisite that had to be fixed first.** The flags were
+unreachable even in principle, because header metadata was scraped only from
+the two comment blocks, which are located by `12 + NV` arithmetic. The 43
+PTR-MS files carry one extra, blank-named variable-definition line, which
+offsets that walk; both blocks were then read from the wrong place and the
+metadata came back **empty** — on exactly the files with the highest
+below-detection fractions in the archive. Metadata is now scraped from the
+whole header, since a `KEY: value` line means the same thing wherever it
+sits, and a data row (which begins with a numeric time field) can never
+match a pattern anchored on an uppercase key. Where `NLHEAD` is *provably*
+wrong (§9.2), the scrape extends a bounded distance past it, because
+clamping to `12 + NV` recovers a lower bound on the header rather than the
+header; two files in the archive keep their comment block past that bound,
+and they held the last 19,398 unmasked sentinels.
+
 ### 9.3 ICARTT revision selection
 
 Archives hold several revisions of one day's data, and ingesting all of them
@@ -1284,6 +1347,38 @@ occasionally. Everything downstream assumes a monotonic axis.
 policy, not a truth: overlapping files may genuinely disagree, averaging
 would silently invent a value, and erroring would reject archives that
 legitimately overlap.
+
+The warning **names the cause instead of guessing it**, because the two
+causes call for opposite responses. Measured on the 43-file PTR-MS set, all
+7,242 dropped rows were duplicated *within* a single file and none came from
+overlap between files — while the message asked "Overlapping files?", which
+points at the crawler and the revision policy, both innocent. Within-file
+duplicates mean the instrument wrote two records under one timestamp (there,
+a nominally 1 Hz logger with 1 s resolution, whose duplicate rows carry
+genuinely different values), so the remedy is a resolution or averaging
+decision; overlap between files means the archive really does hold the same
+period twice, and the remedy is in the manifest's path templates. The split
+is counted per file *before* concatenation, which makes it exact rather than
+heuristic: after concatenation the two are indistinguishable.
+
+**What a file said about itself reaches the stream.** A reader returns the
+file's own declarations — an ICARTT header's PI, mission, revision, platform
+and LOD flags — in `RawTable.attrs`, and orchestration reconciles them across
+an instrument's files: keys that agree are carried through, keys that
+disagree are *joined rather than picked*, since silently choosing one of two
+PIs would put a false statement into a product whose purpose is to be
+self-describing. Past a threshold the disagreement is summarized as
+`first ... last (N distinct values)`, because some keys differ in every file
+by design and a thousand-file instrument would otherwise write an attr that
+is useless as provenance. Counts are summed instead of reconciled, a tally
+over files being exactly the tally over the concatenated record.
+
+**A bundle does not accumulate streams that are no longer its own.**
+`ingest_campaign(..., instruments=[...])` exists so a campaign can be re-run
+for a subset, and saving that subset over an existing bundle would otherwise
+leave the previous run's stream files behind — nothing misreads them, since
+the loader takes its list from `bundle.json`, but the directory would then
+contradict its own descriptor.
 
 **A file that will not read is logged and skipped; an instrument that loses
 every file is an error.** Aborting a campaign on the first bad file is the
