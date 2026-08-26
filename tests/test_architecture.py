@@ -26,6 +26,42 @@ SRC = Path(__file__).resolve().parent.parent / "src" / "tsara"
 PACKAGES_WITH_EXPORTS = ["tsara", "tsara.ingest", "tsara.synthetic"]
 
 
+def _modules_declaring_all() -> list[str]:
+    """Return every ``tsara`` module that declares ``__all__``, discovered.
+
+    Enumerated by walking the source tree rather than by listing names,
+    because a hand-maintained list only guards what someone remembered to
+    add to it. Measured when this replaced a three-item list: 21 modules
+    declare ``__all__`` and 3 were being checked, and two of the unchecked
+    ones had been unsorted for a whole phase without anything noticing.
+
+    Parsed with :mod:`ast` rather than imported, so a module is discovered
+    whether or not importing it has side effects.
+
+    Returns
+    -------
+    list of str
+        Importable dotted module names, sorted.
+    """
+    found: list[str] = []
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        declares = any(
+            isinstance(node, ast.Assign)
+            and any(getattr(target, "id", None) == "__all__" for target in node.targets)
+            for node in tree.body
+        )
+        if not declares:
+            continue
+        dotted = ".".join(path.relative_to(SRC.parent).with_suffix("").parts)
+        found.append(dotted.removesuffix(".__init__"))
+    return found
+
+
+#: Every module with a public surface, found rather than remembered.
+MODULES_WITH_EXPORTS = _modules_declaring_all()
+
+
 def _tsara_imports(module_path: Path) -> list[str]:
     """Return every ``tsara.*`` module name imported by one source file.
 
@@ -77,7 +113,7 @@ def test_core_imports_nothing_from_tsara_outside_core(module_path: Path) -> None
     )
 
 
-@pytest.mark.parametrize("package", PACKAGES_WITH_EXPORTS)
+@pytest.mark.parametrize("package", MODULES_WITH_EXPORTS)
 def test_every_exported_name_resolves(package: str) -> None:
     """``__all__`` must not promise names the package does not have.
 
@@ -90,13 +126,19 @@ def test_every_exported_name_resolves(package: str) -> None:
     assert missing == [], f"{package}.__all__ lists names that do not exist: {missing}"
 
 
-@pytest.mark.parametrize("package", PACKAGES_WITH_EXPORTS)
+@pytest.mark.parametrize("package", MODULES_WITH_EXPORTS)
 def test_exports_are_sorted_and_unique(package: str) -> None:
     """A sorted ``__all__`` keeps additions from colliding in review.
 
     Cosmetic on its own; the real value is that an alphabetical list makes a
     duplicate entry (the usual result of two branches adding an export) an
     obvious diff rather than an invisible one.
+
+    Sorted by Python's own ordering, which puts every capitalized name
+    before every lowercase one -- so ``RawTable`` precedes
+    ``TIME_INDEX_NAME`` precedes ``check_raw_table``. Worth stating because
+    the intuitive case-insensitive reading disagrees, and that disagreement
+    is what two of these lists drifted on.
     """
     exported = list(importlib.import_module(package).__all__)
     assert exported == sorted(exported), f"{package}.__all__ is not alphabetically sorted."
@@ -154,3 +196,13 @@ def test_the_two_bundle_writers_declare_different_stages() -> None:
     from tsara.synthetic.bundle import _STAGE as synthetic_stage
 
     assert ingest_stage != synthetic_stage
+
+
+def test_export_discovery_finds_more_than_the_packages() -> None:
+    """Guards the discovery above from silently degrading to an empty list.
+
+    A parametrized test over zero cases passes, so a walk that stops
+    matching would turn this whole file green while checking nothing.
+    """
+    assert len(MODULES_WITH_EXPORTS) > len(PACKAGES_WITH_EXPORTS)
+    assert set(PACKAGES_WITH_EXPORTS) <= set(MODULES_WITH_EXPORTS)

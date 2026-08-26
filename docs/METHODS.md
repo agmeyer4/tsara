@@ -873,6 +873,15 @@ Ingestion turns a validated `Manifest` into one native-rate
 `xarray.Dataset` per instrument. Nothing here resamples anything: streams
 stay on each instrument's own timestamps until Phase 4 pairs them (§1.1).
 
+Almost every design decision in this section was settled by measuring the
+campaign archive it was built for rather than by reasoning about the format
+specifications, and the counts below all refer to that archive: the 2024
+tree of **1122 ICARTT files** and the 2026 processed tree of **623 parquet
+files**. As of the Phase-3 review, **all 1122 ICARTT files parse, yielding
+35,275,729 rows** — a number worth stating because it started at 1054 files
+and 30,190,402 rows, and every file and row recovered since came from
+letting the data rather than the header settle an ambiguity (§9.2).
+
 ### 9.1 The reader seam
 
 Ingestion has two halves with different shapes. Reading a file is
@@ -917,7 +926,7 @@ regex spelling is refused with a message naming the supported one, because
 **Templates are include-only, and that is not sufficient.** Archives
 quarantine data in place: the target archive's instrument-aligned stage
 keeps rejected files in `bad/` and `bad_timestamp/` subdirectories sitting
-directly beneath the good ones, **187 of its 608 files**. A `**` template —
+directly beneath the good ones, **187 of its 623 files**. A `**` template —
 exactly what varying archive depth calls for — sweeps every one of them in
 without a word. Per-directory templates avoid it, since `Eng/*.parquet` does
 not descend into `Eng/bad/`, but only if the quarantine is already known
@@ -1051,7 +1060,7 @@ no-op for every other file in the archive.
 
 The complementary diagnostic — walking the two comment blocks and comparing
 where they end against `NLHEAD` — is logged at **debug**, not warning. On
-the surveyed archive it fires on 44 of 1055 files and correctly diagnoses
+the surveyed archive it fires on 44 of 1122 files and correctly diagnoses
 none of them: 43 are PTR-MS files carrying one extra, blank-named definition
 line that offsets the walk harmlessly. A warning that is a false positive
 every time it fires teaches its reader to ignore warnings.
@@ -1060,7 +1069,7 @@ every time it fires teaches its reader to ignore warnings.
 FFI-1001 file states its column names twice — the variable definitions, and
 the last normal comment line, which the format designates as the data column
 header — and the two disagree often enough to need a rule. The rule "trust
-`NV`" is right 1054 times in 1055 and wrong once, and the once is a hard
+`NV`" is right 1121 times in 1122 and wrong once, and the once is a hard
 failure rather than a degradation: a file declaring `NV = 1` with its
 independent *and* its single dependent variable both named `Time_UTC` yields
 a duplicated name list, which pandas refuses outright with an untyped
@@ -1068,7 +1077,7 @@ exception escaping a reader contracted to raise `TsaraIngestError`, while
 that file's column-header line carries the 7 correct names its 7-field rows
 need. So the arbiter is the modal field count of the data rows, preferring
 the declared header line, then the definitions. Measurement is what makes
-this safe: on the 1011 files where *both* lists match the row width their
+this safe: on the 1078 files where *both* lists match the row width their
 contents are byte-identical, so the preference is provably content-neutral
 across the archive. Where neither matches, the disagreement is about the
 rows rather than the names — the uniformly-too-wide case that `index_col=False`

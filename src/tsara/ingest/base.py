@@ -66,13 +66,13 @@ if TYPE_CHECKING:  # pragma: no cover
     from tsara.config.manifest import LoaderConfig
 
 __all__ = [
-    "float_precision_kwarg",
-    "TIME_INDEX_NAME",
     "RawTable",
     "Reader",
+    "TIME_INDEX_NAME",
     "TsaraIngestError",
     "check_dropped_rows",
     "check_raw_table",
+    "float_precision_kwarg",
 ]
 
 #: Name TSARA gives the time index everywhere, from raw table to final stream.

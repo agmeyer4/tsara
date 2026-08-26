@@ -132,6 +132,16 @@ instruments:
       # after the revision (processing levels, separate drives) are different
       # data rather than revisions of one another (METHODS.md 9.3).
       revision_policy: latest
+      # How much row loss is a misparse rather than a bad day. A row is
+      # dropped when its timestamp will not parse or its field count is
+      # wrong; past this fraction the read raises instead of warning. The
+      # default of 0.5 is deliberately loose -- one real file here loses 14
+      # rows of 84,362 to a logger interrupted mid-number, which is not worth
+      # refusing a day of data over, while the pathology it exists to catch
+      # loses 99.98% and looks downstream like a quiet instrument rather than
+      # a broken parse. Raise it toward 1.0 for archives where heavy loss is
+      # genuinely expected; 1.0 restores warn-only behaviour.
+      max_dropped_fraction: 0.5
       # Text -> float conversion. 'fast' (the default) is pandas' usual
       # parser; 'exact' guarantees the stored double is the nearest one to
       # the digits in the file. They differ on ~0.4% of values in a real
@@ -171,3 +181,17 @@ instruments:
         column: WS_ms
         role: met
         units: m s-1
+      # A conversion with an OFFSET, which the ppm -> ppb cases above do not
+      # show. Applied as `canonical = raw * scale + offset`, in that order:
+      # the scale first, then the shift. The order is not academic -- with a
+      # non-zero offset, scaling-then-shifting and shifting-then-scaling give
+      # different answers, which is why a conversion carrying both is the
+      # only kind that can prove the order is right (METHODS.md 9.9).
+      air_temperature:
+        column: AirT_C
+        role: met
+        units: degC
+        convert: {from_unit: degC, to_unit: K, offset: 273.15}
+        qaqc:
+          # In canonical units, so kelvin -- QA/QC runs after conversion.
+          - {kind: range, min: 220.0, max: 330.0}

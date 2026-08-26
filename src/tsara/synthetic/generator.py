@@ -93,7 +93,7 @@ logger = logging.getLogger(__name__)
 #: Defined in :mod:`tsara.synthetic.config` (the schema layer reserves it so
 #: a ``report_as`` column can never shadow the answer key) and re-exported
 #: here, where it is used.
-__all__ = ["TRUTH_PREFIX", "SyntheticDataset", "generate"]
+__all__ = ["SyntheticDataset", "TRUTH_PREFIX", "generate"]
 
 
 @dataclass(frozen=True, eq=False)

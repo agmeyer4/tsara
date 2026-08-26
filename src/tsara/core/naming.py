@@ -24,9 +24,9 @@ that true by construction instead of by coincidence.
 from __future__ import annotations
 
 __all__ = [
-    "LOD_COUNT_KEY",
     "ALTITUDE_COORD",
     "LATITUDE_COORD",
+    "LOD_COUNT_KEY",
     "LONGITUDE_COORD",
     "SIGMA_RAND_PREFIX",
     "SIGMA_SYS_PREFIX",
