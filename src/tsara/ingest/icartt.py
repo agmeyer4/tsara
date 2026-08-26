@@ -67,13 +67,18 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pandas as pd
 
 from tsara.config.manifest import ICARTTLoader
-from tsara.ingest.base import RawTable, TsaraIngestError, check_dropped_rows
+from tsara.ingest.base import (
+    RawTable,
+    TsaraIngestError,
+    check_dropped_rows,
+    float_precision_kwarg,
+)
 from tsara.ingest.registry import register_reader
 from tsara.ingest.timeparse import to_utc_naive_ns
 
@@ -634,7 +639,7 @@ def read_icartt(path: Path, loader: LoaderConfig, /) -> RawTable:
     lines = _read_text(path)
     header = parse_icartt_header(lines, path)
 
-    frame = _read_data(lines, header, path, loader.max_dropped_fraction)
+    frame = _read_data(lines, header, path, loader)
     frame, lod_counts = _apply_scales_and_missing(frame, header)
     if lod_counts:
         # Logged, because a species that is mostly below detection is a fact
@@ -777,7 +782,7 @@ def _choose_column_names(body: list[str], header: IcarttHeader, path: Path) -> l
 
 
 def _read_data(
-    lines: list[str], header: IcarttHeader, path: Path, max_dropped_fraction: float
+    lines: list[str], header: IcarttHeader, path: Path, loader: ICARTTLoader
 ) -> pd.DataFrame:
     """Parse the data block below the header into a DataFrame."""
     body = lines[header.n_header_lines :]
@@ -796,29 +801,32 @@ def _read_data(
     # and *counted* — silent skipping would be the genuinely dangerous option.
     n_nonblank = sum(1 for line in body if line.strip())
 
-    frame = pd.read_csv(
-        StringIO("\n".join(body)),
-        header=None,
-        names=names,
-        skipinitialspace=True,
-        skip_blank_lines=True,
-        on_bad_lines="skip",
+    read_kwargs: dict[str, Any] = {
+        "header": None,
+        "names": names,
+        "skipinitialspace": True,
+        "skip_blank_lines": True,
+        "on_bad_lines": "skip",
         # Values stay as written; scaling and missing-masking happen next, in
         # that order, so a sentinel is never scaled.
-        dtype=None,
+        "dtype": None,
         # Parse each column in one pass rather than in chunks. Chunked
         # inference makes a column's dtype depend on where a truncated row
         # happens to fall, which pandas reports as a DtypeWarning and which
         # would make the result depend on file size.
-        low_memory=False,
+        "low_memory": False,
         # Load-bearing, not cosmetic. Without it, a file whose rows are ALL
         # wider than the declared names makes pandas decide the surplus
         # leading fields are an index: it builds a MultiIndex and every value
         # silently shifts left, so the first declared column receives the
         # third field. index_col=False forces the columns to align with the
         # names as declared.
-        index_col=False,
-    )
+        "index_col": False,
+        **float_precision_kwarg(loader),
+    }
+    # `**kwargs` erases the return type, so restore it rather than letting
+    # Any leak into every caller.
+    frame = cast("pd.DataFrame", pd.read_csv(StringIO("\n".join(body)), **read_kwargs))
 
     n_skipped = n_nonblank - len(frame)
     if n_skipped > 0:
@@ -827,7 +835,7 @@ def _read_data(
             n_total=n_nonblank,
             path=path,
             reason="malformed data row (wrong field count)",
-            max_fraction=max_dropped_fraction,
+            max_fraction=loader.max_dropped_fraction,
             logger=logger,
         )
     return frame

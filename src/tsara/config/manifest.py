@@ -550,7 +550,37 @@ class _BaseLoader(_StrictModel):
         return tuple(seen)
 
 
-class CSVLoader(_BaseLoader):
+class _TextLoader(_BaseLoader):
+    """Fields shared by the delimited-text formats (CSV and ICARTT).
+
+    Separate from :class:`_BaseLoader` because the one field here is
+    meaningless for a binary format: parquet stores IEEE doubles directly
+    and recovers them exactly, so offering it a text-parsing precision knob
+    would be an option that cannot do anything.
+    """
+
+    float_precision: Literal["fast", "exact"] = Field(
+        default="fast",
+        description=(
+            "How precisely text is converted to floating point. 'fast' uses "
+            "pandas' default parser, which is what almost every campaign "
+            "wants; 'exact' guarantees that the double TSARA stores is the "
+            "nearest one to the digits written in the file. They differ only "
+            "for values written with more than about 15 significant digits. "
+            "Measured on a 1122-file ICARTT archive: 94.7% of values carry 9 "
+            "or fewer significant digits and are parsed identically either "
+            "way, 0.358% of values differ, and the difference is about one "
+            "unit in the last place (1.2e-16 relative) -- roughly thirteen "
+            "orders of magnitude below any instrument's precision. 'exact' "
+            "cost about 34% more ingestion time on that archive, so it is "
+            "off by default and worth turning on when bitwise "
+            "reproducibility matters more than throughput "
+            "(docs/METHODS.md §9.2.2)."
+        ),
+    )
+
+
+class CSVLoader(_TextLoader):
     r"""Loader for delimited text files (CSV/TSV and friends).
 
     "CSV" is read loosely here: the same reader covers comma-, tab- and
@@ -643,7 +673,7 @@ class CSVLoader(_BaseLoader):
         return self
 
 
-class ICARTTLoader(_BaseLoader):
+class ICARTTLoader(_TextLoader):
     """Loader for ICARTT (.ict) files per the NASA/NOAA FFI-1001 convention.
 
     TSARA ships its own FFI-1001 parser (Phase 3) rather than depending on

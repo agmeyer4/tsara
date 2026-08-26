@@ -1150,6 +1150,44 @@ clamping to `12 + NV` recovers a lower bound on the header rather than the
 header; two files in the archive keep their comment block past that bound,
 and they held the last 19,398 unmasked sentinels.
 
+### 9.2.2 Float precision: what "reading a number" costs
+
+Converting decimal text to a binary double is not free of choices. pandas'
+default CSV parser is fast and *usually* exact; it is not guaranteed to
+return the nearest double to the digits written. `float_precision:
+"round_trip"` is guaranteed, and slower. Both readers that parse text (CSV
+and ICARTT) expose this as `float_precision: fast | exact`, defaulting to
+`fast`.
+
+The default is a measurement, not a guess. Over a 60-file sample of the 2024
+ICARTT archive:
+
+| quantity | value |
+|---|---|
+| values with 9 or fewer significant digits | 94.7% (parsed identically either way) |
+| values with 14-17 significant digits | 5.4% |
+| values where the two modes disagree | **0.358%** |
+| size of the disagreement | ~1 unit in the last place, **1.2e-16** relative |
+
+End to end on the 43-file PTR-MS instrument, `exact` cost about 20-34% more
+ingestion time and changed 0.021% of finite benzene values by at most
+9.0e-17 ppb.
+
+So the trade is a fraction of a percent of values moving by roughly thirteen
+orders of magnitude less than any instrument's precision, against a
+double-digit percentage of the slowest step in the workflow. `fast` is
+therefore the default, and `exact` exists because "my ingestion is bitwise
+reproducible" is a legitimate thing to need — for a regression test, a
+published dataset, or an argument with a collaborator's pipeline — and
+because it should be one line of YAML rather than a patch.
+
+Note the asymmetry with *writing*: `tsara.synthetic.export` writes at
+`repr` precision, which is always round-trip exact, so a synthetic value is
+never lost on the way out. About 41% of noisy synthetic values come back one
+ULP away under `fast`, which is why the round-trip tests compare with a
+relative tolerance rather than exact equality, and why one of them sets
+`exact` and asserts bitwise recovery.
+
 ### 9.3 ICARTT revision selection
 
 Archives hold several revisions of one day's data, and ingesting all of them
@@ -1393,6 +1431,43 @@ UncertaintySpec` seam the generator was built with — so that synthetic data
 travels the road real data does: written to files, crawled, parsed,
 converted, masked, reassembled. The generator's answer key then supplies
 expectations that ingestion had no part in writing.
+
+**How strong is it? Measured, by mutation.** Five realistic bugs were
+injected into `tsara.ingest` and the round-trip file was run alone against
+each. In its original form it caught **one of five**. The full suite caught
+all five, so nothing was broken — but the harness was weaker than its own
+docstring claimed, and three of the four misses had a single cause: a
+default export declares no unit conversion, because it writes every species
+in its own canonical units under its own name. There was nothing to convert.
+
+`export_raw` therefore takes `raw_units`, which writes a species in
+*non-canonical* units and declares the conversion back — the shape a real
+archive has, instrument units on disk and canonical units after the
+manifest. With it, the harness catches **three of five**, and additionally
+catches a bug that compares QA/QC bounds before conversion instead of after.
+
+Two misses remain, and both are deliberate:
+
+* **Duplicate-timestamp policy.** Exercising it would require the exporter
+  to fabricate overlapping files, which is a property of an archive rather
+  than of an instrument. Campaign-level unit tests cover it (§9.8).
+* **The nanosecond resolution pin.** Unobservable here, because CSV
+  timestamp parsing already yields nanoseconds. The pin is defensive code
+  guarding a path this harness cannot reach.
+
+**One non-obvious requirement.** A test conversion must carry both a scale
+and an offset. With a zero offset, `value * scale + offset` and
+`(value + offset) * scale` are the same function, so an ordering bug in
+`convert_values` survives; with a non-zero offset it does not. This was
+found by mutation, not by reading the code.
+
+**What the conversion path is really for.** Beyond conversion itself, it is
+the only end-to-end check of the asymmetry in §2.2: a declared `absolute`
+sigma is *already* in canonical units and must survive untouched, while a
+reported sigma column is in the file's units and must be scaled (and never
+offset — an offset shifts a measurement, not its spread). That asymmetry is
+where the Stage-6 sentinel bug lived, and it was previously verified only
+against hand-written expectations.
 
 Only observable variables are exported; the `truth_`-prefixed answer key
 stays behind, and a test asserts no exported header contains it.

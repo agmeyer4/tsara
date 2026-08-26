@@ -132,6 +132,13 @@ instruments:
       # after the revision (processing levels, separate drives) are different
       # data rather than revisions of one another (METHODS.md 9.3).
       revision_policy: latest
+      # Text -> float conversion. 'fast' (the default) is pandas' usual
+      # parser; 'exact' guarantees the stored double is the nearest one to
+      # the digits in the file. They differ on ~0.4% of values in a real
+      # ICARTT archive, by ~1e-16 relative, and 'exact' costs ~20-34% more
+      # ingestion time -- so turn it on when bitwise reproducibility matters
+      # more than throughput (METHODS.md 9.2.2).
+      float_precision: exact
     metadata:
       institution: noaa
     variables:

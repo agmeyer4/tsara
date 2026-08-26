@@ -66,6 +66,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from tsara.config.manifest import LoaderConfig
 
 __all__ = [
+    "float_precision_kwarg",
     "TIME_INDEX_NAME",
     "RawTable",
     "Reader",
@@ -296,3 +297,29 @@ def check_dropped_rows(
             "the loss is genuinely expected."
         )
     logger.warning("Dropped %d of %d rows from %s: %s.", n_dropped, n_total, path, reason)
+
+
+def float_precision_kwarg(loader: object) -> dict[str, str]:
+    """Return the ``pandas.read_csv`` keyword for a loader's float precision.
+
+    Kept in one place because two readers must interpret the same manifest
+    field identically, and because the mapping is not obvious: pandas spells
+    the exact mode ``"round_trip"``, while the manifest spells it ``"exact"``
+    -- the manifest names the guarantee, not the library's implementation of
+    it. Passing nothing at all for the fast mode preserves pandas' default
+    rather than pinning a spelling that could change.
+
+    Parameters
+    ----------
+    loader : object
+        Any loader config. One without a ``float_precision`` field (parquet,
+        which parses no text) yields no keyword.
+
+    Returns
+    -------
+    dict
+        Keyword arguments to splat into ``pandas.read_csv``.
+    """
+    if getattr(loader, "float_precision", "fast") == "exact":
+        return {"float_precision": "round_trip"}
+    return {}

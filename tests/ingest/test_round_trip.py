@@ -11,6 +11,13 @@ What a failure here means, and what it does not: these tests exercise
 crawl → read → convert → mask → resolve uncertainty → assemble → persist as
 one path, so a failure localizes poorly. That is the point. The per-stage
 tests localize; this one notices.
+
+Conversion and masking reach that path only because the exporter is *asked*
+to put them there. A default export writes every species in its own
+canonical units under its own name, so there is nothing to convert and
+nothing to mask; measured against five injected ingestion bugs, a round trip
+in that shape noticed one. The tests below that pass ``raw_units`` and
+``qaqc_bounds`` are the ones covering the rest.
 """
 
 from __future__ import annotations
@@ -19,14 +26,23 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import pytest
+import yaml
 
 from tsara.config.loader import load_manifest
+from tsara.config.manifest import CSVLoader
 from tsara.core.naming import sigma_rand_name, sigma_sys_name
 from tsara.ingest import ingest_campaign, load_streams, save_streams
 from tsara.synthetic import generate
+from tsara.synthetic.background import TsaraSyntheticError
 from tsara.synthetic.config import SyntheticConfig
-from tsara.synthetic.export import EXPORT_MANIFEST, EXPORT_RAW_DIR, export_raw
+from tsara.synthetic.export import (
+    EXPORT_MANIFEST,
+    EXPORT_RAW_DIR,
+    RawUnits,
+    export_raw,
+)
 
 #: Ingestion recovers values through a text file, and pandas' default CSV
 #: parser is not round-trip exact — it lands within about one unit in the
@@ -310,3 +326,182 @@ def test_site_altitude_survives_the_trip(tmp_path: Path) -> None:
     )
     _, ingested = _round_trip(tmp_path, config)
     assert float(ingested["analyzer"].coords["altitude"]) == pytest.approx(1300.0)
+
+
+# ---------------------------------------------------------------------------
+# Conversion and masking, which the default export cannot reach
+# ---------------------------------------------------------------------------
+#
+# Measured before these were written: a round trip with no declared
+# conversion caught 1 of 5 injected ingestion bugs. Three of the four misses
+# were conversion-related, so the exporter learned to write a species in
+# non-canonical units and declare the conversion back.
+#
+# The offset is not decorative. With offset = 0, `value * scale + offset` and
+# `(value + offset) * scale` are the same function, and an ordering bug in
+# convert_values passes unnoticed; with a non-zero offset it does not.
+
+RAW_PPM = RawUnits(from_unit="ppm", scale=1000.0, offset=7.5)
+
+
+def _converted(tmp_path: Path, **kw: Any) -> tuple[Any, Any]:
+    generated = generate(_config())
+    manifest_path = export_raw(generated, tmp_path / "export", raw_units={"ch4": RAW_PPM}, **kw)
+    return generated, ingest_campaign(load_manifest(manifest_path))
+
+
+def test_values_survive_a_unit_conversion(tmp_path: Path) -> None:
+    """Ingestion must undo exactly what the exporter did."""
+    generated, ingested = _converted(tmp_path)
+    np.testing.assert_allclose(
+        ingested["analyzer"]["ch4"].values,
+        generated.streams["analyzer"]["ch4"].values,
+        rtol=RTOL,
+    )
+
+
+def test_the_file_really_is_in_other_units(tmp_path: Path) -> None:
+    """Guards the test above from passing because nothing was converted."""
+    generated = generate(_config())
+    export_raw(generated, tmp_path / "export", raw_units={"ch4": RAW_PPM})
+    written = pd.read_csv(tmp_path / "export" / EXPORT_RAW_DIR / "analyzer.csv")["ch4"]
+    # ~1900 ppb becomes ~1.89 ppm, which no unconverted path could produce.
+    assert written.max() < 10.0
+
+
+def test_canonical_units_are_recorded_after_conversion(tmp_path: Path) -> None:
+    _, ingested = _converted(tmp_path)
+    assert ingested["analyzer"]["ch4"].attrs["units"] == "ppb"
+
+
+def test_a_reported_sigma_is_converted_but_a_declared_one_is_not(tmp_path: Path) -> None:
+    """The asymmetry METHODS 2.2 requires, checked against truth rather than
+    against a hand-written expectation.
+
+    `absolute` is declared in canonical units and must survive untouched; a
+    reported sigma column is in the file's units and must be scaled. Both
+    are compared to the generator's own sigmas.
+    """
+    generated = generate(_config())
+    manifest_path = export_raw(
+        generated,
+        tmp_path / "export",
+        raw_units={"ch4": RAW_PPM, "c2h6": RawUnits(from_unit="ppm", scale=1000.0, offset=0.25)},
+    )
+    ingested = ingest_campaign(load_manifest(manifest_path))
+    truth = generated.streams["analyzer"]
+
+    np.testing.assert_allclose(
+        ingested["analyzer"][sigma_rand_name("ch4")].values,
+        truth["truth_sigma_rand_ch4"].values,
+        rtol=RTOL,
+    )
+    np.testing.assert_allclose(
+        ingested["analyzer"][sigma_rand_name("c2h6")].values,
+        truth["truth_sigma_rand_c2h6"].values,
+        rtol=RTOL,
+    )
+
+
+def test_qaqc_bounds_are_applied_after_conversion(tmp_path: Path) -> None:
+    """A bound stated in canonical units must be compared against canonical
+    values (METHODS 9.4).
+
+    The bound here is meaningless in the file's own units -- 1900 ppm is not
+    a number that appears anywhere in a file written in ppm -- so masking
+    the right samples is only possible if conversion ran first.
+    """
+    generated = generate(_config())
+    truth = generated.streams["analyzer"]["ch4"].values
+    cutoff = float(np.median(truth))
+
+    manifest_path = export_raw(
+        generated,
+        tmp_path / "export",
+        raw_units={"ch4": RAW_PPM},
+        qaqc_bounds={"ch4": (cutoff, None)},
+    )
+    ingested = ingest_campaign(load_manifest(manifest_path))["analyzer"]
+
+    expected_mask = truth < cutoff
+    np.testing.assert_array_equal(np.isnan(ingested["ch4"].values), expected_mask)
+    assert int(expected_mask.sum()) > 0, "the bound must actually mask something"
+
+
+def test_qaqc_without_conversion_still_masks(tmp_path: Path) -> None:
+    """The simple case, so a failure above localizes to conversion."""
+    generated = generate(_config())
+    truth = generated.streams["analyzer"]["ch4"].values
+    cutoff = float(np.median(truth))
+    manifest_path = export_raw(generated, tmp_path / "export", qaqc_bounds={"ch4": (cutoff, None)})
+    ingested = ingest_campaign(load_manifest(manifest_path))["analyzer"]
+    np.testing.assert_array_equal(np.isnan(ingested["ch4"].values), truth < cutoff)
+
+
+# ---------------------------------------------------------------------------
+# The exporter refuses what it cannot honour
+# ---------------------------------------------------------------------------
+
+
+def test_exporting_onto_a_file_is_a_tsara_error(tmp_path: Path) -> None:
+    target = tmp_path / "not_a_dir"
+    target.write_text("x", encoding="utf-8")
+    with pytest.raises(TsaraSyntheticError, match="not a directory"):
+        export_raw(generate(_config()), target)
+
+
+def test_an_unknown_species_is_refused(tmp_path: Path) -> None:
+    """Silently ignoring a typo would let the harness check less than it claims."""
+    with pytest.raises(TsaraSyntheticError, match="ch5"):
+        export_raw(
+            generate(_config()),
+            tmp_path / "export",
+            raw_units={"ch5": RAW_PPM},
+        )
+
+
+def test_an_unknown_qaqc_species_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(TsaraSyntheticError, match="nope"):
+        export_raw(generate(_config()), tmp_path / "export", qaqc_bounds={"nope": (0.0, 1.0)})
+
+
+# ---------------------------------------------------------------------------
+# Float precision is a declared guarantee, not an accident
+# ---------------------------------------------------------------------------
+
+
+def test_exact_float_precision_recovers_values_bitwise(tmp_path: Path) -> None:
+    """Measured: pandas' default parser returns ~41% of noisy synthetic
+    values one unit in the last place away. 'exact' returns all of them."""
+    generated = generate(_config())
+    manifest_path = export_raw(generated, tmp_path / "export")
+
+    payload = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    for instrument in payload["instruments"].values():
+        instrument["loader"]["float_precision"] = "exact"
+    manifest_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    ingested = ingest_campaign(load_manifest(manifest_path))
+    np.testing.assert_array_equal(
+        ingested["analyzer"]["ch4"].values,
+        generated.streams["analyzer"]["ch4"].values,
+    )
+
+
+def test_fast_is_the_default(tmp_path: Path) -> None:
+    generated = generate(_config())
+    manifest = load_manifest(export_raw(generated, tmp_path / "export"))
+    loader = manifest.instruments["analyzer"].loader
+    assert isinstance(loader, CSVLoader)
+    assert loader.float_precision == "fast"
+
+
+def test_an_upper_bound_alone_is_declarable(tmp_path: Path) -> None:
+    """Either half of a range rule is optional, and a max-only bound is the
+    natural spelling for 'reject the spikes above the calibration range'."""
+    generated = generate(_config())
+    truth = generated.streams["analyzer"]["ch4"].values
+    cutoff = float(np.median(truth))
+    manifest_path = export_raw(generated, tmp_path / "export", qaqc_bounds={"ch4": (None, cutoff)})
+    ingested = ingest_campaign(load_manifest(manifest_path))["analyzer"]
+    np.testing.assert_array_equal(np.isnan(ingested["ch4"].values), truth > cutoff)

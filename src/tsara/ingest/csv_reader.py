@@ -25,7 +25,13 @@ import numpy as np
 import pandas as pd
 
 from tsara.config.manifest import CSVLoader
-from tsara.ingest.base import TIME_INDEX_NAME, RawTable, TsaraIngestError, check_dropped_rows
+from tsara.ingest.base import (
+    TIME_INDEX_NAME,
+    RawTable,
+    TsaraIngestError,
+    check_dropped_rows,
+    float_precision_kwarg,
+)
 from tsara.ingest.registry import register_reader
 from tsara.ingest.timeparse import build_time_index
 
@@ -172,6 +178,8 @@ def _read_frame(path: Path, loader: CSVLoader) -> pd.DataFrame:
         widened = _widened_names(path, loader)
         if widened is not None:
             kwargs["names"] = widened
+
+    kwargs.update(float_precision_kwarg(loader))
 
     # `**kwargs` erases the return type, so restore it rather than letting
     # Any leak into every caller.
