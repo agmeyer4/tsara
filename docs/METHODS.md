@@ -173,6 +173,23 @@ Every product carries an `uncertainty_source` label per species:
 `declared | reported | empirical`. A reader of any TSARA output can always
 determine what pedigree of uncertainty produced each interval.
 
+Provenance is recorded **per component**, because real manifests mix modes
+freely (the shipped example pairs a *reported* random component with a
+*declared* systematic one). The species-level label is then `mixed` when the
+two components disagree. Two further component values are needed to keep §2.3
+honest, and they are not interchangeable:
+
+| Component value | Meaning |
+|---|---|
+| `declared` | computed at ingestion from `absolute`/`relative` |
+| `reported` | read at ingestion from the instrument's per-point sigma column |
+| `empirical` | deferred to the stage holding the analysis config, which owns the estimator name and window (§2.5) |
+| `zero` | a budget was given and *deliberately* omitted this component ("an omitted `systematic` is zero", §2.2) |
+| `unknown` | no budget at all. The random component falls back to `empirical`; the systematic component cannot, since `diff_mad` is structurally blind to it (§2.5) |
+
+Collapsing `zero` into `unknown` would let an undeclared calibration become a
+silent claim of perfect calibration, which is exactly what §2.3 forbids.
+
 ### 2.5 The empirical noise estimator (`diff_mad`)
 
 When noise must be estimated from the data itself, the default estimator is
@@ -847,6 +864,641 @@ a dataset to manufacture rather than the manufactured dataset itself. Both take
 a path and return something plausible, so sharing a name would have made the
 meaning of a notebook line depend on which import happened to be in scope.
 
+
+---
+
+## 9. Ingestion (Phase 3)
+
+Ingestion turns a validated `Manifest` into one native-rate
+`xarray.Dataset` per instrument. Nothing here resamples anything: streams
+stay on each instrument's own timestamps until Phase 4 pairs them (§1.1).
+
+Almost every design decision in this section was settled by measuring the
+campaign archive it was built for rather than by reasoning about the format
+specifications, and the counts below all refer to that archive: the 2024
+tree of **1122 ICARTT files** and the 2026 processed tree of **623 parquet
+files**. As of the Phase-3 review, **all 1122 ICARTT files parse, yielding
+35,275,729 rows** — a number worth stating because it started at 1054 files
+and 30,190,402 rows, and every file and row recovered since came from
+letting the data rather than the header settle an ambiguity (§9.2).
+
+### 9.1 The reader seam
+
+Ingestion has two halves with different shapes. Reading a file is
+format-specific and irreducibly fiddly; everything after it — masking, unit
+conversion, uncertainty resolution, assembly — depends only on the manifest.
+The seam between them is the `RawTable` contract: a reader's whole job is
+
+```
+(path, loader config) -> RawTable
+```
+
+where the returned frame is indexed by **tz-naive UTC nanosecond**
+timestamps and keeps every column under **the name the raw file uses**.
+Canonical renaming is a manifest concern handled downstream; a reader that
+renamed columns would have to be taught the manifest, which is the coupling
+the seam exists to prevent. The contract is enforced at runtime for every
+reader, TSARA's own and anyone else's.
+
+Readers are selected by name from a registry (`@register_reader("csv")`),
+the same convention this document fixes for noise and regression estimators.
+Registered names: `csv`, `icartt`, `parquet`.
+
+### 9.1.1 Finding the files: path templates, and saying "not that"
+
+Directory and naming conventions are **data, not code** (CLAUDE.md §5). A
+path template describes one layout; a loader carries a list of them, because
+one instrument's files routinely span several conventions at once. Each
+template compiles to a *pair* — a glob to drive the filesystem walk, since
+only the filesystem can enumerate what exists, and a regex to harvest
+`{field}` values, since a glob cannot report which text a wildcard consumed.
+The regex is the stricter of the two and so doubles as a second filter.
+
+That pairing only works while the two halves agree, and there is one place
+they silently did not: negation. Glob spells it `[!abc]`, regex spells it
+`[^abc]`, and the class was passed through to both untouched — so `[!x]*.csv`
+glob-matched `a1.csv` and was then discarded by its own harvesting regex,
+which read `[!x]` as a literal `!` or `x`. A correct template reported "no
+files found". The glob spelling is now translated for the regex, and the
+regex spelling is refused with a message naming the supported one, because
+`[^abc]` cannot be made to mean the same thing to both halves.
+
+**Templates are include-only, and that is not sufficient.** Archives
+quarantine data in place: the target archive's instrument-aligned stage
+keeps rejected files in `bad/` and `bad_timestamp/` subdirectories sitting
+directly beneath the good ones, **187 of its 623 files**. A `**` template —
+exactly what varying archive depth calls for — sweeps every one of them in
+without a word. Per-directory templates avoid it, since `Eng/*.parquet` does
+not descend into `Eng/bad/`, but only if the quarantine is already known
+about. `_BaseLoader.exclude` therefore takes patterns in the same syntax and
+removes what they match, reporting the count at INFO: a run that drops a
+third of an archive should say so at a level people read. Excluding
+*everything* a template found is reported as its own error, since "the
+templates found nothing" and "the exclusions removed everything" have
+opposite fixes.
+
+**AppleDouble resource forks (`._*`) are skipped unconditionally.**
+`pathlib.Path.glob` matches dotfiles where `glob.glob` does not, so a
+Mac-touched archive hands every `*.csv` template a binary `._*.csv` shadow
+of each real file, which then fails the read and reports itself as an
+unreadable data file — 18 of them in the target archive's aerosol
+directories. Only this prefix is skipped, not every dotfile: `._` is
+unambiguously macOS metadata, whereas a leading dot in general only means
+hidden, and could be data someone deliberately pointed a template at.
+
+**Known gap, deliberately not closed here.** The same archive publishes a
+`quality_manifest.yaml` marking individual files `good`/`bad`. 31 of its 34
+`bad` entries already sit in quarantine directories, so honouring the file
+would add only 3 files beyond what `exclude` catches — too little to justify
+a file-level accept/reject mechanism inside Phase 3. It is recorded as an
+open design flag instead.
+
+### 9.2 What each reader must get right
+
+**`csv`** — comma, tab, whitespace-run and general regex delimiters;
+headerless files whose column names come from the manifest as a *prefix*
+(a wide instrument log should not require enumerating every spectral bin);
+multi-line preambles; declared missing-value tokens.
+
+Two delimited-text decisions are load-bearing enough to state explicitly.
+
+**Data rows wider than the header.** Two different file shapes produce
+records with more fields than the header names, and both are common enough
+in real logger output to be handled rather than documented as unsupported.
+In one campaign archive surveyed, 21% of delimited-text files were affected;
+within each affected instrument family *every* file was, which is the usual
+pattern — this is a property of the logger, not of the day.
+
+*The shapes.* Either the logger terminates each record with the separator,
+leaving an empty surplus field; or its header is genuinely one or more names
+short, with real measurements recorded under no name at all. They look
+identical to a parser and differ only in whether the surplus field is empty.
+
+*Why it cannot be ignored.* pandas resolves a header/data width mismatch by
+promoting column 0 to the index. Every remaining name then lands on its
+neighbour's values and the final column is dropped — silently. A species
+read that way reports the channel beside it, with nothing raised anywhere.
+
+*The treatment,* in two parts:
+
+1. `index_col=False`, unconditionally. TSARA always builds its time index
+   afterwards from a *named* column, so an inferred index is never wanted
+   whatever the file's shape. This stops the shift but, on its own, makes
+   pandas discard the unnamed surplus.
+2. Surplus columns are **named, not dropped** — `column_N`, continuing the
+   convention headerless files already use, so a manifest addresses such a
+   column the same way in both cases. An empty trailing field becomes an
+   all-NaN column that costs nothing; an unnamed real column is preserved.
+   A well-formed file is left completely alone, because supplying an
+   explicit name list would also disable pandas' duplicate-name mangling.
+
+The width is measured by tokenizing the header line and the first data line
+*separately*. Reading the first few rows with `header=None` does not work on
+a file with a preamble: pandas fixes the field count from the first row it
+sees, so a two-column preamble above a 25-column table decides the width for
+everything below it.
+
+**Known limit:** a file whose *interior* rows are malformed — a logger
+interrupted mid-write, or two records run together where a newline was never
+emitted — is still rejected in full, because the width is established from
+the first data row. Rows like that are rare (in the surveyed archive, 15
+lines in 29,522, costing one file of 24) but they cost the whole file rather
+than the affected rows. Recovering them needs bad-line handling with a
+reported count, which the `icartt` reader already does for ragged rows.
+
+**`header_row` counts lines after blank and comment lines are discarded**,
+not physical line numbers. A file with two preamble lines, a blank line, and
+then its header on physical line 4 needs `header_row: 2`. This follows from
+`skip_blank_lines`/`comment` being applied first and is easy to get wrong by
+one; it fails loudly (the error lists the column names actually found), but
+the field description says so to save the round trip.
+
+**Float parsing is left at pandas' default**, not `float_precision="round_trip"`.
+The default parser is not guaranteed bitwise round-trip exact — it can differ
+in the last unit in the last place — and the exact parser is available for
+about a third more parse time. Measured on a real campaign archive across
+three instrument families, over a million parsed values showed **zero**
+differences between the two, so the guarantee buys nothing observable on
+real instrument output, whose precision is far coarser than the ULP in
+question. Revisit only if a specific dataset is shown to be affected.
+
+**`icartt`** — TSARA's own FFI-1001 parser, because the PyPI `icartt`
+package is GPL-3.0 and unmaintained. Owning it also buys tolerance for what
+real archives contain: non-UTF-8 bytes, per-variable missing sentinels in
+several spellings, ragged rows (skipped and counted), and files that
+contradict their own header by declaring seconds-past-midnight and then
+writing datetime strings. **The time axis is therefore built from the
+values, not the labels** — numeric means seconds past midnight, anything
+else is parsed as timestamps — because archives spell that unit at least a
+dozen ways, including names that falsely suggest a different epoch.
+
+Keying off the values raises the question of what to do when the values
+disagree with each other, and the answer has to be a **majority vote**, not
+an existence test. Asking "is *any* value numeric?" lets one token decide a
+whole file: two PTR-MS VOC files in the surveyed archive hold ten thousand
+datetime strings alongside exactly two numeric tokens that leaked in from a
+mis-declared header block, and the existence test sent both down the
+seconds-past-midnight branch, where every genuine timestamp then failed to
+convert and was discarded. The result was 2 surviving rows out of 10,235,
+across 35 VOC species, reported only as a warning. Counting both
+interpretations and taking the larger costs a second parse **only for
+genuinely mixed columns** — all-numeric and none-numeric short-circuit
+first — and ties favour the spec-compliant seconds reading, since a tie
+means the evidence does not actually distinguish them.
+
+**`NLHEAD` is checked against arithmetic before it is trusted.** The first
+twelve lines are fixed by the format and each of the `NV` dependent
+variables needs its own definition line, so any valid header is at least
+`12 + NV` lines and a file claiming fewer is provably wrong about itself.
+Two archive files declare `NLHEAD = 36` with `NV = 35`; trusting that admits
+header text into the data block, which is exactly where the stray numerics
+above come from. The floor is raised to `12 + NV` with a warning naming the
+arithmetic. This is a partial repair by construction — those files' true
+header is longer still (70 lines), so a residue of comment text remains, and
+it is the majority vote plus ragged-row skipping that contain it. It is a
+no-op for every other file in the archive.
+
+The complementary diagnostic — walking the two comment blocks and comparing
+where they end against `NLHEAD` — is logged at **debug**, not warning. On
+the surveyed archive it fires on 44 of 1122 files and correctly diagnoses
+none of them: 43 are PTR-MS files carrying one extra, blank-named definition
+line that offsets the walk harmlessly. A warning that is a false positive
+every time it fires teaches its reader to ignore warnings.
+
+**Column names are chosen by the width of the data, not by `NV`.** An
+FFI-1001 file states its column names twice — the variable definitions, and
+the last normal comment line, which the format designates as the data column
+header — and the two disagree often enough to need a rule. The rule "trust
+`NV`" is right 1121 times in 1122 and wrong once, and the once is a hard
+failure rather than a degradation: a file declaring `NV = 1` with its
+independent *and* its single dependent variable both named `Time_UTC` yields
+a duplicated name list, which pandas refuses outright with an untyped
+exception escaping a reader contracted to raise `TsaraIngestError`, while
+that file's column-header line carries the 7 correct names its 7-field rows
+need. So the arbiter is the modal field count of the data rows, preferring
+the declared header line, then the definitions. Measurement is what makes
+this safe: on the 1078 files where *both* lists match the row width their
+contents are byte-identical, so the preference is provably content-neutral
+across the archive. Where neither matches, the disagreement is about the
+rows rather than the names — the uniformly-too-wide case that `index_col=False`
+already handles — so the file is not refused. Duplicate names are mangled
+`name`, `name.1` as pandas would, since a real ground-site file repeats two
+of its own column names and an unmangled list cannot be read at all.
+
+Scale factors are applied *after* missing-value sentinels are masked. The
+reverse order turns a `-9999` sentinel into `-9999 * scale`, which no longer
+matches the declared sentinel and enters the data as a plausible number.
+
+**`parquet`** — the usual storage for a campaign's processed stages. Because
+parquet stores the dataframe index, its `time:` block is optional: the
+normal case has no timestamp to parse. Storing the index does not make the
+reader trivial, though — stored indexes are timezone-aware and appear at
+both microsecond and nanosecond resolution, and neither satisfies the
+contract untouched.
+
+### 9.2.1 Two kinds of sentinel: missing versus below detection
+
+ICARTT files declare **two** unrelated families of sentinel, and conflating
+them is the difference between a stream that can be analyzed and one that
+cannot.
+
+`VMISS` (header line 12, one per variable) marks *missing* data. TSARA has
+always masked it, before applying `VSCAL`, for the reason given in §9.2.
+
+`ULOD_FLAG` and `LLOD_FLAG` are declared in the special-comment block and
+mark samples that fell **outside the instrument's detection range**. These
+are scientifically not missing: a below-LOD benzene is an upper bound, while
+a dropout is no information at all. That distinction is real, and for a long
+while it was the argument for carrying the flags forward untouched and
+leaving the values in place.
+
+Measurement settled it the other way. Over the 2024 archive:
+
+| quantity | value |
+|---|---|
+| files declaring a numeric LOD sentinel | 913 of 1122 |
+| distinct sentinel magnitudes in use | `-8888`, `-88888`, `-8.888e50` |
+| LOD sentinel values present in the data | 23,814,123 |
+| share of every numeric value in the archive | **10.03%** |
+| share within the PTR-MS VOC files | **33-56%** |
+
+For a real PTR-MS record, benzene was 67% sentinel and propyne 70%, which is
+far enough past half that the **median of the record was the sentinel** rather
+than a concentration. A rolling low-quantile baseline (§6) would therefore
+have reported a background of `-88888 ppbv`, and every enhancement ratio
+built on it would have been meaningless. Leaving the values in place was not
+a conservative choice; it was a silent one.
+
+So the sentinels are masked to NaN alongside `VMISS`, and — because masking
+must not destroy the information that motivated keeping them — the flag
+values and a **per-variable count of masked samples** travel on into the
+stream, where the count is attached to the species it censors as
+`n_lod_masked`. A later phase can still substitute LOD/2 or fit a censored
+model, which is what the original caveat was protecting, without any file
+being re-read.
+
+Three declaration shapes occur and all are handled: one value for every
+variable, one value per variable (a list as long as `NV`, matched by
+position), and a non-numeric placeholder (`N/A`, `NaN`) meaning the flag is
+unused. When a list is neither length the union of the declared values
+applies to all variables — the conservative reading, since these values are
+chosen precisely to be impossible measurements.
+
+**A parsing prerequisite that had to be fixed first.** The flags were
+unreachable even in principle, because header metadata was scraped only from
+the two comment blocks, which are located by `12 + NV` arithmetic. The 43
+PTR-MS files carry one extra, blank-named variable-definition line, which
+offsets that walk; both blocks were then read from the wrong place and the
+metadata came back **empty** — on exactly the files with the highest
+below-detection fractions in the archive. Metadata is now scraped from the
+whole header, since a `KEY: value` line means the same thing wherever it
+sits, and a data row (which begins with a numeric time field) can never
+match a pattern anchored on an uppercase key. Where `NLHEAD` is *provably*
+wrong (§9.2), the scrape extends a bounded distance past it, because
+clamping to `12 + NV` recovers a lower bound on the header rather than the
+header; two files in the archive keep their comment block past that bound,
+and they held the last 19,398 unmasked sentinels.
+
+### 9.2.2 Float precision: what "reading a number" costs
+
+Converting decimal text to a binary double is not free of choices. pandas'
+default CSV parser is fast and *usually* exact; it is not guaranteed to
+return the nearest double to the digits written. `float_precision:
+"round_trip"` is guaranteed, and slower. Both readers that parse text (CSV
+and ICARTT) expose this as `float_precision: fast | exact`, defaulting to
+`fast`.
+
+The default is a measurement, not a guess. Over a 60-file sample of the 2024
+ICARTT archive:
+
+| quantity | value |
+|---|---|
+| values with 9 or fewer significant digits | 94.7% (parsed identically either way) |
+| values with 14-17 significant digits | 5.4% |
+| values where the two modes disagree | **0.358%** |
+| size of the disagreement | ~1 unit in the last place, **1.2e-16** relative |
+
+End to end on the 43-file PTR-MS instrument, `exact` cost about 20-34% more
+ingestion time and changed 0.021% of finite benzene values by at most
+9.0e-17 ppb.
+
+So the trade is a fraction of a percent of values moving by roughly thirteen
+orders of magnitude less than any instrument's precision, against a
+double-digit percentage of the slowest step in the workflow. `fast` is
+therefore the default, and `exact` exists because "my ingestion is bitwise
+reproducible" is a legitimate thing to need — for a regression test, a
+published dataset, or an argument with a collaborator's pipeline — and
+because it should be one line of YAML rather than a patch.
+
+Note the asymmetry with *writing*: `tsara.synthetic.export` writes at
+`repr` precision, which is always round-trip exact, so a synthetic value is
+never lost on the way out. About 41% of noisy synthetic values come back one
+ULP away under `fast`, which is why the round-trip tests compare with a
+relative tolerance rather than exact equality, and why one of them sets
+`exact` and asserts bitwise recovery.
+
+### 9.3 ICARTT revision selection
+
+Archives hold several revisions of one day's data, and ingesting all of them
+double-counts the same air. `revision_policy: latest` keeps the newest of
+each. Three properties of the real filename convention make this less
+obvious than it looks:
+
+1. Revisions are **alphabetic as well as numeric**. Per the specification,
+   alphabetic (`RA`, `RB`) is preliminary field data and numeric (`R0`,
+   `R1`) is final, so any `R#` supersedes any `R<letter>`.
+2. A **trailing comment field** follows the revision and distinguishes
+   genuinely different products — processing levels, separate drives on one
+   day. It is part of a file's identity, not decoration.
+3. `dataID` and `locationID` are **not reliably one token each**, so the
+   parse locates the `YYYYMMDD` field rather than counting underscores.
+
+De-duplication therefore keys on `(everything-before-the-date, date,
+comment)`. Keying without the comment collapses distinct products into one
+another and silently discards real data.
+
+**The blind spot, and why it reports rather than decides.** Selection can
+only compare files whose names carry a `YYYYMMDD` token; a name without one
+is kept unconditionally, since an unparseable name is not evidence of
+duplication. But 147 of the 1122 names in the surveyed archive have no date
+token, and 39 of those basenames exist in two or three directories at once —
+a dated directory, a `Calibrated Data/` directory, and a `Calibrated Data
+(Updated)/` directory holding the same filename. A recursive template then
+ingests every copy. Whether that is triple-counted air or three genuinely
+distinct products is a question only the data owner can answer, so the
+selector warns and names the repeats instead of guessing.
+
+### 9.3.1 Row loss as an error, not a warning
+
+Every reader discards rows it cannot place on a time axis, and every reader
+already refused a file where *no* row survived. That left the gap exactly
+where it hurts most: a file yielding 2 rows out of 10,235 is a misparse, but
+it produced only a warning, and three stages later it is indistinguishable
+from "this instrument barely ran that day". Warnings scroll past in a run
+over a thousand files.
+
+`LoaderConfig.max_dropped_fraction` (default `0.5`) generalizes the
+all-or-nothing rule to a threshold, applied by a single helper shared by all
+three readers so the policy cannot drift between formats. The default has
+wide headroom by measurement rather than by assumption: with the parsing
+fixes above in place, the worst-affected file in the surveyed archive loses
+0.29% of its rows and only four files lose anything at all, while the
+pathology the threshold exists to catch loses 99.98%. Setting it to `1.0`
+restores warn-only behaviour for archives where heavy loss is expected.
+
+### 9.4 Order of operations per variable
+
+Fixed, and each step depends on the previous one:
+
+| Step | Why here |
+|---|---|
+| convert units | so everything downstream reads canonical numbers |
+| apply QA/QC | bounds are written in the units the author thinks in |
+| resolve uncertainty | `absolute` is declared in canonical units (§2.2) |
+
+`range` bounds are physical statements in canonical units — the shipped
+example converts ppm→ppb and then bounds in ppb, so masking before
+conversion would compare ppb bounds against ppm numbers and reject the whole
+record. `flag` reads a separate instrument status column, which is never a
+converted quantity.
+
+Rules **mask rather than delete**. Rows are the instrument's clock, and a
+rolling window that closes over a removed sample computes a different answer
+than one that sees a gap; "no valid measurement" and "no measurement
+attempted" must stay distinguishable. Counts are reported per rule, because
+a range rule masking everything means the bounds are in the wrong units
+while a flag rule masking everything means the polarity is inverted, and one
+combined number cannot tell them apart.
+
+A `flag` rule must list at least one value. An empty `good_values` validates
+trivially and then masks the *entire* record, since nothing can be a member
+of an empty list; an empty `bad_values` is a rule that looks active in the
+manifest and does nothing. Both are refused at config load, on the same
+principle that refuses the identity `UnitConversion`.
+
+**One ordering constraint lives inside the uncertainty step, not between the
+steps.** A `reported` sigma column is checked for negative values — almost
+always an undeclared `-9999` missing-value sentinel — and that check must
+run *before* the unit conversion is applied to it. `convert_spread` takes an
+absolute value, correctly, because a negative `scale` is a legitimate
+sign-convention flip whose magnitude must survive; so a negativity test
+applied afterwards has nothing left to find. Ordered the wrong way, the
+guard protected only variables with no conversion — failing precisely where
+the manifest was doing more work — and a `-9999` under a ppm→ppb conversion
+entered the budget as a silent 9,999,000 ppb "1σ". For a random component
+that drives the point's inverse-variance weight to zero; for a systematic
+component, combined as a weighted mean of sigmas (§3.3) rather than in
+inverse variance, a single such value dominates the entire bin.
+
+### 9.5 Why there is no spike rule
+
+There was one, and it was removed on 2026-08-26 (owner decision, Phase-3
+walkthrough). It is documented here rather than deleted silently, because
+"we considered an outlier filter and rejected it" is a methodological
+statement a reader of this package needs.
+
+The rule was a centered rolling median/MAD (Hampel) test, thresholding at
+`n_mad` times the raw MAD, intended for sub-second electronic glitches and
+kept deliberately distinct from plume detection. The problem is that its
+operating definition — *a short excursion, large relative to a local robust
+scale* — is also the definition of a plume in mobile trace-gas data. The two
+are not merely similar; on this data they are the same test.
+
+Measurement settled it. On real 2-second analyzer records:
+
+| window | windows with zero MAD | plume samples masked | quiet samples masked | enrichment |
+|---|---|---|---|---|
+| 5 s | 71.2 % | 1.26 % | 1.11 % | 1.14× |
+| 11 s | 49.7 % | 3.88 % | 3.61 % | 1.08× |
+| 31 s | 14.3 % | 6.40 % | 4.92 % | 1.30× |
+| 61 s | 5.4 % | 6.85 % | 2.62 % | **2.61×** |
+| 300 s | 0.0 % | 5.88 % | 2.82 % | 2.08× |
+
+The window is bounded on both sides and the safe range between them is
+narrow and undiscoverable. Too short, and the rolling MAD degenerates to
+zero across most of the record, so the rule silently declines to test
+anything while still reporting a plausible masked count. Too long, and it
+masks plume samples at up to 2.6× the quiet-air rate — it has stopped being
+a glitch filter and become a plume clipper.
+
+The decisive number is the width of real features. In the same records,
+**27–29 % of clear enhancement events are two samples wide or fewer**, and
+even among events exceeding 100σ over baseline, 18 % are that narrow. A
+filter tuned to reject 1–2 sample excursions cannot distinguish a glitch
+from the signal this package exists to find. No choice of `window` and
+`n_mad` escapes that, because the ambiguity is in the data, not the
+parameters.
+
+What replaces it: nothing, deliberately. Genuine instrument glitches are
+better rejected where the information to identify them actually exists — an
+instrument status `flag` column, a physical `range` bound, or a later stage
+that already knows what a plume looks like and can judge an excursion in
+that context. An outlier filter that runs *before* anything understands the
+signal is guessing.
+
+A consequence worth noting: with the rolling rule gone, every remaining
+QA/QC rule is pointwise, so QA/QC no longer depends on record order at all.
+Sorting is purely the orchestration stage's concern.
+
+### 9.6 Uncertainty at ingestion, and what it refuses to invent
+
+Ingestion knows the manifest; it does not know the analysis config. So it
+computes exactly the budgets a manifest can state — `declared` and
+`reported` — and **labels** everything else. The empirical estimator's name
+and window belong to `DetectionConfig` (§2.5), so computing it here would
+mean reading a config this stage has no business reading. The obligation is
+recorded instead, which is the shape of §2.3's promise.
+
+A `reported` column is scaled by `convert.scale` and never by
+`convert.offset`: an uncertainty is a difference on the axis, so the origin
+cancels. Applying the offset would add 273.15 to every sigma in a °C→K
+conversion. A negative reported sigma is masked — in practice an undeclared
+missing-value sentinel rather than a real spread.
+
+### 9.7 Assembly, and the substitutability requirement
+
+A stream built from an archive must be shaped exactly like one the generator
+manufactures, because every later phase consumes both through one code path
+and synthetic truth is the only correctness arbiter available (§9.9). The
+variable-name convention (`sigma_rand_<name>`, `sigma_sys_<name>`) therefore
+lives in one module both producers build from, rather than in two matching
+string literals — a coupling that would break silently, since a rename would
+not fail anything until a later stage found no sigma and fell back to an
+empirical estimate, which is a *plausible* answer rather than an error.
+
+**Platforms.** A stationary site has one position, so attaching it to any
+clock is exact and free. A mobile platform's position lives on the GPS
+instrument's clock, and putting it onto a gas instrument's clock is
+*interpolation* — permitted for smooth auxiliary fields, but only under the
+`max_interp_gap` guard, which belongs to Phase 4 (§1.2). Ingestion therefore
+loads GPS as an ordinary stream, records the binding in attrs, and leaves
+the join to the stage that owns the guard, so the interpolation rule stays
+enforced in exactly one place.
+
+### 9.8 Orchestration
+
+`crawl → read → concatenate → sort → de-duplicate → assemble`.
+
+**Concatenate before assembling.** QA/QC windows and uncertainty are
+campaign-level quantities; evaluated per file they would give a different
+answer at every file boundary, so an archive split into hourly files would
+mask differently than the same data in daily files.
+
+**Sort.** Files crawled across several directory layouts arrive in path
+order, not time order, and an instrument's own timestamps cannot be assumed
+sorted either — logger clock corrections, buffered writes and merge steps in
+an upstream processing chain all produce records that step backwards
+occasionally. Everything downstream assumes a monotonic axis.
+
+**Duplicate timestamps keep the first, and say how many were dropped.** A
+policy, not a truth: overlapping files may genuinely disagree, averaging
+would silently invent a value, and erroring would reject archives that
+legitimately overlap.
+
+The warning **names the cause instead of guessing it**, because the two
+causes call for opposite responses. Measured on the 43-file PTR-MS set, all
+7,242 dropped rows were duplicated *within* a single file and none came from
+overlap between files — while the message asked "Overlapping files?", which
+points at the crawler and the revision policy, both innocent. Within-file
+duplicates mean the instrument wrote two records under one timestamp (there,
+a nominally 1 Hz logger with 1 s resolution, whose duplicate rows carry
+genuinely different values), so the remedy is a resolution or averaging
+decision; overlap between files means the archive really does hold the same
+period twice, and the remedy is in the manifest's path templates. The split
+is counted per file *before* concatenation, which makes it exact rather than
+heuristic: after concatenation the two are indistinguishable.
+
+**What a file said about itself reaches the stream.** A reader returns the
+file's own declarations — an ICARTT header's PI, mission, revision, platform
+and LOD flags — in `RawTable.attrs`, and orchestration reconciles them across
+an instrument's files: keys that agree are carried through, keys that
+disagree are *joined rather than picked*, since silently choosing one of two
+PIs would put a false statement into a product whose purpose is to be
+self-describing. Past a threshold the disagreement is summarized as
+`first ... last (N distinct values)`, because some keys differ in every file
+by design and a thousand-file instrument would otherwise write an attr that
+is useless as provenance. Counts are summed instead of reconciled, a tally
+over files being exactly the tally over the concatenated record.
+
+**A bundle does not accumulate streams that are no longer its own.**
+`ingest_campaign(..., instruments=[...])` exists so a campaign can be re-run
+for a subset, and saving that subset over an existing bundle would otherwise
+leave the previous run's stream files behind — nothing misreads them, since
+the loader takes its list from `bundle.json`, but the directory would then
+contradict its own descriptor.
+
+**A file that will not read is logged and skipped; an instrument that loses
+every file is an error.** Aborting a campaign on the first bad file is the
+wrong trade for a few thousand files on a cluster.
+
+### 9.9 The round-trip harness
+
+The only check that bears on whether ingestion is *correct* rather than
+self-consistent. `export_raw()` writes a generated dataset as raw CSV plus
+the manifest describing it — using the same `TrueUncertainty ->
+UncertaintySpec` seam the generator was built with — so that synthetic data
+travels the road real data does: written to files, crawled, parsed,
+converted, masked, reassembled. The generator's answer key then supplies
+expectations that ingestion had no part in writing.
+
+**How strong is it? Measured, by mutation.** Five realistic bugs were
+injected into `tsara.ingest` and the round-trip file was run alone against
+each. In its original form it caught **one of five**. The full suite caught
+all five, so nothing was broken — but the harness was weaker than its own
+docstring claimed, and three of the four misses had a single cause: a
+default export declares no unit conversion, because it writes every species
+in its own canonical units under its own name. There was nothing to convert.
+
+`export_raw` therefore takes `raw_units`, which writes a species in
+*non-canonical* units and declares the conversion back — the shape a real
+archive has, instrument units on disk and canonical units after the
+manifest. With it, the harness catches **three of five**, and additionally
+catches a bug that compares QA/QC bounds before conversion instead of after.
+
+Two misses remain, and both are deliberate:
+
+* **Duplicate-timestamp policy.** Exercising it would require the exporter
+  to fabricate overlapping files, which is a property of an archive rather
+  than of an instrument. Campaign-level unit tests cover it (§9.8).
+* **The nanosecond resolution pin.** Unobservable here, because CSV
+  timestamp parsing already yields nanoseconds. The pin is defensive code
+  guarding a path this harness cannot reach.
+
+**One non-obvious requirement.** A test conversion must carry both a scale
+and an offset. With a zero offset, `value * scale + offset` and
+`(value + offset) * scale` are the same function, so an ordering bug in
+`convert_values` survives; with a non-zero offset it does not. This was
+found by mutation, not by reading the code.
+
+**What the conversion path is really for.** Beyond conversion itself, it is
+the only end-to-end check of the asymmetry in §2.2: a declared `absolute`
+sigma is *already* in canonical units and must survive untouched, while a
+reported sigma column is in the file's units and must be scaled (and never
+offset — an offset shifts a measurement, not its spread). That asymmetry is
+where the Stage-6 sentinel bug lived, and it was previously verified only
+against hand-written expectations.
+
+Only observable variables are exported; the `truth_`-prefixed answer key
+stays behind, and a test asserts no exported header contains it.
+
+Two limits stated honestly:
+
+- **CSV only.** A round trip constrains the reader only when the writer is
+  trivially correct. An ICARTT writer would be more TSARA-authored code, and
+  a trip through it would show writer and reader agreeing with each other
+  rather than either matching FFI-1001.
+- **Values compare to ~1 ULP, not bitwise.** pandas' default CSV parser is
+  not round-trip exact. Far below any measurement resolution, and fully
+  deterministic, but not zero.
+
+The harness also exposed a genuine asymmetry worth recording: a *relative*
+uncertainty term is a fraction of something, and the two sides necessarily
+choose differently. The generator scales the **true** signal, because that
+is what produced the error it injected; ingestion can only scale the
+**reading**, because a manifest describes a file and the true value is
+exactly what is unavailable. The two agree to the fractional size of the
+error itself — second order, and the standard reading of "percent of
+reading" in an instrument specification.
 
 ---
 

@@ -67,7 +67,6 @@ instruments:
           decorrelation_timescale: 5min
         qaqc:
           - {kind: range, min: 1700.0, max: 100000.0}    # ppb, post-conversion sanity
-          - {kind: spike, window: 5s, n_mad: 6.0}
       co2:
         column: CO2_dry
         role: gas

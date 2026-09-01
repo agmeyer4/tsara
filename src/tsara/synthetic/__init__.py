@@ -58,6 +58,7 @@ from tsara.synthetic.config import (
     TrueUncertainty,
     UniformAmplitude,
 )
+from tsara.synthetic.export import export_raw
 from tsara.synthetic.generator import SyntheticDataset, generate
 from tsara.synthetic.plumes import GroundTruth, GroundTruthEvent
 from tsara.synthetic.profiling import (
@@ -91,6 +92,7 @@ __all__ = [
     "TsaraProfilingError",
     "TsaraSyntheticError",
     "UniformAmplitude",
+    "export_raw",
     "generate",
     "load_bundle",
     "profile_series",

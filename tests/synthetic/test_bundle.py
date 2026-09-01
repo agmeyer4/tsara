@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from tsara.core.bundle import BUNDLE_STAGE_KEY
 from tsara.synthetic.bundle import (
     BUNDLE_CONFIG,
     BUNDLE_GROUND_TRUTH,
@@ -206,6 +207,25 @@ def test_incompatible_bundle_version_is_rejected(
     manifest["bundle_format_version"] = 99
     (bundle / BUNDLE_MANIFEST).write_text(json.dumps(manifest))
     with pytest.raises(TsaraBundleError, match="format version 99"):
+        load_bundle(bundle)
+
+
+def test_a_bundle_from_another_stage_is_rejected(
+    noisy_config: SyntheticConfig, tmp_path: Path
+) -> None:
+    """Say "wrong kind of bundle", not "corrupt bundle".
+
+    An ingest bundle has the same skeleton as this one -- ``bundle.json`` at
+    the same format version, beside a ``streams/`` directory -- and differs
+    only in the stage-specific files. Without this check the loader reached
+    the missing ``config.yaml`` first and reported a *damaged synthetic*
+    bundle, which sends the reader looking for the wrong problem.
+    """
+    bundle = generate(noisy_config).save(tmp_path / "run")
+    manifest = json.loads((bundle / BUNDLE_MANIFEST).read_text())
+    manifest[BUNDLE_STAGE_KEY] = "ingest"
+    (bundle / BUNDLE_MANIFEST).write_text(json.dumps(manifest))
+    with pytest.raises(TsaraBundleError, match="'ingest' stage"):
         load_bundle(bundle)
 
 

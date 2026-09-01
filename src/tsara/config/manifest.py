@@ -132,34 +132,30 @@ class FlagRule(_StrictModel):
     def _exactly_one_list(self) -> FlagRule:
         if (self.good_values is None) == (self.bad_values is None):
             raise ValueError("FlagRule requires exactly one of 'good_values' or 'bad_values'.")
+        # An empty list validates fine and then does something drastic and
+        # silent: `good_values: []` matches nothing, so every sample is "not
+        # good" and the whole record is masked, while `bad_values: []` is a
+        # no-op rule that looks active in the manifest. Neither is ever what
+        # was meant. This mirrors UnitConversion refusing the identity
+        # conversion -- a rule that cannot do anything useful is a mistake
+        # worth catching at config load rather than after a pipeline run.
+        if self.good_values is not None and not self.good_values:
+            raise ValueError(
+                "FlagRule 'good_values' is empty, which would mask every sample "
+                "(nothing can be in an empty list). List the flag values that "
+                "mean good, or use 'bad_values' instead."
+            )
+        if self.bad_values is not None and not self.bad_values:
+            raise ValueError(
+                "FlagRule 'bad_values' is empty, so the rule would mask nothing. "
+                "List the flag values that mean bad, or remove the rule."
+            )
         return self
-
-
-class SpikeRule(_StrictModel):
-    """Mask isolated electronic spikes via a rolling-MAD outlier test.
-
-    A sample is masked when it deviates from the rolling median by more than
-    ``n_mad`` × the rolling median absolute deviation. MAD is used instead
-    of standard deviation because the statistic must be robust to the very
-    spikes it is hunting. NOTE: deliberately distinct from plume detection —
-    this is for sub-second instrument glitches, and the window should be far
-    shorter than any real atmospheric feature.
-    """
-
-    kind: Literal["spike"] = "spike"
-    window: str = Field(description="Rolling window as a pandas timedelta string, e.g. '5s'.")
-    n_mad: float = Field(default=6.0, gt=0, description="Deviation threshold in MADs.")
-
-    @field_validator("window")
-    @classmethod
-    def _valid_timedelta(cls, value: str) -> str:
-        _validate_duration(value, field="SpikeRule.window")
-        return value
 
 
 #: Tagged union — Pydantic dispatches on the 'kind' literal, giving precise
 #: per-kind validation errors instead of trying every alternative blindly.
-QAQCRule = Annotated[RangeRule | FlagRule | SpikeRule, Field(discriminator="kind")]
+QAQCRule = Annotated[RangeRule | FlagRule, Field(discriminator="kind")]
 
 
 # ---------------------------------------------------------------------------
@@ -349,15 +345,43 @@ class TimeParsing(_StrictModel):
 
     ICARTT files don't need this — their time axis is defined by the format
     specification itself (seconds from a header-declared date).
+
+    Why a *list* of columns: loggers routinely split one timestamp across
+    several fields. A Picarro ``DataLog_User`` file, for instance, carries
+    ``DATE`` and ``TIME`` as separate whitespace-delimited columns; the
+    timestamp only exists once they are rejoined. Such a file is unreadable
+    if a schema can name only one column, and the workaround (depend on a
+    redundant epoch column) fails on the loggers that don't emit one. The
+    singular ``column:`` spelling remains valid shorthand for the common
+    one-column case, exactly as ``path_template`` does for
+    :attr:`_BaseLoader.path_templates`.
     """
 
-    column: str = Field(description="Column holding the timestamp (or epoch seconds).")
+    columns: tuple[str, ...] = Field(
+        min_length=1,
+        validation_alias=AliasChoices("columns", "column"),
+        description=(
+            "Column(s) holding the timestamp (or epoch seconds). A bare "
+            "string is accepted for the single-column case; several columns "
+            "are concatenated in the order given, separated by `join`, "
+            "before parsing (e.g. ['DATE', 'TIME'])."
+        ),
+    )
+    join: str = Field(
+        default=" ",
+        description=(
+            "Separator used to concatenate multiple time columns before "
+            "parsing. Ignored when a single column is given."
+        ),
+    )
     format: str | None = Field(
         default=None,
         description=(
             "strftime pattern (e.g. '%Y-%m-%d %H:%M:%S'), or the sentinels "
             "'unix' (epoch seconds) / 'iso8601'. None lets pandas infer — "
-            "convenient but slower and riskier; prefer explicit formats."
+            "convenient but slower and riskier; prefer explicit formats. "
+            "The pattern must describe the *joined* string when several "
+            "columns are given."
         ),
     )
     timezone: str = Field(
@@ -367,6 +391,45 @@ class TimeParsing(_StrictModel):
             "processing is UTC internally; anything else is converted."
         ),
     )
+
+    @field_validator("columns", mode="before")
+    @classmethod
+    def _coerce_single_column(cls, value: object) -> object:
+        """Accept a bare string as shorthand for a one-element list."""
+        if isinstance(value, str):
+            return (value,)
+        return value
+
+    @field_validator("columns")
+    @classmethod
+    def _sane_columns(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Reject blank and repeated column names."""
+        for name in value:
+            if not name.strip():
+                raise ValueError("TimeParsing.columns entries must be non-empty column names.")
+        if len(set(value)) != len(value):
+            raise ValueError(
+                "TimeParsing.columns contains duplicates; each entry must name "
+                "a distinct column of the raw file."
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _unix_is_single_column(self) -> TimeParsing:
+        """Epoch seconds are one number, so 'unix' cannot span columns.
+
+        Concatenating two numeric fields and reading the result as epoch
+        seconds would silently produce a wildly wrong date rather than an
+        error, so this combination is refused at config load.
+        """
+        if self.format == "unix" and len(self.columns) > 1:
+            raise ValueError(
+                "TimeParsing: format='unix' expects a single column of epoch "
+                f"seconds, but {len(self.columns)} columns were given "
+                f"({list(self.columns)}). Use an explicit strftime pattern to "
+                "combine separate date and time fields."
+            )
+        return self
 
 
 class _BaseLoader(_StrictModel):
@@ -396,12 +459,61 @@ class _BaseLoader(_StrictModel):
         ),
     )
 
+    exclude: tuple[str, ...] = Field(
+        default=(),
+        validation_alias=AliasChoices("exclude", "excludes"),
+        description=(
+            "Path patterns, in the same syntax as path_templates, naming files "
+            "the crawler must NOT ingest even when a template matches them. "
+            "Templates are otherwise include-only, which is a problem for "
+            "archives that quarantine data in place: a tree holding "
+            "'<instrument>/Eng/*.parquet' alongside '<instrument>/Eng/bad/*.parquet' "
+            "gives a '**' template no way to say 'not that', and the rejected "
+            "files are ingested silently. Write e.g. '**/bad/**' to exclude "
+            "them. Excluded files are counted and reported, never dropped "
+            "without a word."
+        ),
+    )
+
+    max_dropped_fraction: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Largest fraction of a file's rows that may be discarded (for a "
+            "missing or unparseable timestamp, or a wrong field count) before "
+            "the read is treated as a misparse and raises instead of warning. "
+            "Readers have always refused a file where *every* row failed; this "
+            "generalizes that to near-total loss, which is the case that "
+            "actually hurts — a file yielding 2 rows of 10,000 looks downstream "
+            "like a quiet instrument rather than a broken parse. Raise it "
+            "toward 1.0 for archives where heavy row loss is genuinely "
+            "expected; 1.0 restores warn-only behaviour."
+        ),
+    )
+
     @field_validator("path_templates", mode="before")
     @classmethod
     def _coerce_single_template(cls, value: object) -> object:
         """Accept a bare string as shorthand for a one-element list."""
         if isinstance(value, str):
             return (value,)
+        return value
+
+    @field_validator("exclude", mode="before")
+    @classmethod
+    def _coerce_single_exclude(cls, value: object) -> object:
+        """Accept a bare string as shorthand for a one-element list."""
+        if isinstance(value, str):
+            return (value,)
+        return value
+
+    @field_validator("exclude")
+    @classmethod
+    def _sane_excludes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for pattern in value:
+            if not pattern or pattern.strip() == "":
+                raise ValueError("exclude entries must be non-empty path patterns.")
         return value
 
     @field_validator("path_templates")
@@ -438,13 +550,78 @@ class _BaseLoader(_StrictModel):
         return tuple(seen)
 
 
-class CSVLoader(_BaseLoader):
-    """Loader for delimited text files (CSV/TSV and friends)."""
+class _TextLoader(_BaseLoader):
+    """Fields shared by the delimited-text formats (CSV and ICARTT).
+
+    Separate from :class:`_BaseLoader` because the one field here is
+    meaningless for a binary format: parquet stores IEEE doubles directly
+    and recovers them exactly, so offering it a text-parsing precision knob
+    would be an option that cannot do anything.
+    """
+
+    float_precision: Literal["fast", "exact"] = Field(
+        default="fast",
+        description=(
+            "How precisely text is converted to floating point. 'fast' uses "
+            "pandas' default parser, which is what almost every campaign "
+            "wants; 'exact' guarantees that the double TSARA stores is the "
+            "nearest one to the digits written in the file. They differ only "
+            "for values written with more than about 15 significant digits. "
+            "Measured on a 1122-file ICARTT archive: 94.7% of values carry 9 "
+            "or fewer significant digits and are parsed identically either "
+            "way, 0.358% of values differ, and the difference is about one "
+            "unit in the last place (1.2e-16 relative) -- roughly thirteen "
+            "orders of magnitude below any instrument's precision. 'exact' "
+            "cost about 34% more ingestion time on that archive, so it is "
+            "off by default and worth turning on when bitwise "
+            "reproducibility matters more than throughput "
+            "(docs/METHODS.md §9.2.2)."
+        ),
+    )
+
+
+class CSVLoader(_TextLoader):
+    r"""Loader for delimited text files (CSV/TSV and friends).
+
+    "CSV" is read loosely here: the same reader covers comma-, tab- and
+    whitespace-delimited logger output, which in practice arrives with
+    extensions like ``.dat`` and ``.txt`` as often as ``.csv``. Set
+    ``delimiter: '\s+'`` for the fixed-width-looking, space-padded files
+    that gas analyzers commonly write.
+
+    Headerless files are supported via ``header_row: null`` plus an explicit
+    ``column_names`` list — some instruments (e.g. Aeris Spectralite logs)
+    begin emitting data on line 1 with the column meanings living only in a
+    manual, which is precisely the knowledge a manifest exists to record.
+    """
 
     format: Literal["csv"] = "csv"
     time: TimeParsing = Field(description="Datetime index construction (required for CSV).")
-    delimiter: str = Field(default=",", description="Field separator.")
-    header_row: int = Field(default=0, ge=0, description="0-based row index of column names.")
+    delimiter: str = Field(
+        default=",",
+        description=(
+            "Field separator. Accepts a regular expression, so '\\s+' handles "
+            "space- or tab-padded logger output with runs of whitespace."
+        ),
+    )
+    header_row: int | None = Field(
+        default=0,
+        ge=0,
+        description=(
+            "0-based index of the column-name line, counted AFTER blank and "
+            "comment lines are discarded -- not its physical line number. A "
+            "file whose header sits on physical line 4 with one blank line "
+            "above it therefore needs `header_row: 2`. Use null for a file "
+            "with no header at all (which then requires `column_names`)."
+        ),
+    )
+    column_names: tuple[str, ...] | None = Field(
+        default=None,
+        description=(
+            "Column names for a headerless file, in file order. Required "
+            "when `header_row` is null, and forbidden otherwise."
+        ),
+    )
     na_values: tuple[str, ...] = Field(
         default=(), description="Extra strings to treat as missing, e.g. ['-9999', 'NULL']."
     )
@@ -452,8 +629,51 @@ class CSVLoader(_BaseLoader):
         default=None, max_length=1, description="Comment-line prefix character to skip."
     )
 
+    @field_validator("column_names")
+    @classmethod
+    def _sane_column_names(cls, value: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        """Reject empty lists, blank names, and duplicates."""
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("column_names must name at least one column when given.")
+        for name in value:
+            if not name.strip():
+                raise ValueError("column_names entries must be non-empty column names.")
+        if len(set(value)) != len(value):
+            raise ValueError(
+                "column_names contains duplicates; positional names must be "
+                "distinct or later columns would be unreachable."
+            )
+        return value
 
-class ICARTTLoader(_BaseLoader):
+    @model_validator(mode="after")
+    def _header_and_names_agree(self) -> CSVLoader:
+        """Tie ``header_row`` and ``column_names`` into one coherent statement.
+
+        The two fields answer the same question — "where do column names come
+        from?" — so exactly one of them must supply the answer. Allowing both
+        would mean silently overriding a header that is present, which is
+        indistinguishable at read time from a manifest whose author
+        miscounted the header row; refusing the combination turns that into
+        an immediate config error instead of a column mis-mapping that
+        surfaces as nonsense concentrations.
+        """
+        if self.header_row is None and self.column_names is None:
+            raise ValueError(
+                "CSVLoader: header_row=null declares a file with no header "
+                "line, so column_names must list the columns in file order."
+            )
+        if self.header_row is not None and self.column_names is not None:
+            raise ValueError(
+                "CSVLoader: column_names applies only to headerless files. "
+                "Either set header_row=null (the file has no header) or drop "
+                "column_names (the header line supplies the names)."
+            )
+        return self
+
+
+class ICARTTLoader(_TextLoader):
     """Loader for ICARTT (.ict) files per the NASA/NOAA FFI-1001 convention.
 
     TSARA ships its own FFI-1001 parser (Phase 3) rather than depending on
@@ -474,17 +694,53 @@ class ICARTTLoader(_BaseLoader):
             "filenames follow 'dataID_locationID_YYYYMMDD[_R#].ict', and "
             "archives routinely hold several revisions of one day (R0 "
             "preliminary, R1 final, ...). 'latest' keeps only the highest "
-            "revision per (dataID, locationID, date) — the safe default, "
-            "since ingesting all revisions double-counts the same air. "
+            "revision per (identifier, date, trailing comment) — the safe "
+            "default, since ingesting all revisions double-counts the same "
+            "air. The trailing comment is part of the key deliberately: "
+            "'_L1'/'_L2' processing levels and '_Drive01'/'_Stationary01' "
+            "are different products, not revisions of each other. "
             "'all' ingests everything (only for revision-comparison "
             "studies; expect duplicate timestamps downstream)."
         ),
     )
 
 
-#: Tagged union dispatched on 'format'. New formats (Phase 3+) extend this
-#: union and register a reader; the manifest schema needs no other change.
-LoaderConfig = Annotated[CSVLoader | ICARTTLoader, Field(discriminator="format")]
+class ParquetLoader(_BaseLoader):
+    """Loader for Apache Parquet files.
+
+    Why parquet is a first-class format rather than an afterthought: a
+    campaign's *processed* stages are commonly stored as parquet even when
+    the instruments wrote text. The archive this package targets keeps its
+    entire instrument-aligned stage that way, so parquet is the only route
+    to that data.
+
+    Why ``time`` is optional here but required for CSV
+    -------------------------------------------------
+    Parquet stores a dataframe's index as part of the file, so a parquet
+    written by pandas usually *already has* its ``DatetimeIndex`` — there is
+    nothing to parse and no format string to get wrong. That is the default:
+    leave ``time`` unset and the file's own index is used. Set it only for
+    files that store time as an ordinary column instead, which is the same
+    :class:`TimeParsing` block CSV uses.
+
+    A text format can never do this, which is why ``CSVLoader.time`` is
+    mandatory: a CSV has no index, only columns.
+    """
+
+    format: Literal["parquet"] = "parquet"
+    time: TimeParsing | None = Field(
+        default=None,
+        description=(
+            "How to build the datetime index from column(s). Omit (the "
+            "default) to use the index already stored in the file, which is "
+            "the usual case for parquet written by pandas."
+        ),
+    )
+
+
+#: Tagged union dispatched on 'format'. New formats extend this union and
+#: register a reader; the manifest schema needs no other change.
+LoaderConfig = Annotated[CSVLoader | ICARTTLoader | ParquetLoader, Field(discriminator="format")]
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +806,51 @@ class InstrumentConfig(_StrictModel):
                     f"column '{var.column}'."
                 )
             seen[var.column] = name
+        return self
+
+    @model_validator(mode="after")
+    def _headerless_columns_are_declared(self) -> InstrumentConfig:
+        """For a headerless CSV, every referenced column must be declared.
+
+        Normally a mistyped column name is caught when the file is read and
+        pandas reports the header it actually found. A headerless file has no
+        such fallback: ``column_names`` *is* the schema, so a typo there
+        produces a ``KeyError`` deep inside ingestion — after the crawler has
+        already walked the archive — naming a column the user cannot see in
+        any file. Checking the reference here fails in seconds at config
+        load, which is the same bargain the mobile-GPS cross-reference makes.
+
+        Only the headerless case can be checked: when a header line exists,
+        the authoritative name list lives in the data files, not the manifest.
+        """
+        loader = self.loader
+        if not isinstance(loader, CSVLoader) or loader.column_names is None:
+            return self
+
+        declared = set(loader.column_names)
+        # Everything in the manifest that names a raw column of this file.
+        referenced: dict[str, str] = {}
+        for column in loader.time.columns:
+            referenced[column] = "loader.time.columns"
+        for name, var in self.variables.items():
+            referenced[var.column] = f"variables.{name}.column"
+            if var.uncertainty is not None:
+                for component in ("random", "systematic"):
+                    spec = getattr(var.uncertainty, component)
+                    # Only ReportedUncertainty reads a column; declared does not.
+                    if isinstance(spec, ReportedUncertainty):
+                        referenced[spec.column] = f"variables.{name}.uncertainty.{component}.column"
+            for rule in var.qaqc:
+                if isinstance(rule, FlagRule):
+                    referenced[rule.flag_column] = f"variables.{name}.qaqc flag_column"
+
+        missing = {col: where for col, where in referenced.items() if col not in declared}
+        if missing:
+            detail = "; ".join(f"'{col}' ({where})" for col, where in sorted(missing.items()))
+            raise ValueError(
+                f"Headerless CSV declares column_names={list(loader.column_names)}, "
+                f"but these referenced columns are not among them: {detail}."
+            )
         return self
 
 
