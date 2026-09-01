@@ -25,7 +25,7 @@ business reading. What ingestion does instead is *label* the variable
 is the shape of METHODS §2.3's promise: there is no code path in which an
 uncertainty of unstated origin enters a confidence interval.
 
-The four provenance values, and why "zero" is not "unknown"
+The five provenance values, and why "zero" is not "unknown"
 -----------------------------------------------------------
 ``declared``
     Computed here from ``absolute``/``relative``.

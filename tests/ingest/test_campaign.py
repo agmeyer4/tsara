@@ -213,6 +213,38 @@ def test_collection_behaves_like_a_mapping(tmp_path: Path) -> None:
     assert collection["picarro"] is collection.streams["picarro"]
 
 
+def test_collection_iterates_over_instrument_names(tmp_path: Path) -> None:
+    """A half-mapping fails here with ``KeyError: 0``, not a useful error.
+
+    This is the regression test for the missing ``__iter__``: with only
+    ``__getitem__``/``__len__`` defined, Python's legacy iteration protocol
+    indexes the object with integers, so every one of the four idioms below
+    raised ``KeyError: 0`` from inside ``__getitem__`` -- an error naming
+    neither iteration nor this class. The docstring promised a mapping; the
+    test asserting that promise only checked lookup, which is why the gap
+    survived a whole phase.
+    """
+    collection = ingest_campaign(_manifest(_archive(tmp_path)))
+    assert list(collection) == ["picarro"]
+    assert sorted(collection) == ["picarro"]
+    assert dict(collection) == collection.streams
+    seen: list[str] = []
+    for name in collection:  # the idiom that used to raise
+        seen.append(name)
+    assert seen == ["picarro"]
+
+
+def test_collection_supplies_the_rest_of_the_mapping_api(tmp_path: Path) -> None:
+    """``keys``/``items``/``values``/``get`` come free from the ABC."""
+    collection = ingest_campaign(_manifest(_archive(tmp_path)))
+    assert list(collection.keys()) == ["picarro"]
+    assert [name for name, _ in collection.items()] == ["picarro"]
+    assert [stream.sizes["time"] for stream in collection.values()] == [
+        collection["picarro"].sizes["time"]
+    ]
+    assert collection.get("absent") is None
+
+
 def test_collection_keeps_its_manifest(tmp_path: Path) -> None:
     collection = ingest_campaign(_manifest(_archive(tmp_path)))
     assert collection.manifest.name == "test_campaign"

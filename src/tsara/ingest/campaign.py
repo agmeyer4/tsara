@@ -55,7 +55,7 @@ from tsara.ingest.registry import read_file
 from tsara.ingest.streams import build_stream
 
 if TYPE_CHECKING:  # pragma: no cover
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
     from pathlib import Path
 
     import xarray as xr
@@ -68,7 +68,7 @@ __all__ = ["StreamCollection", "ingest_campaign"]
 
 
 @dataclass(frozen=True)
-class StreamCollection:
+class StreamCollection(Mapping[str, "xr.Dataset"]):
     """A campaign's native-rate streams, one per instrument.
 
     The ingestion counterpart of
@@ -76,6 +76,20 @@ class StreamCollection:
     the same shape: a mapping of instrument name to
     :class:`xarray.Dataset`, so that later phases accept either without
     knowing which they were given.
+
+    Why it inherits :class:`collections.abc.Mapping`
+    ------------------------------------------------
+    Because the paragraph above has to be *true*. Defining ``__getitem__``
+    and ``__len__`` by hand without ``__iter__`` left the class half a
+    mapping: Python's legacy iteration protocol then falls back to calling
+    ``__getitem__(0)``, so the first thing a user writes — ``for name in
+    streams`` or ``sorted(streams)`` — failed with ``KeyError: 0``, an error
+    naming neither the real problem nor this class. Meanwhile
+    ``SyntheticDataset.streams`` is a plain dict and iterates fine, so the
+    two objects that later phases are supposed to accept interchangeably
+    behaved differently in the most basic loop. Inheriting the ABC supplies
+    ``__iter__``-driven ``keys``/``items``/``values``/``get`` from the three
+    methods below, which is less code than the wart was.
 
     Attributes
     ----------
@@ -97,6 +111,10 @@ class StreamCollection:
     def __contains__(self, instrument: object) -> bool:
         """Return whether an instrument was ingested."""
         return instrument in self.streams
+
+    def __iter__(self) -> Iterator[str]:
+        """Iterate over instrument names, in manifest order."""
+        return iter(self.streams)
 
     def __len__(self) -> int:
         """Return the number of ingested instruments."""
