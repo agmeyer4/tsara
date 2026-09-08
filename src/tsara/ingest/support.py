@@ -295,6 +295,41 @@ def _floor_declared_cells(
     return out, bounds.start_ns, bounds.stop_ns, n_widened
 
 
+def _warn_if_cells_would_overlap(
+    declared_width_ns: int, widths_ns: npt.NDArray[np.int64] | None, *, path: Path
+) -> None:
+    """Say so when a declared cell is wider than the gap between samples.
+
+    The schema cannot catch this: a manifest is validated before any file is
+    read, so the sampling interval is unknown to it. By the time support is
+    resolved both numbers are in hand, and the consequence of getting it
+    wrong is not subtle. Measured on a 60 s record declared as 120 s cells:
+    every adjacent pair overlaps, the record reports 182 % coverage of
+    itself, and binning anything onto those cells counts each sample twice.
+
+    A warning rather than a refusal, because a cell wider than the spacing is
+    physically possible -- overlapping integrations exist, even if none appear
+    anywhere in the target archive -- and refusing would block an archive
+    TSARA has merely misjudged. The generator refuses the same configuration
+    outright, but it is manufacturing the data and so cannot be wrong about
+    it.
+    """
+    if widths_ns is None or widths_ns.size == 0:
+        return
+    cadence = int(np.median(widths_ns))
+    if declared_width_ns <= cadence:
+        return
+    logger.warning(
+        "%s: the manifest declares %s cells, wider than the %s measured "
+        "between samples, so cells will overlap and every sample will be "
+        "counted into more than one of them. Check the declared width, or the "
+        "path templates if two products have been mixed into one instrument.",
+        path,
+        pd.Timedelta(declared_width_ns, unit="ns"),
+        pd.Timedelta(cadence, unit="ns"),
+    )
+
+
 def _label_from_bounds(
     index_ns: npt.NDArray[np.int64],
     start_ns: npt.NDArray[np.int64],
@@ -391,6 +426,7 @@ def resolve_support(
 
     if support.width != "cadence":
         declared_width = int(pd.Timedelta(support.width).value)
+        _warn_if_cells_would_overlap(declared_width, widths_ns, path=path)
         widths = np.full(len(frame), declared_width, dtype=np.int64)
         width_source: SupportSource = "declared"
         nominal: int | None = declared_width

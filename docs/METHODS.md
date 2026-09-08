@@ -1743,6 +1743,17 @@ worth of rows the wrong width. It is measured in orchestration, the only place
 the per-file boundaries still exist, and resolution runs before ordering
 because the per-row width array is built in concatenation order.
 
+A **declared** width gets one check the schema cannot perform, because a
+manifest is validated before any file is read: if it exceeds the interval
+actually measured between samples, the cells overlap and TSARA says so.
+Measured on a 60 s record declared as 120 s cells, every adjacent pair
+overlaps, the record reports 182 % coverage of itself, and binning anything
+onto those cells counts each sample twice. It is a warning rather than a
+refusal, since overlapping integrations are physically possible even though
+none appear anywhere in the archive, and refusing would block a record TSARA
+had merely misjudged. A width *narrower* than the spacing gets no warning at
+all: that is the definition of a duty-cycled instrument, not a mistake.
+
 The ladder is self-consistent, which is the strongest argument for it: the
 instruments where cadence inference is *invalid* are precisely the ones that
 declare their own boundaries. The iWAS canisters match their modal cadence on

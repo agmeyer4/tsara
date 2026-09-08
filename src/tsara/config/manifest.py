@@ -537,9 +537,25 @@ class SupportSpec(_StrictModel):
     @field_validator("width")
     @classmethod
     def _valid_width(cls, value: str) -> str:
-        """Accept the 'cadence' sentinel or any strictly positive duration."""
-        if value != "cadence":
+        """Accept the 'cadence' sentinel or any strictly positive duration.
+
+        A near-miss on the sentinel is reported as such rather than as a bad
+        duration: someone who wrote ``cadance`` was reaching for the keyword,
+        and being told to try ``30s`` does not help them find the typo.
+        """
+        if value == "cadence":
+            return value
+        try:
             _validate_duration(value, field="SupportSpec.width")
+        except ValueError as exc:
+            if not any(char.isdigit() for char in value):
+                raise ValueError(
+                    f"SupportSpec.width: '{value}' is neither a duration nor the "
+                    "keyword 'cadence', which is the only non-duration value "
+                    "accepted here. Use 'cadence' to take the width from the "
+                    "file's own sampling interval, or give a duration like '60s'."
+                ) from exc
+            raise
         return value
 
     @model_validator(mode="after")

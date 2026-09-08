@@ -636,3 +636,54 @@ def test_a_file_of_nothing_but_zero_widths_falls_back_to_the_cadence() -> None:
     assert resolved.n_widened == 4
     span = _epoch(out[RAW_TIME_STOP_COLUMN]) - _epoch(out[RAW_TIME_START_COLUMN])
     assert np.all(span == 10 * SECOND)
+
+
+def test_a_declared_width_wider_than_the_cadence_is_reported(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The schema cannot catch this: a manifest is validated before any file
+    is read. By resolution time both numbers are known, and the consequence
+    is not subtle — every adjacent cell overlaps and every sample is counted
+    into more than one of them."""
+    frame = _frame(10, step="60s")
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.support"):
+        out, _ = resolve_support(
+            frame,
+            SupportSpec(width="120s", label="start", method="mean"),
+            widths_ns=np.full(10, 60 * SECOND, dtype=np.int64),
+            label_hint=None,
+            path=Path("f"),
+        )
+    assert "cells will overlap" in caplog.text
+    start = _epoch(out[RAW_TIME_START_COLUMN])
+    stop = _epoch(out[RAW_TIME_STOP_COLUMN])
+    assert np.all(start[1:] < stop[:-1]), "the warning describes something real"
+
+
+def test_a_duty_cycled_width_narrower_than_the_cadence_is_not_reported(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Narrower than the spacing is the definition of a duty cycle, not a
+    mistake, and warning about it would train the user to ignore warnings."""
+    frame = _frame(10, step="60s")
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.support"):
+        resolve_support(
+            frame,
+            SupportSpec(width="15s", method="mean"),
+            widths_ns=np.full(10, 60 * SECOND, dtype=np.int64),
+            label_hint=None,
+            path=Path("f"),
+        )
+    assert "overlap" not in caplog.text
+
+
+def test_no_measured_cadence_means_nothing_to_compare_against() -> None:
+    frame = _frame(3)
+    _, resolved = resolve_support(
+        frame,
+        SupportSpec(width="60s", method="mean"),
+        widths_ns=None,
+        label_hint=None,
+        path=Path("f"),
+    )
+    assert resolved.width_ns == 60 * SECOND

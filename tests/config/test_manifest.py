@@ -893,3 +893,17 @@ def test_at_width_must_be_a_positive_duration(width: str) -> None:
 def test_at_width_is_not_offered_on_a_reported_component() -> None:
     """A per-point column is already at the file's own support by definition."""
     assert "at_width" not in ReportedUncertainty.model_fields
+
+
+def test_a_near_miss_on_the_cadence_keyword_says_so() -> None:
+    """Someone who wrote 'cadance' was reaching for the keyword, and being
+    told to try '30s' does not help them find the typo."""
+    with pytest.raises(ValidationError, match="neither a duration nor the keyword"):
+        SupportSpec.model_validate({"width": "cadance"})
+
+
+def test_a_malformed_duration_still_reads_as_a_duration_problem() -> None:
+    """A value with digits in it was meant to be a duration, so the duration
+    message is the useful one."""
+    with pytest.raises(ValidationError, match="not a valid timedelta"):
+        SupportSpec.model_validate({"width": "60 furlongs"})
