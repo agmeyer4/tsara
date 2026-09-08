@@ -25,19 +25,21 @@ stub says.
 ### 1.1 Native-rate streams ("synchronize late")
 
 Ingestion produces one `xarray.Dataset` **per instrument stream**, on that
-instrument's own native timestamps. Species measured by the same instrument
+instrument's own native timestamps. Since Phase 3.5 each of those timestamps
+carries the *interval of air it describes* rather than standing for an
+instant — see §10, which this section should be read alongside. Species measured by the same instrument
 share a clock and live in the same Dataset (so per-instrument operations remain
 vectorized over species). No resampling of any kind happens at ingestion.
 
 The pipeline defers any change of clock to the last possible moment:
 
-| Stage | Clock used |
-|---|---|
-| QA/QC, unit conversion | native |
-| Rolling baseline, enhancement Δ | native (time-based windows) |
-| Plume detection | native → events are time **intervals** |
-| Ratio regression | **pairing clock** (§1.3), per event/window |
-| Continuous rolling state, PMF matrix | **output grid** (§1.4) |
+| Stage | Clock used | Support (§10) |
+|---|---|---|
+| QA/QC, unit conversion | native | unchanged; both are pointwise |
+| Rolling baseline, enhancement Δ | native (time-based windows) | windows are durations, so cells of any width fit |
+| Plume detection | native → events are time **intervals** | an event's bounds are the union of the cells above threshold; the smallest resolvable event is one cell |
+| Ratio regression | **pairing clock** (§1.3), per event/window | the slower stream's **cells**, with the faster stream averaged onto them by overlap |
+| Continuous rolling state, PMF matrix | **output grid** (§1.4) | grid cells, overlap-weighted |
 
 Rationale: rolling quantiles and MAD thresholds are well-defined on irregular
 native timestamps; resampling before those stages either destroys information
@@ -61,6 +63,11 @@ general design, not merely the more cautious one.
 > Smooth auxiliary fields (GPS position, temperature, pressure, wind via
 > circular statistics) may be interpolated, guarded by `max_interp_gap`.**
 
+Phase 3.5 generalized this to the rule it was a special case of: **TSARA never
+evaluates a value on a finer support than it was delivered on** (§10).
+Interpolating a gas is one way to break that; treating a 1-minute mean as an
+instant is another, and the archive is full of the second.
+
 A concentration inside a plume is not a smooth field; linearly interpolating
 it invents structure exactly where the science happens. Platform position and
 ambient met vary smoothly on sampling timescales, so interpolation onto gas
@@ -72,12 +79,15 @@ timestamps is physically justified there — but never across gaps longer than
 To regress species *y* against species *x* within an event or rolling window,
 when they come from instruments with different rates:
 
-1. The **pairing clock** is the native timestamp set of the *slower* of the
-   two instruments, restricted to the event/window.
-2. The faster stream is bin-averaged into cells centered on those timestamps
-   (cell width = the slow instrument's sampling period), with uncertainty
-   propagated per §3 and the count of native samples per cell,
-   `n_native`, recorded.
+1. The **pairing clock** is the *slower* of the two instruments' own **cells**,
+   restricted to the event/window.
+2. The faster stream is averaged onto those cells **weighted by overlap**
+   (`tsara.core.support.bin_onto_cells`), with uncertainty propagated per §3,
+   the count of contributing samples recorded, and the fraction of each cell
+   actually covered recorded alongside it. Before Phase 3.5 the cell was
+   *assumed* to be the slow instrument's sampling period centred on its
+   timestamp; now it is read from the stream's own boundaries, so a canister
+   that integrated for 14.1 s is paired over exactly 14.1 s (§10).
 3. Cells with `n_native = 0` for either species are dropped — a pair is never
    fabricated.
 
@@ -97,7 +107,9 @@ A single uniform master grid — the familiar `(time × species)` cube — is
 constructed **only** for the continuous rolling state and the PMF export
 matrix, which inherently require one. Construction is binning-only
 (`bin_statistic`), with per-cell propagated uncertainties and `n_native`
-counts carried alongside values. Validation requires the grid period to be
+counts carried alongside values. Grid cells carry CF boundaries like any
+other stream, and `cell_methods = "time: mean (interval: <native>)"` records
+the resolution of the data that went into them (§10.2). Validation requires the grid period to be
 ≥ the slowest stream's native period; cells with no native samples are NaN
 with `n_native = 0`, never interpolated. Config: `OutputGridConfig`
 (`tsara.config.analysis`) — deliberately not named "the grid" or paired with
@@ -151,7 +163,12 @@ quadrature) or `ReportedUncertainty` (`column`, the raw-file column holding
 that component's per-point sigma) — matching the `kind`/`format`-discriminator
 convention already used for QA/QC rules, loaders, and platforms.
 `UncertaintySpec.decorrelation_timescale` is an optional duration string
-carrying τ for the random component (§3.4). Omitting a component means "not
+carrying τ for the random component (§3.4).
+`DeclaredUncertainty.at_width` (added in Phase 3.5) records the averaging
+interval the `absolute`/`relative` figures were *quoted* at, for the ordinary
+case of a spec-sheet precision stated at one second being applied to a
+one-minute product; §10.8 sets out when TSARA will move it onto the stream's
+own cells and the three cases in which it refuses to. Omitting a component means "not
 modeled here": an omitted `systematic` is zero; an omitted `random` falls back
 to the empirical estimator (§2.5) at runtime. A `ReportedUncertainty.column`
 is scaled by the parent variable's `convert.scale` at ingestion (a spread has
@@ -293,6 +310,11 @@ so $\sigma_{\bar{x}}^2 \approx \sigma^2 / N_{\mathrm{eff}}$. The exact double
 sum (§3.1) remains available as a slower, assumption-free alternative; τ → 0
 recovers §3.2 and τ → ∞ is handled by declaring the component systematic
 instead. *(Exact N_eff form is an open flag — see CLAUDE.md §5.)*
+
+This form has one implemented consumer so far: moving a declared σ from the
+interval it was quoted at onto the cells it actually describes (§10.8), where
+$N$ is the number of quoted intervals per cell. Worked numbers there show why
+the naive $\sqrt{N}$ shortcut is not merely imprecise but confidently wrong.
 
 ### 3.5 Median binning
 
@@ -506,6 +528,18 @@ v1:
   registered algorithm name, these can be added without touching the
   pipeline.
 - **Drive-path-aware plume deconvolution** for mobile platforms.
+- **Clock-offset estimation by cross-correlation.** `InstrumentConfig.time_shift`
+  (§10.7) lets a manifest *declare* an offset; deriving one by correlating a
+  species against a trusted reference is a registered estimator waiting to be
+  written. The 2026 campaign's own alignment stage does exactly this.
+- **Instrument response deconvolution.** A laser analyzer's reading is a
+  convolution of the truth with a response function, which is why `point` is
+  the honest description of it rather than `mean` (§10.3). Recovering the
+  underlying signal is a deconvolution problem and a stage of its own.
+- **Non-uniform canister fill weighting.** A whole-air sampler's flow is not
+  constant over its fill, so a canister is a *weighted* mean of the interval
+  rather than a flat one. TSARA assumes uniform and records that it did
+  (§10.10); the weighting is undeclared in every file seen.
 
 ---
 
@@ -841,6 +875,12 @@ separator would send the write into a directory that was never created and
 fail only at save time, after a full generate, with a backend error naming
 neither the instrument nor the rule it broke.
 
+**Cells.** Since Phase 3.5 every generated stream also carries the interval
+each value describes (§10.9). The default reproduces the original behaviour
+exactly — one sample per cell, centred on its own timestamp — so existing
+configurations emit byte-identical output; `method: mean` is what manufactures
+the averaged products most of the real archive contains.
+
 **Known limitation:** plume timing is *not* derived from track geometry —
 there is no dispersion model placing sources in space and computing when the
 vehicle drives through them. Ground-truth event coordinates are the platform
@@ -899,6 +939,12 @@ Canonical renaming is a manifest concern handled downstream; a reader that
 renamed columns would have to be taught the manifest, which is the coupling
 the seam exists to prevent. The contract is enforced at runtime for every
 reader, TSARA's own and anyone else's.
+
+Phase 3.5 added one optional element to it: a reader **may** return two
+reserved columns holding each row's cell boundaries, when the file itself
+states them (§10.4). Both or neither — one alone describes no interval — and
+they travel as columns precisely so that concatenation, sorting and
+de-duplication carry them along with the rows they belong to, for free.
 
 Readers are selected by name from a registry (`@register_reader("csv")`),
 the same convention this document fixes for noise and regression estimators.
@@ -1342,6 +1388,10 @@ Sorting is purely the orchestration stage's concern.
 
 ### 9.6 Uncertainty at ingestion, and what it refuses to invent
 
+*(Phase 3.5 added one thing ingestion may now do with a declared budget:
+move it onto the cells it describes, when — and only when — the manifest has
+supplied the timescale that makes the correction knowable. See §10.8.)*
+
 Ingestion knows the manifest; it does not know the analysis config. So it
 computes exactly the budgets a manifest can state — `declared` and
 `reported` — and **labels** everything else. The empirical estimator's name
@@ -1365,6 +1415,14 @@ lives in one module both producers build from, rather than in two matching
 string literals — a coupling that would break silently, since a rename would
 not fail anything until a later stage found no sigma and fell back to an
 empirical estimate, which is a *plausible* answer rather than an error.
+
+**Cells.** Assembly is also where the boundaries resolved in orchestration
+stop being table columns and become the CF representation: a `time_bnds`
+coordinate, a `cell_methods` string on every variable, and attributes saying
+what the support is and how each part of it was established (§10.2, §10.4).
+The time axis becomes the cell midpoint here, and the declared clock
+correction has already been applied upstream, before ordering, because
+centring can reorder a stream when widths vary (§10.2).
 
 **Platforms.** A stationary site has one position, so attaching it to any
 clock is exact and free. A mobile platform's position lives on the GPS
@@ -1481,6 +1539,12 @@ against hand-written expectations.
 Only observable variables are exported; the `truth_`-prefixed answer key
 stays behind, and a test asserts no exported header contains it.
 
+**A second mutation round, on temporal support**, was run in Phase 3.5 and is
+recorded in §10.9. It scored three of five and reached five of five after two
+fixes — one of which was the same defect this section describes, in a new
+place: a fixture that only ever wrote UTC could not test a reader that ignored
+the declared timezone.
+
 Two limits stated honestly:
 
 - **CSV only.** A round trip constrains the reader only when the writer is
@@ -1499,6 +1563,353 @@ is what produced the error it injected; ingestion can only scale the
 exactly what is unavailable. The two agree to the fractional size of the
 error itself — second order, and the standard reading of "percent of
 reading" in an instrument specification.
+
+---
+
+## 10. Temporal support (Phase 3.5)
+
+TSARA's first data model treated every timestamp as an instant. Most of the
+target archive labels **intervals**: the whole NOAA stationary suite publishes
+1-minute means, the iWAS canisters integrate for roughly 15 s each, and the
+1 s ICARTT records carry a start time by specification. Treating a 1-minute
+mean as an instant invents 59 s of resolution the instrument never had, which
+is the same error as interpolating a gas, stated more generally. One principle
+covers both:
+
+> **TSARA never evaluates a value on a finer support than it was delivered
+> on.**
+
+Everything in this section is the bookkeeping that makes that principle
+checkable.
+
+### 10.1 Vocabulary
+
+A **cell** is one row of a stream: a value together with the time interval of
+air it describes. That interval is its **support**. Three facts describe it:
+
+| Fact | Question it answers |
+|---|---|
+| **width** | How long an interval? |
+| **label** | Where in the interval does the file's timestamp sit — start, mid, end? |
+| **method** | Is the value an *average over* the interval, or a *sample within* it? |
+
+The three are established independently and are therefore recorded
+independently (§10.3).
+
+### 10.2 Representation: CF cell boundaries
+
+Cells are stored in the Climate and Forecast convention rather than in a TSARA
+invention, so a saved stream is readable by `ncview`, CDO and `cf_xarray`
+without a translation layer. Per stream:
+
+- a `time_bnds` coordinate of shape `(time, 2)`, holding each cell's start and
+  stop;
+- `time.attrs["bounds"] = "time_bnds"`, plus `standard_name` and `axis` so a
+  generic CF tool can find the axis by role rather than by our choice of name;
+- `cell_methods = "time: mean"` or `"time: point"` on every time-varying
+  variable, including the `sigma_rand_`/`sigma_sys_` companions — a random
+  error describes the same cell as the value it belongs to.
+
+**`time` is the cell midpoint on every stream.** Left at whatever each file
+happened to use, `time` would mean a start on one instrument and an end on
+another, and every operation that is not bounds-aware — a plot, a `sel`,
+someone else's code — would carry up to a full cell of silent bias. Centred,
+the worst case is half a cell and it is unbiased. Nothing is lost: the
+original label is in `tsara_support_label` and the boundaries are exact.
+Note that centring can *reorder* a stream when widths vary per file (a wide
+cell starting just before a narrow one ends up with the later midpoint), so
+sorting must follow it, not precede it.
+
+**Bounds are always present, including for `point` data.** CF permits this
+explicitly, while being clear about what it means: for point data "the cell is
+irrelevant to the data and the bounds are arbitrary. Nonetheless, the bounds
+may still be included." So a `point` stream's bounds are TSARA's tiling
+convention, not an instrument claim — which is exactly what the per-field
+provenance says out loud. Zero width is never used: measure zero means zero
+weight in every overlap, so such a cell would vanish from the analysis without
+a word. One real airborne instrument does declare stop equal to start; those
+cells are widened to the nominal cadence and counted.
+
+**Operational rule: never `resample`, `rolling` or `coarsen` a stream carrying
+bounds.** Measured, xarray fails on this in two ways and raises on neither.
+Stored as a coordinate, which is TSARA's layout, the bounds variable is
+*dropped* while `time.attrs["bounds"]` goes on naming it — a dangling CF
+reference. Stored as a data variable, the boundary timestamps are *averaged*
+into cells no instrument measured. It also silently coarsens the time axis
+from nanoseconds to microseconds. `tsara.core.support.check_bounds_intact`
+turns that rule into a check, applied at every persistence boundary.
+
+### 10.3 `point` versus `mean` is a claim about arithmetic
+
+A cavity ring-down analyzer is not a point sampler. Gas in the cavity is a
+mixture of what entered over the previous seconds, species are measured
+sequentially in a cycle, and a `_Sync` log is the analyzer's own resampling of
+asynchronous fits onto a grid. But it is not a box-car mean either. So the
+line TSARA draws is operational rather than physical:
+
+- **`mean`** — an explicit averaging operation over a *known* interval was
+  performed. The value times the width is the integral over the cell. This
+  licenses interval arithmetic.
+- **`point`** — the value is a sample, whatever instrumental smoothing lies
+  beneath it.
+
+Declaring `point` is therefore a *guard*, not a shrug: it is what stops a
+later stage rescaling a 1 s precision figure onto a 2 s cell as though
+averaging had happened. Instrument response and cavity residence are
+deliberately not modelled (§10.9); they are a deconvolution problem, not a
+cell method.
+
+The distinction is not academic and it is not TSARA's invention. The
+stationary Picarro's own header states both cases in one sentence:
+
+> Species are measured at 0.5 Hz and reported as 1-minute averages for
+> stationary measurements.
+
+The same analyzer is a point sample on a drive and a genuine 1-minute mean
+when stationary.
+
+### 10.4 The provenance ladder, recorded per field
+
+Support is resolved the way the uncertainty budget is (§2.4): a manifest says
+what it can, the file says what it can, TSARA measures the rest, and every
+answer is labelled.
+
+| Rung | Meaning |
+|---|---|
+| `reported` | Per-row boundary columns in the file itself |
+| `declared` | The manifest states it |
+| `inferred` | TSARA read it from the file (column names, measured cadence) |
+| `assumed` | Nothing said; a default applied and labelled |
+
+Recorded **per field** — `tsara_support_label_source`,
+`_width_source`, `_method_source` — because the three are established
+independently. A stationary analyzer whose file carries a stop column and
+whose manifest declares `method: mean` is honestly reported / reported /
+declared, and one label per stream could not say that. Reconciling several
+files takes the **weakest** value rather than the majority, so one
+undocumented file cannot hide inside a well-documented instrument.
+
+Defaults admit undeclared files rather than refusing them: an unknown label is
+treated as centred, which minimises the worst-case misplacement, and an
+undeclared method is `point`, which claims nothing.
+
+### 10.5 Width is a property of the measurement, not of its neighbours
+
+When the manifest declares no width, it is inferred from each file's own
+**median** sampling interval and applied to every row. The median rather than
+the mode because the mode needs a rounding resolution chosen in advance, and
+that choice is wrong for at least one real instrument either way: exact-mode
+agreement is 100 % on a Picarro but only 12 % on a jittery 10 Hz GPS, while
+both have a well-defined median.
+
+The rejected alternative — width as the distance to the next row — was
+rejected on measurement, not on taste. Classifying every sampling interval
+across 303 files spanning the whole 2024 archive and the 2026 aligned stage,
+for continuous instruments:
+
+| What the interval is | Mean fraction |
+|---|---|
+| Jitter around the file's one nominal cadence | 0.99218 |
+| A dropped row (an integer multiple of the cadence) | 0.00570 |
+| Genuinely something else | 0.00211 |
+
+Only 9 of 299 files have more than 1 % "other". So one width per file
+describes the data, and:
+
+> **A dropped row leaves a hole in the tiling. It never produces a wider
+> cell.**
+
+Under the rejected rule the widest single cell in that sample would have been
+**23.3 days** — a 10 s nominal GPS record whose file spans a campaign. 33 of
+299 files have a gap exceeding 100× their cadence. Each stream therefore
+carries a duty-cycle diagnostic, `tsara_cell_coverage`, the share of the
+record's extent that cells actually cover: median 1.0000 across the sample,
+with 32 of 299 files below 0.95 and one at 0.050.
+
+Cadence is measured **per file**, not per instrument, and that is
+load-bearing: some met records in the archive run at 1 s in one file and 5 s
+in another, so a single instrument-wide cadence would give a whole file's
+worth of rows the wrong width. It is measured in orchestration, the only place
+the per-file boundaries still exist, and resolution runs before ordering
+because the per-row width array is built in concatenation order.
+
+The ladder is self-consistent, which is the strongest argument for it: the
+instruments where cadence inference is *invalid* are precisely the ones that
+declare their own boundaries. The iWAS canisters match their modal cadence on
+between 3 % and 64 % of intervals and have coverage between 0.020 and 0.914 —
+and they publish start, stop and mid columns. Inference never has to cover the
+case it cannot do.
+
+### 10.6 What is inferred, and what deliberately is not
+
+**Label** is inferred from evidence a reader can justify. For ICARTT that is
+the name of the independent variable. The specification says it is a start
+time and most of the archive agrees, but two instruments publish `Time_Mid`
+and one vendor writes `TIMESTAMP_UTC`, which is the analyzer's own resampling
+grid rather than a specification start at all. So the *name* is read rather
+than the specification trusted: a name saying `start` or `mid` justifies a
+label, anything else yields `unknown` and a centred cell. Sampled across the
+archive, 18 of 29 files infer `start` and the rest fall back to centred.
+Assuming `start` everywhere because the specification says so would put a 30 s
+error on every cell of the minute-average suite, in the direction nobody would
+think to check. A hint is used only when every file of an instrument agrees;
+picking a winner would put half of them half a cell out.
+
+A file that states every boundary needs no label inference at all: where its
+index falls between the boundaries *is* the label. That is why an independent
+variable named `Time_Mid` needs no special handling anywhere.
+
+**Method is never inferred.** Scanning all 1122 ICARTT headers for three
+independent signs of averaging:
+
+| Evidence | Files | Instrument groups |
+|---|---|---|
+| Prose keyword declaring an average | 288 | 15 of 152 |
+| A companion dispersion column | 0 | 0 |
+| A companion sample-count column | 0 | 0 |
+| Text saying "instantaneous" | 0 | 0 |
+
+Prose is the *only* evidence that exists, and a regular expression over
+English is not a basis for deciding whether a number may be treated as an
+integral. Where a header does mention averaging it is surfaced as provenance a
+human can read. Undeclared means `point`, marked `assumed`.
+
+**Boundary columns are never guessed.** A file naming `Time_Stop` almost
+certainly means it, and "almost certainly" applied to the wrong column
+silently produces wrong cells for a whole campaign — exactly the failure this
+phase exists to prevent. The manifest names them; candidates found in a file
+are reported in `tsara_boundary_column_candidates` so a user can see what is
+available.
+
+### 10.7 Clock offset is not support
+
+Support says what interval a value describes. **Offset** says how the
+instrument's clock relates to air-at-inlet time. They are separate concepts
+and are kept apart deliberately, because on real data the offset is the larger
+error: the 2026 campaign's own alignment stage applies whole-second lags of
+1–6 s between analyzers, a −9 s inlet lag, and logger clock drift of up to
+13.6 s, while label ambiguity on 1 s data is at most 0.5 s.
+
+`InstrumentConfig.time_shift` is a signed duration **added** to every
+timestamp and to both cell boundaries, so a shift moves a cell without
+resizing it. A logger running 5 s fast takes `-5s`; a 9 s inlet lag also takes
+`-9s`. It defaults to nothing applied, which is right for an archive already
+corrected upstream, and the applied value is written to `tsara_time_shift` so
+a double correction is visible rather than silent — the one failure mode
+internal consistency cannot reveal, since both corrections are individually
+right. Estimating a shift by cross-correlation is a future registered
+estimator, not this field.
+
+### 10.8 Uncertainty at a support
+
+`DeclaredUncertainty.at_width` records the averaging interval a declared sigma
+was quoted at, for the ordinary and easily-mishandled case of a spec-sheet
+precision stated at 1 s being applied to 1-minute means.
+
+**Rescaling happens only when `decorrelation_timescale` is declared.** How
+much averaging helps depends entirely on how quickly the error forgets itself,
+and nothing in a file reveals that. With $\rho_1 = e^{-w/\tau}$ for a quoted
+interval $w$ and a cell holding $N = W/w$ of them, the §3.4 form gives
+$N_{\mathrm{eff}} = N(1-\rho_1)/(1+\rho_1)$ clamped to $[1, N]$, and
+$\sigma_{\mathrm{cell}} = \sigma/\sqrt{N_{\mathrm{eff}}}$. For a 1 s figure on
+60 s cells:
+
+| τ | N_eff | σ falls by | Naive √N would claim |
+|---|---|---|---|
+| 0 | 60.00 | 7.75× | 7.75× |
+| 5 s | 5.98 | 2.45× | 7.75× |
+| 20 s | 1.50 | 1.22× | 7.75× |
+| 5 min | 1.00 | 1.00× | 7.75× |
+
+At τ = 20 s the naive answer is over six times too confident; at τ = 5 min the
+averaging buys nothing at all. Guessing a timescale in order to apply a
+correction would be worse than applying none, so three cases are refused, each
+recorded in `uncertainty_at_width_status` rather than only logged:
+
+1. **No decorrelation timescale** — the correction is unknowable.
+2. **Cells finer than the quoted interval** — recovering noise below that
+   interval assumes the error is white down there, a claim about the
+   instrument that no manifest has made.
+3. **A systematic component quoted at an interval** — a systematic error is
+   correlated across samples by definition and does not average down at all
+   (§3.3), so the interval cannot change it.
+
+Widths are per row, so a sampler whose fills vary is corrected cell by cell.
+
+### 10.9 The manufactured side, and what the harness catches
+
+`TrueSupport` is the generator-side counterpart of the manifest's
+`SupportSpec`, in the same relationship as `TrueUncertainty` to
+`UncertaintySpec`, with `to_manifest_support()` converting between them so the
+two schemas cannot drift. A `mean` instrument renders truth on a fine grid
+*inside* each cell and averages it, rather than evaluating once and labelling
+the result an average — so a 3 s plume inside a 60 s cell comes out diluted by
+roughly twenty, exactly as a real minute mean would record it, and the answer
+key stores the diluted peak the instrument could actually see. Noise is drawn
+**at the cell**, not on the fine grid, so a declared `absolute` sigma keeps
+meaning "the spread of the numbers this instrument publishes".
+
+The averaging is validated against closed forms rather than a golden file: a
+flat background averages exactly, a linear drift is exact in its increments
+(the midpoint rule is exact for linear functions), the quadrature error falls
+as the inverse square of the subsample count, and a narrow Gaussian of
+amplitude $A$ and width $\sigma$ in a cell of width $W$ reaches
+$A\sigma\sqrt{2\pi}/W$, matched to five decimal places.
+
+`export_raw` writes an archive at any of the three rungs — per-row boundary
+columns, a uniform declaration, or nothing — and the time column carries the
+instant the label implies, so a start-labelled product writes start times.
+Writing midpoints would hand ingestion the answer.
+
+**How strong is the harness? Measured, by mutation**, the technique of §9.9.
+Five realistic support bugs were injected and the round-trip file was run
+alone against each: the label ignored, a boundary parsed on the wrong
+timezone, the cell width doubled, the index left at the cell start, and the
+clock correction applied with the wrong sign. **It caught three of five.**
+Both misses had a cause worth fixing:
+
+- The exporter only ever wrote UTC, so a reader ignoring the declared timezone
+  had nothing to bite on. `export_raw` gained a `timezone`, and a round trip
+  through a real zone now proves boundaries are parsed on the same convention
+  as the axis they bound. This is the `raw_units` lesson of §9.9 recurring: a
+  fixture that never exercises a path cannot test it.
+- The width was asserted nowhere that *measures* it. Two of the three
+  declarations take the width from the manifest or from columns; only the
+  undeclared path measures a cadence, and that test checked the offset and the
+  provenance but not the width.
+
+With both fixed the harness catches **five of five**.
+
+End to end on the real archive, the stationary Picarro suite (50,400 rows
+across 35 days) ingests three ways to the same 60 s start-labelled cells at
+coverage 1.000, by three independent routes that each say honestly how they
+know: `reported` from the file's stop column, `declared` from the manifest,
+and `inferred` from the `StartTime_UTC` column name.
+
+### 10.10 Known limits, deliberately not modelled
+
+- **Instrument response and cavity residence.** A laser analyzer's reading is
+  a convolution of the truth with a response function, not a box-car mean.
+  Modelling it is deconvolution, a future stage; `point` is the honest
+  under-claim in the meantime.
+- **Picarro sequential species and `_Sync` interpolation**, PTR-MS per-mass
+  dwell, and non-uniform canister fill weighting. Assumed uniform where it
+  matters, and recorded.
+- **Overlapping cells.** Representable, but refused by the generator schema
+  and unsupported in the effective-sample-count arithmetic. None were found
+  anywhere in the archive.
+- **Inclusive versus exclusive stop seconds.** One instrument declares a 59 s
+  cell on a 60 s cadence; TSARA honours what the file says rather than
+  rounding it.
+- **Spatial support on mobile platforms.** A 15 s canister at 15 m/s covers
+  about 225 m. Cell position is the track at the cell midpoint; a
+  `path_length_m` attribute is a future addition for clustering.
+- **The declared-versus-empirical closure diagnostic** proposed during
+  scoping — comparing a declared σ against `diff_mad` at the delivered support
+  — is not built. The empirical estimator belongs to the analysis
+  configuration, and ingestion computing it would mean reading a config this
+  stage has no business reading (§9.6). It belongs to the phase that owns the
+  noise estimator.
 
 ---
 

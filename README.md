@@ -16,14 +16,15 @@ section there before it has a caller.
 
 ## Status
 
-**Alpha — phases 1–3 of a 10-phase roadmap are complete.** The package is built
-one phase per review cycle, and only what is listed as done below exists.
+**Alpha — phases 1–3 and 3.5 of the roadmap are complete.** The package is
+built one phase per review cycle, and only what is listed as done below exists.
 
 | Phase | | |
 |---|---|---|
 | 1 | Configuration layer (Pydantic schemas, YAML loader, logging) | ✅ done |
 | 2 | Synthetic data generator with ground-truth plumes *and* ground-truth error | ✅ done |
 | 3 | Ingestion (reader registry, CSV / ICARTT / Parquet, crawler, QA/QC, units, uncertainty) | ✅ done |
+| 3.5 | Temporal support: every value carries the interval of air it describes | ✅ done |
 | 4 | Alignment & pairing (native-rate pairing, error propagation, circular stats, output grid) | planned |
 | 5 | Baselines + continuous rolling state | planned |
 | 6 | Plume detection + nested-event bookkeeping | planned |
@@ -33,7 +34,8 @@ one phase per review cycle, and only what is listed as done below exists.
 | 10 | Docs + tutorial | planned |
 
 So today TSARA can **manufacture a campaign with a known answer key, and read a
-real one into analysis-ready streams**. It cannot yet compute baselines, ratios,
+real one into analysis-ready streams whose values each carry the time interval
+they describe**. It cannot yet compute baselines, ratios,
 or the stability cube; there is no CLI yet (phase 9).
 
 ## Install
@@ -160,6 +162,15 @@ the data rather than trusting the header, masks both sentinel families
 (missing *and* below/above detection limit) while keeping the counts, and
 reconciles what a campaign's files say about themselves by joining
 disagreements rather than picking a winner. (`METHODS.md` §9.2)
+
+**A value is not an instant.** Most real archives publish intervals: a
+1-minute mean, a canister fill, a sample whose timestamp is a start time by
+specification. Every stream therefore carries CF cell boundaries and a
+`cell_methods` telling you whether a number is an average over its interval or
+a sample within it, plus a record of how each of those was established —
+reported by the file, declared by the manifest, inferred, or assumed. The rule
+underneath is that TSARA never evaluates a value on a finer support than it was
+delivered on. (`METHODS.md` §10)
 
 **Every stage saves itself.** Each phase ships persistence for the products it
 introduces, so a long run can be inspected in a notebook, resumed after a crash,
