@@ -77,7 +77,7 @@ an overlap of exactly one cell width compare unequal to itself.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -88,6 +88,9 @@ from tsara.core.naming import (
     CELL_METHODS_ATTR,
     TIME_BOUNDS_VAR,
     TIME_COORD,
+    SupportLabel,
+    SupportMethod,
+    SupportSource,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -109,32 +112,12 @@ __all__ = [
     "nominal_cadence_ns",
 ]
 
-#: Where the timestamp sits inside its cell.
-#:
-#: ``unknown`` is a first-class value rather than an error: 402 files in the
-#: target archive declare nothing at all, and refusing them would be worse
-#: than admitting them with the assumption recorded. An unknown label is
-#: treated as centred, which is the choice that minimises the worst-case
-#: misplacement (half a cell rather than a whole one).
-SupportLabel = Literal["start", "mid", "end", "unknown"]
-
-#: Whether a value is an average over its cell or a sample inside it.
-SupportMethod = Literal["point", "mean"]
-
-#: Where a piece of support information came from, best evidence first.
-#:
-#: Recorded **per field** (label, width, method) rather than once per stream,
-#: because the three are established independently: a stationary Picarro with
-#: a stop column and a manifest declaring ``method: mean`` is honestly
-#: described as reported / reported / declared. This mirrors the uncertainty
-#: system, which already records ``random`` and ``systematic`` provenance
-#: separately and reports ``mixed`` when they disagree (METHODS §2.4).
-#:
-#: * ``reported``  -- per-row start/stop columns in the file itself.
-#: * ``declared``  -- the manifest states it.
-#: * ``inferred``  -- TSARA read it from the file (column names, cadence).
-#: * ``assumed``   -- nothing said; a default was applied and labelled.
-SupportSource = Literal["reported", "declared", "inferred", "assumed"]
+# `SupportLabel`, `SupportMethod` and `SupportSource` are re-exported above
+# from `tsara.core.naming`, which is where they are defined and documented.
+# They live there because the config layer needs the same vocabulary and must
+# not pay for this module's NumPy import; they are re-exported here so that
+# code doing support arithmetic can take the types from the module it is
+# already importing. Same reasoning as `ingest.base.TIME_INDEX_NAME`.
 
 #: ``int64`` value that ``datetime64[ns]`` NaT casts to.
 #:

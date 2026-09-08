@@ -23,6 +23,8 @@ that true by construction instead of by coincidence.
 
 from __future__ import annotations
 
+from typing import Literal
+
 __all__ = [
     "ALTITUDE_COORD",
     "BOUNDS_ATTR",
@@ -35,6 +37,9 @@ __all__ = [
     "RAW_TIME_STOP_COLUMN",
     "SIGMA_RAND_PREFIX",
     "SIGMA_SYS_PREFIX",
+    "SupportLabel",
+    "SupportMethod",
+    "SupportSource",
     "TIME_BOUNDS_VAR",
     "TIME_COORD",
     "sigma_rand_name",
@@ -60,6 +65,52 @@ BOUNDS_ATTR = "bounds"
 #: CF attribute naming how a value relates to its cell, e.g. ``time: mean``.
 #: Written per data variable, since one stream can in principle mix them.
 CELL_METHODS_ATTR = "cell_methods"
+
+#: The vocabulary of temporal support, defined here rather than beside the
+#: arithmetic in :mod:`tsara.core.support`, for two reasons.
+#:
+#: The first is the reason everything else in this module is here: three
+#: subsystems have to spell these identically -- the manifest schema that
+#: lets a user declare them, the generator that manufactures streams with
+#: them, and the assembler that writes them into stream attributes. The
+#: second is weight. :mod:`tsara.core.support` imports NumPy, and the config
+#: layer imports neither NumPy nor pandas today; measured, importing it from
+#: the schema would add roughly 120 ms to every config load and every CLI
+#: ``--help``. This module imports nothing at all.
+
+#: Where the timestamp sits inside its cell.
+#:
+#: ``unknown`` is a first-class value rather than an error: hundreds of files
+#: in the target archive declare nothing at all, and refusing them would be
+#: worse than admitting them with the assumption recorded. An unknown label
+#: is treated as centred, which minimises the worst-case misplacement -- half
+#: a cell rather than a whole one.
+SupportLabel = Literal["start", "mid", "end", "unknown"]
+
+#: Whether a value is an average over its cell or a sample inside it.
+#:
+#: A claim about arithmetic, not about physics. ``mean`` says an explicit
+#: averaging operation over a *known* interval was performed, so the value
+#: times the width is the integral over the cell. ``point`` says the value is
+#: a sample, whatever instrumental smoothing lies beneath it -- which is the
+#: honest description of a cavity ring-down analyzer, since it is neither an
+#: instantaneous sampler nor a box-car mean.
+SupportMethod = Literal["point", "mean"]
+
+#: Where a piece of support information came from, best evidence first.
+#:
+#: Recorded **per field** (label, width, method) rather than once per stream,
+#: because the three are established independently: a stationary Picarro with
+#: a stop column and a manifest declaring ``method: mean`` is honestly
+#: described as reported / reported / declared. This mirrors the uncertainty
+#: system, which already records ``random`` and ``systematic`` provenance
+#: separately and reports ``mixed`` when they disagree (METHODS.md 2.4).
+#:
+#: * ``reported``  -- per-row start/stop columns in the file itself.
+#: * ``declared``  -- the manifest states it.
+#: * ``inferred``  -- TSARA read it from the file (column names, cadence).
+#: * ``assumed``   -- nothing said; a default was applied and labelled.
+SupportSource = Literal["reported", "declared", "inferred", "assumed"]
 
 #: Reserved columns by which a reader hands per-row cell boundaries to the
 #: rest of ingestion.

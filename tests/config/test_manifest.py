@@ -11,12 +11,14 @@ from pydantic import ValidationError
 from tsara.config.manifest import (
     CSVLoader,
     DeclaredUncertainty,
+    ICARTTLoader,
     InstrumentConfig,
     Manifest,
     MobilePlatform,
     ParquetLoader,
     ReportedUncertainty,
     StationaryPlatform,
+    SupportSpec,
     TimeParsing,
     UncertaintySpec,
     UnitConversion,
@@ -760,3 +762,134 @@ def test_parquet_loader_takes_part_in_the_format_union(
 def test_parquet_loader_rejects_unknown_keys() -> None:
     with pytest.raises(ValidationError):
         ParquetLoader.model_validate({"path_template": "*.parquet", "delimiter": ","})
+
+
+# ---------------------------------------------------------------------------
+# Temporal support (Phase 3.5)
+# ---------------------------------------------------------------------------
+
+
+def test_support_defaults_claim_nothing() -> None:
+    """The default must be the weakest reading: no label, no method, no width."""
+    spec = SupportSpec()
+    assert spec.label is None
+    assert spec.method is None
+    assert spec.width == "cadence"
+    assert spec.start_column is None and spec.stop_column is None
+
+
+def test_every_loader_carries_support() -> None:
+    """It lives on the shared base, so all three formats get it identically."""
+    for loader in (
+        CSVLoader(path_template="a.csv", time=TimeParsing(column="t")),
+        ICARTTLoader(path_template="a.ict"),
+        ParquetLoader(path_template="a.parquet"),
+    ):
+        assert loader.support == SupportSpec()
+
+
+def test_support_accepts_a_declared_cell() -> None:
+    spec = SupportSpec(label="start", width="60s", method="mean")
+    assert spec.label == "start"
+    assert spec.width == "60s"
+
+
+def test_support_accepts_per_row_boundary_columns() -> None:
+    spec = SupportSpec(start_column="Time_Start", stop_column="Time_Stop", method="mean")
+    assert spec.stop_column == "Time_Stop"
+
+
+def test_a_stop_column_alone_is_enough() -> None:
+    """The common case: the file's time axis is already the cell start."""
+    assert SupportSpec(stop_column="Time_Stop").start_column is None
+
+
+def test_a_start_column_without_a_stop_describes_no_interval() -> None:
+    with pytest.raises(ValidationError, match="describes no interval"):
+        SupportSpec(start_column="Time_Start")
+
+
+def test_boundary_columns_must_differ() -> None:
+    with pytest.raises(ValidationError, match="two distinct boundaries"):
+        SupportSpec(start_column="T", stop_column="T")
+
+
+@pytest.mark.parametrize("declared", [{"label": "start"}, {"width": "60s"}])
+def test_per_row_bounds_and_a_uniform_declaration_are_exclusive(declared: dict[str, Any]) -> None:
+    """Both together can only contradict; refuse rather than pick a winner."""
+    with pytest.raises(ValidationError, match="alternatives"):
+        SupportSpec(stop_column="Time_Stop", **declared)
+
+
+def test_a_method_may_accompany_boundary_columns() -> None:
+    """`method` is orthogonal: the columns say WHEN, not whether it averaged."""
+    assert SupportSpec(stop_column="Time_Stop", method="mean").method == "mean"
+
+
+@pytest.mark.parametrize("width", ["0s", "-5s", "not-a-duration"])
+def test_support_width_must_be_a_positive_duration_or_cadence(width: str) -> None:
+    with pytest.raises(ValidationError):
+        SupportSpec(width=width)
+
+
+def test_support_rejects_an_unknown_label() -> None:
+    # Through model_validate rather than the constructor: this is a YAML typo,
+    # and a static checker would reject the constructor call outright.
+    with pytest.raises(ValidationError):
+        SupportSpec.model_validate({"label": "middle"})
+
+
+def test_support_rejects_unknown_keys() -> None:
+    with pytest.raises(ValidationError):
+        SupportSpec.model_validate({"labl": "start"})
+
+
+# --- time_shift ------------------------------------------------------------
+
+
+def test_time_shift_defaults_to_nothing_applied(
+    stationary_manifest_dict: dict[str, Any],
+) -> None:
+    """Right for an archive already lag-corrected upstream."""
+    manifest = Manifest.model_validate(stationary_manifest_dict)
+    assert manifest.instruments["picarro"].time_shift is None
+
+
+@pytest.mark.parametrize("shift", ["-9s", "5s", "0s", "-1.5s"])
+def test_time_shift_accepts_either_sign(
+    shift: str, stationary_manifest_dict: dict[str, Any]
+) -> None:
+    """A clock can be fast or slow, so this is parse-only, not positive-only."""
+    payload = copy.deepcopy(stationary_manifest_dict)
+    payload["instruments"]["picarro"]["time_shift"] = shift
+    assert Manifest.model_validate(payload).instruments["picarro"].time_shift == shift
+
+
+def test_time_shift_rejects_nonsense(stationary_manifest_dict: dict[str, Any]) -> None:
+    payload = copy.deepcopy(stationary_manifest_dict)
+    payload["instruments"]["picarro"]["time_shift"] = "yesterday"
+    with pytest.raises(ValidationError, match="not a valid timedelta"):
+        Manifest.model_validate(payload)
+
+
+# --- at_width --------------------------------------------------------------
+
+
+def test_declared_uncertainty_at_width_defaults_to_the_streams_own_cell() -> None:
+    assert DeclaredUncertainty(absolute=0.5).at_width is None
+
+
+def test_declared_uncertainty_records_the_interval_it_was_quoted_at() -> None:
+    """A spec-sheet precision quoted at 1 s, applied to 1-minute means."""
+    assert DeclaredUncertainty(absolute=0.5, at_width="1s").at_width == "1s"
+
+
+@pytest.mark.parametrize("width", ["0s", "-1s", "soon"])
+def test_at_width_must_be_a_positive_duration(width: str) -> None:
+    with pytest.raises(ValidationError):
+        DeclaredUncertainty(absolute=0.5, at_width=width)
+
+
+def test_at_width_is_not_offered_on_a_reported_component() -> None:
+    """A per-point column is already at the file's own support by definition."""
+    assert "at_width" not in ReportedUncertainty.model_fields
