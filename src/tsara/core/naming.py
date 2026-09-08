@@ -50,6 +50,7 @@ __all__ = [
     "TIME_BOUNDS_VAR",
     "TIME_COORD",
     "TIME_SHIFT_ATTR",
+    "is_sigma_name",
     "sigma_rand_name",
     "sigma_sys_name",
 ]
@@ -184,6 +185,28 @@ ALTITUDE_COORD = "altitude"
 #: behave differently under averaging (``docs/METHODS.md`` §2.1).
 SIGMA_RAND_PREFIX = "sigma_rand_"
 SIGMA_SYS_PREFIX = "sigma_sys_"
+
+
+def is_sigma_name(name: str) -> bool:
+    """Return whether a variable name is one of the uncertainty companions.
+
+    The prefixes are the seam the two producers agree on -- the synthetic
+    generator and ingestion both build companion names this way, and neither
+    records anything else that identifies them -- so asking about a name is
+    the only test that works on a stream from either source, or on one
+    reloaded from disk.
+
+    Parameters
+    ----------
+    name : str
+        Variable name to test.
+
+    Returns
+    -------
+    bool
+        True for ``sigma_rand_*`` / ``sigma_sys_*``.
+    """
+    return name.startswith((SIGMA_RAND_PREFIX, SIGMA_SYS_PREFIX))
 
 
 def sigma_rand_name(variable: str) -> str:

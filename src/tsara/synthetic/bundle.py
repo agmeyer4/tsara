@@ -56,6 +56,7 @@ from tsara.core.bundle import (
     BUNDLE_MANIFEST,
     BUNDLE_STAGE_KEY,
     BUNDLE_STREAMS_DIR,
+    BUNDLE_VERSION_WITH_CELLS,
     SUPPORTED_BUNDLE_VERSIONS,
     TsaraBundleError,
     pin_time_encoding,
@@ -238,6 +239,11 @@ def load_bundle(path: str | Path) -> SyntheticDataset:
         raise TsaraBundleError(f"Bundle '{bundle}' is missing {BUNDLE_GROUND_TRUTH}.")
     ground_truth = GroundTruth.from_frame(pd.read_parquet(truth_path))
 
+    # See the same gate in `tsara.ingest.bundle`: an absent `time_bnds` means
+    # "the format could not record one" in version 1 and "nothing could be
+    # known" from version 2 on, and only the first is safe to complete.
+    predates_cells = int(found_version) < BUNDLE_VERSION_WITH_CELLS
+
     streams: dict[str, xr.Dataset] = {}
     migrated: list[str] = []
     for name in manifest.get("streams", []):
@@ -250,7 +256,7 @@ def load_bundle(path: str | Path) -> SyntheticDataset:
         # `time_bnds` returns as a coordinate, the shape it was saved in.
         with xr.open_dataset(stream_path, engine="netcdf4", decode_coords="all") as opened:
             streams[name] = opened.load()
-        if ensure_time_bounds(streams[name]):
+        if predates_cells and ensure_time_bounds(streams[name]):
             migrated.append(name)
 
     if migrated:

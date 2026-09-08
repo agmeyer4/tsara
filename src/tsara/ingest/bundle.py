@@ -41,6 +41,7 @@ from tsara.core.bundle import (
     BUNDLE_MANIFEST,
     BUNDLE_STAGE_KEY,
     BUNDLE_STREAMS_DIR,
+    BUNDLE_VERSION_WITH_CELLS,
     SUPPORTED_BUNDLE_VERSIONS,
     TsaraBundleError,
     pin_time_encoding,
@@ -176,6 +177,15 @@ def load_streams(path: str | Path) -> StreamCollection:
     descriptor = _read_descriptor(bundle)
     manifest = _read_manifest(bundle)
 
+    # Only a bundle older than the format that records cells is migrated. A
+    # version-2 stream with no `time_bnds` is not missing them: ingestion
+    # measured that it could not know this instrument's width -- no manifest
+    # declaration, and no file long enough to measure a cadence -- and refused
+    # to invent one. Completing it here would silently promote that finding
+    # from `assumed` to `inferred` and stamp a nominal width onto a stream
+    # whose whole point is that it has none. See `BUNDLE_VERSION_WITH_CELLS`.
+    predates_cells = int(descriptor["bundle_format_version"]) < BUNDLE_VERSION_WITH_CELLS
+
     streams: dict[str, xr.Dataset] = {}
     migrated: list[str] = []
     for name in descriptor.get("streams", []):
@@ -189,7 +199,7 @@ def load_streams(path: str | Path) -> StreamCollection:
         # underneath it fails far from here.
         with xr.open_dataset(target, engine="netcdf4", decode_coords="all") as stream:
             streams[name] = stream.load()
-        if ensure_time_bounds(streams[name]):
+        if predates_cells and ensure_time_bounds(streams[name]):
             migrated.append(name)
 
     if migrated:

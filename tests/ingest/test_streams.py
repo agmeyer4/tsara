@@ -487,15 +487,32 @@ def test_a_stream_carries_its_cells_and_their_provenance() -> None:
     assert stream.attrs[SUPPORT_COVERAGE_ATTR] == pytest.approx(1.0)
 
 
-def test_a_sigma_describes_the_same_cell_as_its_species() -> None:
-    """A random error belongs to the value it accompanies, so it is averaged
-    or sampled over exactly the same interval."""
+def test_a_sigma_carries_no_cell_method() -> None:
+    """A sigma shares its species' cell but not its cell *method*.
+
+    `cell_methods` says what operation produced a value FROM its cell, so
+    "time: mean" on `sigma_rand_ch4` asserts the stored number is the mean of
+    the random sigmas over that cell. It is not — it is the standard error of
+    the cell mean, smaller by exactly the square root of N_eff, a factor the
+    same stream records in `uncertainty_n_eff`. Measured on a 60 s cell of
+    1 s data with a 2 s decorrelation time: 0.130 ppb stored against 0.5
+    declared, a ratio of 3.83.
+
+    The systematic companion happens to satisfy "time: mean" exactly, because
+    a fully correlated error does not average down. It is excluded anyway —
+    true by coincidence is not a reason to assert it, and one string on both
+    invites a reader to treat two components that behave oppositely under
+    averaging as though they were alike.
+    """
     instrument = _instrument(
         ch4={
             "column": "CH4_dry",
             "role": "gas",
             "units": "ppm",
-            "uncertainty": {"random": {"mode": "declared", "absolute": 0.5}},
+            "uncertainty": {
+                "random": {"mode": "declared", "absolute": 0.5},
+                "systematic": {"mode": "declared", "absolute": 0.2},
+            },
         }
     )
     stream = build_stream(
@@ -505,7 +522,12 @@ def test_a_sigma_describes_the_same_cell_as_its_species() -> None:
         platform=StationaryPlatform(latitude=40.0, longitude=-111.0),
         support=_resolved(),
     )
-    assert stream["sigma_rand_ch4"].attrs[CELL_METHODS_ATTR] == "time: mean"
+    # The species says how it relates to its cell; its companions do not.
+    assert stream["ch4"].attrs[CELL_METHODS_ATTR] == "time: mean"
+    assert CELL_METHODS_ATTR not in stream["sigma_rand_ch4"].attrs
+    assert CELL_METHODS_ATTR not in stream["sigma_sys_ch4"].attrs
+    # They are still identified, by the seam both producers share.
+    assert stream["sigma_rand_ch4"].attrs["uncertainty_component"] == "random"
 
 
 def test_a_stream_whose_cells_could_not_be_determined_still_builds() -> None:

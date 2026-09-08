@@ -265,8 +265,13 @@ def test_missing_stream_file_is_reported(noisy_config: SyntheticConfig, tmp_path
 # ---------------------------------------------------------------------------
 
 
-def _strip_cells_to_version_1(bundle: Path) -> None:
-    """Rewrite a bundle as the version-1 layout: streams with no cells."""
+def _strip_cells(bundle: Path, *, version: int = 1) -> None:
+    """Remove every stream's cells, and stamp the bundle at ``version``.
+
+    At version 1 that reproduces the older layout, which had no way to record
+    cells. At version 2 it reproduces the *other* absence — a stream that
+    could not have cells, or lost them — which must not be migrated.
+    """
     import xarray as xr
 
     for target in sorted((bundle / BUNDLE_STREAMS_DIR).glob("*.nc")):
@@ -287,7 +292,7 @@ def _strip_cells_to_version_1(bundle: Path) -> None:
         stream[TIME_COORD].encoding = {}
         stream.to_netcdf(target, engine="netcdf4")
     manifest = json.loads((bundle / BUNDLE_MANIFEST).read_text())
-    manifest["bundle_format_version"] = 1
+    manifest["bundle_format_version"] = version
     (bundle / BUNDLE_MANIFEST).write_text(json.dumps(manifest))
 
 
@@ -309,7 +314,7 @@ def test_a_version_1_bundle_is_migrated_rather_than_refused(
 ) -> None:
     """The older layout has an exact honest reading, so admit and label it."""
     bundle = generate(noisy_config).save(tmp_path / "run")
-    _strip_cells_to_version_1(bundle)
+    _strip_cells(bundle)
 
     reloaded = load_bundle(bundle)
     for name, stream in reloaded.streams.items():
@@ -325,12 +330,32 @@ def test_a_version_1_bundle_is_migrated_rather_than_refused(
         assert stream.attrs[SUPPORT_METHOD_SOURCE_ATTR] == "assumed", name
 
 
+def test_a_version_2_bundle_without_cells_is_not_completed(
+    noisy_config: SyntheticConfig, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The same absence means opposite things at the two versions.
+
+    Version 1 had no way to record cells, so completing a stream adds
+    information. From version 2 on, a stream without them either could not
+    have them or has lost them, and inventing a cadence would paper over the
+    second while promoting the first up the provenance ladder. The loader ran
+    the migration unconditionally, so version was never consulted.
+    """
+    bundle = generate(noisy_config).save(tmp_path / "run")
+    _strip_cells(bundle, version=2)
+    with caplog.at_level(logging.INFO, logger="tsara.synthetic.bundle"):
+        reloaded = load_bundle(bundle)
+    for name, stream in reloaded.streams.items():
+        assert TIME_BOUNDS_VAR not in stream.coords, name
+    assert "assumed cells" not in caplog.text
+
+
 def test_the_migration_says_what_it_did(
     noisy_config: SyntheticConfig, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A weak reading applied silently would be worse than no reading."""
     bundle = generate(noisy_config).save(tmp_path / "run")
-    _strip_cells_to_version_1(bundle)
+    _strip_cells(bundle)
     with caplog.at_level(logging.INFO, logger="tsara.synthetic.bundle"):
         load_bundle(bundle)
     assert "assumed cells" in caplog.text

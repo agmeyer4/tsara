@@ -98,6 +98,7 @@ from tsara.core.naming import (
     SupportLabel,
     SupportMethod,
     SupportSource,
+    is_sigma_name,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -595,9 +596,27 @@ def attach_time_bounds(
     Writes the representation both producers must agree on exactly: a
     ``time_bnds`` coordinate of shape ``(time, 2)``, the CF ``bounds``
     attribute pointing at it from the time coordinate, and a
-    ``cell_methods`` attribute on every time-varying data variable. Sigma
-    companions get it too, because a random error describes the same cell as
-    the value it belongs to.
+    ``cell_methods`` attribute on every time-varying data variable.
+
+    **Not on the sigma companions**, and that exclusion is measured rather
+    than fastidious. ``cell_methods`` says what operation produced a value
+    *from* its cell, so ``time: mean`` on ``sigma_rand_ch4`` asserts the
+    stored number is the mean of the random sigmas over the cell. It is not:
+    it is the standard error of the cell mean, smaller by exactly the square
+    root of N_eff (METHODS §10.8) -- on a 60 s cell of 1 s
+    data with a 2 s decorrelation time, measured, 0.130 ppb against 0.5, a
+    factor of 3.83 that the very same file records in ``uncertainty_n_eff``.
+    The file contradicted itself.
+
+    The systematic companion happens to satisfy ``time: mean`` exactly, since
+    a fully correlated error does not average down and every within-cell value
+    is the same number. It is excluded anyway: the claim is true there only by
+    coincidence, and stamping the same string on both invites a reader to
+    treat two components that behave oppositely under averaging as though they
+    were alike -- which is the one thing the two-component design exists to
+    prevent. What the companions *are* is said by their names and their
+    ``uncertainty_component`` attribute; a cell method is the wrong vocabulary
+    for it.
 
     Parameters
     ----------
@@ -646,7 +665,7 @@ def attach_time_bounds(
     dataset[TIME_COORD].attrs["axis"] = "T"
     cell_methods = cell_methods_value(method)
     for name in dataset.data_vars:
-        if TIME_COORD in dataset[name].dims:
+        if TIME_COORD in dataset[name].dims and not is_sigma_name(str(name)):
             dataset[name].attrs[CELL_METHODS_ATTR] = cell_methods
     return dataset
 

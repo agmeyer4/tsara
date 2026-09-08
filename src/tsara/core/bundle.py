@@ -31,6 +31,7 @@ __all__ = [
     "BUNDLE_MANIFEST",
     "BUNDLE_STAGE_KEY",
     "BUNDLE_STREAMS_DIR",
+    "BUNDLE_VERSION_WITH_CELLS",
     "SUPPORTED_BUNDLE_VERSIONS",
     "TIME_ENCODING",
     "TsaraBundleError",
@@ -50,14 +51,30 @@ BUNDLE_STREAMS_DIR = "streams"
 #: now carries the time interval it describes rather than a bare instant.
 BUNDLE_FORMAT_VERSION = 2
 
+#: First format version whose streams record their own cells.
+#:
+#: The line between two absences that look identical on disk and mean opposite
+#: things. In a version-1 stream, no ``time_bnds`` means *the format had no way
+#: to record one* -- so completing it with a weak, labelled reading adds
+#: information. In a version-2 stream it means *ingestion could not know*: no
+#: width was declared and no file was long enough to measure one, and it said
+#: so rather than inventing a number. Migrating that second case would move a
+#: stream UP the provenance ladder -- ``assumed`` to ``inferred`` -- for no
+#: reason but having been written to disk and read back, which is precisely
+#: what recording provenance per field exists to prevent.
+BUNDLE_VERSION_WITH_CELLS = 2
+
 #: Versions this TSARA can still read, oldest first.
 #:
 #: A version-1 bundle is *migrated* rather than refused, because the change
 #: that produced version 2 is additive and the older layout has an exact,
 #: honest reading: cells of the record's own nominal cadence, centred on each
-#: timestamp, every field of their support marked ``assumed``. Refusing would
-#: strand any bundle written before the upgrade for no gain -- the whole point
-#: of labelling provenance is that a weak reading can be admitted safely.
+#: timestamp, with the label and method marked ``assumed`` and the width
+#: ``inferred`` -- the cadence really was measured from the record, and saying
+#: ``assumed`` there would understate it in the one direction the ladder is
+#: not allowed to move. Refusing would strand any bundle written before the
+#: upgrade for no gain: the whole point of labelling provenance is that a weak
+#: reading can be admitted safely.
 SUPPORTED_BUNDLE_VERSIONS = (1, 2)
 
 #: Key in ``bundle.json`` naming the stage that wrote the bundle.
@@ -82,14 +99,21 @@ class TsaraBundleError(TsaraError):
 
 #: netCDF encoding pinned onto every time axis TSARA writes.
 #:
-#: Not cosmetic. Left to itself, xarray chooses a units string per variable
-#: from that variable's own values, so a ``time`` coordinate and its
-#: ``time_bnds`` companion get **different reference epochs** -- measured
-#: here, "nanoseconds since 2024-07-01 00:00:00" against "nanoseconds since
-#: 2024-06-30 23:59:30", because the first cell's start precedes the first
-#: timestamp. xarray warns about exactly this and CF requires the two to
-#: agree. Pinning one absolute epoch also keeps a saved file byte-comparable
-#: across runs whose records begin at different instants.
+#: Not cosmetic -- though not for the reason first recorded here, which was
+#: wrong. A CF bounds variable never carries units of its own: it inherits its
+#: parent's, and xarray implements that, writing ``time_bnds`` with no
+#: ``units`` attribute at all and encoding it with whatever ``time`` was
+#: given. The two therefore *cannot* disagree about an epoch, and the pair of
+#: differing epochs this comment once claimed to have measured is not a state
+#: the writer can reach.
+#:
+#: What xarray actually warns about, measured, is a datetime coordinate that
+#: has a bounds variable and no pinned units: left alone it picks a units
+#: string from the data -- "minutes since 2024-07-01 00:01:00" on a four-row
+#: stream -- and applies it to the bounds as well, so a file's resolution
+#: depends on when its record happens to start. Pinning one absolute epoch
+#: silences the warning and keeps a saved file byte-comparable across runs
+#: that begin at different instants.
 #:
 #: Nanoseconds and int64 rather than a coarser unit, for the reason the whole
 #: package pins ns: a microsecond axis round-trips through netCDF as
@@ -126,15 +150,18 @@ def pin_time_encoding(dataset: xr.Dataset) -> xr.Dataset:
             continue
         variable = dataset[name]
         if variable.dtype.kind == "M" and str(variable.dtype) != "datetime64[ns]":
-            # Not a nicety. Pinning NANOSECOND units onto an axis stored at a
-            # coarser resolution makes xarray write the NaT sentinel for every
-            # value, and the file then reads back as an axis of NaT with no
-            # error anywhere -- measured, on a plain `pd.date_range`, which
-            # pandas now returns in microseconds. Widening to nanoseconds is
+            # Not a nicety, and this -- not any epoch mismatch -- is why
+            # `time_bnds` is in this loop at all. Nanosecond units applied to
+            # an axis stored at a coarser resolution make xarray write the NaT
+            # sentinel for every value, and the file reads back as NaT with no
+            # error anywhere. Measured on a microsecond bounds array beside a
+            # nanosecond time axis: every cell returns `['NaT' 'NaT']`, and
+            # since the bounds inherit the *parent's* pinned units they hit
+            # this even though nothing pinned anything onto them. Widening is
             # exact, so it is done here rather than refused. TSARA's own
-            # producers already pin ns (the readers enforce it, the generator
-            # builds it), so this fires only for a dataset assembled outside
-            # the package.
+            # producers already build ns (the readers enforce it, the
+            # generator and `attach_time_bounds` construct it), so this fires
+            # only for a dataset assembled outside the package.
             dataset[name] = variable.astype("datetime64[ns]")
         dataset[name].encoding.update(TIME_ENCODING)
     return dataset

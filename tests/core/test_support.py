@@ -571,6 +571,36 @@ def test_an_independent_cf_reader_finds_our_cells(tmp_path: Path) -> None:
         assert back.cf.axes["T"] == [TIME_COORD]
 
 
+def test_coarse_cell_bounds_are_widened_before_they_are_pinned(tmp_path: Path) -> None:
+    """A bounds array coarser than nanoseconds round-trips to NaT, silently.
+
+    A CF bounds variable carries no units of its own -- it inherits its
+    parent's, and xarray implements that -- so `time_bnds` is encoded with
+    whatever `time` was pinned to whether or not anything pinned it directly.
+    Nanosecond units applied to a microsecond array make xarray write the NaT
+    sentinel for every value and raise nothing, so the cells come back as
+    `['NaT' 'NaT']` and every later overlap silently finds nothing.
+
+    `pin_time_encoding` widens first, which is exact. Removing `time_bnds`
+    from its loop passed the whole suite, because nothing built bounds at any
+    other resolution.
+    """
+    stream = _stream(4)
+    stamps = stream[TIME_COORD].values.astype("datetime64[ns]").astype(np.int64)
+    attach_time_bounds(stream, CellBounds.from_label(stamps, 60 * SECOND, "start"), "mean")
+    expected = stream[TIME_BOUNDS_VAR].values.astype("datetime64[ns]")
+    # The shape a dataset assembled outside TSARA can easily have.
+    stream[TIME_BOUNDS_VAR] = stream[TIME_BOUNDS_VAR].astype("datetime64[us]")
+
+    pin_time_encoding(stream)
+    target = tmp_path / "coarse.nc"
+    stream.to_netcdf(target, engine="netcdf4")
+    with xr.open_dataset(target, engine="netcdf4", decode_coords="all") as back:
+        found = back[TIME_BOUNDS_VAR].values.astype("datetime64[ns]")
+    assert not np.isnat(found).any()
+    assert np.array_equal(found, expected)
+
+
 # ---------------------------------------------------------------------------
 # Finding the bounds a stream declares
 # ---------------------------------------------------------------------------

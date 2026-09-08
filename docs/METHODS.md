@@ -1628,8 +1628,36 @@ without a translation layer. Per stream:
 - `time.attrs["bounds"] = "time_bnds"`, plus `standard_name` and `axis` so a
   generic CF tool can find the axis by role rather than by our choice of name;
 - `cell_methods = "time: mean"` or `"time: point"` on every time-varying
-  variable, including the `sigma_rand_`/`sigma_sys_` companions — a random
-  error describes the same cell as the value it belongs to.
+  variable **except** the `sigma_rand_`/`sigma_sys_` companions.
+
+The exception is measured rather than fastidious. `cell_methods` says what
+operation produced a value *from* its cell, so `time: mean` on
+`sigma_rand_ch4` asserts the stored number is the mean of the random sigmas
+over that cell. It is not — it is the standard error of the cell mean, smaller
+by exactly √N_eff (§10.8). On a 60 s cell of 1 s data with a 2 s decorrelation
+time: 0.130 ppb stored against 0.5 declared, a ratio of 3.83, and the same
+file records `uncertainty_n_eff = 14.7` two attributes away. The file
+contradicted itself.
+
+The systematic companion happens to satisfy `time: mean` exactly, since a
+fully correlated error does not average down and every within-cell value is
+the same number. It is excluded anyway: true by coincidence is not a reason to
+assert it, and stamping one string on both invites a reader to treat two
+components that behave oppositely under averaging as though they were alike —
+the one confusion the two-component design exists to prevent. What the
+companions *are* is carried by their names and by `uncertainty_component`; a
+cell method is the wrong vocabulary for it.
+
+**A bounds variable carries no units of its own.** CF says it inherits its
+parent's, and xarray implements that — `time_bnds` is written with no `units`
+attribute and encoded with whatever `time` was pinned to. So the two cannot
+disagree about an epoch. `TIME_ENCODING` is pinned for a different reason,
+measured: an unpinned datetime coordinate that has a bounds variable picks its
+units from the data (`"minutes since 2024-07-01 00:01:00"` on a four-row
+stream), making a file's resolution depend on when its record starts. And
+because the bounds inherit that pinned unit, a bounds array stored coarser
+than nanoseconds is written as the NaT sentinel for every value, with no error
+anywhere — so `pin_time_encoding` widens before it pins.
 
 **`time` is the cell midpoint on every stream.** Left at whatever each file
 happened to use, `time` would mean a start on one instrument and an end on
@@ -1669,6 +1697,25 @@ reference. Stored as a data variable, the boundary timestamps are *averaged*
 into cells no instrument measured. It also silently coarsens the time axis
 from nanoseconds to microseconds. `tsara.core.support.check_bounds_intact`
 turns that rule into a check, applied at every persistence boundary.
+
+**Two absences that look identical on disk and mean opposite things.** Bundle
+format version 2 is what added cells, and a version-1 bundle is *migrated*
+rather than refused: the older layout has an exact honest reading — cells of
+the record's own nominal cadence, centred on each timestamp, label and method
+`assumed` and width `inferred`, since the cadence really was measured. But a
+**version-2** stream without `time_bnds` is not missing them. It means
+ingestion could not know: no declared width, and no file long enough to
+measure a cadence, and it said so rather than inventing a number (§10.5).
+
+Both loaders ran the migration on every stream regardless of version, so an
+instrument whose files hold one row each — no measurable cadence per file, but
+three timestamps a minute apart once concatenated — came back from its own
+bundle with 60 s cells and `tsara_support_width_source` moved from `assumed`
+to `inferred`. A stream was promoted up the provenance ladder by nothing but a
+trip through disk, and the log line announced it had been "written before cell
+boundaries existed" about a bundle written moments earlier at version 2. The
+migration is now gated on the format version, which is the only thing that
+distinguishes the two absences.
 
 ### 10.3 `point` versus `mean` is a claim about arithmetic
 
@@ -2005,6 +2052,15 @@ independent-variable name. They are therefore unreachable from a CSV-only
 exporter, and that is the price of the decision above: a round trip through a
 TSARA-written ICARTT would demonstrate the writer and reader agreeing with
 each other rather than either matching FFI-1001.
+
+A fourth round aimed at **assembly and the bundle** — where cells become the
+CF representation and go to disk — put eight bugs to the suite and it caught
+**six**. Both misses were in persistence: the bundle migration running
+whatever the format version (found by hand, above), and `time_bnds` dropped
+from the pinned time encoding, which no test could see because nothing ever
+built bounds at a resolution other than nanoseconds. With tests for both, plus
+one for the sigma `cell_methods` exclusion, the suite catches **eight of
+eight**.
 
 A third round aimed at the **readers and the orchestrator** — the layer that
 decides what interval each row describes and in what order the deciding

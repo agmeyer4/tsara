@@ -23,6 +23,8 @@ from tsara.core.naming import (
     LOD_COUNT_KEY,
     RAW_TIME_START_COLUMN,
     RAW_TIME_STOP_COLUMN,
+    SUPPORT_WIDTH_ATTR,
+    SUPPORT_WIDTH_SOURCE_ATTR,
     TIME_BOUNDS_VAR,
     TIME_SHIFT_ATTR,
 )
@@ -817,6 +819,45 @@ def test_a_version_1_ingest_bundle_is_still_migrated(
     assert "assumed cells" in caplog.text
     for name in reloaded.streams:
         assert declared_bounds_name(reloaded[name]) is not None, name
+
+
+def test_a_version_2_stream_without_cells_is_left_alone(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two absences that look identical on disk and mean opposite things.
+
+    In a version-1 stream, no `time_bnds` means the format could not record
+    one, so completing it adds information. In a version-2 stream it means
+    ingestion *could not know*: no declared width, and no file long enough to
+    measure a cadence — and it said so instead of inventing a number.
+
+    The loader ran the migration on every stream regardless of version, so
+    saving and reloading this instrument attached 60 s cells and moved
+    `width_source` from `assumed` to `inferred`. A stream was promoted up the
+    provenance ladder by nothing but a trip through disk, and the log line
+    said it had been "written before cell boundaries existed" about a bundle
+    written a moment earlier at version 2.
+    """
+    base = tmp_path / "data"
+    # One row per file, so no file has a measurable cadence — but the
+    # concatenated record has three timestamps a minute apart, which is
+    # exactly what the migration would have measured.
+    for i, stamp in enumerate(("00:00:00", "00:01:00", "00:02:00")):
+        _write_csv(base / "picarro" / f"c{i}.csv", [(f"2026-01-01 {stamp}", 1900.0 + i)])
+
+    streams = ingest_campaign(_manifest(base))
+    assert declared_bounds_name(streams["picarro"]) is None
+    assert streams["picarro"].attrs[SUPPORT_WIDTH_SOURCE_ATTR] == "assumed"
+
+    bundle = tmp_path / "bundle"
+    save_streams(streams, bundle)
+    with caplog.at_level(logging.INFO, logger="tsara.ingest.bundle"):
+        reloaded = load_streams(bundle)
+
+    assert declared_bounds_name(reloaded["picarro"]) is None
+    assert reloaded["picarro"].attrs[SUPPORT_WIDTH_SOURCE_ATTR] == "assumed"
+    assert SUPPORT_WIDTH_ATTR not in reloaded["picarro"].attrs
+    assert "assumed cells" not in caplog.text
 
 
 def test_a_zero_clock_correction_is_not_announced(
