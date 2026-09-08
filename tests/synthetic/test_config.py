@@ -11,7 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from tsara.config.base import validate_signed_timedelta
-from tsara.config.manifest import DeclaredUncertainty, ReportedUncertainty
+from tsara.config.manifest import DeclaredUncertainty, ReportedUncertainty, SupportSpec
 from tsara.synthetic.config import (
     TRUTH_PREFIX,
     BootstrapBackground,
@@ -24,6 +24,7 @@ from tsara.synthetic.config import (
     SpeciesSpec,
     SyntheticConfig,
     TrueComponent,
+    TrueSupport,
     TrueUncertainty,
     UniformAmplitude,
 )
@@ -547,3 +548,27 @@ def test_config_is_frozen_and_rejects_extra_keys(synthetic_dict: dict[str, Any])
     synthetic_dict["unexpected"] = 1
     with pytest.raises(ValidationError):
         SyntheticConfig.model_validate(synthetic_dict)
+
+
+# ---------------------------------------------------------------------------
+# TrueSupport -> SupportSpec (the seam an exported archive travels through)
+# ---------------------------------------------------------------------------
+
+
+def test_support_converts_to_the_manifest_declaration() -> None:
+    declared = TrueSupport(method="mean", label="start", width="15s").to_manifest_support("60s")
+    assert isinstance(declared, SupportSpec)
+    assert declared.method == "mean"
+    assert declared.label == "start"
+    assert declared.width == "15s"
+
+
+def test_an_implicit_width_becomes_the_native_rate() -> None:
+    """A manifest cannot say "the cadence, whatever that is" about a width it
+    is declaring, so the seam resolves it to the number the generator used."""
+    assert TrueSupport().to_manifest_support("2s").width == "2s"
+
+
+def test_the_default_support_declares_a_centred_point_cell() -> None:
+    declared = TrueSupport().to_manifest_support("1s")
+    assert (declared.method, declared.label) == ("point", "mid")

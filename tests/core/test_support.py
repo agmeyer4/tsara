@@ -20,17 +20,24 @@ from tsara.core.naming import (
     BOUNDS_ATTR,
     BOUNDS_DIM,
     CELL_METHODS_ATTR,
+    SUPPORT_LABEL_SOURCE_ATTR,
+    SUPPORT_WIDTH_ATTR,
     TIME_BOUNDS_VAR,
     TIME_COORD,
 )
 from tsara.core.support import (
     CellBounds,
+    SupportLabel,
+    SupportMethod,
     TsaraSupportError,
     attach_time_bounds,
     bin_onto_cells,
     cell_methods_value,
     check_bounds_intact,
+    declared_bounds_name,
+    ensure_time_bounds,
     nominal_cadence_ns,
+    support_attrs,
 )
 
 SECOND = 1_000_000_000
@@ -451,6 +458,13 @@ def test_bounds_survive_netcdf_exactly_and_without_a_cf_warning(tmp_path: Path) 
 
     with xr.open_dataset(target, engine="netcdf4", decode_coords="all") as back:
         assert TIME_BOUNDS_VAR in back.coords
+        # The timestamps themselves, not only the bounds. Checking only the
+        # bounds let a pin that wrote every time value as NaT pass unnoticed.
+        assert back[TIME_COORD].dtype == "datetime64[ns]"
+        assert np.array_equal(
+            back[TIME_COORD].values.astype("datetime64[ns]"),
+            stream[TIME_COORD].values.astype("datetime64[ns]"),
+        )
         assert np.array_equal(
             back[TIME_BOUNDS_VAR].values.astype("datetime64[ns]").astype(np.int64),
             np.stack([bounds.start_ns, bounds.stop_ns], axis=1),
@@ -554,3 +568,144 @@ def test_an_independent_cf_reader_finds_our_cells(tmp_path: Path) -> None:
         assert back.cf.bounds["T"] == [TIME_BOUNDS_VAR]
         assert back.cf.get_bounds(TIME_COORD).name == TIME_BOUNDS_VAR
         assert back.cf.axes["T"] == [TIME_COORD]
+
+
+# ---------------------------------------------------------------------------
+# Finding the bounds a stream declares
+# ---------------------------------------------------------------------------
+
+
+def _saved_and_reopened(tmp_path: Path, label: SupportLabel, method: SupportMethod) -> xr.Dataset:
+    stream = _stream(4)
+    stamps = stream[TIME_COORD].values.astype("datetime64[ns]").astype(np.int64)
+    attach_time_bounds(stream, CellBounds.from_label(stamps, 60 * SECOND, label), method)
+    pin_time_encoding(stream)
+    target = tmp_path / f"{label}_{method}.nc"
+    stream.to_netcdf(target, engine="netcdf4")
+    with xr.open_dataset(target, engine="netcdf4", decode_coords="all") as opened:
+        return opened.load()
+
+
+def test_a_reopened_stream_still_declares_its_bounds(tmp_path: Path) -> None:
+    """Regression: `decode_coords='all'` moves the attribute into `encoding`.
+
+    Checking only `attrs` reported "no cells" for every stream TSARA itself
+    had just loaded.
+    """
+    back = _saved_and_reopened(tmp_path, "start", "mean")
+    assert back[TIME_COORD].attrs.get(BOUNDS_ATTR) is None
+    assert declared_bounds_name(back) == TIME_BOUNDS_VAR
+
+
+def test_reloading_does_not_replace_declared_cells_with_assumed_ones(
+    tmp_path: Path,
+) -> None:
+    """The failure the bug above would have caused, stated as a test.
+
+    A start-labelled mean stream is the only shape that can see it: for a
+    centred point stream the assumed cells are identical to the real ones, so
+    a round-trip check cannot tell that they were silently substituted.
+    """
+    back = _saved_and_reopened(tmp_path, "start", "mean")
+    before = back[TIME_BOUNDS_VAR].values.copy()
+    assert ensure_time_bounds(back) is False
+    assert np.array_equal(back[TIME_BOUNDS_VAR].values, before)
+    # Still start-labelled: each cell runs forward from its stamp. Assumed
+    # cells would have been centred on it, so the two are distinguishable.
+    stamps = back[TIME_COORD].values.astype("datetime64[ns]").astype(np.int64)
+    bounds = back[TIME_BOUNDS_VAR].values.astype("datetime64[ns]").astype(np.int64)
+    assert np.array_equal(bounds[:, 0], stamps)
+    assert np.array_equal(bounds[:, 1] - stamps, np.full(stamps.size, 60 * SECOND))
+
+
+def test_bounds_survive_two_round_trips(tmp_path: Path) -> None:
+    """Once the attribute lives in `encoding`, a re-save must still write it."""
+    back = _saved_and_reopened(tmp_path, "start", "mean")
+    again = tmp_path / "again.nc"
+    pin_time_encoding(back)
+    back.to_netcdf(again, engine="netcdf4")
+    with xr.open_dataset(again, engine="netcdf4", decode_coords="all") as reopened:
+        assert declared_bounds_name(reopened) == TIME_BOUNDS_VAR
+        assert np.array_equal(reopened[TIME_BOUNDS_VAR].values, back[TIME_BOUNDS_VAR].values)
+
+
+def test_a_stream_that_declares_nothing_gets_assumed_cells() -> None:
+    stream = _stream(5)
+    assert ensure_time_bounds(stream) is True
+    assert TIME_BOUNDS_VAR in stream.coords
+    stamps = stream[TIME_COORD].values.astype("datetime64[ns]").astype(np.int64)
+    bounds = stream[TIME_BOUNDS_VAR].values.astype("datetime64[ns]").astype(np.int64)
+    # Centred, so no timestamp moves.
+    assert np.array_equal(bounds[:, 0] + (bounds[:, 1] - bounds[:, 0]) // 2, stamps)
+    assert stream["ch4"].attrs[CELL_METHODS_ATTR] == "time: point"
+
+
+def test_a_product_without_a_time_axis_is_left_alone() -> None:
+    assert ensure_time_bounds(xr.Dataset({"slope": ((), 1.4)})) is False
+
+
+def test_a_single_sample_stream_gets_no_invented_cadence() -> None:
+    """One timestamp implies no interval, and guessing one would be a
+    fabrication rather than the weak-but-honest reading migration applies."""
+    assert ensure_time_bounds(_stream(1)) is False
+
+
+def test_a_dangling_declaration_is_left_for_the_intactness_check() -> None:
+    """Papering over it with assumed cells would hide a real corruption."""
+    stream = _stream(4)
+    stream[TIME_COORD].attrs[BOUNDS_ATTR] = TIME_BOUNDS_VAR
+    assert ensure_time_bounds(stream) is False
+    with pytest.raises(TsaraSupportError, match="names 'time_bnds'"):
+        check_bounds_intact(stream)
+
+
+def test_support_attrs_omit_a_width_that_does_not_exist() -> None:
+    """A canister record has per-row widths and no single nominal one."""
+    attrs = support_attrs(
+        label="start",
+        width_ns=None,
+        coverage=0.5,
+        label_source="reported",
+        width_source="reported",
+        method_source="declared",
+    )
+    assert SUPPORT_WIDTH_ATTR not in attrs
+    assert attrs[SUPPORT_LABEL_SOURCE_ATTR] == "reported"
+
+
+def test_support_attrs_record_the_nominal_width_in_seconds() -> None:
+    attrs = support_attrs(
+        label="mid",
+        width_ns=60 * SECOND,
+        coverage=1.0,
+        label_source="declared",
+        width_source="inferred",
+        method_source="assumed",
+    )
+    assert attrs[SUPPORT_WIDTH_ATTR] == pytest.approx(60.0)
+
+
+def test_pinning_widens_a_coarser_time_axis_instead_of_destroying_it(
+    tmp_path: Path,
+) -> None:
+    """Regression: nanosecond units on a microsecond axis wrote all-NaT.
+
+    `pd.date_range` returns microseconds in current pandas, so this is the
+    shape any dataset assembled outside TSARA's own producers arrives in. The
+    failure was silent in both directions: nothing raised on write, and the
+    file read back as a full axis of NaT.
+    """
+    times = pd.date_range("2024-07-01", periods=4, freq="60s").as_unit("us")
+    stream = xr.Dataset({"ch4": (TIME_COORD, np.arange(4.0))}, coords={TIME_COORD: times})
+    assert stream[TIME_COORD].dtype == "datetime64[us]"
+
+    pin_time_encoding(stream)
+    assert stream[TIME_COORD].dtype == "datetime64[ns]"
+
+    target = tmp_path / "coarse.nc"
+    stream.to_netcdf(target, engine="netcdf4")
+    with xr.open_dataset(target, engine="netcdf4") as back:
+        assert np.array_equal(
+            back[TIME_COORD].values.astype("datetime64[ns]"),
+            times.values.astype("datetime64[ns]"),
+        )

@@ -86,7 +86,12 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from tsara.config.manifest import Manifest
-from tsara.core.naming import LATITUDE_COORD, LONGITUDE_COORD, TIME_COORD
+from tsara.core.naming import (
+    LATITUDE_COORD,
+    LONGITUDE_COORD,
+    TIME_BOUNDS_VAR,
+    TIME_COORD,
+)
 from tsara.synthetic.background import TsaraSyntheticError
 from tsara.synthetic.config import MobileTrack, StationarySite
 
@@ -240,7 +245,11 @@ def _write_csv(
     sigma_columns: Mapping[str, str],
 ) -> None:
     """Write one observable stream as a CSV with an ISO 8601 time column."""
-    frame = stream.to_dataframe()
+    # Bounds first: a two-dimensional coordinate turns `to_dataframe` into a
+    # (time, nv) MultiIndex, and every row would then appear twice. Phase 3.5
+    # declares support in the manifest instead, which is where a CSV can
+    # actually carry it.
+    frame = stream.drop_vars(TIME_BOUNDS_VAR, errors="ignore").to_dataframe()
     # `to_dataframe` brings coordinates along as columns. Platform position
     # attached to a gas stream is a coordinate, not a measurement, and would
     # otherwise appear as an undeclared column. Dropped by asking the dataset

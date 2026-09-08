@@ -19,7 +19,13 @@ import pytest
 
 from tsara.config.manifest import InstrumentConfig, Manifest, StationaryPlatform
 from tsara.core.bundle import BUNDLE_MANIFEST, BUNDLE_STREAMS_DIR, TsaraBundleError
-from tsara.core.naming import LOD_COUNT_KEY
+from tsara.core.naming import LOD_COUNT_KEY, TIME_BOUNDS_VAR
+from tsara.core.support import (
+    CellBounds,
+    attach_time_bounds,
+    declared_bounds_name,
+    nominal_cadence_ns,
+)
 from tsara.ingest.base import TsaraIngestError
 from tsara.ingest.bundle import BUNDLE_MANIFEST_CONFIG, load_streams, save_streams
 from tsara.ingest.campaign import (
@@ -555,3 +561,47 @@ def test_unrelated_files_in_the_streams_directory_are_left_alone(tmp_path: Path)
     save_streams(collection, bundle)
 
     assert note.is_file()
+
+
+def test_ingested_streams_get_assumed_cells_on_load(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Ingestion does not declare support yet, so the loader completes it.
+
+    Reading a stream's support from its files is the reader stage's job. Until
+    then a saved ingest stream carries no cells, and the loader gives it the
+    weakest honest reading rather than leaving a later stage to guess.
+    """
+    save_streams(ingest_campaign(_manifest(_archive(tmp_path))), tmp_path / "bundle")
+    with caplog.at_level(logging.INFO, logger="tsara.ingest.bundle"):
+        reloaded = load_streams(tmp_path / "bundle")
+    assert "assumed cells" in caplog.text
+    for name in reloaded.streams:
+        assert declared_bounds_name(reloaded[name]) is not None, name
+
+
+def test_streams_that_already_carry_cells_are_left_alone(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The shape the reader stage will produce: declared cells must survive.
+
+    Start-labelled, because that is the only geometry an assumed migration
+    could not accidentally reproduce -- centred cadence cells would be
+    identical to the real ones and the substitution would be invisible.
+    """
+    collection = ingest_campaign(_manifest(_archive(tmp_path)))
+    expected = {}
+    for name, stream in collection.streams.items():
+        stamps = stream["time"].values.astype("datetime64[ns]").astype(np.int64)
+        cadence = nominal_cadence_ns(stamps)
+        assert cadence is not None
+        attach_time_bounds(stream, CellBounds.from_label(stamps, cadence, "start"), "mean")
+        expected[name] = stream[TIME_BOUNDS_VAR].values.copy()
+
+    save_streams(collection, tmp_path / "bundle")
+    with caplog.at_level(logging.INFO, logger="tsara.ingest.bundle"):
+        reloaded = load_streams(tmp_path / "bundle")
+
+    assert "assumed cells" not in caplog.text
+    for name, bounds in expected.items():
+        assert np.array_equal(reloaded[name][TIME_BOUNDS_VAR].values, bounds), name

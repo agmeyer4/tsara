@@ -37,6 +37,12 @@ __all__ = [
     "RAW_TIME_STOP_COLUMN",
     "SIGMA_RAND_PREFIX",
     "SIGMA_SYS_PREFIX",
+    "SUPPORT_COVERAGE_ATTR",
+    "SUPPORT_LABEL_ATTR",
+    "SUPPORT_LABEL_SOURCE_ATTR",
+    "SUPPORT_METHOD_SOURCE_ATTR",
+    "SUPPORT_WIDTH_ATTR",
+    "SUPPORT_WIDTH_SOURCE_ATTR",
     "SupportLabel",
     "SupportMethod",
     "SupportSource",
@@ -111,6 +117,27 @@ SupportMethod = Literal["point", "mean"]
 #: * ``inferred``  -- TSARA read it from the file (column names, cadence).
 #: * ``assumed``   -- nothing said; a default was applied and labelled.
 SupportSource = Literal["reported", "declared", "inferred", "assumed"]
+
+#: Stream attributes describing temporal support and where it came from.
+#:
+#: The cells themselves live in CF ``time_bnds``; these record what CF has no
+#: place for. ``SUPPORT_LABEL_ATTR`` keeps the file's ORIGINAL label position,
+#: which matters because TSARA moves ``time`` to the cell midpoint -- without
+#: it, a user comparing a stream against their raw file could not tell whether
+#: a 30 s difference was a correction or a bug. The nominal width is recorded
+#: separately from the bounds because per-row widths (a canister) and one
+#: nominal width (a continuous logger) are different situations and a later
+#: stage may need to know which it has.
+#:
+#: The three ``_SOURCE`` attrs are the provenance ladder, recorded per field
+#: rather than once per stream, exactly as the uncertainty system records it
+#: per component. See :data:`SupportSource`.
+SUPPORT_LABEL_ATTR = "tsara_support_label"
+SUPPORT_WIDTH_ATTR = "tsara_nominal_cell_width_s"
+SUPPORT_COVERAGE_ATTR = "tsara_cell_coverage"
+SUPPORT_LABEL_SOURCE_ATTR = "tsara_support_label_source"
+SUPPORT_WIDTH_SOURCE_ATTR = "tsara_support_width_source"
+SUPPORT_METHOD_SOURCE_ATTR = "tsara_support_method_source"
 
 #: Reserved columns by which a reader hands per-row cell boundaries to the
 #: rest of ingestion.

@@ -9,11 +9,25 @@ from __future__ import annotations
 
 import math
 from datetime import UTC, datetime
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
+from pydantic import ValidationError
 
+from tsara.core.naming import (
+    BOUNDS_ATTR,
+    BOUNDS_DIM,
+    CELL_METHODS_ATTR,
+    SUPPORT_COVERAGE_ATTR,
+    SUPPORT_LABEL_ATTR,
+    SUPPORT_LABEL_SOURCE_ATTR,
+    SUPPORT_METHOD_SOURCE_ATTR,
+    SUPPORT_WIDTH_SOURCE_ATTR,
+    TIME_BOUNDS_VAR,
+    TIME_COORD,
+)
 from tsara.synthetic.background import TsaraSyntheticError
 from tsara.synthetic.config import (
     BootstrapBackground,
@@ -900,3 +914,259 @@ def test_an_event_inside_a_data_gap_has_no_sampled_peak() -> None:
     assert missed
     # The event is still catalogued with its true (physical) amplitude.
     assert all(event.true_amplitude > 0.0 for event in missed)
+
+
+# ---------------------------------------------------------------------------
+# Temporal support (Phase 3.5)
+# ---------------------------------------------------------------------------
+
+
+def _flat_config(**support: Any) -> SyntheticConfig:
+    """A single 60 s instrument on a flat background, with no noise."""
+    return SyntheticConfig.model_validate(
+        {
+            "name": "cells",
+            "start": "2026-01-01T00:00:00Z",
+            "duration": "1h",
+            "seed": 7,
+            "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
+            "instruments": {
+                "slow": {
+                    "native_rate": "60s",
+                    "support": support,
+                    "species": {
+                        "ch4": {
+                            "units": "ppb",
+                            "background": {"kind": "parametric", "offset": 1900.0},
+                        }
+                    },
+                }
+            },
+            "sources": {},
+        }
+    )
+
+
+def test_every_stream_carries_cells_including_gps(synthetic_dict: dict[str, Any]) -> None:
+    dataset = generate(SyntheticConfig.model_validate(synthetic_dict))
+    for name, stream in dataset.streams.items():
+        assert TIME_BOUNDS_VAR in stream.coords, name
+        assert stream[TIME_COORD].attrs[BOUNDS_ATTR] == TIME_BOUNDS_VAR, name
+        assert stream.sizes[BOUNDS_DIM] == 2, name
+
+
+def test_the_default_cell_is_centred_so_no_timestamp_moves() -> None:
+    """The compatibility guarantee: existing configs emit the same clock."""
+    dataset = generate(_flat_config())
+    stream = dataset.streams["slow"]
+    bounds = stream[TIME_BOUNDS_VAR].values.astype("datetime64[ns]").astype(np.int64)
+    stamps = stream[TIME_COORD].values.astype("datetime64[ns]").astype(np.int64)
+    assert np.array_equal(bounds[:, 0] + 30_000_000_000, stamps)
+    assert np.array_equal(bounds[:, 1] - 30_000_000_000, stamps)
+
+
+def test_a_start_label_moves_time_to_the_cell_midpoint() -> None:
+    centred = generate(_flat_config()).streams["slow"]
+    labelled = generate(_flat_config(label="start")).streams["slow"]
+    shift = labelled[TIME_COORD].values.astype("datetime64[ns]").astype(np.int64) - centred[
+        TIME_COORD
+    ].values.astype("datetime64[ns]").astype(np.int64)
+    assert np.all(shift == 30_000_000_000)
+    assert labelled.attrs[SUPPORT_LABEL_ATTR] == "start"
+
+
+def test_point_and_mean_are_recorded_as_cf_cell_methods() -> None:
+    point = generate(_flat_config()).streams["slow"]
+    averaged = generate(_flat_config(method="mean")).streams["slow"]
+    assert point["ch4"].attrs[CELL_METHODS_ATTR] == "time: point"
+    assert averaged["ch4"].attrs[CELL_METHODS_ATTR] == "time: mean"
+
+
+def test_a_duty_cycled_instrument_has_narrow_cells_and_low_coverage() -> None:
+    """A sampler that integrates for 15 s a minute, the canister shape."""
+    stream = generate(_flat_config(method="mean", width="15s")).streams["slow"]
+    bounds = stream[TIME_BOUNDS_VAR].values.astype("datetime64[ns]").astype(np.int64)
+    assert np.all(bounds[:, 1] - bounds[:, 0] == 15_000_000_000)
+    assert stream.attrs[SUPPORT_COVERAGE_ATTR] == pytest.approx(0.25, abs=0.01)
+
+
+def test_a_cell_wider_than_the_clock_is_refused() -> None:
+    with pytest.raises(ValidationError, match="would make cells overlap"):
+        _flat_config(method="mean", width="120s")
+
+
+def test_the_generator_declares_all_three_support_facts() -> None:
+    stream = generate(_flat_config(method="mean")).streams["slow"]
+    assert stream.attrs[SUPPORT_LABEL_SOURCE_ATTR] == "declared"
+    assert stream.attrs[SUPPORT_WIDTH_SOURCE_ATTR] == "declared"
+    assert stream.attrs[SUPPORT_METHOD_SOURCE_ATTR] == "declared"
+
+
+# --- does `mean` actually average? -----------------------------------------
+
+
+def test_averaging_a_flat_background_is_exact() -> None:
+    """No approximation to make: every subsample is the same number."""
+    stream = generate(_flat_config(method="mean")).streams["slow"]
+    assert np.allclose(stream["ch4"].values, 1900.0, rtol=0, atol=1e-12)
+
+
+def test_averaging_a_linear_drift_is_exact_in_its_increments() -> None:
+    """The midpoint rule is exact for a linear function, so this pins the cell
+    geometry rather than the quadrature: any error here is a wrong interval,
+    not a rounding cost.
+
+    Compared as increments rather than absolute values because the background's
+    drift term is anchored on the FIRST RENDERED SAMPLE, and a fine grid begins
+    half a sub-step before the first cell midpoint. That shifts every value of a
+    `mean` stream by one constant -- here about 1.3e-4 ppb, four orders below
+    the noise of any real instrument. Pre-existing behaviour rather than
+    something cells introduced (a stream whose opening samples are dropped has
+    always anchored later), and re-anchoring would break the guarantee that
+    existing configs emit byte-identical output.
+    """
+    config = SyntheticConfig.model_validate(
+        {
+            "name": "drift",
+            "start": "2026-01-01T00:00:00Z",
+            "duration": "1h",
+            "seed": 3,
+            "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
+            "instruments": {
+                "slow": {
+                    "native_rate": "60s",
+                    "support": {"method": "mean", "label": "start"},
+                    "species": {
+                        "ch4": {
+                            "units": "ppb",
+                            "background": {
+                                "kind": "parametric",
+                                "offset": 1000.0,
+                                "drift_per_day": 24.0,
+                            },
+                        }
+                    },
+                }
+            },
+            "sources": {},
+        }
+    )
+    values = generate(config).streams["slow"]["ch4"].values
+    # 24 ppb/day is 1 ppb/hour, so consecutive 60 s cells differ by 1/60 ppb.
+    assert np.allclose(np.diff(values), 1.0 / 60.0, rtol=0, atol=1e-12)
+
+
+def test_the_cell_average_converges_as_the_fine_grid_refines() -> None:
+    """Validates the quadrature itself, without needing a closed form.
+
+    The midpoint rule's error falls as the inverse square of the subsample
+    count, so quadrupling the count should cut the error by roughly sixteen.
+    Asserted loosely (a factor of eight) because the events are drawn at
+    random phases and a cell whose plume sits near its edge converges more
+    slowly than one whose plume sits in the middle.
+    """
+
+    def values(subsamples: int) -> np.ndarray:
+        config = SyntheticConfig.model_validate(
+            {
+                "name": "converge",
+                "start": "2026-01-01T00:00:00Z",
+                "duration": "2h",
+                "seed": 11,
+                "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
+                "instruments": {
+                    "slow": {
+                        "native_rate": "60s",
+                        "support": {"method": "mean", "subsamples": subsamples},
+                        "species": {
+                            "ch4": {
+                                "units": "ppb",
+                                "background": {"kind": "parametric", "offset": 1900.0},
+                            }
+                        },
+                    }
+                },
+                "sources": {
+                    "leak": {
+                        "rate_per_hour": 20.0,
+                        "reference_species": "ch4",
+                        "shape": {"kind": "gaussian", "sigma": "20s"},
+                        "amplitude": {"kind": "uniform", "low": 100.0, "high": 100.001},
+                        "ratios": {},
+                    }
+                },
+            }
+        )
+        return np.asarray(generate(config).streams["slow"]["ch4"].values)
+
+    reference = values(2048)
+    coarse = np.max(np.abs(values(16) - reference))
+    finer = np.max(np.abs(values(64) - reference))
+    assert coarse > 0, "a coarse grid must actually differ, or this proves nothing"
+    assert finer < coarse / 8.0
+
+
+def test_a_narrow_plume_inside_a_wide_cell_comes_out_diluted() -> None:
+    """The scientific point of `mean`, checked against the closed form.
+
+    A Gaussian of amplitude A and width sigma sitting wholly inside a cell of
+    width W averages to A * sigma * sqrt(2*pi) / W. With sigma 3 s in a 60 s
+    cell that is 12.53% of the true amplitude, and no event can exceed it: one
+    straddling a cell boundary is split and reads lower still. The answer key
+    records that diluted peak, which is what a later stage needs in order to
+    say an event was never resolvable on this instrument.
+    """
+    config = SyntheticConfig.model_validate(
+        {
+            "name": "dilute",
+            "start": "2026-01-01T00:00:00Z",
+            "duration": "6h",
+            "seed": 5,
+            "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
+            "instruments": {
+                "slow": {
+                    "native_rate": "60s",
+                    "support": {"method": "mean"},
+                    "species": {
+                        "ch4": {
+                            "units": "ppb",
+                            "background": {"kind": "parametric", "offset": 1900.0},
+                        }
+                    },
+                }
+            },
+            "sources": {
+                "blip": {
+                    "rate_per_hour": 10.0,
+                    "reference_species": "ch4",
+                    "shape": {"kind": "gaussian", "sigma": "3s"},
+                    "amplitude": {"kind": "uniform", "low": 100.0, "high": 100.001},
+                    "ratios": {},
+                }
+            },
+        }
+    )
+    rows = generate(config).ground_truth.for_species("ch4")
+    ratios = np.array([r.sampled_peak_amplitude / r.true_amplitude for r in rows])
+    # An event whose whole support window falls past the end of the record has
+    # no sampled peak at all, which the generator records as nan rather than
+    # as zero. Pre-existing edge behaviour, unrelated to cells.
+    ratios = ratios[np.isfinite(ratios)]
+    ceiling = 3.0 * math.sqrt(2.0 * math.pi) / 60.0
+    assert ratios.size > 10
+    assert np.all(ratios > 0.0)
+    assert np.all(ratios <= ceiling + 1e-12)
+    # Some event lands near enough to a cell centre to reach the closed form.
+    assert ratios.max() == pytest.approx(ceiling, rel=1e-3)
+
+
+def test_the_observable_view_still_carries_its_cells(
+    synthetic_dict: dict[str, Any],
+) -> None:
+    """It is meant to be what ingestion would have produced, and a real stream
+    has cells. Selecting variables by name would have dropped them."""
+    dataset = generate(SyntheticConfig.model_validate(synthetic_dict))
+    for name in dataset.streams:
+        observable = dataset.observable(name)
+        assert TIME_BOUNDS_VAR in observable.coords, name
+        assert not [v for v in observable.data_vars if str(v).startswith(TRUTH_PREFIX)], name

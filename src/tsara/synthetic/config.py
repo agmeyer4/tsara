@@ -59,9 +59,11 @@ from tsara.config.base import validate_stream_name as _validate_stream_name
 from tsara.config.manifest import (
     DeclaredUncertainty,
     ReportedUncertainty,
+    SupportSpec,
     UncertaintySpec,
     VariableRole,
 )
+from tsara.core.naming import SupportMethod
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy as np
@@ -467,6 +469,105 @@ class DropoutSpec(_StrictModel):
         return value
 
 
+class TrueSupport(_StrictModel):
+    """What interval of air each generated row describes.
+
+    The generator-side counterpart of
+    :class:`~tsara.config.manifest.SupportSpec`, in the same relationship as
+    :class:`TrueUncertainty` to ``UncertaintySpec``: this one *manufactures*
+    the property, that one *declares* it, and
+    :meth:`to_manifest_support` converts between them so the two schemas
+    cannot drift apart.
+
+    The defaults reproduce the generator's original behaviour exactly -- a
+    sample at each timestamp, in a cell centred on it -- so every existing
+    config keeps producing byte-identical output. Setting ``method: mean``
+    is what manufactures the case most of the real archive is in: a value
+    that is an average over its whole cell, not a reading at an instant.
+
+    How a mean is actually computed
+    --------------------------------
+    Truth is rendered on a fine grid *inside* each cell and averaged, rather
+    than evaluated once and labelled an average. That difference is the whole
+    point: a 3 s plume falling inside a 60 s cell then shows up diluted by
+    roughly twenty, exactly as a real 1-minute mean would record it, and the
+    answer key records the diluted peak the instrument could actually see.
+
+    Noise, by contrast, is drawn **at the cell**, not on the fine grid. A
+    declared ``absolute`` sigma therefore keeps meaning "the sigma of the
+    numbers this instrument publishes", which is what an instrument
+    specification states and what a manifest can declare back.
+    """
+
+    method: SupportMethod = Field(
+        default="point",
+        description=(
+            "'point' (the default) samples the truth at one instant per cell; "
+            "'mean' averages it over the whole cell."
+        ),
+    )
+    label: Literal["start", "mid", "end"] = Field(
+        default="mid",
+        description=(
+            "Where the emitted timestamp sits in its cell. 'mid' (the "
+            "default) leaves timestamps exactly where they were. 'start' "
+            "reproduces the ICARTT convention, which is what makes a "
+            "label-handling bug visible in a test."
+        ),
+    )
+    width: str | None = Field(
+        default=None,
+        description=(
+            "Cell width. None (the default) means the full native rate, so "
+            "cells tile the record. A shorter width manufactures a "
+            "duty-cycled instrument -- a sampler that integrates for 15 s "
+            "every minute -- which is the shape a canister record has."
+        ),
+    )
+    subsamples: int = Field(
+        default=64,
+        ge=1,
+        description=(
+            "Fine-grid points per cell used to average truth when "
+            "method='mean'. Ignored for 'point'. The midpoint rule converges "
+            "as the inverse square of this number, so the default is already "
+            "far below the injected noise for any realistic plume; raise it "
+            "only when testing the quadrature itself."
+        ),
+    )
+
+    @field_validator("width")
+    @classmethod
+    def _valid_width(cls, value: str | None) -> str | None:
+        if value is not None:
+            _validate_duration(value, field="TrueSupport.width")
+        return value
+
+    def to_manifest_support(self, native_rate: str) -> SupportSpec:
+        """Convert to the :class:`~tsara.config.manifest.SupportSpec` a manifest would declare.
+
+        The seam that lets an exported synthetic archive carry a manifest
+        describing its own cells, so ingestion can be round-trip tested
+        against data whose support is known rather than guessed.
+
+        Parameters
+        ----------
+        native_rate : str
+            The owning instrument's sampling interval, used as the cell width
+            when this spec leaves it implicit.
+
+        Returns
+        -------
+        SupportSpec
+            The manifest-side declaration of this support.
+        """
+        return SupportSpec(
+            label=self.label,
+            width=self.width if self.width is not None else native_rate,
+            method=self.method,
+        )
+
+
 class InstrumentSpec(_StrictModel):
     """One synthetic instrument: a clock, and the species sharing it.
 
@@ -493,6 +594,13 @@ class InstrumentSpec(_StrictModel):
     )
     dropouts: DropoutSpec | None = Field(
         default=None, description="Optional random outages that delete samples."
+    )
+    support: TrueSupport = Field(
+        default_factory=TrueSupport,
+        description=(
+            "What interval of air each row describes. The default reproduces "
+            "the original point-sample behaviour exactly."
+        ),
     )
 
     @field_validator("native_rate")
@@ -538,6 +646,32 @@ class InstrumentSpec(_StrictModel):
                 f"InstrumentSpec.timestamp_jitter ({self.timestamp_jitter}) must be "
                 f"less than half native_rate ({self.native_rate}), otherwise "
                 "timestamps could stop being strictly increasing."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _cell_width_fits_the_clock(self) -> InstrumentSpec:
+        """Refuse a cell wider than the gap between samples.
+
+        Wider cells would overlap, and overlapping cells break two things at
+        once: the flattened fine grid stops being sorted, so plume injection
+        could no longer locate an event by binary search, and a fast stream
+        binned onto them would be counted twice. Nothing in the real archive
+        overlaps, so this refuses a configuration rather than paying to
+        support one.
+        """
+        import pandas as pd
+
+        if self.support.width is None:
+            return self
+        width = pd.Timedelta(self.support.width)
+        rate = pd.Timedelta(self.native_rate)
+        if width > rate:
+            raise ValueError(
+                f"InstrumentSpec.support.width ({self.support.width}) exceeds "
+                f"native_rate ({self.native_rate}), which would make cells "
+                "overlap. Use a width at most the sampling interval; a shorter "
+                "one manufactures a duty-cycled instrument."
             )
         return self
 

@@ -41,8 +41,11 @@ from tsara.core.bundle import (
     BUNDLE_MANIFEST,
     BUNDLE_STAGE_KEY,
     BUNDLE_STREAMS_DIR,
+    SUPPORTED_BUNDLE_VERSIONS,
     TsaraBundleError,
+    pin_time_encoding,
 )
+from tsara.core.support import check_bounds_intact, ensure_time_bounds
 from tsara.ingest.campaign import StreamCollection
 
 logger = logging.getLogger(__name__)
@@ -98,6 +101,12 @@ def save_streams(collection: StreamCollection, path: str | Path) -> Path:
         # a netCDF-safe scalar (str, int or float). Booleans and None are not
         # valid netCDF attribute types, which is why `circular` is stored as
         # int and why optional attrs are omitted rather than written as None.
+        # Pinned before writing so `time` and `time_bnds` cannot end up with
+        # different reference epochs, and checked so that a stream whose
+        # bounds were destroyed upstream is caught here rather than
+        # inherited by everything downstream.
+        check_bounds_intact(stream)
+        pin_time_encoding(stream)
         stream.to_netcdf(streams_dir / f"{name}.nc", engine="netcdf4")
 
     _remove_orphan_streams(streams_dir, set(collection.streams))
@@ -168,6 +177,7 @@ def load_streams(path: str | Path) -> StreamCollection:
     manifest = _read_manifest(bundle)
 
     streams: dict[str, xr.Dataset] = {}
+    migrated: list[str] = []
     for name in descriptor.get("streams", []):
         target = bundle / BUNDLE_STREAMS_DIR / f"{name}.nc"
         if not target.is_file():
@@ -177,9 +187,18 @@ def load_streams(path: str | Path) -> StreamCollection:
         # Loaded eagerly rather than lazily: a StreamCollection is handed
         # around and sliced freely, and a lazily-opened file that closes
         # underneath it fails far from here.
-        with xr.open_dataset(target, engine="netcdf4") as stream:
+        with xr.open_dataset(target, engine="netcdf4", decode_coords="all") as stream:
             streams[name] = stream.load()
+        if ensure_time_bounds(streams[name]):
+            migrated.append(name)
 
+    if migrated:
+        logger.info(
+            "Attached assumed cells (cadence width, centred) to %d stream(s) "
+            "written before cell boundaries existed: %s.",
+            len(migrated),
+            ", ".join(migrated),
+        )
     logger.info("Loaded ingest bundle from %s (%d streams).", bundle, len(streams))
     return StreamCollection(streams=streams, manifest=manifest)
 
@@ -195,13 +214,13 @@ def _read_descriptor(bundle: Path) -> dict[str, Any]:
         raise TsaraBundleError(f"'{target}' is not valid JSON: {exc}") from exc
 
     version = descriptor.get("bundle_format_version")
-    if version != BUNDLE_FORMAT_VERSION:
+    if version not in SUPPORTED_BUNDLE_VERSIONS:
         # The whole point of writing a version is to refuse rather than
         # misinterpret; a layout change that silently half-loads would be
         # worse than not loading at all.
         raise TsaraBundleError(
             f"Bundle '{bundle}' has format version {version!r}, but this TSARA "
-            f"reads version {BUNDLE_FORMAT_VERSION}."
+            f"reads versions {list(SUPPORTED_BUNDLE_VERSIONS)}."
         )
     stage = descriptor.get(BUNDLE_STAGE_KEY)
     if stage != _STAGE:

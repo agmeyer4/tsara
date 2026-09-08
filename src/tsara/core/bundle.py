@@ -31,6 +31,7 @@ __all__ = [
     "BUNDLE_MANIFEST",
     "BUNDLE_STAGE_KEY",
     "BUNDLE_STREAMS_DIR",
+    "SUPPORTED_BUNDLE_VERSIONS",
     "TIME_ENCODING",
     "TsaraBundleError",
     "pin_time_encoding",
@@ -44,7 +45,20 @@ BUNDLE_STREAMS_DIR = "streams"
 
 #: Bumped only when the layout changes incompatibly, so a future reader can
 #: refuse (or migrate) an old bundle rather than misinterpreting it.
-BUNDLE_FORMAT_VERSION = 1
+#:
+#: Version 2 (Phase 3.5) added CF cell boundaries to every stream: each value
+#: now carries the time interval it describes rather than a bare instant.
+BUNDLE_FORMAT_VERSION = 2
+
+#: Versions this TSARA can still read, oldest first.
+#:
+#: A version-1 bundle is *migrated* rather than refused, because the change
+#: that produced version 2 is additive and the older layout has an exact,
+#: honest reading: cells of the record's own nominal cadence, centred on each
+#: timestamp, every field of their support marked ``assumed``. Refusing would
+#: strand any bundle written before the upgrade for no gain -- the whole point
+#: of labelling provenance is that a weak reading can be admitted safely.
+SUPPORTED_BUNDLE_VERSIONS = (1, 2)
 
 #: Key in ``bundle.json`` naming the stage that wrote the bundle.
 #:
@@ -108,6 +122,19 @@ def pin_time_encoding(dataset: xr.Dataset) -> xr.Dataset:
         The same object, for chaining.
     """
     for name in (TIME_COORD, TIME_BOUNDS_VAR):
-        if name in dataset.variables:
-            dataset[name].encoding.update(TIME_ENCODING)
+        if name not in dataset.variables:
+            continue
+        variable = dataset[name]
+        if variable.dtype.kind == "M" and str(variable.dtype) != "datetime64[ns]":
+            # Not a nicety. Pinning NANOSECOND units onto an axis stored at a
+            # coarser resolution makes xarray write the NaT sentinel for every
+            # value, and the file then reads back as an axis of NaT with no
+            # error anywhere -- measured, on a plain `pd.date_range`, which
+            # pandas now returns in microseconds. Widening to nanoseconds is
+            # exact, so it is done here rather than refused. TSARA's own
+            # producers already pin ns (the readers enforce it, the generator
+            # builds it), so this fires only for a dataset assembled outside
+            # the package.
+            dataset[name] = variable.astype("datetime64[ns]")
+        dataset[name].encoding.update(TIME_ENCODING)
     return dataset

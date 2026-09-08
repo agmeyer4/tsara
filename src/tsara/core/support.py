@@ -86,6 +86,12 @@ from tsara.core.naming import (
     BOUNDS_ATTR,
     BOUNDS_DIM,
     CELL_METHODS_ATTR,
+    SUPPORT_COVERAGE_ATTR,
+    SUPPORT_LABEL_ATTR,
+    SUPPORT_LABEL_SOURCE_ATTR,
+    SUPPORT_METHOD_SOURCE_ATTR,
+    SUPPORT_WIDTH_ATTR,
+    SUPPORT_WIDTH_SOURCE_ATTR,
     TIME_BOUNDS_VAR,
     TIME_COORD,
     SupportLabel,
@@ -109,7 +115,10 @@ __all__ = [
     "bin_onto_cells",
     "cell_methods_value",
     "check_bounds_intact",
+    "declared_bounds_name",
+    "ensure_time_bounds",
     "nominal_cadence_ns",
+    "support_attrs",
 ]
 
 # `SupportLabel`, `SupportMethod` and `SupportSource` are re-exported above
@@ -588,6 +597,42 @@ def attach_time_bounds(
     return dataset
 
 
+def declared_bounds_name(dataset: xr.Dataset) -> str | None:
+    """Return the bounds variable a stream's time coordinate names, if any.
+
+    Looks in ``encoding`` as well as ``attrs``, and that is not defensive
+    padding: opening a file with ``decode_coords="all"`` -- which TSARA does,
+    so that ``time_bnds`` comes back as a coordinate -- **moves** the CF
+    ``bounds`` attribute out of ``attrs`` and into ``encoding``. Checking only
+    ``attrs`` therefore reports "this stream has no cells" for every stream
+    TSARA itself just loaded.
+
+    That mistake was live and nearly invisible. The migration helper below
+    would have re-attached *assumed* centred cells over perfectly good
+    declared ones on every load, and the round-trip test could not see it
+    because for a centred point stream the assumed cells are identical to the
+    real ones. It only shows up on a start-labelled mean stream, where it
+    silently moves every cell by half its width.
+
+    Parameters
+    ----------
+    dataset : xarray.Dataset
+        Stream to inspect.
+
+    Returns
+    -------
+    str or None
+        The declared bounds variable name, or None if the stream declares
+        none. A declared name whose variable is absent is still returned;
+        distinguishing that case is :func:`check_bounds_intact`'s job.
+    """
+    if TIME_COORD not in dataset.variables:
+        return None
+    time = dataset[TIME_COORD]
+    name = time.attrs.get(BOUNDS_ATTR, time.encoding.get(BOUNDS_ATTR))
+    return None if name is None else str(name)
+
+
 def check_bounds_intact(dataset: xr.Dataset) -> None:
     """Verify a stream's cell boundaries are still coherent.
 
@@ -617,9 +662,7 @@ def check_bounds_intact(dataset: xr.Dataset) -> None:
         If the time coordinate declares a bounds variable that is missing,
         or one whose shape does not match the time axis.
     """
-    if TIME_COORD not in dataset.variables:
-        return
-    declared = dataset[TIME_COORD].attrs.get(BOUNDS_ATTR)
+    declared = declared_bounds_name(dataset)
     if declared is None:
         return
     if declared not in dataset.variables:
@@ -635,3 +678,106 @@ def check_bounds_intact(dataset: xr.Dataset) -> None:
             f"Bounds variable '{declared}' has shape {found}, but the time axis "
             f"requires {expected}: one start and one stop per timestamp."
         )
+
+
+def support_attrs(
+    *,
+    label: SupportLabel,
+    width_ns: int | None,
+    coverage: float,
+    label_source: SupportSource,
+    width_source: SupportSource,
+    method_source: SupportSource,
+) -> dict[str, str | float]:
+    """Build the stream attributes that describe temporal support.
+
+    Everything here is a netCDF-safe scalar (str or float), the invariant
+    both bundle writers rely on. Provenance is recorded per field rather than
+    once per stream, because the three facts are established independently:
+    a stationary analyzer with a stop column in its file and a manifest
+    declaring ``method: mean`` is honestly reported / reported / declared,
+    and one label could not say that.
+
+    Parameters
+    ----------
+    label : {'start', 'mid', 'end', 'unknown'}
+        The ORIGINAL label position, before ``time`` was moved to the cell
+        midpoint. Recorded so the shift is recoverable and explicable.
+    width_ns : int or None
+        Nominal cell width in nanoseconds, or None when widths are per row
+        and no single nominal value applies (a canister sampler).
+    coverage : float
+        Share of the record's extent that cells cover, the duty-cycle
+        diagnostic from :attr:`CellBounds.coverage_fraction`.
+    label_source, width_source, method_source : str
+        Where each fact came from; see :data:`SupportSource`.
+
+    Returns
+    -------
+    dict
+        Attributes to merge into a stream's ``attrs``.
+    """
+    attrs: dict[str, str | float] = {
+        SUPPORT_LABEL_ATTR: label,
+        SUPPORT_COVERAGE_ATTR: float(coverage),
+        SUPPORT_LABEL_SOURCE_ATTR: label_source,
+        SUPPORT_WIDTH_SOURCE_ATTR: width_source,
+        SUPPORT_METHOD_SOURCE_ATTR: method_source,
+    }
+    if width_ns is not None:
+        attrs[SUPPORT_WIDTH_ATTR] = float(width_ns) / 1e9
+    return attrs
+
+
+def ensure_time_bounds(dataset: xr.Dataset) -> bool:
+    """Give a stream assumed cells if it has none, and say whether it did.
+
+    The migration path for products written before cells existed, and the
+    reason a version-1 bundle is readable rather than refused. The reading it
+    applies is the weakest available and is labelled as such: cells of the
+    record's own nominal cadence, centred on each timestamp, so no timestamp
+    moves and nothing is claimed about averaging.
+
+    Parameters
+    ----------
+    dataset : xarray.Dataset
+        Stream to complete, modified in place.
+
+    Returns
+    -------
+    bool
+        True if cells were attached, False if the stream already had them.
+        The caller decides whether that is worth logging; it is not an error.
+    """
+    from tsara.core.timebase import epoch_ns
+
+    if TIME_COORD not in dataset.variables:
+        return False
+    if declared_bounds_name(dataset) is not None:
+        # Already has cells, or names cells that have gone missing. The second
+        # case is a corruption rather than an absence, so it is left for
+        # `check_bounds_intact` to report instead of being papered over with
+        # assumed cells that would hide it.
+        return False
+
+    import pandas as pd
+
+    stamps = epoch_ns(pd.DatetimeIndex(dataset[TIME_COORD].values))
+    cadence = nominal_cadence_ns(stamps)
+    if cadence is None:
+        # A single-sample stream has no cadence to infer, and inventing one
+        # would be a fabrication rather than a weak reading. Left alone.
+        return False
+    bounds = CellBounds.from_label(stamps, cadence, "unknown")
+    attach_time_bounds(dataset, bounds, "point")
+    dataset.attrs.update(
+        support_attrs(
+            label="unknown",
+            width_ns=cadence,
+            coverage=bounds.coverage_fraction,
+            label_source="assumed",
+            width_source="inferred",
+            method_source="assumed",
+        )
+    )
+    return True

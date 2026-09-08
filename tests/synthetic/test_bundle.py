@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from tsara.core.bundle import BUNDLE_STAGE_KEY
+from tsara.core.naming import (
+    BOUNDS_ATTR,
+    SUPPORT_LABEL_SOURCE_ATTR,
+    SUPPORT_METHOD_SOURCE_ATTR,
+    SUPPORT_WIDTH_SOURCE_ATTR,
+    TIME_BOUNDS_VAR,
+    TIME_COORD,
+)
+from tsara.core.support import TsaraSupportError
 from tsara.synthetic.bundle import (
     BUNDLE_CONFIG,
     BUNDLE_GROUND_TRUTH,
@@ -248,3 +258,91 @@ def test_missing_stream_file_is_reported(noisy_config: SyntheticConfig, tmp_path
     (bundle / BUNDLE_STREAMS_DIR / "analyzer.nc").unlink()
     with pytest.raises(TsaraBundleError, match="analyzer.nc' is missing"):
         load_bundle(bundle)
+
+
+# ---------------------------------------------------------------------------
+# Cell boundaries (Phase 3.5)
+# ---------------------------------------------------------------------------
+
+
+def _strip_cells_to_version_1(bundle: Path) -> None:
+    """Rewrite a bundle as the version-1 layout: streams with no cells."""
+    import xarray as xr
+
+    for target in sorted((bundle / BUNDLE_STREAMS_DIR).glob("*.nc")):
+        with xr.open_dataset(target, engine="netcdf4", decode_coords="all") as opened:
+            stream = opened.load()
+        stream = stream.drop_vars(TIME_BOUNDS_VAR)
+        # Rebuild the attrs rather than popping in place: version 1 never had
+        # the bounds attribute at all, and leaving it behind would write a file
+        # naming a variable that is not there, which is a different defect from
+        # the one this helper is meant to reproduce.
+        stream[TIME_COORD].attrs = {
+            key: value for key, value in stream[TIME_COORD].attrs.items() if key != BOUNDS_ATTR
+        }
+        # And the encoding, which is where `decode_coords="all"` put the
+        # bounds name on the way in. Clearing only attrs leaves xarray to
+        # write the declaration straight back out, producing a file that
+        # names a variable it does not contain.
+        stream[TIME_COORD].encoding = {}
+        stream.to_netcdf(target, engine="netcdf4")
+    manifest = json.loads((bundle / BUNDLE_MANIFEST).read_text())
+    manifest["bundle_format_version"] = 1
+    (bundle / BUNDLE_MANIFEST).write_text(json.dumps(manifest))
+
+
+def test_cells_survive_a_bundle_round_trip_exactly(
+    noisy_config: SyntheticConfig, tmp_path: Path
+) -> None:
+    dataset = generate(noisy_config)
+    reloaded = load_bundle(dataset.save(tmp_path / "run"))
+    for name, stream in dataset.streams.items():
+        assert TIME_BOUNDS_VAR in reloaded.streams[name].coords, name
+        assert np.array_equal(
+            reloaded.streams[name][TIME_BOUNDS_VAR].values.astype("datetime64[ns]"),
+            stream[TIME_BOUNDS_VAR].values.astype("datetime64[ns]"),
+        ), name
+
+
+def test_a_version_1_bundle_is_migrated_rather_than_refused(
+    noisy_config: SyntheticConfig, tmp_path: Path
+) -> None:
+    """The older layout has an exact honest reading, so admit and label it."""
+    bundle = generate(noisy_config).save(tmp_path / "run")
+    _strip_cells_to_version_1(bundle)
+
+    reloaded = load_bundle(bundle)
+    for name, stream in reloaded.streams.items():
+        assert TIME_BOUNDS_VAR in stream.coords, name
+        # Centred on the original timestamps, so nothing moved.
+        bounds = stream[TIME_BOUNDS_VAR].values.astype("datetime64[ns]").astype(np.int64)
+        stamps = stream[TIME_COORD].values.astype("datetime64[ns]").astype(np.int64)
+        midpoints = bounds[:, 0] + (bounds[:, 1] - bounds[:, 0]) // 2
+        assert np.array_equal(midpoints, stamps), name
+        # And every field of the support says where it came from.
+        assert stream.attrs[SUPPORT_LABEL_SOURCE_ATTR] == "assumed", name
+        assert stream.attrs[SUPPORT_WIDTH_SOURCE_ATTR] == "inferred", name
+        assert stream.attrs[SUPPORT_METHOD_SOURCE_ATTR] == "assumed", name
+
+
+def test_the_migration_says_what_it_did(
+    noisy_config: SyntheticConfig, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A weak reading applied silently would be worse than no reading."""
+    bundle = generate(noisy_config).save(tmp_path / "run")
+    _strip_cells_to_version_1(bundle)
+    with caplog.at_level(logging.INFO, logger="tsara.synthetic.bundle"):
+        load_bundle(bundle)
+    assert "assumed cells" in caplog.text
+
+
+def test_saving_refuses_a_stream_whose_cells_were_destroyed(
+    noisy_config: SyntheticConfig, tmp_path: Path
+) -> None:
+    """The guard at the persistence boundary: an xarray resample upstream
+    leaves the bounds attribute naming a variable that no longer exists."""
+    dataset = generate(noisy_config)
+    name = next(iter(dataset.streams))
+    dataset.streams[name] = dataset.streams[name].drop_vars(TIME_BOUNDS_VAR)
+    with pytest.raises(TsaraSupportError, match="names 'time_bnds'"):
+        save_bundle(dataset, tmp_path / "broken")
