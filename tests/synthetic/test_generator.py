@@ -44,7 +44,13 @@ from tsara.synthetic.config import (
     TrueUncertainty,
     UniformAmplitude,
 )
-from tsara.synthetic.generator import TRUTH_PREFIX, generate
+from tsara.synthetic.generator import (
+    TRUTH_PREFIX,
+    _build_cells,
+    _build_times,
+    generate,
+)
+from tsara.synthetic.plumes import schedule_events
 from tsara.synthetic.profiling import RealDataProfile
 
 # ---------------------------------------------------------------------------
@@ -1170,3 +1176,74 @@ def test_the_observable_view_still_carries_its_cells(
         observable = dataset.observable(name)
         assert TIME_BOUNDS_VAR in observable.coords, name
         assert not [v for v in observable.data_vars if str(v).startswith(TRUTH_PREFIX)], name
+
+
+def test_a_jittered_mean_instrument_gets_an_exact_answer_key() -> None:
+    """Regression: plume injection used to locate events by binary search over
+    the flattened fine grid, and that grid is not sorted.
+
+    Jitter is permitted up to just under half the sampling interval, so
+    full-width cells centred on jittered stamps overlap and the flat grid
+    descends. Measured at the time, 151 of 300 adjacent cells overlapped and
+    the search mis-selected cells by up to 0.8% of a plume's peak. Events are
+    now located against the cell boundaries, which are sorted whatever the
+    jitter. Checked against a reference that evaluates every event on every
+    cell with no search at all.
+    """
+    config = SyntheticConfig.model_validate(
+        {
+            "name": "jittered",
+            "start": "2026-01-01T00:00:00Z",
+            "duration": "1h",
+            "seed": 7,
+            "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
+            "instruments": {
+                "a": {
+                    "native_rate": "10s",
+                    # Close to the schema's ceiling of half the sampling rate,
+                    # which is where the cells overlap most.
+                    "timestamp_jitter": "4s",
+                    "support": {"method": "mean"},
+                    "species": {
+                        "ch4": {
+                            "units": "ppb",
+                            "background": {"kind": "parametric", "offset": 1900.0},
+                        }
+                    },
+                }
+            },
+            "sources": {
+                "leak": {
+                    "rate_per_hour": 60.0,
+                    "reference_species": "ch4",
+                    "shape": {"kind": "gaussian", "sigma": "3s"},
+                    "amplitude": {"kind": "uniform", "low": 100.0, "high": 100.001},
+                    "ratios": {},
+                }
+            },
+        }
+    )
+    produced = np.asarray(generate(config).streams["a"][f"{TRUTH_PREFIX}enhancement_ch4"].values)
+
+    # Rebuild the same clock and events, then brute-force the enhancement.
+    rng = np.random.default_rng(config.seed)
+    events = schedule_events(config, rng)
+    start = pd.Timestamp(config.start).tz_localize(None)
+    times = _build_times(start, start + pd.Timedelta(config.duration), "10s", "4s", None, rng, "a")
+    bounds, fine = _build_cells(times, config.instruments["a"])
+    assert np.any(bounds.start_ns[1:] < bounds.stop_ns[:-1]), (
+        "this configuration must actually produce overlapping cells, or the test proves nothing"
+    )
+    n_sub = fine.shape[1]
+    fine_seconds = fine / 1e9
+    expected = np.zeros(len(bounds))
+    for event in events:
+        amplitude = event.amplitudes.get("ch4")
+        if amplitude is None:
+            continue
+        centre = event.species_center("ch4").value / 1e9
+        expected += amplitude * event.kernel.evaluate((fine_seconds - centre).reshape(-1)).reshape(
+            -1, n_sub
+        ).mean(axis=1)
+
+    assert np.allclose(produced, expected, rtol=0, atol=1e-9)

@@ -1870,6 +1870,17 @@ key stores the diluted peak the instrument could actually see. Noise is drawn
 **at the cell**, not on the fine grid, so a declared `absolute` sigma keeps
 meaning "the spread of the numbers this instrument publishes".
 
+Events are located against each stream's **cell boundaries**, never against
+the flattened fine grid. The grid looks sortable and is not: jitter is
+permitted up to just under half the sampling interval, so full-width cells
+centred on jittered stamps overlap and the grid descends. Measured on a 1 Hz
+stream with 0.4 s jitter, 151 of 300 adjacent cells overlap. A binary search
+over that grid mis-selects cells, by up to 0.8 % of a plume's peak in the
+harshest configuration the schema permits. Cell starts are sorted whatever
+the jitter, being a constant shift of an increasing clock, so they give a
+valid search. The wider selection this implies costs nothing, because the
+kernel returns exactly zero outside its support.
+
 The averaging is validated against closed forms rather than a golden file: a
 flat background averages exactly, a linear drift is exact in its increments
 (the midpoint rule is exact for linear functions), the quadrature error falls

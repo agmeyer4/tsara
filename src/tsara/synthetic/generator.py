@@ -682,12 +682,22 @@ def _inject_plumes(
     rows: list[GroundTruthEvent] = []
 
     n_sub = int(fine_ns.shape[1])
-    # Flat and sorted, which the schema guarantees by refusing a cell wider
-    # than the sampling interval: overlapping cells would break the binary
-    # search below.
-    epoch_ns = fine_ns.reshape(-1)
-    epoch_s = epoch_ns / NS_PER_S
+    epoch_s = fine_ns.reshape(-1) / NS_PER_S
     midpoint_s = bounds.midpoint_ns / NS_PER_S
+    # Events are located against the CELL BOUNDARIES, never against the
+    # flattened fine grid. The flat grid looks sortable and is not: timestamp
+    # jitter is permitted up to just under half the sampling interval, so
+    # full-width cells centred on jittered stamps overlap, and the grid then
+    # descends. Measured on a 1 Hz stream with 0.4 s jitter, 151 of 300
+    # adjacent cells overlap and the flat grid has 146 descending steps —
+    # enough for a binary search over it to select the wrong cells, by up to
+    # 0.8 % of a plume's peak in the harshest configuration the schema allows.
+    #
+    # Cell starts are sorted whatever the jitter, since they are a constant
+    # shift of an increasing clock, so the running maximum of the stops makes
+    # a valid lower bound. Same pattern as `bin_onto_cells`.
+    cell_start = bounds.start_ns
+    running_stop = np.maximum.accumulate(bounds.stop_ns)
 
     for event in events:
         amplitude = event.amplitudes.get(species_name)
@@ -700,17 +710,18 @@ def _inject_plumes(
         end_time = center + pd.Timedelta(seconds=kernel.support_after_s)
         peak_time = event.species_peak_time(species_name)
 
-        # Restrict to the support window: searchsorted keeps this cheap even
-        # with tens of thousands of events over a long record. The result is
-        # widened to whole cells, because a cell is the unit the instrument
-        # emits -- a cell with even one fine sample inside the window is
-        # affected, and its remaining samples carry the kernel's real (tiny)
-        # value there rather than a truncation to zero. With one subsample
-        # this reduces exactly to selecting the timestamps in the window.
-        lo_fine = int(np.searchsorted(epoch_ns, _stamp_ns(start_time), side="left"))
-        hi_fine = int(np.searchsorted(epoch_ns, _stamp_ns(end_time), side="right"))
-        lo = lo_fine // n_sub
-        hi = -(-hi_fine // n_sub)
+        # Every cell that OVERLAPS the support window, which is the unit the
+        # instrument emits: a cell partly inside the window is partly affected
+        # by the event.
+        #
+        # This is a wider selection than the timestamps-in-window rule it
+        # replaces, and it costs nothing, because `PlumeKernel.evaluate`
+        # returns exactly zero outside the support rather than a very small
+        # number. So the extra cells contribute exact zeros and the default
+        # point path is unchanged bit for bit -- verified against a hash taken
+        # before any of this phase was written.
+        lo = int(np.searchsorted(running_stop, _stamp_ns(start_time), side="right"))
+        hi = int(np.searchsorted(cell_start, _stamp_ns(end_time), side="left"))
 
         sampled_peak = float("nan")
         if hi > lo:
