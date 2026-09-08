@@ -97,7 +97,7 @@ from tsara.synthetic.background import TsaraSyntheticError
 from tsara.synthetic.config import MobileTrack, StationarySite
 
 if TYPE_CHECKING:  # pragma: no cover
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     import xarray as xr
 
@@ -173,6 +173,8 @@ def export_raw(
     support_declaration: SupportDeclaration = "declared",
     time_shift: Mapping[str, str] | None = None,
     timezone: str = "UTC",
+    split: Mapping[str, Sequence[int]] | None = None,
+    zero_width_cells: Mapping[str, int] | None = None,
 ) -> Path:
     """Write a synthetic dataset as raw CSV files with a matching manifest.
 
@@ -216,6 +218,29 @@ def export_raw(
         correction to recover the generator's truth. Same shape as
         ``raw_units``: write the archive wrong, declare the fix, check that
         the answer comes back right.
+    split : Mapping of str to sequence of int, optional
+        Write an instrument's record as several files instead of one, keyed
+        by instrument name. Each entry gives one stride per file: ``(1, 2)``
+        splits the rows in half and writes the second half taking every
+        second row, so the two files have different sampling intervals.
+
+        This exists because a fixture of one file per instrument cannot test
+        anything that only matters across files. Measured by mutation, a
+        round trip through a single-file archive missed all four multi-file
+        bugs it was pointed at, including cadence measured per instrument
+        rather than per file -- the decision the archive census makes
+        load-bearing, since some met records really do run at 1 s in one file
+        and 5 s in another.
+    zero_width_cells : Mapping of int, optional
+        Write this many cells per instrument with stop equal to start. Only
+        meaningful alongside ``support_declaration='reported'``, since that
+        is the only mode in which the file states its own boundaries.
+
+        Real files do this: one airborne spectrometer in the target archive
+        declares zero duration on 0.71 % of its rows. A cell of zero duration
+        carries no weight in any overlap, so ingestion widens it; without a
+        fixture that produces one, that repair is testable only against
+        expectations written by the same person who wrote it.
     timezone : str, optional
         IANA zone the file's timestamps are written in, declared in the
         manifest so ingestion converts them back. Defaults to UTC, which
@@ -252,8 +277,12 @@ def export_raw(
     scales = dict(raw_units or {})
     bounds = dict(qaqc_bounds or {})
     shifts = dict(time_shift or {})
+    strides = {name: tuple(v) for name, v in (split or {}).items()}
+    degenerate = dict(zero_width_cells or {})
     _check_species_exist(dataset.config, scales, bounds)
     _check_instruments_exist(dataset, shifts)
+    _check_instruments_exist(dataset, strides)
+    _check_instruments_exist(dataset, degenerate)
     if support_declaration == "reported":
         _check_boundary_columns_are_free(dataset)
 
@@ -262,19 +291,30 @@ def export_raw(
 
     sigma_columns = _reported_sigma_columns(dataset.config)
     for name in dataset.streams:
-        _write_csv(
-            dataset.observable(name),
-            raw_dir / f"{name}.csv",
-            scales,
-            sigma_columns,
-            label=_label_of(dataset.config, name),
-            write_boundaries=support_declaration == "reported",
-            shift_ns=_shift_ns(shifts.get(name)),
-            timezone=timezone,
-        )
+        for suffix, chunk, n_zero in _chunks(
+            dataset.observable(name), strides.get(name), degenerate.get(name, 0)
+        ):
+            _write_csv(
+                chunk,
+                raw_dir / f"{name}{suffix}.csv",
+                scales,
+                sigma_columns,
+                label=_label_of(dataset.config, name),
+                write_boundaries=support_declaration == "reported",
+                shift_ns=_shift_ns(shifts.get(name)),
+                timezone=timezone,
+                n_zero_width=n_zero,
+            )
 
     manifest = _build_manifest(
-        dataset.config, raw_dir, scales, bounds, support_declaration, shifts, timezone
+        dataset.config,
+        raw_dir,
+        scales,
+        bounds,
+        support_declaration,
+        shifts,
+        timezone,
+        set(strides),
     )
     manifest_path = root / EXPORT_MANIFEST
     manifest_path.write_text(
@@ -350,17 +390,17 @@ def _shift_ns(shift: str | None) -> int:
     return 0 if shift is None else int(pd.Timedelta(shift).value)
 
 
-def _check_instruments_exist(dataset: SyntheticDataset, shifts: Mapping[str, str]) -> None:
-    """Refuse a clock offset for a stream that does not exist.
+def _check_instruments_exist(dataset: SyntheticDataset, requested: Mapping[str, object]) -> None:
+    """Refuse any per-instrument request naming a stream that does not exist.
 
     Same reasoning as :func:`_check_species_exist`: silently ignoring a
     misspelled name would leave the harness passing while testing less than
     it claims.
     """
-    unknown = sorted(set(shifts) - set(dataset.streams))
+    unknown = sorted(set(requested) - set(dataset.streams))
     if unknown:
         raise TsaraSyntheticError(
-            f"Cannot shift the clock of {unknown}: this dataset has {sorted(dataset.streams)}."
+            f"Cannot export {unknown}: this dataset has {sorted(dataset.streams)}."
         )
 
 
@@ -388,6 +428,38 @@ def _check_boundary_columns_are_free(dataset: SyntheticDataset) -> None:
         )
 
 
+def _chunks(
+    stream: xr.Dataset, strides: tuple[int, ...] | None, n_zero_width: int
+) -> list[tuple[str, xr.Dataset, int]]:
+    """Split one stream into the files it should be written as.
+
+    An instrument whose record arrives as several files, each with its own
+    sampling interval, is the ordinary case in a real archive and the one a
+    single-file fixture cannot reproduce. Each stride writes one file: ``(1,
+    2)`` halves the record and takes every second row of the second half, so
+    the two files disagree about cadence exactly as some real met records do.
+
+    Any requested zero-width cells go in the first file, since one file is
+    enough to exercise the repair and spreading them would only make the
+    expectation harder to state.
+
+    Returns
+    -------
+    list of (str, xarray.Dataset, int)
+        Filename suffix, the rows for that file, and how many of its cells
+        should be written with no duration.
+    """
+    if not strides:
+        return [("", stream, n_zero_width)]
+    total = int(stream.sizes[TIME_COORD])
+    edges = np.linspace(0, total, len(strides) + 1).astype(int)
+    out: list[tuple[str, xr.Dataset, int]] = []
+    for i, (first, last) in enumerate(zip(edges[:-1], edges[1:], strict=True)):
+        rows = np.arange(first, last, strides[i])
+        out.append((f"_{i:03d}", stream.isel({TIME_COORD: rows}), n_zero_width if i == 0 else 0))
+    return out
+
+
 def _write_csv(
     stream: xr.Dataset,
     target: Path,
@@ -398,6 +470,7 @@ def _write_csv(
     write_boundaries: bool,
     shift_ns: int,
     timezone: str,
+    n_zero_width: int = 0,
 ) -> None:
     """Write one observable stream as a CSV with an ISO 8601 time column.
 
@@ -451,7 +524,13 @@ def _write_csv(
         return [stamp.isoformat() for stamp in moved]
 
     if write_boundaries:
-        frame.insert(0, STOP_COLUMN, _iso(cells[:, 1]))
+        stops = cells[:, 1].copy()
+        if n_zero_width:
+            # Written as the file would write them: a stop identical to the
+            # start, which is a statement of zero duration rather than a
+            # missing value.
+            stops[:n_zero_width] = cells[:n_zero_width, 0]
+        frame.insert(0, STOP_COLUMN, _iso(stops))
         if label != "start":
             # Only needed when the time column is not already the cell start;
             # a start column duplicating it would say nothing.
@@ -512,6 +591,7 @@ def _build_manifest(
     support_declaration: SupportDeclaration,
     shifts: Mapping[str, str],
     timezone: str,
+    split_instruments: set[str],
 ) -> Manifest:
     """Build the manifest that describes the files just written."""
     instruments: dict[str, Any] = {}
@@ -560,7 +640,7 @@ def _build_manifest(
             variables[species_name] = variable
         loader: dict[str, Any] = {
             "format": "csv",
-            "path_template": f"{name}.csv",
+            "path_template": f"{name}_*.csv" if name in split_instruments else f"{name}.csv",
             "time": {"column": TIME_COORD, "format": "iso8601", "timezone": timezone},
         }
         support = _support_block(config, name, support_declaration)
@@ -583,7 +663,11 @@ def _build_manifest(
         gps_instrument = config.platform.gps_instrument
         gps_loader: dict[str, Any] = {
             "format": "csv",
-            "path_template": f"{gps_instrument}.csv",
+            "path_template": (
+                f"{gps_instrument}_*.csv"
+                if gps_instrument in split_instruments
+                else f"{gps_instrument}.csv"
+            ),
             "time": {"column": TIME_COORD, "format": "iso8601", "timezone": timezone},
         }
         gps_support = _support_block(config, gps_instrument, support_declaration)

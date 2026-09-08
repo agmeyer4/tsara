@@ -26,7 +26,6 @@ from tsara.ingest.support import (
     attach_declared_boundaries,
     resolve_support,
     shift_and_centre,
-    weakest,
 )
 
 SECOND = 1_000_000_000
@@ -236,19 +235,6 @@ def test_with_nothing_to_measure_no_cells_are_invented(
     assert RAW_TIME_START_COLUMN not in out.columns
     assert resolved.width_ns is None and resolved.width_source == "assumed"
     assert "too few samples" in caplog.text
-
-
-# ---------------------------------------------------------------------------
-# Reconciling several files
-# ---------------------------------------------------------------------------
-
-
-def test_provenance_across_files_takes_the_floor() -> None:
-    """One undocumented file must not hide inside a documented instrument."""
-    assert weakest(["reported", "declared", "assumed"]) == "assumed"
-    assert weakest(["declared", "reported"]) == "declared"
-    assert weakest(["reported"]) == "reported"
-    assert weakest([]) == "assumed"
 
 
 # ---------------------------------------------------------------------------

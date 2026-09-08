@@ -1912,6 +1912,24 @@ Both misses had a cause worth fixing:
 
 With both fixed the harness catches **five of five**.
 
+A second round, aimed at the paths that only matter when an instrument has
+several files, scored **zero of four**: cadence measured per instrument
+rather than per file, provenance reconciled the wrong way, a label hint used
+when files disagree, and the zero-width repair disabled. The full suite
+caught all four, so nothing was broken — but the round trip is the only test
+that bears on whether ingestion is *correct* rather than self-consistent, and
+it could not see any of them, because the exporter wrote one file per
+instrument and never a degenerate cell. It now takes `split`, which writes an
+instrument as several files with different sampling intervals, and
+`zero_width_cells`. That lifts the score to **two of four**.
+
+The remaining two need files of one instrument that *disagree* about their
+support, and the only per-file variation TSARA models is the ICARTT
+independent-variable name. They are therefore unreachable from a CSV-only
+exporter, and that is the price of the decision above: a round trip through a
+TSARA-written ICARTT would demonstrate the writer and reader agreeing with
+each other rather than either matching FFI-1001.
+
 End to end on the real archive, the stationary Picarro suite (50,400 rows
 across 35 days) ingests three ways to the same 60 s start-labelled cells at
 coverage 1.000, by three independent routes that each say honestly how they

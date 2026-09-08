@@ -656,7 +656,7 @@ def test_the_offset_moves_the_boundaries_too(tmp_path: Path) -> None:
 
 
 def test_shifting_an_unknown_instrument_is_refused(tmp_path: Path) -> None:
-    with pytest.raises(TsaraSyntheticError, match="Cannot shift the clock"):
+    with pytest.raises(TsaraSyntheticError, match="Cannot export"):
         export_raw(generate(_cell_config()), tmp_path / "a", time_shift={"nope": "1s"})
 
 
@@ -839,3 +839,56 @@ def test_an_archive_written_in_local_time_round_trips(tmp_path: Path) -> None:
         np.asarray(stream[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]"),
         np.asarray(generated[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]"),
     )
+
+
+def test_files_of_one_instrument_keep_their_own_cadences(tmp_path: Path) -> None:
+    """The decision the archive census makes load-bearing, now round-trip
+    testable: some met records run at 1 s in one file and 5 s in another, and
+    one instrument-wide cadence would give a whole file the wrong width.
+
+    Written as two files, the second taking every third row.
+    """
+    dataset = generate(_cell_config(method="mean"))
+    manifest_path = export_raw(
+        dataset,
+        tmp_path / "archive",
+        support_declaration="none",
+        split={"slow": (1, 3)},
+    )
+    written = sorted(p.name for p in (tmp_path / "archive" / EXPORT_RAW_DIR).glob("slow*.csv"))
+    assert written == ["slow_000.csv", "slow_001.csv"]
+
+    stream = ingest_campaign(load_manifest(manifest_path))["slow"]
+    bounds = np.asarray(stream[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]")
+    widths = (bounds[:, 1] - bounds[:, 0]) / np.timedelta64(1, "s")
+    # 60 s cells from the first file, 180 s from the decimated second.
+    assert set(np.unique(widths)) == {60.0, 180.0}
+    # And so the instrument has no single nominal width to report.
+    assert "tsara_nominal_cell_width_s" not in stream.attrs
+
+
+def test_a_zero_width_cell_in_a_real_file_is_repaired(tmp_path: Path) -> None:
+    """Round-trip cover for the repair, which was previously checked only
+    against expectations written by the same person who wrote it."""
+    dataset = generate(_cell_config(method="mean", label="start"))
+    manifest_path = export_raw(
+        dataset,
+        tmp_path / "archive",
+        support_declaration="reported",
+        zero_width_cells={"slow": 3},
+    )
+    frame = pd.read_csv(tmp_path / "archive" / EXPORT_RAW_DIR / "slow.csv")
+    degenerate = (pd.to_datetime(frame[STOP_COLUMN]) == pd.to_datetime(frame[TIME_COORD])).sum()
+    assert degenerate == 3, "the fixture must really contain them"
+
+    stream = ingest_campaign(load_manifest(manifest_path))["slow"]
+    bounds = np.asarray(stream[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]")
+    assert np.all(bounds[:, 1] > bounds[:, 0]), "none left with zero duration"
+    assert stream.attrs["tsara_cells_widened"] == 3.0
+
+
+def test_exporting_for_an_instrument_that_does_not_exist_is_refused(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(TsaraSyntheticError, match="Cannot export"):
+        export_raw(generate(_cell_config()), tmp_path / "a", split={"nope": (1, 2)})

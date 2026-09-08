@@ -58,7 +58,7 @@ from tsara.core.timebase import epoch_ns
 from tsara.ingest.base import TsaraIngestError, check_dropped_rows
 
 if TYPE_CHECKING:  # pragma: no cover
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable
     from pathlib import Path
 
     import numpy.typing as npt
@@ -75,7 +75,6 @@ __all__ = [
     "attach_declared_boundaries",
     "resolve_support",
     "shift_and_centre",
-    "weakest",
 ]
 
 #: ``RawTable.attrs`` key by which a reader hands up a label it can justify.
@@ -92,10 +91,6 @@ LABEL_HINT_KEY = "tsara_support_label_hint"
 #: iWAS_Stop_UTC" in a stream's provenance is what tells someone their
 #: manifest could be naming it.
 CANDIDATE_COLUMNS_KEY = "tsara_boundary_column_candidates"
-
-#: Provenance strength, weakest first. Reconciling several files takes the
-#: weakest, because a stream is only as well described as its worst file.
-_STRENGTH: tuple[SupportSource, ...] = ("assumed", "inferred", "declared", "reported")
 
 
 @dataclass(frozen=True)
@@ -466,30 +461,6 @@ def resolve_support(
         width_source=width_source,
         method_source=method_source,
     )
-
-
-def weakest(sources: Sequence[SupportSource]) -> SupportSource:
-    """Return the weakest provenance among several files.
-
-    A stream assembled from many files is only as well described as its worst
-    one, so reconciliation takes the floor rather than the mode. Reporting the
-    majority would let one undocumented file hide inside a well-documented
-    instrument, which is the kind of averaging-away of provenance the whole
-    labelling scheme exists to prevent.
-
-    Parameters
-    ----------
-    sources : sequence of str
-        One provenance value per contributing file.
-
-    Returns
-    -------
-    str
-        The weakest of them; ``'assumed'`` for an empty sequence.
-    """
-    if not sources:
-        return "assumed"
-    return min(sources, key=_STRENGTH.index)
 
 
 def shift_and_centre(frame: pd.DataFrame, *, shift_ns: int) -> pd.DataFrame:
