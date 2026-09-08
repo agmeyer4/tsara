@@ -41,6 +41,7 @@ __all__ = [
     "SUPPORT_LABEL_ATTR",
     "SUPPORT_LABEL_SOURCE_ATTR",
     "SUPPORT_METHOD_SOURCE_ATTR",
+    "SUPPORT_WIDENED_ATTR",
     "SUPPORT_WIDTH_ATTR",
     "SUPPORT_WIDTH_SOURCE_ATTR",
     "SupportLabel",
@@ -136,6 +137,15 @@ SupportSource = Literal["reported", "declared", "inferred", "assumed"]
 SUPPORT_LABEL_ATTR = "tsara_support_label"
 SUPPORT_WIDTH_ATTR = "tsara_nominal_cell_width_s"
 SUPPORT_COVERAGE_ATTR = "tsara_cell_coverage"
+
+#: How many cells TSARA had to widen because the file declared them as having
+#: no duration at all.
+#:
+#: Written only when it happened. A zero-width cell has zero measure and so
+#: zero weight in every overlap, which would leave the row in the stream
+#: looking like data while never contributing to anything -- so it is widened
+#: to the record's own cadence, and the count says the repair took place.
+SUPPORT_WIDENED_ATTR = "tsara_cells_widened"
 SUPPORT_LABEL_SOURCE_ATTR = "tsara_support_label_source"
 SUPPORT_WIDTH_SOURCE_ATTR = "tsara_support_width_source"
 SUPPORT_METHOD_SOURCE_ATTR = "tsara_support_method_source"

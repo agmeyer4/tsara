@@ -90,6 +90,7 @@ from tsara.core.naming import (
     SUPPORT_LABEL_ATTR,
     SUPPORT_LABEL_SOURCE_ATTR,
     SUPPORT_METHOD_SOURCE_ATTR,
+    SUPPORT_WIDENED_ATTR,
     SUPPORT_WIDTH_ATTR,
     SUPPORT_WIDTH_SOURCE_ATTR,
     TIME_BOUNDS_VAR,
@@ -374,7 +375,7 @@ class CellBounds:
             start = times - widths // 2
         return cls(start_ns=np.asarray(start, dtype=np.int64), stop_ns=start + widths)
 
-    def floor_width(self, minimum_ns: int) -> tuple[CellBounds, int]:
+    def floor_width(self, minimum_ns: int | npt.NDArray[np.int64]) -> tuple[CellBounds, int]:
         """Widen any cell narrower than ``minimum_ns``, keeping it centred.
 
         Exists for a measured case, not a hypothetical one: one airborne
@@ -386,8 +387,11 @@ class CellBounds:
 
         Parameters
         ----------
-        minimum_ns : int
+        minimum_ns : int or numpy.ndarray
             Smallest acceptable width, normally the record's nominal cadence.
+            One value per row is accepted for the same reason
+            :meth:`from_label` accepts one: an instrument's files can
+            legitimately disagree about cadence.
 
         Returns
         -------
@@ -401,18 +405,23 @@ class CellBounds:
         TsaraSupportError
             If ``minimum_ns`` is not strictly positive.
         """
-        if minimum_ns <= 0:
+        minimum = np.asarray(minimum_ns, dtype=np.int64)
+        if np.any(minimum <= 0):
+            smallest = int(minimum.min()) if minimum.size else 0
             raise TsaraSupportError(
-                f"Minimum cell width must be strictly positive, got {minimum_ns} ns."
+                f"Minimum cell width must be strictly positive, got {smallest} ns."
             )
-        narrow = self.width_ns < minimum_ns
+        narrow = self.width_ns < minimum
         n_widened = int(np.count_nonzero(narrow))
         if n_widened == 0:
             return self, 0
         centre = self.midpoint_ns
-        start = np.where(narrow, centre - minimum_ns // 2, self.start_ns)
-        stop = np.where(narrow, start + minimum_ns, self.stop_ns)
-        return CellBounds(start_ns=start, stop_ns=stop), n_widened
+        start = np.where(narrow, centre - minimum // 2, self.start_ns)
+        stop = np.where(narrow, start + minimum, self.stop_ns)
+        return CellBounds(
+            start_ns=np.asarray(start, dtype=np.int64),
+            stop_ns=np.asarray(stop, dtype=np.int64),
+        ), n_widened
 
 
 @dataclass(frozen=True)
@@ -426,9 +435,15 @@ class BinnedOntoCells:
         contributed. Never interpolated: a target cell with no overlapping
         source data stays ``nan`` rather than being bridged.
     n_source : numpy.ndarray
-        How many source cells contributed to each target cell. The honest
+        How many source cells *contributed* to each target cell. The honest
         sample size, and what stops interpolated points posing as
         independent samples in a later regression.
+    n_overlapping : numpy.ndarray
+        How many source cells overlapped it at all, masked ones included.
+        The difference between this and ``n_source`` is the number of
+        samples QA/QC removed, which is what separates "there was no data
+        here" from "the data here was rejected". Both leave a NaN, and a
+        later stage diagnosing a dropped pair needs to tell them apart.
     coverage : numpy.ndarray
         Share of each target cell's width covered by contributing source
         cells. The guard a later stage needs: a canister whose 15 s fill
@@ -439,6 +454,7 @@ class BinnedOntoCells:
     values: npt.NDArray[np.float64]
     n_source: npt.NDArray[np.int64]
     coverage: npt.NDArray[np.float64]
+    n_overlapping: npt.NDArray[np.int64]
 
 
 def bin_onto_cells(
@@ -490,8 +506,14 @@ def bin_onto_cells(
     out_values = np.full(n_target, np.nan, dtype=np.float64)
     out_counts = np.zeros(n_target, dtype=np.int64)
     out_coverage = np.zeros(n_target, dtype=np.float64)
+    out_overlapping = np.zeros(n_target, dtype=np.int64)
     if n_target == 0 or len(source) == 0:
-        return BinnedOntoCells(values=out_values, n_source=out_counts, coverage=out_coverage)
+        return BinnedOntoCells(
+            values=out_values,
+            n_source=out_counts,
+            coverage=out_coverage,
+            n_overlapping=out_overlapping,
+        )
 
     if np.any(np.diff(source.start_ns) < 0):
         raise TsaraSupportError(
@@ -512,7 +534,12 @@ def bin_onto_cells(
     counts = np.maximum(hi - lo, 0).astype(np.int64)
     total = int(counts.sum())
     if total == 0:
-        return BinnedOntoCells(values=out_values, n_source=out_counts, coverage=out_coverage)
+        return BinnedOntoCells(
+            values=out_values,
+            n_source=out_counts,
+            coverage=out_coverage,
+            n_overlapping=out_overlapping,
+        )
 
     # Expand (target, candidate-source) pairs without a Python loop: repeat
     # each target index `counts` times, then walk 0..count-1 within each run.
@@ -537,6 +564,10 @@ def bin_onto_cells(
     out_counts = np.bincount(
         target_index, weights=(weight > 0).astype(np.float64), minlength=n_target
     ).astype(np.int64)
+    # Overlap alone, ignoring whether the value survived QA/QC.
+    out_overlapping = np.bincount(
+        target_index, weights=(overlap > 0).astype(np.float64), minlength=n_target
+    ).astype(np.int64)
 
     contributing = weight_sum > 0
     out_values[contributing] = value_sum[contributing] / weight_sum[contributing]
@@ -546,7 +577,12 @@ def bin_onto_cells(
     # caller opts into fixing it) and this must not raise on it.
     wide = target_width > 0
     out_coverage[wide] = weight_sum[wide] / target_width[wide]
-    return BinnedOntoCells(values=out_values, n_source=out_counts, coverage=out_coverage)
+    return BinnedOntoCells(
+        values=out_values,
+        n_source=out_counts,
+        coverage=out_coverage,
+        n_overlapping=out_overlapping,
+    )
 
 
 def attach_time_bounds(
@@ -706,6 +742,7 @@ def support_attrs(
     label_source: SupportSource,
     width_source: SupportSource,
     method_source: SupportSource,
+    n_widened: int = 0,
 ) -> dict[str, str | float]:
     """Build the stream attributes that describe temporal support.
 
@@ -744,6 +781,8 @@ def support_attrs(
     }
     if width_ns is not None:
         attrs[SUPPORT_WIDTH_ATTR] = float(width_ns) / 1e9
+    if n_widened:
+        attrs[SUPPORT_WIDENED_ATTR] = float(n_widened)
     return attrs
 
 

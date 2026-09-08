@@ -396,6 +396,7 @@ def _stream_attrs(
             label_source=support.label_source,
             width_source=support.width_source,
             method_source=support.method_source,
+            n_widened=support.n_widened,
         )
     if time_shift is not None:
         attrs[TIME_SHIFT_ATTR] = time_shift

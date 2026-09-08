@@ -113,6 +113,9 @@ class ResolvedSupport:
         and no single nominal value applies.
     label_source, width_source, method_source : str
         Where each of the three came from.
+    n_widened : int
+        How many cells the file declared with no duration at all, and which
+        were widened to the record's cadence so they could carry weight.
     """
 
     label: SupportLabel
@@ -121,6 +124,7 @@ class ResolvedSupport:
     label_source: SupportSource
     width_source: SupportSource
     method_source: SupportSource
+    n_widened: int = 0
 
 
 def attach_declared_boundaries(
@@ -211,6 +215,86 @@ def attach_declared_boundaries(
     return out
 
 
+def _floor_declared_cells(
+    frame: pd.DataFrame,
+    start_ns: npt.NDArray[np.int64],
+    stop_ns: npt.NDArray[np.int64],
+    *,
+    widths_ns: npt.NDArray[np.int64] | None,
+    path: Path,
+) -> tuple[pd.DataFrame, npt.NDArray[np.int64], npt.NDArray[np.int64], int]:
+    """Give a declared cell of zero duration the record's own cadence instead.
+
+    Real files do this. One airborne spectrometer in the target archive
+    declares stop equal to start on 644 of its 90,673 rows, 0.71 %, and a
+    cell of zero duration has zero measure and therefore zero weight in every
+    overlap. Left alone, those rows would sit in the stream looking exactly
+    like data and never contribute to a single paired regression point, with
+    nothing anywhere saying so — which is the failure this whole phase exists
+    to prevent.
+
+    Widening is the repair that keeps the measurement. The alternative,
+    refusing the file, would cost a whole instrument to save 0.71 % of it.
+    Only *zero* widths are repaired, and they are repaired to the median of
+    the file's own other cells rather than to the spacing between cells. A
+    cell narrower than that spacing is not a defect but the definition of a
+    duty-cycled instrument, and a sampler that fills for 15 s every 10
+    minutes must not have one degenerate row inflated to 10 minutes.
+    The cells are re-centred on their original midpoints, so nothing moves
+    except the width, and the count is carried out so the stream can record
+    that a repair took place.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The frame, with the reserved boundary columns updated if anything
+        was widened.
+    numpy.ndarray, numpy.ndarray
+        The (possibly widened) starts and stops.
+    int
+        How many cells were widened.
+    """
+    if widths_ns is None:
+        # Nothing to widen them to. A record with no measurable cadence
+        # cannot supply a floor, and inventing one would be a fabrication.
+        return frame, start_ns, stop_ns, 0
+    # ONLY cells of exactly zero duration are touched, and the minimum for
+    # every other row is its own existing width. Flooring at the cadence
+    # instead would be a serious error rather than a conservative one: a
+    # duty-cycled sampler is *supposed* to have cells narrower than its
+    # spacing, so it would inflate a 15 s canister fill to the several
+    # minutes between canisters and quietly claim the instrument had been
+    # sampling the whole time.
+    current = stop_ns - start_ns
+    positive = current[current > 0]
+    # The file's own other cells are the best available answer for how long a
+    # cell of this instrument lasts -- far better than the spacing between
+    # them, which for a duty-cycled sampler is a different quantity entirely.
+    # The cadence is the fallback for the degenerate file whose cells are
+    # *all* zero-width, where there is nothing else to go on.
+    replacement = (
+        np.full(current.shape, int(np.median(positive)), dtype=np.int64)
+        if positive.size
+        else np.asarray(widths_ns, dtype=np.int64)
+    )
+    minimum = np.where(current == 0, replacement, current)
+    bounds, n_widened = CellBounds(start_ns=start_ns, stop_ns=stop_ns).floor_width(minimum)
+    if n_widened == 0:
+        return frame, start_ns, stop_ns, 0
+    logger.warning(
+        "%s: %d cell(s) were declared with zero duration and have been widened "
+        "to the record's own cadence, centred where they were. A zero-width "
+        "cell carries no weight in any overlap, so it would otherwise have "
+        "been silently absent from every pairing.",
+        path,
+        n_widened,
+    )
+    out = frame.copy()
+    out[RAW_TIME_START_COLUMN] = bounds.start_ns.astype("datetime64[ns]")
+    out[RAW_TIME_STOP_COLUMN] = bounds.stop_ns.astype("datetime64[ns]")
+    return out, bounds.start_ns, bounds.stop_ns, n_widened
+
+
 def _label_from_bounds(
     index_ns: npt.NDArray[np.int64],
     start_ns: npt.NDArray[np.int64],
@@ -274,10 +358,19 @@ def resolve_support(
     if reported:
         start_ns = epoch_ns(pd.DatetimeIndex(frame[RAW_TIME_START_COLUMN]))
         stop_ns = epoch_ns(pd.DatetimeIndex(frame[RAW_TIME_STOP_COLUMN]))
+        # Derived BEFORE any repair below, because the label is a fact about
+        # how the file writes its timestamps, not about what TSARA did to a
+        # handful of degenerate cells. Flooring first would let 644 rows in a
+        # 90,000-row record turn the whole stream's label into 'unknown'.
+        label_from_file = _label_from_bounds(index_ns, start_ns, stop_ns)
+
+        frame, start_ns, stop_ns, n_widened = _floor_declared_cells(
+            frame, start_ns, stop_ns, widths_ns=widths_ns, path=path
+        )
         widths = stop_ns - start_ns
         distinct = np.unique(widths)
         return frame, ResolvedSupport(
-            label=_label_from_bounds(index_ns, start_ns, stop_ns),
+            label=label_from_file,
             method=method,
             # One nominal width only if the file really has one; a sampler
             # whose fills vary has no single number to report and saying so
@@ -286,6 +379,7 @@ def resolve_support(
             label_source="reported",
             width_source="reported",
             method_source=method_source,
+            n_widened=n_widened,
         )
 
     label: SupportLabel = "unknown"

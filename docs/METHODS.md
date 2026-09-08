@@ -1627,8 +1627,18 @@ may still be included." So a `point` stream's bounds are TSARA's tiling
 convention, not an instrument claim — which is exactly what the per-field
 provenance says out loud. Zero width is never used: measure zero means zero
 weight in every overlap, so such a cell would vanish from the analysis without
-a word. One real airborne instrument does declare stop equal to start; those
-cells are widened to the nominal cadence and counted.
+a word while still sitting in the stream looking like data.
+
+One real instrument does declare stop equal to start, on 644 of the 90,673
+rows of the TwinOtter AMAX-DOAS record, 0.71 %. Those cells are widened and
+the count is written to `tsara_cells_widened`, so the repair is visible rather
+than silent. They are widened to the **median of the file's own other cells**,
+not to the spacing between cells: a cell narrower than that spacing is not a
+defect but the definition of a duty-cycled instrument, and repairing at the
+spacing would inflate a 15 s canister fill to the ten minutes between
+canisters and quietly claim the sampler had been collecting throughout. The
+spacing is used only for the degenerate file whose cells are *all* zero-width,
+where nothing else is available.
 
 **Operational rule: never `resample`, `rolling` or `coarsen` a stream carrying
 bounds.** Measured, xarray fails on this in two ways and raises on neither.

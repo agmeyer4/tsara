@@ -21,6 +21,7 @@ from tsara.core.naming import (
     BOUNDS_DIM,
     CELL_METHODS_ATTR,
     SUPPORT_LABEL_SOURCE_ATTR,
+    SUPPORT_WIDENED_ATTR,
     SUPPORT_WIDTH_ATTR,
     TIME_BOUNDS_VAR,
     TIME_COORD,
@@ -726,3 +727,54 @@ def test_per_row_widths_build_cells_of_differing_size() -> None:
     widths = np.array([SECOND, SECOND, 5 * SECOND], dtype=np.int64)
     bounds = CellBounds.from_label(_times(0, 10 * SECOND, 3), widths, "start")
     assert list(bounds.width_ns) == [SECOND, SECOND, 5 * SECOND]
+
+
+def test_floor_width_accepts_a_per_row_minimum() -> None:
+    """One instrument's files can disagree about cadence, so the floor can too."""
+    start = _times(0, 10 * SECOND, 3)
+    bounds = CellBounds(start_ns=start, stop_ns=start.copy())
+    minimum = np.array([SECOND, 5 * SECOND, 2 * SECOND], dtype=np.int64)
+    widened, n = bounds.floor_width(minimum)
+    assert n == 3
+    assert list(widened.width_ns) == [SECOND, 5 * SECOND, 2 * SECOND]
+
+
+def test_binning_separates_no_data_from_rejected_data() -> None:
+    """Both leave a NaN, and a later stage diagnosing a dropped pair needs to
+    tell a gap apart from a QA/QC decision."""
+    source = CellBounds.from_label(_times(0, SECOND, 10), SECOND, "start")
+    values = np.full(10, np.nan)
+    covered = CellBounds.from_label(np.array([0], dtype=np.int64), 10 * SECOND, "start")
+    empty = CellBounds.from_label(np.array([1000 * SECOND], dtype=np.int64), SECOND, "start")
+
+    masked = bin_onto_cells(source, values, covered)
+    assert np.isnan(masked.values[0])
+    assert masked.n_source[0] == 0, "nothing contributed"
+    assert masked.n_overlapping[0] == 10, "but ten cells were there and rejected"
+
+    absent = bin_onto_cells(source, np.ones(10), empty)
+    assert np.isnan(absent.values[0])
+    assert absent.n_source[0] == 0
+    assert absent.n_overlapping[0] == 0, "genuinely nothing there"
+
+
+def test_support_attrs_record_a_repair_only_when_one_happened() -> None:
+    plain = support_attrs(
+        label="start",
+        width_ns=SECOND,
+        coverage=1.0,
+        label_source="reported",
+        width_source="reported",
+        method_source="declared",
+    )
+    repaired = support_attrs(
+        label="start",
+        width_ns=SECOND,
+        coverage=1.0,
+        label_source="reported",
+        width_source="reported",
+        method_source="declared",
+        n_widened=644,
+    )
+    assert SUPPORT_WIDENED_ATTR not in plain
+    assert repaired[SUPPORT_WIDENED_ATTR] == 644.0

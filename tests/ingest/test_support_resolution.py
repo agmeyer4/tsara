@@ -532,3 +532,107 @@ def test_shifting_moves_a_cell_without_resizing_it() -> None:
     assert (span == pd.Timedelta("60s")).all()
     # And the index landed on the midpoint of the shifted cell.
     assert (out.index - out[RAW_TIME_START_COLUMN] == pd.Timedelta("30s")).all()
+
+
+def test_a_declared_zero_width_cell_is_widened_and_counted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Real files do this: one airborne spectrometer declares stop equal to
+    start on 0.71% of its rows. A cell of zero duration carries no weight in
+    any overlap, so those rows would sit in the stream looking like data and
+    never reach a single paired regression point."""
+    frame = _frame(5, step="10s")
+    frame[RAW_TIME_START_COLUMN] = frame.index
+    stops = list(frame.index)
+    stops[2] = frame.index[2]  # zero duration
+    frame[RAW_TIME_STOP_COLUMN] = [
+        s + pd.Timedelta("4s") if i != 2 else s for i, s in enumerate(frame.index)
+    ]
+    widths = np.full(5, 10 * SECOND, dtype=np.int64)
+    del stops
+
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.support"):
+        out, resolved = resolve_support(
+            frame, SupportSpec(), widths_ns=widths, label_hint=None, path=Path("f")
+        )
+    assert resolved.n_widened == 1
+    assert "zero duration" in caplog.text
+    span = _epoch(out[RAW_TIME_STOP_COLUMN]) - _epoch(out[RAW_TIME_START_COLUMN])
+    # Repaired to the file's own cell length (4 s), not to the 10 s spacing.
+    assert span[2] == 4 * SECOND
+    assert np.all(span > 0)
+
+
+def test_the_label_is_read_before_any_cell_is_repaired() -> None:
+    """The ordering trap: flooring first would let a handful of degenerate
+    cells turn a whole stream's label into 'unknown'. On the real record that
+    is 644 rows out of 90,673 deciding the answer for all of them."""
+    frame = _frame(100, step="10s")
+    frame[RAW_TIME_START_COLUMN] = frame.index
+    frame[RAW_TIME_STOP_COLUMN] = [
+        s + pd.Timedelta("4s") if i % 20 else s for i, s in enumerate(frame.index)
+    ]
+    _, resolved = resolve_support(
+        frame,
+        SupportSpec(),
+        widths_ns=np.full(100, 10 * SECOND, dtype=np.int64),
+        label_hint=None,
+        path=Path("f"),
+    )
+    assert resolved.label == "start"
+    assert resolved.label_source == "reported"
+    assert resolved.n_widened == 5
+
+
+def test_without_a_cadence_a_zero_width_cell_is_left_alone() -> None:
+    """Nothing to widen it to, and inventing a width would be a fabrication."""
+    frame = _frame(3)
+    frame[RAW_TIME_START_COLUMN] = frame.index
+    frame[RAW_TIME_STOP_COLUMN] = frame.index
+    _, resolved = resolve_support(
+        frame, SupportSpec(), widths_ns=None, label_hint=None, path=Path("f")
+    )
+    assert resolved.n_widened == 0
+
+
+def test_a_duty_cycled_sampler_is_repaired_to_its_own_fill_length() -> None:
+    """The trap the first version of this repair fell into.
+
+    A canister filling for 15 s every 10 minutes is *supposed* to have cells
+    far narrower than its spacing. Repairing a degenerate row to the spacing
+    would inflate it to 10 minutes and quietly claim the sampler had been
+    collecting the whole time. The file's own other cells are the answer.
+    """
+    index = pd.DatetimeIndex(
+        pd.date_range("2026-01-01", periods=6, freq="10min").as_unit("ns"), name="time"
+    )
+    frame = pd.DataFrame({"benzene": np.arange(6.0)}, index=index)
+    frame[RAW_TIME_START_COLUMN] = index
+    frame[RAW_TIME_STOP_COLUMN] = [
+        t + pd.Timedelta("15s") if i != 3 else t for i, t in enumerate(index)
+    ]
+    spacing = np.full(6, int(pd.Timedelta("10min").value), dtype=np.int64)
+
+    out, resolved = resolve_support(
+        frame, SupportSpec(method="mean"), widths_ns=spacing, label_hint=None, path=Path("f")
+    )
+    widths = out[RAW_TIME_STOP_COLUMN] - out[RAW_TIME_START_COLUMN]
+    assert set(widths) == {pd.Timedelta("15s")}
+    assert resolved.n_widened == 1
+
+
+def test_a_file_of_nothing_but_zero_widths_falls_back_to_the_cadence() -> None:
+    """No other cell to learn a duration from, so the spacing is all there is."""
+    frame = _frame(4, step="10s")
+    frame[RAW_TIME_START_COLUMN] = frame.index
+    frame[RAW_TIME_STOP_COLUMN] = frame.index
+    out, resolved = resolve_support(
+        frame,
+        SupportSpec(),
+        widths_ns=np.full(4, 10 * SECOND, dtype=np.int64),
+        label_hint=None,
+        path=Path("f"),
+    )
+    assert resolved.n_widened == 4
+    span = _epoch(out[RAW_TIME_STOP_COLUMN]) - _epoch(out[RAW_TIME_START_COLUMN])
+    assert np.all(span == 10 * SECOND)
