@@ -25,11 +25,17 @@ from __future__ import annotations
 
 __all__ = [
     "ALTITUDE_COORD",
+    "BOUNDS_ATTR",
+    "BOUNDS_DIM",
+    "CELL_METHODS_ATTR",
     "LATITUDE_COORD",
     "LOD_COUNT_KEY",
     "LONGITUDE_COORD",
+    "RAW_TIME_START_COLUMN",
+    "RAW_TIME_STOP_COLUMN",
     "SIGMA_RAND_PREFIX",
     "SIGMA_SYS_PREFIX",
+    "TIME_BOUNDS_VAR",
     "TIME_COORD",
     "sigma_rand_name",
     "sigma_sys_name",
@@ -37,6 +43,36 @@ __all__ = [
 
 #: The time dimension and coordinate, everywhere in TSARA.
 TIME_COORD = "time"
+
+#: CF cell boundaries: the variable holding each cell's start and stop, the
+#: length-2 dimension it varies over, and the attribute on ``time`` that
+#: points at it.
+#:
+#: These follow the Climate and Forecast conventions rather than a TSARA
+#: invention, which is what makes a saved stream readable by ncview, CDO and
+#: cf_xarray without a translation layer. ``nv`` is CF's own example name for
+#: the vertex dimension; it carries no values and is only ever length 2,
+#: since a time cell has a start vertex and a stop vertex.
+TIME_BOUNDS_VAR = "time_bnds"
+BOUNDS_DIM = "nv"
+BOUNDS_ATTR = "bounds"
+
+#: CF attribute naming how a value relates to its cell, e.g. ``time: mean``.
+#: Written per data variable, since one stream can in principle mix them.
+CELL_METHODS_ATTR = "cell_methods"
+
+#: Reserved columns by which a reader hands per-row cell boundaries to the
+#: rest of ingestion.
+#:
+#: A reader's contract is ``(path, loader config) -> RawTable``, with columns
+#: under the names the raw file uses -- so there is no way to return bounds
+#: except as columns. The underscore prefix keeps them from colliding with a
+#: real instrument column, and naming them here rather than in the reader
+#: means the reader and the stream assembler cannot drift apart. Only files
+#: that genuinely declare per-row bounds carry them; everything else gets
+#: cells built from a nominal cadence further downstream.
+RAW_TIME_START_COLUMN = "_tsara_time_start"
+RAW_TIME_STOP_COLUMN = "_tsara_time_stop"
 
 #: Platform position coordinates. Scalar for a stationary site, indexed by
 #: ``time`` for a mobile platform — the same names either way, so downstream
