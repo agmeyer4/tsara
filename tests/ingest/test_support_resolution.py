@@ -25,6 +25,7 @@ from tsara.ingest.support import (
     LABEL_HINT_KEY,
     attach_declared_boundaries,
     resolve_support,
+    shift_and_centre,
     weakest,
 )
 
@@ -512,3 +513,22 @@ def test_files_disagreeing_on_a_label_fall_back_to_centred(tmp_path: Path) -> No
     )
     ingested = _ingest_instrument(manifest, "voc", manifest.instruments["voc"])
     assert (ingested.support.label, ingested.support.label_source) == ("unknown", "assumed")
+
+
+def test_a_clock_correction_applies_even_without_cells() -> None:
+    """A record too short to have a cadence still has a clock."""
+    from tsara.ingest.support import shift_and_centre
+
+    frame = _frame(3)
+    out = shift_and_centre(frame, shift_ns=-4 * SECOND)
+    assert RAW_TIME_START_COLUMN not in out.columns
+    assert (out.index - frame.index == pd.Timedelta("-4s")).all()
+
+
+def test_shifting_moves_a_cell_without_resizing_it() -> None:
+    frame = _with_bounds(_frame(3), "0s", "60s")
+    out = shift_and_centre(frame, shift_ns=-4 * SECOND)
+    span = out[RAW_TIME_STOP_COLUMN] - out[RAW_TIME_START_COLUMN]
+    assert (span == pd.Timedelta("60s")).all()
+    # And the index landed on the midpoint of the shifted cell.
+    assert (out.index - out[RAW_TIME_START_COLUMN] == pd.Timedelta("30s")).all()

@@ -172,6 +172,7 @@ def export_raw(
     qaqc_bounds: Mapping[str, tuple[float | None, float | None]] | None = None,
     support_declaration: SupportDeclaration = "declared",
     time_shift: Mapping[str, str] | None = None,
+    timezone: str = "UTC",
 ) -> Path:
     """Write a synthetic dataset as raw CSV files with a matching manifest.
 
@@ -215,6 +216,16 @@ def export_raw(
         correction to recover the generator's truth. Same shape as
         ``raw_units``: write the archive wrong, declare the fix, check that
         the answer comes back right.
+    timezone : str, optional
+        IANA zone the file's timestamps are written in, declared in the
+        manifest so ingestion converts them back. Defaults to UTC, which
+        writes the same numbers TSARA works in.
+
+        Exists because a harness that only ever writes UTC cannot notice a
+        reader that ignores the declared zone: measured by mutation, dropping
+        the timezone from cell-boundary parsing changed nothing any test
+        could see. Set it to a real zone and a boundary parsed on the wrong
+        convention lands hours from the start it belongs to.
 
     Returns
     -------
@@ -259,9 +270,12 @@ def export_raw(
             label=_label_of(dataset.config, name),
             write_boundaries=support_declaration == "reported",
             shift_ns=_shift_ns(shifts.get(name)),
+            timezone=timezone,
         )
 
-    manifest = _build_manifest(dataset.config, raw_dir, scales, bounds, support_declaration, shifts)
+    manifest = _build_manifest(
+        dataset.config, raw_dir, scales, bounds, support_declaration, shifts, timezone
+    )
     manifest_path = root / EXPORT_MANIFEST
     manifest_path.write_text(
         yaml.safe_dump(manifest.model_dump(mode="json", exclude_none=False), sort_keys=False),
@@ -383,6 +397,7 @@ def _write_csv(
     label: str,
     write_boundaries: bool,
     shift_ns: int,
+    timezone: str,
 ) -> None:
     """Write one observable stream as a CSV with an ISO 8601 time column.
 
@@ -429,6 +444,10 @@ def _write_csv(
         # The shift is applied here so it reaches the boundary columns too --
         # a clock offset moves a cell, it does not resize it.
         moved = pd.DatetimeIndex((values - shift_ns).astype("datetime64[ns]"))
+        if timezone != "UTC":
+            # Written naive in local time, exactly as a logger that knows
+            # nothing about UTC would write it; the manifest declares the zone.
+            moved = moved.tz_localize("UTC").tz_convert(timezone).tz_localize(None)
         return [stamp.isoformat() for stamp in moved]
 
     if write_boundaries:
@@ -492,6 +511,7 @@ def _build_manifest(
     bounds: Mapping[str, tuple[float | None, float | None]],
     support_declaration: SupportDeclaration,
     shifts: Mapping[str, str],
+    timezone: str,
 ) -> Manifest:
     """Build the manifest that describes the files just written."""
     instruments: dict[str, Any] = {}
@@ -541,7 +561,7 @@ def _build_manifest(
         loader: dict[str, Any] = {
             "format": "csv",
             "path_template": f"{name}.csv",
-            "time": {"column": TIME_COORD, "format": "iso8601"},
+            "time": {"column": TIME_COORD, "format": "iso8601", "timezone": timezone},
         }
         support = _support_block(config, name, support_declaration)
         if support is not None:
@@ -564,7 +584,7 @@ def _build_manifest(
         gps_loader: dict[str, Any] = {
             "format": "csv",
             "path_template": f"{gps_instrument}.csv",
-            "time": {"column": TIME_COORD, "format": "iso8601"},
+            "time": {"column": TIME_COORD, "format": "iso8601", "timezone": timezone},
         }
         gps_support = _support_block(config, gps_instrument, support_declaration)
         if gps_support is not None:

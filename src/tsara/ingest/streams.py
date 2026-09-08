@@ -56,10 +56,15 @@ from tsara.core.naming import (
     LATITUDE_COORD,
     LOD_COUNT_KEY,
     LONGITUDE_COORD,
+    RAW_TIME_START_COLUMN,
+    RAW_TIME_STOP_COLUMN,
     TIME_COORD,
+    TIME_SHIFT_ATTR,
     sigma_rand_name,
     sigma_sys_name,
 )
+from tsara.core.support import CellBounds, attach_time_bounds, support_attrs
+from tsara.core.timebase import epoch_ns
 from tsara.ingest.base import TsaraIngestError
 from tsara.ingest.qaqc import apply_qaqc, masked_fraction
 from tsara.ingest.uncertainty import resolve_uncertainty
@@ -70,6 +75,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from pathlib import Path
 
     from tsara.config.manifest import InstrumentConfig, PlatformConfig, VariableConfig
+    from tsara.ingest.support import ResolvedSupport
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +91,8 @@ def build_stream(
     campaign: str = "",
     sources: Sequence[Path] = (),
     file_attrs: Mapping[str, object] | None = None,
+    support: ResolvedSupport | None = None,
+    time_shift: str | None = None,
 ) -> xr.Dataset:
     """Turn one instrument's combined raw table into a native-rate stream.
 
@@ -115,6 +123,17 @@ def build_stream(
         explains itself without its source archive (CLAUDE.md §5). Counts
         of samples masked as out-of-detection-range are routed to the
         variable they describe instead of the dataset.
+    support : ResolvedSupport, optional
+        What was concluded about this instrument's cells, resolved before
+        concatenation by :mod:`tsara.ingest.support`. None leaves the stream
+        without cell boundaries, which is what a record too short to have a
+        measurable cadence produces.
+    time_shift : str, optional
+        The clock correction orchestration has *already applied* to
+        ``frame``, recorded here so a saved product says it happened. Passed
+        rather than applied, because this function receives a frame whose
+        axis is final: shifting here would move timestamps out from under the
+        ordering and de-duplication that already ran on them.
 
     Returns
     -------
@@ -128,6 +147,7 @@ def build_stream(
         declared column is absent from the data.
     """
     index = _normalize_index(frame, name)
+    bounds = _cell_bounds(frame)
     declared = dict(file_attrs or {})
     lod_counts = declared.pop(LOD_COUNT_KEY, None)
     lod_by_column = dict(lod_counts) if isinstance(lod_counts, Mapping) else {}
@@ -148,11 +168,37 @@ def build_stream(
         data_vars=data_vars,
         coords={TIME_COORD: index},
         attrs=_stream_attrs(
-            name, instrument, platform, campaign=campaign, sources=sources, declared=declared
+            name,
+            instrument,
+            platform,
+            campaign=campaign,
+            sources=sources,
+            declared=declared,
+            support=support,
+            bounds=bounds,
+            time_shift=time_shift,
         ),
     )
+    if bounds is not None and support is not None:
+        attach_time_bounds(dataset, bounds, support.method)
     _attach_platform_coords(dataset, platform)
     return dataset
+
+
+def _cell_bounds(frame: pd.DataFrame) -> CellBounds | None:
+    """Read the cell boundaries orchestration resolved, if it managed to.
+
+    They arrive as reserved frame columns rather than as an argument because
+    that is how they survived concatenation, sorting and de-duplication
+    alongside the rows they describe (:mod:`tsara.ingest.base`). Here is
+    where they stop being table columns and become the CF representation.
+    """
+    if RAW_TIME_START_COLUMN not in frame.columns:
+        return None
+    return CellBounds(
+        start_ns=epoch_ns(pd.DatetimeIndex(frame[RAW_TIME_START_COLUMN])),
+        stop_ns=epoch_ns(pd.DatetimeIndex(frame[RAW_TIME_STOP_COLUMN])),
+    )
 
 
 def _normalize_index(frame: pd.DataFrame, name: str) -> pd.DatetimeIndex:
@@ -308,6 +354,9 @@ def _stream_attrs(
     campaign: str,
     sources: Sequence[Path],
     declared: Mapping[str, object] = MappingProxyType({}),
+    support: ResolvedSupport | None = None,
+    bounds: CellBounds | None = None,
+    time_shift: str | None = None,
 ) -> dict[str, Any]:
     """Build the self-describing attrs every stream carries.
 
@@ -328,6 +377,17 @@ def _stream_attrs(
         "n_source_files": len(sources),
         "loader_format": instrument.loader.format,
     }
+    if support is not None:
+        attrs |= support_attrs(
+            label=support.label,
+            width_ns=support.width_ns,
+            coverage=bounds.coverage_fraction if bounds is not None else float("nan"),
+            label_source=support.label_source,
+            width_source=support.width_source,
+            method_source=support.method_source,
+        )
+    if time_shift is not None:
+        attrs[TIME_SHIFT_ATTR] = time_shift
     if campaign:
         attrs["campaign"] = campaign
     if instrument.description:

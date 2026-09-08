@@ -21,9 +21,21 @@ from tsara.config.manifest import (
     MobilePlatform,
     StationaryPlatform,
 )
-from tsara.core.naming import LOD_COUNT_KEY, sigma_rand_name, sigma_sys_name
+from tsara.core.naming import (
+    CELL_METHODS_ATTR,
+    LOD_COUNT_KEY,
+    RAW_TIME_START_COLUMN,
+    RAW_TIME_STOP_COLUMN,
+    SUPPORT_COVERAGE_ATTR,
+    SUPPORT_LABEL_ATTR,
+    TIME_BOUNDS_VAR,
+    TIME_SHIFT_ATTR,
+    sigma_rand_name,
+    sigma_sys_name,
+)
 from tsara.ingest.base import TsaraIngestError
 from tsara.ingest.streams import build_stream
+from tsara.ingest.support import ResolvedSupport
 
 SITE = StationaryPlatform(latitude=40.77, longitude=-111.85, altitude_m=1300.0)
 MOBILE = MobilePlatform(gps_instrument="gps", lat_variable="latitude", lon_variable="longitude")
@@ -433,3 +445,98 @@ def test_declared_file_attrs_reach_the_dataset() -> None:
     """A stream found on disk has to explain itself (CLAUDE.md 5)."""
     stream = _build(_frame(), _instrument(), file_attrs={"icartt_pi": "Hu, Lu"})
     assert stream.attrs["icartt_pi"] == "Hu, Lu"
+
+
+# ---------------------------------------------------------------------------
+# Cells (Phase 3.5)
+# ---------------------------------------------------------------------------
+
+
+def _resolved(**overrides: Any) -> ResolvedSupport:
+    fields: dict[str, Any] = {
+        "label": "start",
+        "method": "mean",
+        "width_ns": 2_000_000_000,
+        "label_source": "declared",
+        "width_source": "declared",
+        "method_source": "declared",
+    }
+    fields.update(overrides)
+    return ResolvedSupport(**fields)
+
+
+def _bounded_frame() -> pd.DataFrame:
+    frame = _frame()
+    frame[RAW_TIME_START_COLUMN] = frame.index
+    frame[RAW_TIME_STOP_COLUMN] = frame.index + pd.Timedelta("2s")
+    return frame
+
+
+def test_a_stream_carries_its_cells_and_their_provenance() -> None:
+    stream = build_stream(
+        _bounded_frame(),
+        _instrument(),
+        name="picarro",
+        platform=StationaryPlatform(latitude=40.0, longitude=-111.0),
+        support=_resolved(),
+    )
+    assert TIME_BOUNDS_VAR in stream.coords
+    assert stream["ch4"].attrs[CELL_METHODS_ATTR] == "time: mean"
+    assert stream.attrs[SUPPORT_LABEL_ATTR] == "start"
+    assert stream.attrs["tsara_support_label_source"] == "declared"
+    assert stream.attrs[SUPPORT_COVERAGE_ATTR] == pytest.approx(1.0)
+
+
+def test_a_sigma_describes_the_same_cell_as_its_species() -> None:
+    """A random error belongs to the value it accompanies, so it is averaged
+    or sampled over exactly the same interval."""
+    instrument = _instrument(
+        ch4={
+            "column": "CH4_dry",
+            "role": "gas",
+            "units": "ppm",
+            "uncertainty": {"random": {"mode": "declared", "absolute": 0.5}},
+        }
+    )
+    stream = build_stream(
+        _bounded_frame(),
+        instrument,
+        name="picarro",
+        platform=StationaryPlatform(latitude=40.0, longitude=-111.0),
+        support=_resolved(),
+    )
+    assert stream["sigma_rand_ch4"].attrs[CELL_METHODS_ATTR] == "time: mean"
+
+
+def test_a_stream_whose_cells_could_not_be_determined_still_builds() -> None:
+    """One sample implies no interval, and the stream says so rather than
+    refusing to exist."""
+    stream = build_stream(
+        _frame(),
+        _instrument(),
+        name="picarro",
+        platform=StationaryPlatform(latitude=40.0, longitude=-111.0),
+        support=_resolved(width_ns=None, width_source="assumed"),
+    )
+    assert TIME_BOUNDS_VAR not in stream.coords
+    assert stream.attrs["tsara_support_width_source"] == "assumed"
+    assert np.isnan(stream.attrs[SUPPORT_COVERAGE_ATTR])
+
+
+def test_a_clock_correction_is_recorded_but_not_reapplied() -> None:
+    """Assembly receives a frame whose axis is already final; shifting again
+    here would move timestamps out from under the ordering that ran on them."""
+    frame = _bounded_frame()
+    stream = build_stream(
+        frame,
+        _instrument(),
+        name="picarro",
+        platform=StationaryPlatform(latitude=40.0, longitude=-111.0),
+        support=_resolved(),
+        time_shift="-9s",
+    )
+    assert stream.attrs[TIME_SHIFT_ATTR] == "-9s"
+    assert np.array_equal(
+        np.asarray(stream["time"].values, dtype="datetime64[ns]"),
+        np.asarray(frame.index, dtype="datetime64[ns]"),
+    )

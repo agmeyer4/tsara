@@ -723,31 +723,119 @@ def test_a_mobile_archive_declares_its_track_support(tmp_path: Path) -> None:
     assert (support.method, support.label) == ("point", "mid")
 
 
-def test_ingestion_does_not_yet_read_the_declaration(tmp_path: Path) -> None:
-    """Characterization test, written to be INVERTED by a later stage.
+def test_a_declared_label_is_read_back_exactly(tmp_path: Path) -> None:
+    """The loop closes: what the archive declares, ingestion recovers.
 
-    The exporter can now describe an archive's cells; ingestion cannot yet
-    read that description. Pinning the gap rather than leaving it implicit
-    means the stage that closes it cannot land quietly: this test will start
-    failing, and the failure is the signal to rewrite it as the assertion it
-    is standing in for.
-
-    What the fixture proves today is that the harness can *see* the error at
-    all. A start-labelled 60 s product is written with start times and
-    declared as such, and ingestion places every value half a cell late.
+    This replaces a characterization test that pinned the gap while the
+    reading side was being built. It asserted the timestamps came back half a
+    cell late; the same fixture now asserts they come back exactly.
     """
     config = _cell_config(method="mean", label="start")
     dataset = generate(config)
     manifest_path = export_raw(dataset, tmp_path / "archive", support_declaration="declared")
-    manifest = load_manifest(manifest_path)
-    assert manifest.instruments["slow"].loader.support.label == "start"
+    ingested = ingest_campaign(load_manifest(manifest_path))
 
-    ingested = ingest_campaign(manifest)
+    generated = dataset.streams["slow"]
+    stream = ingested["slow"]
+    assert np.array_equal(
+        np.asarray(stream[TIME_COORD].values, dtype="datetime64[ns]"),
+        np.asarray(generated[TIME_COORD].values, dtype="datetime64[ns]"),
+    )
+    assert np.array_equal(
+        np.asarray(stream[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]"),
+        np.asarray(generated[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]"),
+    )
+    assert stream["ch4"].attrs["cell_methods"] == "time: mean"
+    assert stream.attrs["tsara_support_label"] == "start"
+    assert stream.attrs["tsara_support_label_source"] == "declared"
+
+
+def test_a_file_that_states_its_cells_is_read_back_exactly(tmp_path: Path) -> None:
+    """The strongest rung: boundary columns, so nothing is inferred at all."""
+    dataset = generate(_cell_config(method="mean", label="start"))
+    manifest_path = export_raw(dataset, tmp_path / "archive", support_declaration="reported")
+    stream = ingest_campaign(load_manifest(manifest_path))["slow"]
+    assert np.array_equal(
+        np.asarray(stream[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]"),
+        np.asarray(dataset.streams["slow"][TIME_BOUNDS_VAR].values, dtype="datetime64[ns]"),
+    )
+    assert stream.attrs["tsara_support_label_source"] == "reported"
+    assert stream.attrs["tsara_support_width_source"] == "reported"
+
+
+def test_an_archive_that_says_nothing_is_read_back_wrong_and_says_so(
+    tmp_path: Path,
+) -> None:
+    """The negative control, and the reason the ladder is worth having.
+
+    The same start-labelled product, exported with no declaration, comes back
+    half a cell late. Nothing about the data changed; only what the archive
+    said about it did. Every field of the stream's provenance admits the
+    guess, which is the difference between being wrong and being wrong
+    silently.
+    """
+    dataset = generate(_cell_config(method="mean", label="start"))
+    manifest_path = export_raw(dataset, tmp_path / "archive", support_declaration="none")
+    stream = ingest_campaign(load_manifest(manifest_path))["slow"]
+
     generated = np.asarray(dataset.streams["slow"][TIME_COORD].values, dtype="datetime64[ns]")
-    read_back = np.asarray(ingested["slow"][TIME_COORD].values, dtype="datetime64[ns]")
-
-    # TODO(phase3.5 stage 6): becomes array_equal once support is read.
-    assert not np.array_equal(read_back, generated)
+    read_back = np.asarray(stream[TIME_COORD].values, dtype="datetime64[ns]")
     offset = (generated - read_back) / np.timedelta64(1, "s")
-    assert np.all(offset == 30.0), "half a cell, exactly the label being ignored"
-    assert TIME_BOUNDS_VAR not in ingested["slow"].coords
+    assert np.all(offset == 30.0), "half a cell, exactly the label being unknown"
+    assert stream.attrs["tsara_support_label_source"] == "assumed"
+    assert stream.attrs["tsara_support_method_source"] == "assumed"
+    assert stream["ch4"].attrs["cell_methods"] == "time: point"
+    # The width is still right, because it is measured from the file's own
+    # cadence rather than guessed. This is the ONLY path that exercises that
+    # measurement -- the other two declarations take the width from the
+    # manifest or from columns -- so without this assertion a wrong cadence
+    # would go unnoticed.
+    bounds = np.asarray(stream[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]")
+    assert np.all(bounds[:, 1] - bounds[:, 0] == np.timedelta64(60, "s"))
+
+
+def test_a_declared_clock_offset_is_applied_and_recorded(tmp_path: Path) -> None:
+    """The archive is written wrong and declares the fix; ingestion applies
+    it and says it did, which is the guard against correcting twice."""
+    dataset = generate(_cell_config(method="mean", label="start"))
+    manifest_path = export_raw(
+        dataset,
+        tmp_path / "archive",
+        support_declaration="declared",
+        time_shift={"slow": "-4s"},
+    )
+    stream = ingest_campaign(load_manifest(manifest_path))["slow"]
+    assert np.array_equal(
+        np.asarray(stream[TIME_COORD].values, dtype="datetime64[ns]"),
+        np.asarray(dataset.streams["slow"][TIME_COORD].values, dtype="datetime64[ns]"),
+    )
+    assert stream.attrs["tsara_time_shift"] == "-4s"
+
+
+def test_an_archive_written_in_local_time_round_trips(tmp_path: Path) -> None:
+    """Boundaries are parsed on the same convention as the axis they bound.
+
+    Added after a mutation test: dropping the declared timezone from
+    cell-boundary parsing changed nothing any test could see, because the
+    exporter only ever wrote UTC. Written in a real zone, a boundary parsed
+    on the wrong convention lands hours from the start it belongs to.
+    """
+    dataset = generate(_cell_config(method="mean", label="start"))
+    manifest_path = export_raw(
+        dataset,
+        tmp_path / "archive",
+        support_declaration="reported",
+        timezone="Etc/GMT-2",
+    )
+    # The file really is in local time, or this proves nothing.
+    written = pd.read_csv(tmp_path / "archive" / EXPORT_RAW_DIR / "slow.csv")
+    first = pd.Timestamp(written[TIME_COORD].iloc[0])
+    generated = dataset.streams["slow"]
+    truth = np.asarray(generated[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]")
+    assert first - pd.Timestamp(truth[0, 0].item()) == pd.Timedelta("2h")
+
+    stream = ingest_campaign(load_manifest(manifest_path))["slow"]
+    assert np.array_equal(
+        np.asarray(stream[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]"),
+        np.asarray(generated[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]"),
+    )

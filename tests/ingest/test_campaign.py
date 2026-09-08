@@ -24,6 +24,7 @@ from tsara.core.naming import (
     RAW_TIME_START_COLUMN,
     RAW_TIME_STOP_COLUMN,
     TIME_BOUNDS_VAR,
+    TIME_SHIFT_ATTR,
 )
 from tsara.core.support import (
     CellBounds,
@@ -569,21 +570,22 @@ def test_unrelated_files_in_the_streams_directory_are_left_alone(tmp_path: Path)
     assert note.is_file()
 
 
-def test_ingested_streams_get_assumed_cells_on_load(
+def test_ingested_streams_carry_cells_of_their_own(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Ingestion does not declare support yet, so the loader completes it.
+    """Assembly resolves support now, so nothing is left for the loader.
 
-    Reading a stream's support from its files is the reader stage's job. Until
-    then a saved ingest stream carries no cells, and the loader gives it the
-    weakest honest reading rather than leaving a later stage to guess.
+    Until stream assembly read the manifest's declaration, a saved ingest
+    bundle had no cells and the loader completed it with assumed ones. It
+    does not any more, and the absence of that notice is the check.
     """
     save_streams(ingest_campaign(_manifest(_archive(tmp_path))), tmp_path / "bundle")
     with caplog.at_level(logging.INFO, logger="tsara.ingest.bundle"):
         reloaded = load_streams(tmp_path / "bundle")
-    assert "assumed cells" in caplog.text
+    assert "assumed cells" not in caplog.text
     for name in reloaded.streams:
         assert declared_bounds_name(reloaded[name]) is not None, name
+        assert TIME_BOUNDS_VAR in reloaded[name].coords, name
 
 
 def test_streams_that_already_carry_cells_are_left_alone(
@@ -677,3 +679,51 @@ def test_boundaries_survive_sorting_and_de_duplication(tmp_path: Path) -> None:
     starts = ingested.frame[RAW_TIME_START_COLUMN]
     assert starts.is_monotonic_increasing
     assert (ingested.frame.index - starts == pd.Timedelta("1s")).all()
+
+
+def test_a_version_1_ingest_bundle_is_still_migrated(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Bundles written before cells existed stay readable.
+
+    Assembly gives every new stream its cells, so the loader's migration path
+    is now reached only by an older bundle -- which is exactly the population
+    it was built for.
+    """
+    import json
+
+    import xarray as xr
+
+    bundle = tmp_path / "bundle"
+    save_streams(ingest_campaign(_manifest(_archive(tmp_path))), bundle)
+    for target in sorted((bundle / BUNDLE_STREAMS_DIR).glob("*.nc")):
+        with xr.open_dataset(target, engine="netcdf4", decode_coords="all") as opened:
+            stream = opened.load()
+        stream = stream.drop_vars(TIME_BOUNDS_VAR)
+        stream["time"].attrs = {
+            key: value for key, value in stream["time"].attrs.items() if key != "bounds"
+        }
+        stream["time"].encoding = {}
+        stream.to_netcdf(target, engine="netcdf4")
+    descriptor = json.loads((bundle / BUNDLE_MANIFEST).read_text())
+    descriptor["bundle_format_version"] = 1
+    (bundle / BUNDLE_MANIFEST).write_text(json.dumps(descriptor))
+
+    with caplog.at_level(logging.INFO, logger="tsara.ingest.bundle"):
+        reloaded = load_streams(bundle)
+    assert "assumed cells" in caplog.text
+    for name in reloaded.streams:
+        assert declared_bounds_name(reloaded[name]) is not None, name
+
+
+def test_a_zero_clock_correction_is_not_announced(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Declaring no offset is a legitimate way of saying "already corrected",
+    and it should not read like something happened."""
+    manifest = _manifest(_archive(tmp_path))
+    manifest.instruments["picarro"].__dict__["time_shift"] = "0s"
+    with caplog.at_level(logging.INFO, logger="tsara.ingest.campaign"):
+        streams = ingest_campaign(manifest)
+    assert "time_shift" not in caplog.text
+    assert streams["picarro"].attrs[TIME_SHIFT_ATTR] == "0s"

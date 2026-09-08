@@ -48,6 +48,7 @@ __all__ = [
     "SupportSource",
     "TIME_BOUNDS_VAR",
     "TIME_COORD",
+    "TIME_SHIFT_ATTR",
     "sigma_rand_name",
     "sigma_sys_name",
 ]
@@ -138,6 +139,15 @@ SUPPORT_COVERAGE_ATTR = "tsara_cell_coverage"
 SUPPORT_LABEL_SOURCE_ATTR = "tsara_support_label_source"
 SUPPORT_WIDTH_SOURCE_ATTR = "tsara_support_width_source"
 SUPPORT_METHOD_SOURCE_ATTR = "tsara_support_method_source"
+
+#: Stream attribute recording a clock correction that was applied.
+#:
+#: Written whenever a non-zero ``InstrumentConfig.time_shift`` moved a
+#: stream's timestamps, and absent otherwise. Recording it is the guard
+#: against the failure that actually happens: an archive corrected once
+#: upstream and again here, which no amount of internal consistency would
+#: reveal because both corrections are individually right.
+TIME_SHIFT_ATTR = "tsara_time_shift"
 
 #: Reserved columns by which a reader hands per-row cell boundaries to the
 #: rest of ingestion.

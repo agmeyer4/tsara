@@ -74,6 +74,8 @@ __all__ = [
     "ResolvedSupport",
     "attach_declared_boundaries",
     "resolve_support",
+    "shift_and_centre",
+    "weakest",
 ]
 
 #: ``RawTable.attrs`` key by which a reader hands up a label it can justify.
@@ -358,3 +360,65 @@ def weakest(sources: Sequence[SupportSource]) -> SupportSource:
     if not sources:
         return "assumed"
     return min(sources, key=_STRENGTH.index)
+
+
+def shift_and_centre(frame: pd.DataFrame, *, shift_ns: int) -> pd.DataFrame:
+    """Correct the clock, then move the index onto each cell's midpoint.
+
+    Two operations that have to happen together and in this order, because
+    both act on the same three quantities and the second one reads what the
+    first one wrote.
+
+    **The shift moves a cell; it never resizes one.** It is applied to the
+    index and to both boundaries alike, so a stream corrected by nine seconds
+    describes exactly the same intervals of air, nine seconds earlier.
+
+    **The index becomes the midpoint** because that is the one label that
+    means the same thing on every stream. Left at whatever each file happened
+    to use, ``time`` would mean a start on one instrument and an end on
+    another, and every operation that is not bounds-aware -- a plot, a
+    ``sel``, someone else's code -- would carry up to a full cell of silent
+    bias. Centred, the worst case is half a cell and it is unbiased. Nothing
+    is lost: the original label is recorded in the stream's attributes and
+    the boundaries themselves are exact.
+
+    Note the sort that follows this is not redundant. With per-row widths a
+    later row can have an earlier midpoint than its neighbour -- a wide cell
+    starting just before a narrow one -- so centring can genuinely reorder a
+    stream, and only re-sorting afterwards keeps the axis monotonic.
+
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        One instrument's rows, carrying the reserved boundary columns if its
+        cells could be determined.
+    shift_ns : int
+        Nanoseconds to add to every timestamp; zero applies nothing.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The frame, shifted and re-indexed on cell midpoints.
+    """
+    out = frame if shift_ns == 0 else frame.copy()
+    if shift_ns:
+        offset = pd.Timedelta(shift_ns, unit="ns")
+        out.index = pd.DatetimeIndex(out.index + offset, name=out.index.name)
+        for column in (RAW_TIME_START_COLUMN, RAW_TIME_STOP_COLUMN):
+            if column in out.columns:
+                out[column] = out[column] + offset
+
+    if RAW_TIME_START_COLUMN not in out.columns:
+        # No cells were determined, so there is no midpoint to move to. The
+        # stream keeps the file's own timestamps and says, through its
+        # provenance attributes, that nothing is known about their support.
+        return out
+
+    start = epoch_ns(pd.DatetimeIndex(out[RAW_TIME_START_COLUMN]))
+    stop = epoch_ns(pd.DatetimeIndex(out[RAW_TIME_STOP_COLUMN]))
+    if out is frame:
+        out = frame.copy()
+    out.index = pd.DatetimeIndex(
+        (start + (stop - start) // 2).astype("datetime64[ns]"), name=frame.index.name
+    )
+    return out

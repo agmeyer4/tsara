@@ -57,7 +57,12 @@ from tsara.ingest.base import TsaraIngestError
 from tsara.ingest.crawler import crawl
 from tsara.ingest.registry import read_file
 from tsara.ingest.streams import build_stream
-from tsara.ingest.support import LABEL_HINT_KEY, ResolvedSupport, resolve_support
+from tsara.ingest.support import (
+    LABEL_HINT_KEY,
+    ResolvedSupport,
+    resolve_support,
+    shift_and_centre,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Iterator, Sequence
@@ -245,6 +250,8 @@ def ingest_campaign(
             campaign=manifest.name,
             sources=ingested.sources,
             file_attrs=ingested.file_attrs,
+            support=ingested.support,
+            time_shift=instrument.time_shift,
         )
         logger.info(
             "Instrument '%s': %d samples from %d file(s).",
@@ -335,12 +342,29 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
         label_hint=_agreed_hint(hints),
         path=sources[0] if len(sources) == 1 else Path(f"<{len(sources)} files>"),
     )
+    # Correct the clock and centre the axis before ordering, not after:
+    # centring can reorder rows when widths vary per file, so the sort has to
+    # see the axis the stream will actually carry.
+    combined = shift_and_centre(combined, shift_ns=_shift_ns(instrument.time_shift, name=name))
     return _Ingested(
         frame=_order(combined, name, n_within=n_within),
         sources=sources,
         file_attrs=_merge_file_attrs(file_attrs),
         support=support,
     )
+
+
+def _shift_ns(time_shift: str | None, *, name: str) -> int:
+    """Return an instrument's declared clock correction in nanoseconds."""
+    if time_shift is None:
+        return 0
+    shift = int(pd.Timedelta(time_shift).value)
+    if shift:
+        # Logged because a silent clock change is the one correction nobody
+        # can spot afterwards: the numbers stay plausible and only their
+        # relationship to another instrument moves.
+        logger.info("Instrument '%s': applying declared time_shift %s.", name, time_shift)
+    return shift
 
 
 def _per_row_widths(
