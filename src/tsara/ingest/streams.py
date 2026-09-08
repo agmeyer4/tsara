@@ -162,6 +162,7 @@ def build_stream(
             instrument_name=name,
             sources=sources,
             lod_by_column=lod_by_column,
+            cell_width_ns=None if bounds is None else bounds.width_ns,
         )
 
     dataset = xr.Dataset(
@@ -245,6 +246,7 @@ def _add_variable(
     instrument_name: str,
     sources: Sequence[Path],
     lod_by_column: Mapping[str, int] = MappingProxyType({}),
+    cell_width_ns: Any = None,
 ) -> None:
     """Convert, mask and resolve one variable, adding it and its sigmas."""
     if variable.column not in frame.columns:
@@ -272,6 +274,7 @@ def _add_variable(
         conversion=variable.convert,
         variable=canonical,
         path=label,
+        cell_width_ns=cell_width_ns,
     )
 
     units = canonical_units(variable.units, variable.convert)
@@ -291,6 +294,14 @@ def _add_variable(
         attrs["description"] = variable.description
     if resolved.decorrelation_timescale is not None:
         attrs["decorrelation_timescale"] = resolved.decorrelation_timescale
+    if resolved.at_width is not None:
+        # Written even when nothing was done with it: "this sigma describes a
+        # different interval from its own cells" is a fact a reader cannot
+        # re-derive from the numbers.
+        attrs["uncertainty_at_width"] = resolved.at_width
+        attrs["uncertainty_at_width_status"] = str(resolved.at_width_status)
+    if resolved.n_eff is not None:
+        attrs["uncertainty_n_eff"] = float(resolved.n_eff)
     # Recorded per variable rather than per stream because that is the
     # scope of the fact: a below-detection count belongs to the species it
     # censors. Keyed on the RAW column name, the only name a reader knows.

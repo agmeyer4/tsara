@@ -97,6 +97,18 @@ class ResolvedUncertainty:
         The random component's correlation timescale as declared, passed
         through untouched for the alignment and regression stages that
         consume it (METHODS §3.4).
+    at_width : str or None
+        The averaging interval a declared random sigma was quoted at, when
+        the manifest said. Recorded whether or not it could be acted on.
+    at_width_status : str or None
+        What became of that declaration: ``rescaled``, or the reason it was
+        left alone. Present in the saved product rather than only in a log,
+        because "this sigma describes a different interval from its own
+        cells" is exactly the kind of fact a reader six months later needs
+        and cannot re-derive.
+    n_eff : float or None
+        Median effective sample count used in a rescaling, so the size of
+        the correction is visible rather than implicit.
     """
 
     random: npt.NDArray[np.float64] | None
@@ -104,6 +116,9 @@ class ResolvedUncertainty:
     random_source: UncertaintySource
     systematic_source: UncertaintySource
     decorrelation_timescale: str | None = None
+    at_width: str | None = None
+    at_width_status: str | None = None
+    n_eff: float | None = None
 
     @property
     def source(self) -> str:
@@ -134,6 +149,7 @@ def resolve_uncertainty(
     conversion: UnitConversion | None,
     variable: str,
     path: Path,
+    cell_width_ns: npt.NDArray[np.int64] | None = None,
 ) -> ResolvedUncertainty:
     """Resolve a variable's uncertainty budget into per-point sigmas.
 
@@ -192,12 +208,46 @@ def resolve_uncertainty(
         path=path,
         absent_source="zero",
     )
+
+    at_width, status, n_eff = None, None, None
+    if (
+        isinstance(spec.random, DeclaredUncertainty)
+        and spec.random.at_width is not None
+        # Always true for a declared component; stated rather than asserted
+        # so the narrowing is visible to a reader as well as a checker.
+        and random is not None
+    ):
+        at_width = spec.random.at_width
+        random, status, n_eff = rescale_to_cell(
+            random,
+            at_width=at_width,
+            decorrelation_timescale=spec.decorrelation_timescale,
+            cell_width_ns=cell_width_ns,
+            variable=variable,
+            path=path,
+        )
+    if isinstance(spec.systematic, DeclaredUncertainty) and spec.systematic.at_width is not None:
+        # Deliberately not acted on. A systematic error is correlated across
+        # samples by definition, so it does not average down at all
+        # (METHODS §3.3) and the interval it was quoted at cannot change it.
+        # Saying so beats silently ignoring the field.
+        logger.warning(
+            "%s: '%s' declares a systematic uncertainty at %s. A systematic "
+            "error does not average down, so the averaging interval has no "
+            "effect on it and the figure is used as given.",
+            path,
+            variable,
+            spec.systematic.at_width,
+        )
     return ResolvedUncertainty(
         random=random,
         systematic=systematic,
         random_source=random_source,
         systematic_source=systematic_source,
         decorrelation_timescale=spec.decorrelation_timescale,
+        at_width=at_width,
+        at_width_status=status,
+        n_eff=n_eff,
     )
 
 
@@ -298,3 +348,108 @@ def _reported_sigma(
     # An uncertainty without a surviving measurement is meaningless, and
     # carrying one would let a masked sample re-enter a weighted fit.
     return np.where(np.asarray(values.isna()), np.nan, sigma)
+
+
+def rescale_to_cell(
+    sigma: npt.NDArray[np.float64],
+    *,
+    at_width: str,
+    decorrelation_timescale: str | None,
+    cell_width_ns: npt.NDArray[np.int64] | None,
+    variable: str,
+    path: Path,
+) -> tuple[npt.NDArray[np.float64], str, float | None]:
+    r"""Move a declared sigma from the interval it was quoted at onto the cell.
+
+    The case this exists for is ordinary and easy to get wrong: an instrument
+    specification states a precision at one second, and the data product is a
+    one-minute mean. Read as-is, that sigma overstates the noise of the
+    published numbers; read with a naive :math:`\sqrt{N}`, it understates it,
+    usually badly.
+
+    **Rescaling happens only when a decorrelation timescale is declared.**
+    How much averaging helps depends entirely on how quickly the error
+    forgets itself, and nothing in a file reveals that. With
+    :math:`\rho_1 = e^{-w/\tau}` for a quoted interval *w*, the effective
+    sample count over a cell holding *N* of them is
+
+    .. math:: N_\mathrm{eff} = N\,\frac{1-\rho_1}{1+\rho_1},
+
+    clamped to :math:`[1, N]` (METHODS §3.4), and
+    :math:`\sigma_\mathrm{cell} = \sigma / \sqrt{N_\mathrm{eff}}`. The
+    difference is not academic: at :math:`\tau = 20` s, sixty one-second
+    samples are worth about 1.5 independent ones, so the naive answer is
+    over six times too confident. Guessing a timescale in order to apply a
+    correction would be worse than applying none, so an undeclared timescale
+    leaves the sigma alone and says so.
+
+    **Scaling up is refused.** When the cells are *finer* than the quoted
+    interval, recovering the noise at the shorter scale would mean assuming
+    the error is white all the way down, which is a claim about the
+    instrument that no manifest has made.
+
+    Parameters
+    ----------
+    sigma : numpy.ndarray
+        Per-point sigma as declared.
+    at_width : str
+        The averaging interval it was quoted at.
+    decorrelation_timescale : str or None
+        The error's correlation timescale, if declared.
+    cell_width_ns : numpy.ndarray or None
+        Each row's cell width; None when the stream has no cells.
+    variable : str
+        Canonical name, for messages.
+    path : pathlib.Path
+        Something path-like naming the data, for messages.
+
+    Returns
+    -------
+    numpy.ndarray
+        The sigma, rescaled or unchanged.
+    str
+        ``'rescaled'`` or the reason it was not.
+    float or None
+        Median effective sample count when rescaled.
+    """
+    if cell_width_ns is None:
+        logger.warning(
+            "%s: '%s' declares uncertainty at %s but the stream has no cells, so "
+            "the figure is used as given.",
+            path,
+            variable,
+            at_width,
+        )
+        return sigma, "unscaled: stream has no cells", None
+
+    quoted_ns = int(pd.Timedelta(at_width).value)
+    counts = np.asarray(cell_width_ns, dtype="float64") / quoted_ns
+    if np.all(counts <= 1.0):
+        logger.warning(
+            "%s: '%s' declares uncertainty at %s, which is longer than its own "
+            "cells. Recovering finer-scale noise would assume the error is white "
+            "below the quoted interval, which nothing here has stated, so the "
+            "figure is used as given.",
+            path,
+            variable,
+            at_width,
+        )
+        return sigma, "unscaled: cells are finer than the quoted interval", None
+
+    if decorrelation_timescale is None:
+        logger.warning(
+            "%s: '%s' declares uncertainty at %s and its cells are wider, but no "
+            "decorrelation_timescale is declared, so how much averaging helps is "
+            "unknowable and the figure is used as given. Declare one to have it "
+            "rescaled (METHODS 3.4).",
+            path,
+            variable,
+            at_width,
+        )
+        return sigma, "unscaled: no decorrelation_timescale", None
+
+    tau_ns = float(pd.Timedelta(decorrelation_timescale).value)
+    rho = float(np.exp(-quoted_ns / tau_ns))
+    n_eff = np.clip(counts * (1.0 - rho) / (1.0 + rho), 1.0, counts)
+    rescaled: npt.NDArray[np.float64] = sigma / np.sqrt(n_eff)
+    return rescaled, "rescaled", float(np.median(n_eff))

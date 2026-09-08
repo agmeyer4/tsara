@@ -540,3 +540,51 @@ def test_a_clock_correction_is_recorded_but_not_reapplied() -> None:
         np.asarray(stream["time"].values, dtype="datetime64[ns]"),
         np.asarray(frame.index, dtype="datetime64[ns]"),
     )
+
+
+def test_a_rescaled_sigma_says_so_in_the_saved_product() -> None:
+    """ "This sigma describes a different interval from its own cells" cannot
+    be re-derived from the numbers, so it is written down."""
+    instrument = _instrument(
+        ch4={
+            "column": "CH4_dry",
+            "role": "gas",
+            "units": "ppm",
+            "uncertainty": {
+                "random": {"mode": "declared", "absolute": 1.0, "at_width": "1s"},
+                "decorrelation_timescale": "1ns",
+            },
+        }
+    )
+    stream = build_stream(
+        _bounded_frame(),
+        instrument,
+        name="picarro",
+        platform=StationaryPlatform(latitude=40.0, longitude=-111.0),
+        support=_resolved(),
+    )
+    assert stream["ch4"].attrs["uncertainty_at_width"] == "1s"
+    assert stream["ch4"].attrs["uncertainty_at_width_status"] == "rescaled"
+    assert stream["ch4"].attrs["uncertainty_n_eff"] == pytest.approx(2.0)
+
+
+def test_an_unrescalable_sigma_records_why_not() -> None:
+    instrument = _instrument(
+        ch4={
+            "column": "CH4_dry",
+            "role": "gas",
+            "units": "ppm",
+            "uncertainty": {"random": {"mode": "declared", "absolute": 1.0, "at_width": "1s"}},
+        }
+    )
+    stream = build_stream(
+        _bounded_frame(),
+        instrument,
+        name="picarro",
+        platform=StationaryPlatform(latitude=40.0, longitude=-111.0),
+        support=_resolved(),
+    )
+    assert stream["ch4"].attrs["uncertainty_at_width_status"] == (
+        "unscaled: no decorrelation_timescale"
+    )
+    assert "uncertainty_n_eff" not in stream["ch4"].attrs
