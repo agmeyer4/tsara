@@ -33,7 +33,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["build_time_index", "to_utc_naive_ns"]
+__all__ = ["build_boundary_index", "build_time_index", "to_utc_naive_ns"]
 
 #: Sentinel accepted by ``TimeParsing.format`` meaning "epoch seconds".
 _UNIX = "unix"
@@ -224,3 +224,34 @@ def to_utc_naive_ns(times: pd.DatetimeIndex, timezone: str, path: Path) -> pd.Da
                 "in UTC avoids this entirely."
             ) from exc
     return pd.DatetimeIndex(result.astype("datetime64[ns]"), name=TIME_INDEX_NAME)
+
+
+def build_boundary_index(
+    frame: pd.DataFrame, column: str, spec: TimeParsing, path: Path
+) -> pd.DatetimeIndex:
+    """Parse one cell-boundary column using the loader's own time conventions.
+
+    A boundary is a timestamp in the same file, written the same way, so it
+    is parsed by the same rules: the loader's declared format and timezone.
+    Re-deriving those separately is how a stop column ends up an hour away
+    from its own start column on a campaign that logs in local time.
+
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        The file's rows.
+    column : str
+        Column holding the boundary.
+    spec : TimeParsing
+        The loader's time-parsing declaration; only its format and timezone
+        are used, since a boundary is always a single column.
+    path : pathlib.Path
+        File being read, for messages.
+
+    Returns
+    -------
+    pandas.DatetimeIndex
+        Tz-naive UTC nanosecond timestamps, with ``NaT`` where a value did
+        not parse.
+    """
+    return build_time_index(frame, spec.model_copy(update={"columns": (column,)}), path)

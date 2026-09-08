@@ -19,7 +19,12 @@ import pytest
 
 from tsara.config.manifest import InstrumentConfig, Manifest, StationaryPlatform
 from tsara.core.bundle import BUNDLE_MANIFEST, BUNDLE_STREAMS_DIR, TsaraBundleError
-from tsara.core.naming import LOD_COUNT_KEY, TIME_BOUNDS_VAR
+from tsara.core.naming import (
+    LOD_COUNT_KEY,
+    RAW_TIME_START_COLUMN,
+    RAW_TIME_STOP_COLUMN,
+    TIME_BOUNDS_VAR,
+)
 from tsara.core.support import (
     CellBounds,
     attach_time_bounds,
@@ -30,6 +35,7 @@ from tsara.ingest.base import TsaraIngestError
 from tsara.ingest.bundle import BUNDLE_MANIFEST_CONFIG, load_streams, save_streams
 from tsara.ingest.campaign import (
     StreamCollection,
+    _ingest_instrument,
     _merge_file_attrs,
     ingest_campaign,
 )
@@ -605,3 +611,69 @@ def test_streams_that_already_carry_cells_are_left_alone(
     assert "assumed cells" not in caplog.text
     for name, bounds in expected.items():
         assert np.array_equal(reloaded[name][TIME_BOUNDS_VAR].values, bounds), name
+
+
+# ---------------------------------------------------------------------------
+# Support resolution across an instrument's files (Phase 3.5)
+# ---------------------------------------------------------------------------
+
+
+def test_each_file_keeps_its_own_cadence(tmp_path: Path) -> None:
+    """Cadence is measured per FILE, and that is load-bearing.
+
+    One instrument's files can legitimately disagree: in the target archive
+    some met records run at 1 s in one file and 5 s in another. A single
+    instrument-wide cadence would give one of them cells of the wrong width,
+    and it would be a whole file's worth rather than a stray row.
+    """
+    base = tmp_path / "data"
+    _write_csv(
+        base / "picarro" / "a_fast.csv",
+        [("2026-01-01 00:00:00", 1900.0), ("2026-01-01 00:00:01", 1901.0)],
+    )
+    _write_csv(
+        base / "picarro" / "b_slow.csv",
+        [("2026-01-01 01:00:00", 1902.0), ("2026-01-01 01:00:05", 1903.0)],
+    )
+    ingested = _ingest_instrument(
+        _manifest(base), "picarro", _manifest(base).instruments["picarro"]
+    )
+    widths = (ingested.frame[RAW_TIME_STOP_COLUMN] - ingested.frame[RAW_TIME_START_COLUMN]).tolist()
+    assert widths == [pd.Timedelta("1s")] * 2 + [pd.Timedelta("5s")] * 2
+    # And so no single nominal width is reported for the instrument.
+    assert ingested.support.width_ns is None
+    assert ingested.support.width_source == "inferred"
+
+
+def test_a_gap_does_not_widen_the_cell_before_it(tmp_path: Path) -> None:
+    """The rule the whole width design rests on: a dropped row leaves a hole
+    in the tiling, never a wider cell. Under the rejected alternative the
+    widest cell in the real archive would have been 23 days."""
+    base = tmp_path / "data"
+    _write_csv(
+        base / "picarro" / "a.csv",
+        [
+            ("2026-01-01 00:00:00", 1900.0),
+            ("2026-01-01 00:00:01", 1901.0),
+            ("2026-01-01 03:00:00", 1902.0),
+            ("2026-01-01 03:00:01", 1903.0),
+        ],
+    )
+    ingested = _ingest_instrument(
+        _manifest(base), "picarro", _manifest(base).instruments["picarro"]
+    )
+    widths = (ingested.frame[RAW_TIME_STOP_COLUMN] - ingested.frame[RAW_TIME_START_COLUMN]).unique()
+    assert list(widths) == [pd.Timedelta("1s")]
+
+
+def test_boundaries_survive_sorting_and_de_duplication(tmp_path: Path) -> None:
+    """Cells ride along as columns precisely so this needs no special care."""
+    ingested = _ingest_instrument(
+        _manifest(_archive(tmp_path)),
+        "picarro",
+        _manifest(_archive(tmp_path)).instruments["picarro"],
+    )
+    assert ingested.frame.index.is_monotonic_increasing
+    starts = ingested.frame[RAW_TIME_START_COLUMN]
+    assert starts.is_monotonic_increasing
+    assert (ingested.frame.index - starts == pd.Timedelta("1s")).all()

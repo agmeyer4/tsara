@@ -18,6 +18,7 @@ import pandas as pd
 import pytest
 
 from tsara.config.manifest import CSVLoader
+from tsara.core.naming import RAW_TIME_START_COLUMN, RAW_TIME_STOP_COLUMN
 from tsara.ingest import registry
 from tsara.ingest.base import (
     TIME_INDEX_NAME,
@@ -387,3 +388,67 @@ def test_check_dropped_rows_treats_an_empty_total_as_total_loss() -> None:
             max_fraction=0.5,
             logger=logging.getLogger("tsara.ingest.test"),
         )
+
+
+# ---------------------------------------------------------------------------
+# The optional cell-boundary columns (Phase 3.5)
+# ---------------------------------------------------------------------------
+
+
+def _bounded(**columns: object) -> RawTable:
+    index = pd.DatetimeIndex(
+        pd.date_range("2026-01-01", periods=3, freq="60s").as_unit("ns"), name="time"
+    )
+    return RawTable(
+        frame=pd.DataFrame({"ch4": [1.0, 2.0, 3.0], **columns}, index=index),
+        path=Path("f.csv"),
+    )
+
+
+def test_boundaries_are_optional() -> None:
+    check_raw_table(_bounded(), reader_name="t")
+
+
+def test_a_start_without_its_stop_is_refused() -> None:
+    """One boundary alone describes no interval."""
+    table = _bounded(**{RAW_TIME_START_COLUMN: pd.date_range("2026-01-01", periods=3, freq="60s")})
+    with pytest.raises(TsaraIngestError, match="not its partner"):
+        check_raw_table(table, reader_name="t")
+
+
+def test_boundaries_must_be_nanosecond_datetimes() -> None:
+    """A float column would survive every stage and mean nothing."""
+    table = _bounded(
+        **{RAW_TIME_START_COLUMN: [0.0, 1.0, 2.0], RAW_TIME_STOP_COLUMN: [1.0, 2.0, 3.0]}
+    )
+    with pytest.raises(TsaraIngestError, match="must be\n?\\s*tz-naive datetime64"):
+        check_raw_table(table, reader_name="t")
+
+
+def test_a_missing_boundary_is_refused() -> None:
+    """NaT sorts and compares happily while placing a cell nowhere."""
+    starts = pd.DatetimeIndex(["2026-01-01", pd.NaT, "2026-01-01 00:02"]).as_unit("ns")
+    table = _bounded(
+        **{
+            RAW_TIME_START_COLUMN: starts,
+            RAW_TIME_STOP_COLUMN: pd.DatetimeIndex(
+                ["2026-01-01 00:01", "2026-01-01 00:02", "2026-01-01 00:03"]
+            ).as_unit("ns"),
+        }
+    )
+    with pytest.raises(TsaraIngestError, match="missing value"):
+        check_raw_table(table, reader_name="t")
+
+
+def test_a_stop_before_its_start_is_refused() -> None:
+    """A negative overlap clips to zero, so the sample would silently stop
+    contributing to anything rather than failing."""
+    index = pd.date_range("2026-01-01", periods=3, freq="60s").as_unit("ns")
+    table = _bounded(
+        **{
+            RAW_TIME_START_COLUMN: index,
+            RAW_TIME_STOP_COLUMN: index - pd.Timedelta("10s"),
+        }
+    )
+    with pytest.raises(TsaraIngestError, match="precedes its start"):
+        check_raw_table(table, reader_name="t")

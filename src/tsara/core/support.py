@@ -308,7 +308,7 @@ class CellBounds:
     def from_label(
         cls,
         times_ns: npt.NDArray[np.int64],
-        width_ns: int,
+        width_ns: int | npt.NDArray[np.int64],
         label: SupportLabel,
     ) -> CellBounds:
         """Build cells of a fixed width from timestamps and a label.
@@ -317,11 +317,18 @@ class CellBounds:
         ----------
         times_ns : numpy.ndarray
             The file's timestamps as int64 epoch nanoseconds.
-        width_ns : int
-            Cell width. Must be strictly positive: a zero-width cell has zero
+        width_ns : int or numpy.ndarray
+            Cell width, one value for every row or a single value for all of
+            them. Must be strictly positive: a zero-width cell has zero
             measure, therefore zero weight in every overlap, and would vanish
             from the analysis silently. Real files do declare them, so this
             is a live case rather than a formality.
+
+            The per-row form exists because one instrument's files can
+            legitimately disagree about cadence -- measured, some met records
+            run at 1 s in one file and 5 s in another -- so a campaign's cells
+            are built from each file's own sampling interval rather than from
+            a single number for the whole instrument.
         label : {'start', 'mid', 'end', 'unknown'}
             Which point of the cell the timestamp names. ``'unknown'`` is
             treated as ``'mid'``.
@@ -336,25 +343,36 @@ class CellBounds:
         TsaraSupportError
             If ``width_ns`` is not strictly positive.
         """
-        if width_ns <= 0:
+        widths = np.asarray(width_ns, dtype=np.int64)
+        if widths.ndim not in (0, 1):
             raise TsaraSupportError(
-                f"Cell width must be strictly positive, got {width_ns} ns. A "
+                f"Cell width must be a scalar or one value per row, got shape {widths.shape}."
+            )
+        if np.any(widths <= 0):
+            smallest = int(widths.min()) if widths.size else 0
+            raise TsaraSupportError(
+                f"Cell width must be strictly positive, got {smallest} ns. A "
                 "zero-width cell carries zero weight in every overlap and would "
                 "disappear from the analysis without a word."
             )
         times = np.asarray(times_ns, dtype=np.int64)
+        if widths.ndim == 1 and widths.shape != times.shape:
+            raise TsaraSupportError(
+                f"Got {widths.size} cell width(s) for {times.size} timestamp(s); "
+                "a per-row width needs one value per row."
+            )
         if label == "start":
             start = times
         elif label == "end":
-            start = times - width_ns
+            start = times - widths
         else:
             # Centred, and offset by floor(width/2) so that `start + width`
             # reproduces the width exactly for odd widths too. Splitting as
             # (w//2, w - w//2) instead would make the cell asymmetric by a
             # nanosecond, which is harmless but would break the "every width
             # is identical" invariant that makes tests exact.
-            start = times - width_ns // 2
-        return cls(start_ns=start, stop_ns=start + width_ns)
+            start = times - widths // 2
+        return cls(start_ns=np.asarray(start, dtype=np.int64), stop_ns=start + widths)
 
     def floor_width(self, minimum_ns: int) -> tuple[CellBounds, int]:
         """Widen any cell narrower than ``minimum_ns``, keeping it centred.

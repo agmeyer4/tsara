@@ -709,3 +709,20 @@ def test_pinning_widens_a_coarser_time_axis_instead_of_destroying_it(
             back[TIME_COORD].values.astype("datetime64[ns]"),
             times.values.astype("datetime64[ns]"),
         )
+
+
+def test_a_per_row_width_must_have_one_value_per_row() -> None:
+    with pytest.raises(TsaraSupportError, match="one value per row"):
+        CellBounds.from_label(_times(0, SECOND, 4), np.full(3, SECOND, dtype=np.int64), "mid")
+
+
+def test_a_width_of_the_wrong_shape_is_refused() -> None:
+    with pytest.raises(TsaraSupportError, match="scalar or one value per row"):
+        CellBounds.from_label(_times(0, SECOND, 4), np.ones((2, 2), dtype=np.int64), "mid")
+
+
+def test_per_row_widths_build_cells_of_differing_size() -> None:
+    """The mixed-cadence case: one instrument's files can disagree."""
+    widths = np.array([SECOND, SECOND, 5 * SECOND], dtype=np.int64)
+    bounds = CellBounds.from_label(_times(0, 10 * SECOND, 3), widths, "start")
+    assert list(bounds.width_ns) == [SECOND, SECOND, 5 * SECOND]

@@ -44,7 +44,8 @@ import pandas as pd
 from tsara.config.manifest import ParquetLoader
 from tsara.ingest.base import TIME_INDEX_NAME, RawTable, TsaraIngestError, check_dropped_rows
 from tsara.ingest.registry import register_reader
-from tsara.ingest.timeparse import build_time_index, to_utc_naive_ns
+from tsara.ingest.support import attach_declared_boundaries
+from tsara.ingest.timeparse import build_boundary_index, build_time_index, to_utc_naive_ns
 
 if TYPE_CHECKING:  # pragma: no cover
     from pathlib import Path
@@ -123,7 +124,31 @@ def read_parquet(path: Path, loader: LoaderConfig, /) -> RawTable:
         times = times[valid]
 
     frame = frame.set_axis(pd.DatetimeIndex(times, name=TIME_INDEX_NAME), axis=0)
+    frame = attach_declared_boundaries(
+        frame,
+        loader.support,
+        parse=lambda column: _boundary_index(frame, column, loader, path),
+        path=path,
+        max_dropped_fraction=loader.max_dropped_fraction,
+        reader_logger=logger,
+    )
     return RawTable(frame=frame, path=path, attrs={})
+
+
+def _boundary_index(
+    frame: pd.DataFrame, column: str, loader: ParquetLoader, path: Path
+) -> pd.DatetimeIndex:
+    """Parse a boundary column, with or without a declared time format.
+
+    Parquet stores real types, so a boundary column is usually already a
+    datetime and needs no format at all -- which is exactly why ``time:`` is
+    optional on this loader. When one *is* declared, the boundary is parsed
+    by the same rules as the time axis, so the two cannot end up interpreting
+    the same file differently.
+    """
+    if loader.time is not None:
+        return build_boundary_index(frame, column, loader.time, path)
+    return to_utc_naive_ns(pd.DatetimeIndex(pd.to_datetime(frame[column])), "UTC", path)
 
 
 def _index_from_file(frame: pd.DataFrame, path: Path) -> pd.DatetimeIndex:

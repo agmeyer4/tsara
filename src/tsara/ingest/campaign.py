@@ -44,20 +44,26 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 
-from tsara.core.naming import LOD_COUNT_KEY
+from tsara.core.naming import LOD_COUNT_KEY, SupportLabel
+from tsara.core.support import nominal_cadence_ns
+from tsara.core.timebase import epoch_ns
 from tsara.ingest.base import TsaraIngestError
 from tsara.ingest.crawler import crawl
 from tsara.ingest.registry import read_file
 from tsara.ingest.streams import build_stream
+from tsara.ingest.support import LABEL_HINT_KEY, ResolvedSupport, resolve_support
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Iterator, Sequence
     from pathlib import Path
 
+    import numpy.typing as npt
     import xarray as xr
 
     from tsara.config.manifest import InstrumentConfig, Manifest
@@ -126,6 +132,10 @@ class _Ingested:
     """One instrument's concatenated table plus the files behind it."""
 
     frame: pd.DataFrame
+    #: What TSARA concluded about this instrument's cells, and on what basis.
+    #: Resolved here rather than in stream assembly because the per-file
+    #: boundaries this is derived from only exist before concatenation.
+    support: ResolvedSupport
     sources: list[Path] = field(default_factory=list)
     #: What the files said about themselves, reconciled across all of them.
     #: See :func:`_merge_file_attrs`.
@@ -267,6 +277,14 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
     frames: list[pd.DataFrame] = []
     sources: list[Path] = []
     file_attrs: list[Mapping[str, object]] = []
+    # Cadence is measured per FILE, and that is load-bearing rather than
+    # incidental: one instrument's files can legitimately disagree about it.
+    # Measured in the target archive, some met records run at 1 s in one file
+    # and 5 s in another, and a single instrument-wide cadence would give one
+    # of them cells of the wrong width. Here is the only place the per-file
+    # boundaries still exist.
+    cadences: list[int | None] = []
+    hints: list[str | None] = []
     failures = 0
     for match in matches:
         try:
@@ -280,6 +298,9 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
             continue
         frames.append(table.frame)
         sources.append(match.path)
+        cadences.append(nominal_cadence_ns(epoch_ns(pd.DatetimeIndex(table.frame.index))))
+        hint = table.attrs.get(LABEL_HINT_KEY)
+        hints.append(str(hint) if hint is not None else None)
         # Kept, not discarded: this is what the file said about *itself*
         # (PI, mission, revision, LOD flags), as distinct from what the
         # manifest says about it. Dropping it here used to make the reader's
@@ -304,11 +325,71 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
     n_within = sum(int(f.index.duplicated(keep="first").sum()) for f in frames)
 
     combined = frames[0] if len(frames) == 1 else pd.concat(frames)
+    # Resolved before ordering, because the per-row width array below is
+    # built in concatenation order; sorting first would misalign every file's
+    # cadence with the rows it belongs to.
+    combined, support = resolve_support(
+        combined,
+        instrument.loader.support,
+        widths_ns=_per_row_widths(frames, cadences),
+        label_hint=_agreed_hint(hints),
+        path=sources[0] if len(sources) == 1 else Path(f"<{len(sources)} files>"),
+    )
     return _Ingested(
         frame=_order(combined, name, n_within=n_within),
         sources=sources,
         file_attrs=_merge_file_attrs(file_attrs),
+        support=support,
     )
+
+
+def _per_row_widths(
+    frames: Sequence[pd.DataFrame], cadences: Sequence[int | None]
+) -> npt.NDArray[np.int64] | None:
+    """Expand each file's measured cadence to one width per row.
+
+    A file too short to have a cadence borrows the median of the files that
+    do, which is the least-surprising stand-in and is only ever reached by a
+    file of one or two rows. When *no* file was long enough, there is nothing
+    to borrow and None says so rather than inventing a number.
+    """
+    known = [cadence for cadence in cadences if cadence is not None]
+    if not known:
+        return None
+    fallback = int(np.median(known))
+    per_file = [fallback if cadence is None else cadence for cadence in cadences]
+    return np.repeat(
+        np.asarray(per_file, dtype=np.int64),
+        np.asarray([len(frame) for frame in frames], dtype=np.int64),
+    )
+
+
+#: The label vocabulary, as a lookup that both validates and types.
+#:
+#: A hint arrives from ``RawTable.attrs``, which is untyped by design, so it
+#: has to be checked before it can be trusted as a label. A dict does that and
+#: gives the checker a typed result, where a membership test would give
+#: neither.
+_LABELS: dict[str, SupportLabel] = {
+    "start": "start",
+    "mid": "mid",
+    "end": "end",
+    "unknown": "unknown",
+}
+
+
+def _agreed_hint(hints: Sequence[str | None]) -> SupportLabel | None:
+    """Return the label hint only when every file agrees on it.
+
+    A disagreement means the instrument's files do not share a convention,
+    and picking a winner would put half of them half a cell out. Returning
+    None instead lets the resolver fall back to a centred cell, which is
+    wrong by at most half that on every file rather than fully wrong on some.
+    """
+    distinct = {hint for hint in hints if hint is not None}
+    if len(distinct) != 1 or any(hint is None for hint in hints):
+        return None
+    return _LABELS.get(distinct.pop())
 
 
 def _order(frame: pd.DataFrame, name: str, *, n_within: int = 0) -> pd.DataFrame:
