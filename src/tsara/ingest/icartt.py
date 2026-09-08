@@ -658,6 +658,12 @@ def read_icartt(path: Path, loader: LoaderConfig, /) -> RawTable:
 
     times = _build_time_index(frame, header, path, loader.max_dropped_fraction)
     frame = frame.set_axis(times, axis=0)
+    # Captured BEFORE the boundary columns are attached. The candidate list is
+    # a statement about what is in the *file*, and `attach_declared_boundaries`
+    # adds TSARA's own reserved columns -- one of which is literally named
+    # `_tsara_time_stop`, so reading the list afterwards told every correctly
+    # configured instrument that it might like to name a column TSARA invented.
+    file_columns = list(frame.columns)
     frame = attach_declared_boundaries(
         frame,
         loader.support,
@@ -668,9 +674,7 @@ def read_icartt(path: Path, loader: LoaderConfig, /) -> RawTable:
         max_dropped_fraction=loader.max_dropped_fraction,
         reader_logger=logger,
     )
-    return RawTable(
-        frame=frame, path=path, attrs=_provenance(header, lod_counts, list(frame.columns))
-    )
+    return RawTable(frame=frame, path=path, attrs=_provenance(header, lod_counts, file_columns))
 
 
 def _modal_field_count(body: list[str]) -> int:
@@ -1122,7 +1126,18 @@ def _time_like_column(
 #: alone matches the time axis itself. Used only to report what a file offers,
 #: never to decide anything -- see :mod:`tsara.ingest.support` for why
 #: guessing a boundary column is refused.
-_BOUNDARY_NAME = re.compile(r"(stop|end|mid)", re.IGNORECASE)
+#: Names that could be a cell boundary a manifest is able to *name*.
+#:
+#: ``mid`` is deliberately absent. The schema accepts a ``start_column`` and a
+#: ``stop_column``; a midpoint column is neither, so listing one answers a
+#: question the user cannot act on and invites the one manifest entry that
+#: would be silently wrong -- ``stop_column: Time_Mid`` halves every cell.
+#: Measured across all 1122 files of the 2024 archive, dropping it costs
+#: nothing: every file carrying a mid column either carries a real stop column
+#: beside it (64 files) or is one of the 20 whose *independent variable* is
+#: itself named ``Time_Mid``, where the "candidate" was the file's own time
+#: axis handed back to the user.
+_BOUNDARY_NAME = re.compile(r"(stop|end)", re.IGNORECASE)
 _TIME_NAME = re.compile(r"(time|utc|sec)", re.IGNORECASE)
 
 #: Independent-variable names that justify a label without guessing.
@@ -1155,7 +1170,19 @@ def _label_hint(header: IcarttHeader) -> str | None:
 
 
 def _boundary_candidates(columns: list[str]) -> tuple[str, ...]:
-    """Return columns that look like cell boundaries, as evidence only."""
+    """Return columns a manifest could *name* as a cell boundary, as evidence.
+
+    Read by a human deciding what to write in ``support.start_column`` /
+    ``support.stop_column``, so every entry has to be something they can
+    actually write there. Two kinds of entry are not, and both used to appear:
+    a midpoint column, which fits neither field (see :data:`_BOUNDARY_NAME`),
+    and TSARA's own reserved boundary columns, which the caller excludes by
+    reading the file's columns before they are attached.
+
+    Measured across the 2024 archive: 169 of 1122 files offer a boundary
+    column a manifest could name -- ``Time_Stop`` on 123, ``StopTime_UTC`` on
+    35 and ``iWAS_Stop_UTC`` on 11 -- and every one of them is now actionable.
+    """
     return tuple(
         column for column in columns if _BOUNDARY_NAME.search(column) and _TIME_NAME.search(column)
     )

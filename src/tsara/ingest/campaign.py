@@ -327,10 +327,6 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
             len(matches),
         )
 
-    # Counted here, where the per-file boundaries still exist. After
-    # concatenation the two causes are indistinguishable.
-    n_within = sum(int(f.index.duplicated(keep="first").sum()) for f in frames)
-
     combined = frames[0] if len(frames) == 1 else pd.concat(frames)
     # Resolved before ordering, because the per-row width array below is
     # built in concatenation order; sorting first would misalign every file's
@@ -346,11 +342,63 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
     # centring can reorder rows when widths vary per file, so the sort has to
     # see the axis the stream will actually carry.
     combined = shift_and_centre(combined, shift_ns=_shift_ns(instrument.time_shift, name=name))
+    # Counted last, on the axis the rows are actually de-duplicated on. See
+    # `_n_within_file` for why counting it any earlier was wrong.
+    n_within = _n_within_file(combined.index, [len(frame) for frame in frames])
     return _Ingested(
         frame=_order(combined, name, n_within=n_within),
         sources=sources,
         file_attrs=_merge_file_attrs(file_attrs),
         support=support,
+    )
+
+
+def _n_within_file(index: pd.Index, sizes: Sequence[int]) -> int:
+    """Count the duplicate timestamps one file explains, on the FINAL axis.
+
+    :func:`_order` reports its dropped rows split two ways -- duplicated
+    inside a single file, or duplicated because two files cover the same
+    period -- because the two call for opposite fixes. That split is only
+    meaningful if both halves are counted on the *same* time axis, and they
+    were not: within-file duplicates were counted on each file's raw index
+    before concatenation, while the total is counted after centring.
+
+    Centring is not a translation when widths vary per row. A row whose cell
+    is wide moves further than its neighbour, so two rows sharing a raw
+    timestamp but declaring different stops land on *different* midpoints and
+    stop being duplicates. The raw count could then exceed the final total
+    and the reported overlap came out **negative** -- pointing a user at the
+    manifest's path templates for rows that no two files ever shared. That is
+    the same wrong accusation the Phase-3 walkthrough removed from this
+    message once already, arrived at from the other direction.
+
+    Counting per file on the final axis makes the split exact rather than
+    approximate. For one instant held by ``c_i`` rows in each of ``k`` files,
+    the total counts ``sum(c_i) - 1`` and this counts ``sum(c_i - 1)``, so the
+    remainder is ``k - 1``: the number of *extra files* holding that instant,
+    which is precisely what "overlap between files" means, and which cannot
+    be negative.
+
+    Parameters
+    ----------
+    index : pandas.Index
+        The concatenated record's timestamps, still in concatenation order --
+        which is what makes the per-file slices below correct. Neither
+        :func:`~tsara.ingest.support.resolve_support` nor
+        :func:`~tsara.ingest.support.shift_and_centre` reorders rows; the sort
+        happens afterwards, inside :func:`_order`.
+    sizes : Sequence of int
+        Row count of each file, in the same order.
+
+    Returns
+    -------
+    int
+        How many rows duplicate an earlier row *of their own file*.
+    """
+    edges = np.cumsum([0, *sizes])
+    return sum(
+        int(index[start:stop].duplicated(keep="first").sum())
+        for start, stop in zip(edges[:-1], edges[1:], strict=True)
     )
 
 
@@ -447,11 +495,12 @@ def _order(frame: pd.DataFrame, name: str, *, n_within: int = 0) -> pd.DataFrame
     duplicated = ordered.index.duplicated(keep="first")
     n_duplicate = int(duplicated.sum())
     if n_duplicate:
-        # `n_within` is counted per file before concatenation, which is
-        # what makes the split exact rather than heuristic: a timestamp
-        # repeated inside one file is still duplicated in the combined
-        # table, so it is the part of the total that overlap cannot
-        # explain, and the remainder is the part it can.
+        # `n_within` is counted per file on this same axis, which is what
+        # makes the split exact rather than heuristic: a timestamp repeated
+        # inside one file is still duplicated in the combined table, so it is
+        # the part of the total that overlap cannot explain, and the
+        # remainder is the part it can. See `_n_within_file` for why the
+        # axis, not just the grouping, is the load-bearing part.
         n_across = n_duplicate - n_within
         logger.warning(
             "Instrument '%s': dropped %d row(s) sharing a timestamp with an "

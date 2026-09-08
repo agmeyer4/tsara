@@ -38,6 +38,7 @@ from tsara.ingest.campaign import (
     StreamCollection,
     _ingest_instrument,
     _merge_file_attrs,
+    _n_within_file,
     ingest_campaign,
 )
 from tsara.ingest.streams import build_stream
@@ -666,6 +667,108 @@ def test_a_gap_does_not_widen_the_cell_before_it(tmp_path: Path) -> None:
     )
     widths = (ingested.frame[RAW_TIME_STOP_COLUMN] - ingested.frame[RAW_TIME_START_COLUMN]).unique()
     assert list(widths) == [pd.Timedelta("1s")]
+
+
+def _write_csv_cells(path: Path, rows: list[tuple[str, str, float]]) -> None:
+    """A file that states each row's own cell.
+
+    The shape 169 of the 2024 archive's 1122 ICARTT files have: a start time
+    on the axis and a companion stop column, so widths can differ row to row.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = "\n".join(f"{start},{stop},{value}" for start, stop, value in rows)
+    path.write_text(f"t,stop,CH4\n{body}\n", encoding="utf-8")
+
+
+def _cells_manifest(base: Path) -> Manifest:
+    """The same manifest, with the stop column declared."""
+    spec = _manifest(base).model_dump(mode="json")
+    spec["instruments"]["picarro"]["loader"]["support"] = {"stop_column": "stop"}
+    return Manifest.model_validate(spec)
+
+
+def test_cells_are_centred_before_the_record_is_sorted(tmp_path: Path) -> None:
+    """Centring can genuinely reorder a stream, so the sort has to come after.
+
+    With one width per row, centring is not a translation: a wide cell moves
+    its timestamp further than a narrow one. Here a 100 s cell starts first
+    but is centred *after* the 10 s cell that starts ten seconds later, so
+    sorting the raw axis and centring afterwards leaves the stream
+    non-monotonic -- which `build_stream` refuses, failing an archive that is
+    perfectly legitimate.
+
+    The ordering was already correct and already explained in a comment; what
+    was missing was anything that would notice if it changed. Swapping the two
+    calls passed the entire suite.
+    """
+    base = tmp_path / "data"
+    _write_csv_cells(
+        base / "picarro" / "a.csv",
+        [
+            ("2026-01-01 00:00:00", "2026-01-01 00:01:40", 1900.0),  # 100 s, mid :50
+            ("2026-01-01 00:00:10", "2026-01-01 00:00:20", 1901.0),  # 10 s, mid :15
+        ],
+    )
+    manifest = _cells_manifest(base)
+    ingested = _ingest_instrument(manifest, "picarro", manifest.instruments["picarro"])
+
+    assert ingested.frame.index.is_monotonic_increasing
+    # The narrow cell comes first, because its midpoint does.
+    assert ingested.frame["CH4"].tolist() == [1901.0, 1900.0]
+    assert [str(stamp) for stamp in ingested.frame.index] == [
+        "2026-01-01 00:00:15",
+        "2026-01-01 00:00:50",
+    ]
+
+
+def test_the_duplicate_split_is_counted_on_the_axis_rows_are_dropped_on(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The two halves of the dropped-row message must describe one axis.
+
+    Three rows share a start; two declare the same stop and one a longer one.
+    On the raw axis all three are duplicates, but after centring only the two
+    identical cells still collide -- so a within-file count taken before
+    centring exceeded the total taken after it, and the "overlap between
+    files" remainder came out **negative**, telling the user to check path
+    templates for a single-file instrument.
+    """
+    base = tmp_path / "data"
+    _write_csv_cells(
+        base / "picarro" / "a.csv",
+        [
+            ("2026-01-01 00:00:10", "2026-01-01 00:00:20", 1900.0),
+            ("2026-01-01 00:00:10", "2026-01-01 00:00:20", 1901.0),
+            ("2026-01-01 00:00:10", "2026-01-01 00:00:30", 1902.0),
+            ("2026-01-01 00:00:40", "2026-01-01 00:00:50", 1903.0),
+        ],
+    )
+    manifest = _cells_manifest(base)
+    with caplog.at_level(logging.WARNING):
+        ingested = _ingest_instrument(manifest, "picarro", manifest.instruments["picarro"])
+
+    # The duplicated cell is dropped; the wider cell sharing its start is not,
+    # because it describes a different interval of air.
+    assert len(ingested.frame) == 3
+    message = "\n".join(record.getMessage() for record in caplog.records)
+    assert "dropped 1 row(s)" in message
+    assert "1 duplicated within a single file" in message
+    assert "0 from overlap between files" in message
+
+
+def test_overlap_between_files_is_still_counted(tmp_path: Path) -> None:
+    """The other half of the split still works: two files, one shared cell."""
+    base = tmp_path / "data"
+    for name in ("a.csv", "b.csv"):
+        _write_csv_cells(
+            base / "picarro" / name,
+            [("2026-01-01 00:00:00", "2026-01-01 00:00:10", 1900.0)],
+        )
+    manifest = _cells_manifest(base)
+    frames = [pd.DataFrame(index=pd.DatetimeIndex(["2026-01-01 00:00:05"]))] * 2
+    assert _n_within_file(pd.concat(frames).index, [1, 1]) == 0
+    ingested = _ingest_instrument(manifest, "picarro", manifest.instruments["picarro"])
+    assert len(ingested.frame) == 1
 
 
 def test_boundaries_survive_sorting_and_de_duplication(tmp_path: Path) -> None:

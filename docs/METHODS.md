@@ -1462,9 +1462,30 @@ duplicates mean the instrument wrote two records under one timestamp (there,
 a nominally 1 Hz logger with 1 s resolution, whose duplicate rows carry
 genuinely different values), so the remedy is a resolution or averaging
 decision; overlap between files means the archive really does hold the same
-period twice, and the remedy is in the manifest's path templates. The split
-is counted per file *before* concatenation, which makes it exact rather than
-heuristic: after concatenation the two are indistinguishable.
+period twice, and the remedy is in the manifest's path templates.
+
+The split is counted **per file, on the axis the rows are actually dropped
+on**, and both halves of that sentence are load-bearing. Per file, because
+after concatenation nothing else can attribute a duplicate. On the final
+axis, because centring is not a translation once cells have per-row widths —
+a wide cell's timestamp moves further than its neighbour's, so two rows that
+shared a raw timestamp and declared different stops land on *different*
+midpoints and stop being duplicates. Counting the within-file half before
+centring and the total after it mixed two axes: the first could exceed the
+second, and the reported overlap came out **negative**, telling the reader to
+go and check the path templates of a single-file instrument. Counted on one
+axis the split is exact and provably non-negative — for an instant held by
+`c_i` rows in each of `k` files, the total is `sum(c_i) - 1` and the
+within-file part is `sum(c_i - 1)`, so the remainder is `k - 1`: the number
+of *extra files* holding that instant, which is what "overlap" means.
+
+**Cells are centred before the record is sorted.** Ingestion moves each
+timestamp onto its cell's midpoint (§10.2), and with per-row widths that can
+genuinely reorder a stream: a 100 s cell starting at `:00` is centred after a
+10 s cell starting at `:10`. Sorting the raw axis and centring afterwards
+therefore leaves a non-monotonic stream, which assembly refuses — failing an
+archive that is perfectly legitimate. So the sort must see the axis the
+stream will actually carry.
 
 **What a file said about itself reaches the stream.** A reader returns the
 file's own declarations — an ICARTT header's PI, mission, revision, platform
@@ -1695,9 +1716,23 @@ Recorded **per field** — `tsara_support_label_source`,
 `_width_source`, `_method_source` — because the three are established
 independently. A stationary analyzer whose file carries a stop column and
 whose manifest declares `method: mean` is honestly reported / reported /
-declared, and one label per stream could not say that. Reconciling several
-files takes the **weakest** value rather than the majority, so one
-undocumented file cannot hide inside a well-documented instrument.
+declared, and one label per stream could not say that.
+
+**Nothing is reconciled by vote.** A manifest declares support per *loader*,
+so every file of an instrument shares whatever it says, and the two things
+that genuinely vary file to file are handled more strictly than a majority
+would handle them. A **width** measured per file stays per row, and the
+stream reports no single nominal width rather than an average nobody could
+use. A **label** inferred from an ICARTT independent variable is used only
+when every file agrees — one disagreement, or one file offering no hint at
+all, drops the whole instrument to `unknown` and a centred cell, since
+picking a winner would put half the files half a cell out. An instrument is
+only as documented as its least documented file.
+
+(An earlier draft reconciled a *list* of provenance values by taking the
+weakest of them. It was removed when the audit in §10.9 showed nothing ever
+built such a list: support being per loader, there was never more than one
+value to reconcile.)
 
 Defaults admit undeclared files rather than refusing them: an unknown label is
 treated as centred, which minimises the worst-case misplacement, and an
@@ -1711,6 +1746,14 @@ the mode because the mode needs a rounding resolution chosen in advance, and
 that choice is wrong for at least one real instrument either way: exact-mode
 agreement is 100 % on a Picarro but only 12 % on a jittery 10 Hz GPS, while
 both have a well-defined median.
+
+Measured per file, and *before* the record is sorted — which is the only
+point at which the per-file boundaries still exist. That ordering is safe
+rather than merely convenient: 15 of the 1122 ICARTT files step backwards at
+least once (56 steps in all, concentrated in one 10 Hz GPS product), and in
+every one of them the median of the positive intervals is identical before
+and after sorting. A median over intervals is unmoved by a minority of
+out-of-order rows for the same reason it is unmoved by a 23-day gap.
 
 The rejected alternative — width as the distance to the next row — was
 rejected on measurement, not on taste. Classifying every sampling interval
@@ -1769,8 +1812,18 @@ time and most of the archive agrees, but two instruments publish `Time_Mid`
 and one vendor writes `TIMESTAMP_UTC`, which is the analyzer's own resampling
 grid rather than a specification start at all. So the *name* is read rather
 than the specification trusted: a name saying `start` or `mid` justifies a
-label, anything else yields `unknown` and a centred cell. Sampled across the
-archive, 18 of 29 files infer `start` and the rest fall back to centred.
+label, anything else yields `unknown` and a centred cell. Across all 1122
+ICARTT files of the 2024 archive:
+
+| Independent variable | Files | Inferred label |
+|---|---|---|
+| `Time_Start`, `starttime_UTC`, `StartTime_UTC`, `StartTime_seconds`, `iWAS_Start_UTC` | 700 | `start` |
+| `Time_Mid` | 20 | `mid` |
+| `TIMESTAMP_UTC`, `Time_UTC`, `IgorTime`, `TIMESTAMP`, `N46_Time_UTC` | 402 | none — centred |
+
+So 64 % of the archive justifies a label from its own file and 36 % does not,
+and the 36 % is not a long tail of oddities: it is five ordinary names that
+simply do not say where the timestamp sits.
 Assuming `start` everywhere because the specification says so would put a 30 s
 error on every cell of the minute-average suite, in the direction nobody would
 think to check. A hint is used only when every file of an instrument agrees;
@@ -1800,7 +1853,30 @@ certainly means it, and "almost certainly" applied to the wrong column
 silently produces wrong cells for a whole campaign — exactly the failure this
 phase exists to prevent. The manifest names them; candidates found in a file
 are reported in `tsara_boundary_column_candidates` so a user can see what is
-available.
+available. **169 of the 1122 files carry one**: `Time_Stop` on 123,
+`StopTime_UTC` on 35 and `iWAS_Stop_UTC` on 11, concentrated in the stationary
+suite (139 files), the mobile drives (30) and the Twin Otter (20). That is
+15 % of the archive whose exact support is stated in the file and reachable
+today by adding one line of YAML.
+
+Because the list is read by a human deciding what to write in `start_column`
+or `stop_column`, every entry has to be something they can actually write
+there — and two kinds of entry were not:
+
+- **Midpoint columns.** A midpoint fits neither field, so offering one invites
+  the single manifest entry that is silently wrong: `stop_column: Time_Mid`
+  halves every cell, and a halved cell looks exactly like a correct one.
+  Excluding them costs nothing measurable: of the 84 files carrying a mid
+  column, 64 carry a real stop column beside it and the other 20 are the files
+  whose *independent variable* is itself `Time_Mid` — where the "candidate"
+  offered was the file's own time axis, handed back to its owner.
+- **TSARA's own reserved columns.** The list was read from the frame *after*
+  the declared boundaries had been attached as `_tsara_time_start` /
+  `_tsara_time_stop`, and the second of those matches any rule that looks for
+  a stop. Every instrument that had already been configured correctly was
+  therefore told, in its own provenance, that it might like to name a column
+  TSARA invented. The list is now taken before they are attached, so it
+  describes the file rather than the reader.
 
 ### 10.7 Clock offset is not support
 
@@ -1930,11 +2006,35 @@ exporter, and that is the price of the decision above: a round trip through a
 TSARA-written ICARTT would demonstrate the writer and reader agreeing with
 each other rather than either matching FFI-1001.
 
+A third round aimed at the **readers and the orchestrator** — the layer that
+decides what interval each row describes and in what order the deciding
+happens — put five bugs to the whole suite rather than the round trip alone:
+a clock correction that moves the index but not the cell it names, sorting
+before centring, a file's stated cells overridden by an assumed `start`
+label, ICARTT trusting the specification instead of reading the independent
+variable's name, and a cell whose stop precedes its start accepted. The round
+trip caught **one of five** (it writes one label and one width, so most of
+this layer is invisible to it); the suite caught **four**.
+
+The miss was *sorting before centring* — the one ordering decision this stage
+is built on, explained in a comment and enforced by nothing. Swapping the two
+calls passed all 1072 tests. It now has a test: an instrument whose 100 s cell
+starts before a 10 s cell and is centred after it, where the wrong order
+leaves a non-monotonic stream. Three further mutations were added for the
+defects this stage found by hand — the duplicate split counted on two
+different axes, the candidate list read after TSARA attaches its own columns,
+and a midpoint offered as a boundary. The suite now catches **eight of
+eight**.
+
 End to end on the real archive, the stationary Picarro suite (50,400 rows
 across 35 days) ingests three ways to the same 60 s start-labelled cells at
 coverage 1.000, by three independent routes that each say honestly how they
 know: `reported` from the file's stop column, `declared` from the manifest,
-and `inferred` from the `StartTime_UTC` column name.
+and `inferred` from the `StartTime_UTC` column name. Four other real shapes
+read correctly at the `reported` rung, including one worth naming: the
+stationary POPS instrument declares **59 s cells on a 60 s cadence**, so the
+cadence-inferred reading of it would have been a second too wide on every
+row, in the direction that overlaps its neighbour.
 
 ### 10.10 Known limits, deliberately not modelled
 

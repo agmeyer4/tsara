@@ -374,6 +374,56 @@ def test_boundary_columns_are_reported_as_evidence_never_guessed(
     assert RAW_TIME_STOP_COLUMN not in table.frame.columns
 
 
+def test_a_midpoint_column_is_not_offered_as_a_boundary(tmp_path: Path) -> None:
+    """A midpoint fits neither `start_column` nor `stop_column`.
+
+    Listing one answers a question the user cannot act on, and invites the
+    single manifest entry that would be silently wrong: `stop_column:
+    Time_Mid` halves every cell, and a halved cell looks exactly like a
+    correct one. Measured across the 2024 archive, excluding midpoints costs
+    nothing -- 64 of the 84 files carrying one carry a real stop column
+    beside it, and the other 20 are the files whose *independent variable* is
+    itself `Time_Mid`, where the candidate offered was the file's own time
+    axis handed back to its owner.
+    """
+    path = _icartt(
+        tmp_path,
+        columns=("Time_Mid", "Time_Stop", "CH4_ppb"),
+        rows=("0.0, 30.0, 60.0, 1900.0",),
+    )
+    table = read_icartt(path, ICARTTLoader(path_template="*.ict"))
+    offered = str(table.attrs[CANDIDATE_COLUMNS_KEY])
+    assert "Time_Stop" in offered
+    assert "Time_Mid" not in offered
+
+
+def test_a_file_whose_time_axis_is_a_midpoint_offers_nothing(tmp_path: Path) -> None:
+    """Twenty files in the 2024 archive publish `Time_Mid` as their
+    independent variable and carry no other interval column. There is nothing
+    for a manifest to name, and saying so is the honest answer -- their label
+    is already inferred from that same name."""
+    path = _icartt(tmp_path, independent="Time_Mid", columns=("CH4_ppb",))
+    table = read_icartt(path, ICARTTLoader(path_template="*.ict"))
+    assert CANDIDATE_COLUMNS_KEY not in table.attrs
+    assert table.attrs[LABEL_HINT_KEY] == "mid"
+
+
+def test_tsaras_own_boundary_columns_are_never_offered(tmp_path: Path) -> None:
+    """The candidate list describes the FILE.
+
+    It was read from the frame after `attach_declared_boundaries` had added
+    the reserved columns, one of which is named `_tsara_time_stop` -- so
+    every instrument that had already been configured correctly was told, in
+    its own provenance, that it might like to name a column TSARA invented.
+    """
+    path = _icartt(tmp_path, columns=("Time_Stop", "CH4_ppb"), rows=("0.0, 60.0, 1900.0",))
+    loader = ICARTTLoader(path_template="*.ict", support=SupportSpec(stop_column="Time_Stop"))
+    table = read_icartt(path, loader)
+    assert RAW_TIME_STOP_COLUMN in table.frame.columns, "the cells were read"
+    assert RAW_TIME_STOP_COLUMN not in str(table.attrs.get(CANDIDATE_COLUMNS_KEY, ""))
+    assert RAW_TIME_START_COLUMN not in str(table.attrs.get(CANDIDATE_COLUMNS_KEY, ""))
+
+
 def test_a_declared_stop_narrower_than_the_cadence_is_honoured(
     tmp_path: Path,
 ) -> None:
