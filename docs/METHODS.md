@@ -10,9 +10,10 @@ reverse-engineered from code.
 deliverable of that phase. Swappable algorithms are registered by name in the
 code (the same decorator-registry pattern used for file readers), and **every
 registered algorithm name must have a section here**. Saved TSARA outputs
-self-describe: xarray/parquet attributes record the package version, the
-resolved configuration, the algorithm names used, and the uncertainty
-provenance of every interval (see §2.4).
+self-describe: xarray/parquet attributes record the package version and the
+stage that wrote it (`tsara_version`, `tsara_stage`), the resolved
+configuration, the algorithm names used, and the uncertainty provenance of
+every interval (see §2.4).
 
 Sections marked **[stub — Phase N]** are placeholders that will be written
 when that phase is built. Nothing in a stub section is decided beyond what the
@@ -191,10 +192,12 @@ Every product carries an `uncertainty_source` label per species:
 `declared | reported | empirical`. A reader of any TSARA output can always
 determine what pedigree of uncertainty produced each interval.
 
-Provenance is recorded **per component**, because real manifests mix modes
-freely (the shipped example pairs a *reported* random component with a
-*declared* systematic one). The species-level label is then `mixed` when the
-two components disagree. Two further component values are needed to keep §2.3
+Provenance is recorded **per component**, in
+`uncertainty_source_random` and `uncertainty_source_systematic`, because real
+manifests mix modes freely (the shipped example pairs a *reported* random
+component with a *declared* systematic one). The species-level
+`uncertainty_source` is then `mixed` when the two components disagree, and the
+sigma companions carry `uncertainty_component` saying which one they are. Two further component values are needed to keep §2.3
 honest, and they are not interchangeable:
 
 | Component value | Meaning |
@@ -1784,10 +1787,14 @@ answer is labelled.
 | `assumed` | Nothing said; a default applied and labelled |
 
 Recorded **per field** — `tsara_support_label_source`,
-`_width_source`, `_method_source` — because the three are established
-independently. A stationary analyzer whose file carries a stop column and
-whose manifest declares `method: mean` is honestly reported / reported /
-declared, and one label per stream could not say that.
+`tsara_support_width_source` and `tsara_support_method_source` — because the
+three are established independently. A stationary analyzer whose file carries
+a stop column and whose manifest declares `method: mean` is honestly reported
+/ reported / declared, and one label per stream could not say that. Beside
+them the stream records the answers themselves: `tsara_support_label`, and
+`tsara_nominal_cell_width_s` where one nominal width applies to the whole
+instrument. The method needs no attribute of its own — CF already has the
+vocabulary, and it is on every variable as `cell_methods` (§10.2).
 
 **Nothing is reconciled by vote.** A manifest declares support per *loader*,
 so every file of an instrument shares whatever it says, and the two things
@@ -1820,35 +1827,49 @@ both have a well-defined median.
 
 Measured per file, and *before* the record is sorted — which is the only
 point at which the per-file boundaries still exist. That ordering is safe
-rather than merely convenient: 15 of the 1122 ICARTT files step backwards at
-least once (56 steps in all, concentrated in one 10 Hz GPS product), and in
-every one of them the median of the positive intervals is identical before
-and after sorting. A median over intervals is unmoved by a minority of
+rather than merely convenient: 22 of the 1122 ICARTT files step backwards at
+least once, 70 steps in all, spread across four unrelated products — a 1 s
+PTR-MS, the 10 s and 50 s GPS logs, a met station and a drive Aeris — and in
+**every one of the 22** the median of the positive intervals is identical
+before and after sorting. A median over intervals is unmoved by a minority of
 out-of-order rows for the same reason it is unmoved by a 23-day gap.
 
 The rejected alternative — width as the distance to the next row — was
-rejected on measurement, not on taste. Classifying every sampling interval
-across 303 files spanning the whole 2024 archive and the 2026 aligned stage,
-for continuous instruments:
+rejected on measurement, not on taste. Every sampling interval in the archive
+was classified: all 1122 ICARTT files of `Data/2024` plus the 460 parquet
+files of the 2026 aligned stage that lie outside its quarantine directories,
+1582 files in all, read through TSARA's own readers. The rule is stated here
+so the numbers can be re-derived: a file's cadence *c* is what TSARA itself
+infers, the median positive interval; for each interval, *r* = Δt / *c*; it is
+jitter when |*r* − 1| ≤ 0.25, a dropped row when *r* ≥ 1.75 and *r* is within
+0.25 of an integer, and something else otherwise. Per-file fractions,
+averaged over files:
 
 | What the interval is | Mean fraction |
 |---|---|
-| Jitter around the file's one nominal cadence | 0.99218 |
-| A dropped row (an integer multiple of the cadence) | 0.00570 |
-| Genuinely something else | 0.00211 |
+| Jitter around the file's one nominal cadence | 0.97724 |
+| A dropped row (an integer multiple of the cadence) | 0.01113 |
+| Genuinely something else | 0.01164 |
 
-Only 9 of 299 files have more than 1 % "other". So one width per file
-describes the data, and:
+So 98.8 % of all intervals are explained by one cadence per file, and the
+residual is not spread thinly across the archive but concentrated in a few
+products: 137 of 1582 files exceed 1 % "something else", and **119 of those
+137 are three sub-second 2026 instruments** — the LANL GPS at 21.7 %, whose
+stamps are ≈0.1 s apart and heavily jittered, and the two LANL Aeris
+directories. Restricted to the 1122 ICARTT files the residual is 0.585 %,
+with 18 files above 1 %. The rule is therefore well founded for the gas
+records this package exists to analyse, and its known weak case is a
+sub-second product whose own timing is irregular. So:
 
 > **A dropped row leaves a hole in the tiling. It never produces a wider
 > cell.**
 
-Under the rejected rule the widest single cell in that sample would have been
-**23.3 days** — a 10 s nominal GPS record whose file spans a campaign. 33 of
-299 files have a gap exceeding 100× their cadence. Each stream therefore
-carries a duty-cycle diagnostic, `tsara_cell_coverage`, the share of the
-record's extent that cells actually cover: median 1.0000 across the sample,
-with 32 of 299 files below 0.95 and one at 0.050.
+Under the rejected rule the widest single cell would have been **23.3 days** —
+a 10 s nominal GPS record whose file spans a campaign — and 84 of the 1582
+files have a gap exceeding 100× their cadence. Each stream therefore carries a
+duty-cycle diagnostic, `tsara_cell_coverage`, the share of the record's extent
+that cells actually cover: median 1.0001 archive-wide, with 78 files below
+0.95 and one at 0.024.
 
 Cadence is measured **per file**, not per instrument, and that is
 load-bearing: some met records in the archive run at 1 s in one file and 5 s
@@ -1898,7 +1919,10 @@ simply do not say where the timestamp sits.
 Assuming `start` everywhere because the specification says so would put a 30 s
 error on every cell of the minute-average suite, in the direction nobody would
 think to check. A hint is used only when every file of an instrument agrees;
-picking a winner would put half of them half a cell out.
+picking a winner would put half of them half a cell out. What the file itself
+suggested travels into the stream as `tsara_support_label_hint`, beside the
+label actually used and its provenance, so a manifest overriding a file can be
+seen to have done so.
 
 A file that states every boundary needs no label inference at all: where its
 index falls between the boundaries *is* the label. That is why an independent

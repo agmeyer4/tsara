@@ -297,3 +297,86 @@ def test_no_unreferenced_exemption_is_stale() -> None:
     now_used = sorted(n for n in UNREFERENCED if n in used)
     assert gone == [], f"UNREFERENCED names that no longer exist: {gone}"
     assert now_used == [], f"UNREFERENCED names that now have a caller: {now_used}. Drop them."
+
+
+# ---------------------------------------------------------------------------
+# Every attribute a product carries is documented
+# ---------------------------------------------------------------------------
+
+#: The methods document is where a reader looks up what an attribute means, so
+#: an attribute nobody wrote down is a number in a file with no definition.
+#: Exemptions need a reason, and `test_no_attr_exemption_is_stale` deletes the
+#: reason's shelf life.
+EXEMPT_ATTRS: dict[str, str] = {}
+
+#: Attribute names are TSARA's own vocabulary when they carry one of these
+#: prefixes. CF's own names (`bounds`, `cell_methods`, `units`) are governed by
+#: CF and documented where they are used.
+ATTR_PREFIXES = ("tsara_", "uncertainty_")
+
+
+def _attr_names() -> dict[str, str]:
+    """Every namespaced attribute name written anywhere in ``src/``.
+
+    Discovered from string constants in the syntax tree rather than from a
+    list, because the two families are spelled differently in the code: the
+    support attributes are constants in ``core.naming``, the uncertainty ones
+    are literals at the point of use. A test that enumerated either one by
+    hand would cover half the vocabulary and look complete.
+    """
+    found: dict[str, str] = {}
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            name = node.value
+            if name.startswith(ATTR_PREFIXES) and name.replace("_", "").isalnum():
+                found.setdefault(name, f"{path.relative_to(SRC)}:{node.lineno}")
+    return found
+
+
+def _methods_text() -> str:
+    return (SRC.parent.parent / "docs" / "METHODS.md").read_text()
+
+
+def test_discovery_finds_the_attribute_vocabulary() -> None:
+    """A test parametrized over nothing passes. Guard the discovery itself."""
+    names = _attr_names()
+    assert len(names) >= 10, f"attribute discovery found only {sorted(names)}"
+
+
+def test_every_attribute_a_product_carries_is_documented() -> None:
+    """An attribute is a promise to a reader six months later, and the only
+    place that promise is explained is METHODS.md.
+
+    This has failed for real: both provenance families were documented by
+    halves -- the support section named the label and width sources but
+    abbreviated the method one to `_method_source`, and the uncertainty
+    section named the species-level label while the per-component attributes
+    that carry it went unmentioned.
+    """
+    doc = _methods_text()
+    undocumented = {
+        name: where
+        for name, where in _attr_names().items()
+        if f"`{name}`" not in doc and name not in EXEMPT_ATTRS
+    }
+    assert undocumented == {}, (
+        "These attributes are written into products but named nowhere in "
+        f"docs/METHODS.md: {undocumented}. Document them where their family "
+        "is discussed, or record why not in EXEMPT_ATTRS."
+    )
+
+
+def test_no_attr_exemption_is_stale() -> None:
+    """An exemption for an attribute that is gone, or that is now documented
+    anyway, makes the list less trustworthy than no list."""
+    doc = _methods_text()
+    names = _attr_names()
+    gone = sorted(a for a in EXEMPT_ATTRS if a not in names)
+    documented = sorted(a for a in EXEMPT_ATTRS if f"`{a}`" in doc)
+    assert gone == [], f"EXEMPT_ATTRS names attributes no longer written: {gone}"
+    assert documented == [], (
+        f"EXEMPT_ATTRS excuses attributes that ARE documented: {documented}. Drop them."
+    )
