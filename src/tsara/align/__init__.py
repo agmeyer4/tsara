@@ -20,9 +20,12 @@ Shape of the subpackage
     The one exception to the interpolation rule: smooth fields evaluated
     between samples, under a gap guard, and the mobile position join that
     ingestion deliberately left undone (§1.2).
-
-The module for the uniform output grid lands with its stage, and it is the
-same binner with a different target.
+``grid``
+    The uniform campaign-wide support for the continuous state and a receptor
+    model's input matrix (§1.4) -- the same binner with a different target,
+    plus the rule that the period must respect the data going into it.
+``bundle``
+    Saving and reloading that grid.
 
 The arithmetic itself is not here. Overlap-weighted binning lives in
 :mod:`tsara.core.support`, angular averaging in :mod:`tsara.core.circular`,
@@ -35,7 +38,14 @@ configuration, streams and provenance.
 from __future__ import annotations
 
 from tsara.align.auxiliary import InterpolatedField, attach_positions, interpolate_onto_cells
-from tsara.align.binning import TsaraAlignError, bin_streams_onto_cells, resolve_variable
+from tsara.align.binning import (
+    TsaraAlignError,
+    bin_streams_onto_cells,
+    resolve_variable,
+    select_variables,
+)
+from tsara.align.bundle import load_grid, save_grid
+from tsara.align.grid import build_output_grid, grid_cells
 from tsara.align.pairing import PairedSpecies, pair_species
 
 __all__ = [
@@ -44,7 +54,12 @@ __all__ = [
     "TsaraAlignError",
     "attach_positions",
     "bin_streams_onto_cells",
+    "build_output_grid",
+    "grid_cells",
     "interpolate_onto_cells",
+    "load_grid",
     "pair_species",
     "resolve_variable",
+    "save_grid",
+    "select_variables",
 ]

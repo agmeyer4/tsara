@@ -84,6 +84,7 @@ __all__ = [
     "VariableRef",
     "bin_streams_onto_cells",
     "resolve_variable",
+    "select_variables",
 ]
 
 #: How a caller names a variable: by its canonical name, or by the instrument
@@ -220,14 +221,40 @@ def cadence_s(cells: CellBounds) -> float:
     return max(median_width_s(cells), 1.0 / NS_PER_S)
 
 
-def _default_selection(streams: Mapping[str, xr.Dataset]) -> list[tuple[str, str]]:
-    """Return every non-sigma variable in every stream, in stream order.
+def select_variables(
+    streams: Mapping[str, xr.Dataset],
+    variables: Sequence[str | tuple[str, str]] | None = None,
+) -> list[tuple[str, str]]:
+    """Resolve which variables a call acts on, as ``(instrument, name)`` pairs.
 
-    Sigma companions are excluded because they are not variables in their own
-    right: each travels automatically with the value it describes, and
-    selecting one directly would produce a column with no parent and no
-    meaning.
+    Public because more than one stage needs the *same* answer: the binner
+    uses it to decide what to join, and the output grid uses it to decide
+    which cell widths its period has to respect (``docs/METHODS.md`` §11.7).
+    Two implementations of "which variables did the caller mean" would let
+    the grid validate one set and bin another.
+
+    Parameters
+    ----------
+    streams : mapping of str to xarray.Dataset
+        The campaign's streams.
+    variables : sequence of str or (str, str), optional
+        Explicit selection. ``None`` takes every non-sigma variable in every
+        stream, in stream order.
+
+    Returns
+    -------
+    list of tuple of (str, str)
+        Instrument and variable name for each selection.
+
+    Notes
+    -----
+    Sigma companions are excluded from the default because they are not
+    variables in their own right: each travels automatically with the value
+    it describes, and selecting one directly would produce a column with no
+    parent and no meaning.
     """
+    if variables is not None:
+        return [resolve_variable(streams, reference) for reference in variables]
     return [
         (instrument, str(name))
         for instrument, stream in streams.items()
@@ -361,11 +388,7 @@ def bin_streams_onto_cells(
         raise TsaraAlignError("No streams to bin.")
     if len(target) == 0:
         raise TsaraAlignError("No target cells to bin onto.")
-    selection = (
-        _default_selection(streams)
-        if variables is None
-        else [resolve_variable(streams, reference) for reference in variables]
-    )
+    selection = select_variables(streams, variables)
     if not selection:
         raise TsaraAlignError(
             "No variables selected. Every stream holds only uncertainty companions, "

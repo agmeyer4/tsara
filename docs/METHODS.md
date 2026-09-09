@@ -2673,7 +2673,86 @@ convention everywhere else.
 
 ### 11.7 Output grid
 
-Construction **[stub — lands with its stage]**.
+Implemented in `tsara.align.grid`, specified in §1.4. A single uniform
+`(time × variable)` cube, built **only** for the products that inherently need
+one: the continuous rolling state, and the matrix a receptor model such as PMF
+consumes. Baselines, detection and cross-species regression all run at native
+rate and never see it (§1.1).
+
+It is a thin layer over §11.2 — the only things it adds are *which cells* and
+the rule that the period must respect the data going into it.
+
+**There is deliberately no "PMF matrix" object.** A receptor-model matrix is
+this function called with a chosen set of columns. Which columns is a
+scientific decision — raw concentrations or the enhancements §5 will compute,
+which species, whether met belongs in the same cube — and hard-coding any of it
+would make the block need editing every time that decision changed.
+
+#### The period rule
+
+**The grid period must be at least the widest cell among the *selected*
+variables.** A 60 s mean evaluated on 1 s cells is the same value repeated
+sixty times: resolution the instrument never had, and sixty points where there
+is one measurement. Every count downstream would then believe there were
+sixty. That is the prohibition the interval model exists to enforce (§10), so
+it is an error naming the offending variable and the smallest period that
+would work, not a warning.
+
+Checked against the *selection* rather than against every stream the campaign
+contains, and that is a real lever rather than a formality. Measured on the
+2024-07-18 drive with five instruments loaded:
+
+| request | outcome |
+|---|---|
+| 5 s over everything | refused — `iwas` has 14.7 s cells |
+| 15 s over everything | 1301 cells |
+| 1 s, canisters excluded | 19 501 cells |
+
+Fifteen times the resolution, from the same archive, decided entirely by which
+columns the run needs. That refines §1.4's earlier "≥ the slowest stream's
+native period", which was written before cells existed and before it was clear
+that which variables go into a cube is the user's choice.
+
+The same run's 60 s matrix shows what the qualifying columns are for: the five
+continuous instruments come back 100 % filled at a median of 60 contributing
+samples per cell, the PTR benzene 97.5 %, and the two canister species 11.3 %
+with a median of **zero**. A sparse instrument on a campaign grid is mostly
+absent, which is honest, and is exactly why a two-species ratio uses a pair
+clock (§11.4) rather than this product.
+
+#### Where the cells fall
+
+Abutting cells of exactly the requested period. With no explicit `start`, the
+grid begins at the largest whole multiple of the period at or before the
+earliest selected cell — anchored to the epoch rather than to whenever the
+data happened to start, so that two runs over overlapping periods produce
+cells that line up. Grids that never share a boundary could not have their
+outputs compared at all.
+
+#### Attributes
+
+| attribute | meaning |
+|---|---|
+| `tsara_grid_freq` | the period, as requested |
+| `tsara_grid_widest_source_cell_s` | the widest selected cell the period was validated against |
+| `tsara_grid_variables` | which variables were selected, instrument-qualified |
+
+The last is recorded because a reader cannot tell from the columns alone
+whether a variable is absent because it was excluded or because it had no
+data.
+
+#### Persistence
+
+`save_grid` writes `grid.nc` into a bundle directory and `load_grid` reads it
+back. It does **not** touch `bundle.json`: that descriptor records which stage
+created the bundle and what streams it wrote, and a grid is a different
+stage's product arriving later, so editing it would make it say something its
+writer never said. The grid carries its own provenance in its attributes
+instead, which is what §1 asks of every saved output anyway — and loading
+checks `tsara_stage`, because a stream and a grid are both netCDF files with a
+time axis and reading one as the other would produce a plausible object with
+the wrong meaning. Writing also refuses a grid whose bounds were destroyed
+upstream, rather than producing a product claiming cells it does not have.
 
 #### 11.7.1 Why there is no median binning option
 

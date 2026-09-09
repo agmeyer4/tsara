@@ -28,6 +28,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 __all__ = [
     "BUNDLE_FORMAT_VERSION",
+    "BUNDLE_GRID_FILE",
     "BUNDLE_MANIFEST",
     "BUNDLE_STAGE_KEY",
     "BUNDLE_STREAMS_DIR",
@@ -43,6 +44,17 @@ BUNDLE_MANIFEST = "bundle.json"
 
 #: Subdirectory holding one netCDF file per instrument stream.
 BUNDLE_STREAMS_DIR = "streams"
+
+#: The gridded product, when a bundle holds one.
+#:
+#: A file rather than an entry in ``bundle.json``, deliberately. The
+#: descriptor records which stage *created* the bundle and what streams it
+#: wrote; a grid is a different stage's product dropped into the same
+#: directory later, and having it edit another stage's record would make that
+#: file say something its writer never said. The grid carries its own
+#: provenance in its attributes instead, which is what CLAUDE.md §5 asks of
+#: every saved output anyway.
+BUNDLE_GRID_FILE = "grid.nc"
 
 #: Bumped only when the layout changes incompatibly, so a future reader can
 #: refuse (or migrate) an old bundle rather than misinterpreting it.
