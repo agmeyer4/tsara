@@ -225,6 +225,21 @@ UNREFERENCED: dict[str, str] = {
         "Reached by name through the reader registry (@register_reader), "
         "which is a lookup rather than a call site the parser can see."
     ),
+    "propagate_random": (
+        "Uncertainty propagation under averaging. Its first caller is Phase 4 "
+        "pairing, which lands in a later commit of this phase; until then it "
+        "is reached only by its own tests."
+    ),
+    "propagate_systematic": (
+        "The systematic half of the same pair, and unreachable for the same "
+        "reason. Listed separately so that wiring one in does not silently "
+        "excuse the other."
+    ),
+    "sigma_at_support": (
+        "Moves a declared sigma onto the support a stage actually wants, the "
+        "arithmetic Phase 3.5 deliberately removed from ingestion (METHODS "
+        "§10.8). Phase 4 pairing is its first caller."
+    ),
 }
 
 

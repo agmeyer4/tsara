@@ -287,6 +287,14 @@ $$\sigma_{\bar{x}}^2 = \Big(\sum_i 1/\sigma_i^2\Big)^{-1}
 
 This is the familiar "quadrature, scaled by N" rule — valid **only** here.
 
+**The weights are the operation's, not the estimator's.** Inverse-variance
+weights are the minimum-variance choice for *estimating a constant*, and it is
+tempting to reach for them here. TSARA does not. The value being reported is an
+overlap-weighted time average, because that is what "this stream's mean over
+that interval" means (§1.3); an uncertainty computed with different weights
+would not describe the number it is attached to. `tsara.core.propagation`
+therefore takes the caller's weights and uses exactly those.
+
 ### 3.3 Fully correlated errors (ρ = 1) — the systematic component
 
 $$\mathrm{Var}(\bar{x}) = \sum_i\sum_j w_i w_j \sigma_i \sigma_j
@@ -302,28 +310,71 @@ not an ad-hoc convention.
 
 ### 3.4 Partial correlation — decorrelation timescale τ
 
-For a random component with declared decorrelation timescale τ, v1 models the
-error autocorrelation as AR(1)-like, $\rho(\Delta t) = e^{-|\Delta t|/\tau}$,
-and applies the standard effective-sample-size correction with lag-1
-correlation $\rho_1 = e^{-\Delta t/\tau}$:
+For a random component with a declared decorrelation timescale τ (§2.2), TSARA
+models the error autocorrelation as AR(1)-like,
+$\rho(\Delta t) = e^{-|\Delta t|/\tau}$, and reduces the sample count
+accordingly:
 
-$$N_{\mathrm{eff}} = N\,\frac{1-\rho_1}{1+\rho_1}, \qquad
-N_{\mathrm{eff}} \in [1, N],$$
+$$\sigma_{\bar{x}}^2 = \sigma^2 / N_{\mathrm{eff}}, \qquad
+N_{\mathrm{eff}} \in [1, N].$$
 
-so $\sigma_{\bar{x}}^2 \approx \sigma^2 / N_{\mathrm{eff}}$. The exact double
-sum (§3.1) remains available as a slower, assumption-free alternative; τ → 0
-recovers §3.2 and τ → ∞ is handled by declaring the component systematic
-instead. *(Exact N_eff form is an open flag — see CLAUDE.md §5.)*
+Where **no** τ is declared the samples are treated as independent (§3.2). That
+is a *declaration*, not an assumption TSARA invents: a component declared
+random is by definition uncorrelated point to point, and τ is the refinement
+that says "less so than that". Every propagated σ carries the name of the form
+that produced it, `independent` included, so the two cases are distinguishable
+in the product rather than only by the absence of a label.
 
-This form has **no implemented consumer yet, deliberately**. Its callers are
-the stages that combine values across a support: §4 binning a fast stream onto
-a slow cell, §5 rolling a window over cells, §7 weighting a fit, and moving a
-declared σ from the interval it was quoted at onto whichever support is wanted
-(§10.8, where $N$ is the number of quoted intervals per cell, and where the
-worked numbers show why the naive $\sqrt{N}$ shortcut is not merely imprecise
-but confidently wrong). Ingestion records what a manifest declares and leaves
-the arithmetic to them, so this form has exactly one implementation when it
-arrives rather than one per stage.
+**Implementation.** `tsara.core.propagation` — one module, because §1.3
+binning, §5 rolling and §4.3 fit weighting all need this answered identically,
+and because moving a declared σ onto a different support (§10.8) is the same
+arithmetic again. Ingestion deliberately performs none of it (§10.8, §9.6).
+
+**Registered forms.** All three assume the same AR(1) autocorrelation and
+differ only in how faithfully they evaluate the resulting double sum.
+
+| name | cost | exact when |
+|---|---|---|
+| `ar1_neff` | O(N) | samples equally spaced with equal σ — **the default** |
+| `ar1_asymptotic` | O(1) | N is many correlation times |
+| `ar1_double_sum` | O(N²) | always, given AR(1) |
+
+`ar1_neff` evaluates the equal-weight, equally-spaced case of §3.1 exactly. There
+$\rho_{ij} = \rho_1^{|i-j|}$ collapses the $N^2$ terms onto $N$ distinct lags:
+
+$$\frac{\mathrm{Var}(\bar{x})}{\sigma^2} = \frac{1}{N^2}\Big(N + 2\sum_{k=1}^{N-1}(N-k)\,\rho_1^{\,k}\Big),
+\qquad N_{\mathrm{eff}} = \Big(\frac{\mathrm{Var}(\bar{x})}{\sigma^2}\Big)^{-1}.$$
+
+The sum is evaluated term by term rather than through its algebraic closed
+form, which is numerically hopeless as $\rho_1 \to 1$: at $\rho_1 = 0.999$ it
+subtracts two quantities of order $10^4$ that agree to four figures, through a
+denominator of $10^{-6}$. The terms decay geometrically, so the sum is
+truncated once $\rho_1^k$ stops moving a float64 accumulator. Unequal weights
+reach the same formula through their Kish sample size,
+$(\sum w)^2 / \sum w^2$, which is exact for equal weights and an
+approximation otherwise; `ar1_double_sum` is how to find out what that
+approximation costs on a given cell.
+
+`ar1_asymptotic` is the large-$N$ limit, $N_{\mathrm{eff}} = N(1-\rho_1)/(1+\rho_1)$.
+It is the form this document specified before the finite-$N$ version existed,
+and it is kept because reproducing its error is worth being able to do:
+
+| case | `ar1_asymptotic` | `ar1_neff` | σ overstated by |
+|---|---|---|---|
+| 1 Hz, N = 200, τ = 100 s | 1.00 | 1.76 | 33 % |
+| 1 Hz, N = 60, τ = 20 s | 1.50 | 2.19 | 21 % |
+| 1 Hz, N = 600, τ = 2 s | 146.9 | 147.4 | 0.2 % |
+
+So the choice matters exactly when a window holds only a few correlation
+times, which is the normal case for a plume. **This resolves the "AR(1)
+approximation vs. exact double sum" flag in CLAUDE.md §5 for the arithmetic**:
+the finite-$N$ form is exact for the case it is used on and costs no more than
+linear time, so there is no reason to prefer the asymptotic one. It does not
+resolve whether the AR(1) *model* describes real instrument error; that is
+measured against synthetic ground truth with known τ in §11.1 and §11.7.
+
+Limits: τ → 0 recovers §3.2, and τ → ∞ is properly handled by declaring the
+component systematic (§3.3) rather than by an enormous τ.
 
 ### 3.5 Median binning
 
@@ -2226,6 +2277,75 @@ row, in the direction that overlaps its neighbour.
   configuration, and ingestion computing it would mean reading a config this
   stage has no business reading (§9.6). It belongs to the phase that owns the
   noise estimator.
+
+---
+
+## 11. Alignment and pairing (Phase 4)
+
+The stage that first *combines* values across time. Three operations live
+here, and they need different amounts of trust — the test being whether an
+operation needs a **model** or only a **declaration** (§10.8):
+
+| operation | needs | where |
+|---|---|---|
+| averaging a fast stream onto a slow stream's cells | only the cells, which are already declared | §1.3, §11.2 |
+| interpolating GPS and met onto another clock | a smoothness model, guarded by `max_interp_gap` | §1.2, §11.4 |
+| moving a σ from its quoted interval onto a cell | τ and an AR(1) model | §3.4, §10.8 |
+
+Nothing here detects events, computes a baseline or fits a slope; it hands
+those phases honest pairs.
+
+### 11.1 How each operation here is checked
+
+This phase is the first that **combines** measurements: earlier stages apply
+declared, exact, one-to-one maps (a unit conversion, a per-point σ from a
+declared budget, a timestamp moved to its cell midpoint), and each of those is
+recoverable from what the product records. Nothing here is. A binned value is
+a weighted mean no instrument reported, interpolation assumes smoothness, the
+τ correction assumes AR(1), and none of the three can be inverted back to the
+values that went in.
+
+That asymmetry sets the standard of proof. Five kinds of evidence are used,
+because they fail differently:
+
+| evidence | catches |
+|---|---|
+| a fixture small enough to check with a pencil | the code does something other than what the docstring says |
+| an independent reimplementation, written from the definition and slow | the vectorized spelling is wrong |
+| a closed form (an analytic plume integrated exactly) | the weighting scheme is subtly wrong |
+| **Monte Carlo** | the formula is the *wrong formula* |
+| mutation testing of the tests themselves | the tests would not have noticed |
+
+The fourth is the one that matters, and it is the one an algebraic test
+cannot supply: comparing algebra against algebra proves a formula was typed
+correctly, never that it was the right formula. For an uncertainty the
+experiment is direct — draw many realizations of an error with known
+structure, average each, and measure how much the averages actually scatter.
+
+Measured for §3, at 20 000 realizations (where the measurement itself is good
+to about 0.5 %):
+
+| case | observed scatter | predicted | disagreement |
+|---|---|---|---|
+| white noise, N = 60 | 0.2568 | 0.2582 (`independent`) | 0.6 % |
+| AR(1), τ = 20 s, N = 60 | 1.3536 | 1.3501 (`ar1_neff`) | **0.3 %** |
+| the same, other forms | 1.3536 | 1.6332 (`ar1_asymptotic`) | 17 % |
+| the same, naive √N | 1.3536 | 0.2582 | 424 % |
+| systematic, N = 100 | 0.02003 | 0.02000 (§3.3) | 0.2 % |
+
+So the finite-*N* form is not merely the tidier algebra: it is the one that
+matches what happens. The last two rows are the cost of the alternatives, and
+the naive √N row is why §10.8 refuses to apply it when no τ is declared.
+
+### 11.2 Propagation
+
+Implemented in `tsara.core.propagation`, specified in §3. The two components
+never mix, the weights are the operation's rather than the estimator's (§3.2),
+and every propagated σ carries the name of the form that produced it.
+
+**[remaining subsections land with their stages — §11.3 pairing, §11.4
+circular statistics, §11.5 auxiliary fields and the mobile position join,
+§11.6 the output grid, §11.7 the AR(1) model against generated ground truth]**
 
 ---
 
