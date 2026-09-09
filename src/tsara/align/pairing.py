@@ -22,9 +22,10 @@ Why *wider*, not *slower*
 --------------------------
 Before Phase 3.5 the rule in ``docs/METHODS.md`` §1.3 said "the slower
 instrument", and rate and support can disagree. Measured on the 2024 drives,
-the iWAS canisters sample every 441 s but each sample integrates for only
-14.7 s. Against a 60 s stationary mean, the canister is thirty times slower by
-rate and four times *narrower* by support. Pairing on the canister's clock
+the iWAS canisters sample every 530 s but each sample integrates for only
+14.9 s -- medians over all 261 fills of the ten 2024 drive days. Against a 60 s
+stationary mean the canister is thirty-five times slower by rate and four times
+*narrower* by support. Pairing on the canister's clock
 would evaluate a 60 s mean over 15 s, which is exactly what the interval model
 forbids; pairing on the mean's clock is admissible, and the coverage of 0.25
 is what says how much to trust it.

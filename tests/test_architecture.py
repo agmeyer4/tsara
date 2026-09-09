@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import re
 from pathlib import Path
 
 import pytest
@@ -383,6 +384,56 @@ def test_every_attribute_a_product_carries_is_documented() -> None:
         f"docs/METHODS.md: {undocumented}. Document them where their family "
         "is discussed, or record why not in EXEMPT_ATTRS."
     )
+
+
+#: Attributes METHODS names deliberately although nothing writes them, e.g. a
+#: renamed or removed one discussed as history. Each needs a reason, and
+#: `test_no_documented_attr_exemption_is_stale` gives the reason a shelf life.
+DOCUMENTED_ONLY_ATTRS: dict[str, str] = {}
+
+
+def test_the_document_names_no_attribute_that_nothing_writes() -> None:
+    """The reverse of the check above, and the direction a rename breaks.
+
+    `test_every_attribute_a_product_carries_is_documented` walks from the
+    source to the document, so it notices a *new* attribute with no
+    definition. It cannot notice the opposite: rename an attribute and its old
+    name sits in the document forever, looking documented and describing
+    nothing.
+
+    That is not hypothetical. `tsara_pairing_binned` became `tsara_binned`
+    when pairing was refactored into a thin layer over the binner, and the
+    old name survived in the pairing section's attribute table because every
+    test looked the other way.
+    """
+    doc = _methods_text()
+    written = set(_attr_names())
+    documented = {
+        name
+        for name in re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", doc)
+        if name.startswith(ATTR_PREFIXES)
+    }
+    orphans = sorted(documented - written - set(DOCUMENTED_ONLY_ATTRS))
+    assert orphans == [], (
+        f"docs/METHODS.md documents attributes nothing in src/ writes: {orphans}. "
+        "Rename them to match, delete them, or record the reason in "
+        "DOCUMENTED_ONLY_ATTRS."
+    )
+
+
+def test_no_documented_attr_exemption_is_stale() -> None:
+    """An excuse for an attribute that is written again, or never named, rots."""
+    doc = _methods_text()
+    written = set(_attr_names())
+    documented = {
+        name
+        for name in re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", doc)
+        if name.startswith(ATTR_PREFIXES)
+    }
+    revived = sorted(a for a in DOCUMENTED_ONLY_ATTRS if a in written)
+    absent = sorted(a for a in DOCUMENTED_ONLY_ATTRS if a not in documented)
+    assert revived == [], f"DOCUMENTED_ONLY_ATTRS excuses attributes now written: {revived}"
+    assert absent == [], f"DOCUMENTED_ONLY_ATTRS names attributes the document lost: {absent}"
 
 
 def test_no_attr_exemption_is_stale() -> None:

@@ -39,7 +39,7 @@ The pipeline defers any change of clock to the last possible moment:
 | QA/QC, unit conversion | native | unchanged; both are pointwise |
 | Rolling baseline, enhancement Δ | native (time-based windows) | windows are durations, so cells of any width fit |
 | Plume detection | native → events are time **intervals** | an event's bounds are the union of the cells above threshold; the smallest resolvable event is one cell |
-| Ratio regression | **pairing clock** (§1.3), per event/window | the slower stream's **cells**, with the faster stream averaged onto them by overlap |
+| Ratio regression | **pairing clock** (§1.3), per event/window | the **wider-supported** stream's cells, with its partner averaged onto them by overlap |
 | Continuous rolling state, PMF matrix | **output grid** (§1.4) | grid cells, overlap-weighted |
 
 Rationale: rolling quantiles and MAD thresholds are well-defined on irregular
@@ -84,9 +84,10 @@ when they come from instruments with different rates:
    own **cells**, restricted to the event/window. Phase 3.5 sharpened this:
    before cells existed the rule read "the slower instrument", and rate and
    support can disagree. Measured on the 2024 drives, the iWAS canisters
-   sample every 441 s (median) but each sample integrates for only 14.7 s, so
-   against a 60 s stationary mean the canister is thirty times slower by rate
-   and four times *narrower* by support. Pairing on the canister's clock would
+   sample every 530 s (median over all 261 fills of the ten 2024 drive days)
+   but each sample integrates for only 14.9 s, so against a 60 s stationary
+   mean the canister is thirty-five times slower by rate and four times
+   *narrower* by support. Pairing on the canister's clock would
    split a 60 s mean onto 15 s, which the interval model forbids; pairing on
    the mean's clock is admissible, and the coverage of 0.25 is what says how
    much to trust it.
@@ -2415,8 +2416,9 @@ clock, real pairs only.
 the other is averaged onto them by overlap. Never the reverse: a value may be
 averaged onto a wider support, never split onto a narrower one. §1.3 records
 why this stopped being "the slower instrument" — measured, the iWAS canisters
-are thirty times slower than a 60 s stationary mean by rate and four times
-*narrower* by support. Ties go to whichever stream is named first, and the
+are thirty-five times slower than a 60 s stationary mean by rate and four
+times *narrower* by support (median over all 261 fills of the ten 2024 drive
+days). Ties go to whichever stream is named first, and the
 choice does not depend on which species is numerator.
 
 **Same-instrument species skip the binning entirely.** Several gases retrieved
@@ -2467,7 +2469,7 @@ and per variable:
 | attribute | meaning |
 |---|---|
 | `tsara_source_instrument` | which stream this species came from |
-| `tsara_pairing_binned` | 1 if averaged onto the clock, 0 if already on it |
+| `tsara_binned` | 1 if averaged onto the clock, 0 if already on it |
 | `tsara_sigma_at_support` | how a declared σ was moved onto its own cells, or `unscaled` |
 
 **How it is checked** (§11.1): a two-cell fixture whose paired values (1.5 and
@@ -2481,8 +2483,8 @@ needing no ground truth — binning a stream onto matching cells returns it, and
 a cell with no partner data yields no pair rather than an interpolation.
 
 **And on real data.** The 2024-07-18 mobile-lab drive carries both members of
-the canister case: 32 iWAS fills of median width 14.7 s at a 441 s cadence,
-and a 1 Hz Picarro. Pairing benzene against CH₄ chooses the canister as the
+the canister case: on that day, 32 iWAS fills of median width 14.7 s at a
+441 s cadence, and a 1 Hz Picarro. Pairing benzene against CH₄ chooses the canister as the
 clock (14.7 s vs 1 s), keeps all 32 cells at coverage 1.000, and draws a
 median of 16 one-second samples into each. Recomputing every pair with a
 Python loop straight from §1.3 reproduces the paired values **exactly** — a
@@ -2704,7 +2706,7 @@ contains, and that is a real lever rather than a formality. Measured on the
 
 | request | outcome |
 |---|---|
-| 5 s over everything | refused — `iwas` has 14.7 s cells |
+| 5 s over everything | refused — `iwas` has 14.7 s cells that day |
 | 15 s over everything | 1301 cells |
 | 1 s, canisters excluded | 19 501 cells |
 
@@ -2787,7 +2789,8 @@ Two lesser costs, recorded because they were part of the decision: an
 overlap-weighted median is a different algorithm from a weighted mean, so it
 would be a second code path through binning *and* uncertainty propagation; and
 the median standard-error inflation factor $\sqrt{\pi/2} \approx 1.253$ that
-the old §3.5 specified is valid only for Gaussian noise under equal weights,
+the deleted median-binning section specified is valid only for Gaussian noise
+under equal weights,
 which overlap weighting does not provide.
 
 A caller who wants robustness has the tools: QA/QC `range` bounds and `flag`
@@ -2844,6 +2847,25 @@ instrument does not decorrelate as an AR(1) process should expect no better.
 **Which is also why estimating τ from data is a §7 avenue rather than a
 field.** No file declares one, and this measurement shows what a wrong one
 costs.
+
+#### 11.8.1 A measured number without its denominator
+
+Recorded because this is the third phase in which it has happened. The
+canister figures above were first written as "14.7 s fills every 441 s",
+measured from **one** drive day and quoted as though they described the
+instrument. Re-run at the phase boundary across all ten 2024 drive days and
+261 fills, the medians are **14.9 s and 530 s** — so "thirty times slower by
+rate" was really thirty-five.
+
+The conclusion survives untouched, which is exactly why the error was
+invisible: rate and support still disagree, and the canister is still narrower
+by support than a 60 s mean while being far slower by rate. What was wrong was
+the *provenance*. A number quoted without saying what it was measured over
+cannot be checked by anyone, including its author a week later.
+
+Every archive-derived number in §11 has now been re-run and states its sample.
+The day-specific checks say which day; the instrument-level claims say how many
+fills over how many days.
 
 ### 11.9 The acceptance criterion
 

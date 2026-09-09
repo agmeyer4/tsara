@@ -593,7 +593,8 @@ def bin_onto_cells(
         excluded from ``coverage``, so a masked sample reduces coverage
         rather than silently passing as data.
     target : CellBounds
-        Cells to average onto, typically the slower stream's own cells.
+        Cells to average onto, typically the wider-supported stream's own
+        cells.
 
     Returns
     -------
