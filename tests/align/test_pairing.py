@@ -230,7 +230,7 @@ def test_same_instrument_species_are_not_binned_at_all() -> None:
     assert paired.clock == "em27"
     assert np.array_equal(paired.dataset["ch4"].values, values["ch4"])
     assert np.array_equal(paired.dataset["c2h6"].values, values["c2h6"])
-    assert paired.dataset["ch4"].attrs["tsara_pairing_binned"] == 0
+    assert paired.dataset["ch4"].attrs["tsara_binned"] == 0
     assert paired.dataset["coverage_ch4"].values == pytest.approx(np.ones(50))
 
 
@@ -526,7 +526,7 @@ def test_the_product_records_how_it_was_made(two_rates: dict[str, xr.Dataset]) -
     assert attrs["tsara_pairing_clock"] == "slow"
     assert attrs["tsara_propagation_form"] == "ar1_neff"
     assert paired.dataset["ch4"].attrs["tsara_source_instrument"] == "fast"
-    assert paired.dataset["co2"].attrs["tsara_pairing_binned"] == 0
+    assert paired.dataset["co2"].attrs["tsara_binned"] == 0
 
 
 def test_the_paired_product_round_trips_through_netcdf(
@@ -574,7 +574,7 @@ def test_an_empty_stream_is_refused_by_name() -> None:
         },
     )
     empty["time"].attrs["bounds"] = "time_bnds"
-    with pytest.raises(TsaraAlignError, match="no cells to pair over"):
+    with pytest.raises(TsaraAlignError, match="no cells to bin from"):
         pair_species({"fast": fast, "empty": empty}, "ch4", "co2")
 
 

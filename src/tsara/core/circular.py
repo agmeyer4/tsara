@@ -29,7 +29,7 @@ The dispersion TSARA reports alongside it is the **exact circular standard
 deviation**, which is unbounded: as the samples spread toward uniform it runs
 to infinity, which is the honest description of a direction that has ceased
 to exist. The Yamartino form saturates near 105° instead, and is deliberately
-not implemented (``docs/METHODS.md`` §11.4): it is a single-pass
+not implemented (``docs/METHODS.md`` §11.5): it is a single-pass
 approximation built for 1980s dataloggers that could not hold the sample
 vectors in memory, which is not a constraint TSARA operates under. Measured on
 the same drive data the two agree to 0.16° in the median cell and diverge by

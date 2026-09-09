@@ -118,7 +118,7 @@ be comparable as estimates.
 A single uniform master grid — the familiar `(time × species)` cube — is
 constructed **only** for the continuous rolling state and the PMF export
 matrix, which inherently require one. Construction is binning-only, by
-overlap-weighted mean and no other statistic (§11.6), with per-cell
+overlap-weighted mean and no other statistic (§11.7), with per-cell
 propagated uncertainties and `n_native` counts carried alongside values. Grid cells carry CF boundaries like any
 other stream, and `cell_methods = "time: mean (interval: <native>)"` records
 the resolution of the data that went into them (§10.2). Validation requires the grid period to be
@@ -138,7 +138,7 @@ than 45° in 26.7 % of 60 s cells. A binned direction carries the mean
 resultant length *R* alongside it, and the dispersion reported is the **exact**
 circular standard deviation rather than the Yamartino (1984) single-pass
 approximation, which is bounded where the exact form correctly is not.
-Specified in full, with the measurements behind each choice, in **§11.4**.
+Specified in full, with the measurements behind each choice, in **§11.5**.
 
 ---
 
@@ -388,7 +388,7 @@ approximation vs. exact double sum" flag in CLAUDE.md §5 for the arithmetic**:
 the finite-$N$ form is exact for the case it is used on and costs no more than
 linear time, so there is no reason to prefer the asymptotic one. It does not
 resolve whether the AR(1) *model* describes real instrument error; that is
-measured against synthetic ground truth with known τ in §11.1 and §11.7.
+measured against synthetic ground truth with known τ in §11.1 and §11.8.
 
 Limits: τ → 0 recovers §3.2, and τ → ∞ is properly handled by declaring the
 component systematic (§3.3) rather than by an enormous τ.
@@ -2347,13 +2347,64 @@ So the finite-*N* form is not merely the tidier algebra: it is the one that
 matches what happens. The last two rows are the cost of the alternatives, and
 the naive √N row is why §10.8 refuses to apply it when no τ is declared.
 
-### 11.2 Propagation
+### 11.2 The joining operation
+
+Everything TSARA does with more than one clock is one operation: **every value
+is averaged onto target cells, weighted by how much of it falls inside each
+one**. The two products of this phase differ only in what the target is.
+
+| product | target cells | consumer |
+|---|---|---|
+| a species pair (§11.4) | the wider-supported member's own cells | §4 regression |
+| a campaign matrix (§11.7) | a uniform grid | receptor modelling, continuous state |
+
+They are not two designs. `tsara.align.binning.bin_streams_onto_cells` is the
+operation; `pair_species` is that function with two variables selected and
+incomplete rows dropped. Writing the pairwise form as its own implementation
+was a design inversion caught during the phase, and it would have left two
+implementations of one idea to drift apart.
+
+**Deliberately variable-agnostic.** The binner does not know what a species
+is. It takes whatever variables it is handed — raw concentrations now,
+baselines and enhancements once §5 computes them, met, anything a later stage
+invents — and puts them on the support asked for. TSARA is a loader and
+transformer for sweeping analysis choices, so the joining block must not need
+editing every time a new kind of variable appears upstream of it. There is
+deliberately **no "PMF matrix" object**: a receptor-model matrix is a *call*
+to this function with a chosen set of columns.
+
+**What travels with a variable**, automatically, so a caller cannot forget:
+
+* its uncertainty components, propagated through the *same* overlap weights
+  that formed the value, random and systematic separately (§3);
+* `n_source_<name>` and `coverage_<name>` — how many source cells contributed
+  and how much of the target cell they covered, the two numbers that separate
+  a well-determined value from a number that merely exists;
+* everything the source declared about itself, plus `tsara_source_instrument`
+  saying where it came from and `tsara_binned` saying whether this stage
+  averaged it at all.
+
+**Three behaviours are not left to callers.** A variable declaring
+`circular: 1` is vector-averaged, never arithmetically (§11.5), and carries a
+resultant length and dispersion instead of a sigma. A stream whose cells
+already *are* the target passes through untouched — tested on the cells, not
+on the instrument name, because averaging a cell onto itself is the identity
+mathematically and not in floating point. And a target cell with no
+contributing data stays `nan`: gases are binned, never interpolated (§1.2).
+
+**Column names.** A canonical name is kept as it is when only one selected
+stream carries it. When two do — a campaign comparing two analyzers — both are
+suffixed with their instrument rather than one silently winning. The spelling
+therefore depends on the selection, which is why every column also records its
+source instrument.
+
+### 11.3 Propagation
 
 Implemented in `tsara.core.propagation`, specified in §3. The two components
 never mix, the weights are the operation's rather than the estimator's (§3.2),
 and every propagated σ carries the name of the form that produced it.
 
-### 11.3 Pairing
+### 11.4 Pairing
 
 Implemented in `tsara.align.pairing`, specified in §1.3. Two species, one
 clock, real pairs only.
@@ -2398,7 +2449,7 @@ hide a real property of the source record behind a tidier number.
 **What the product carries.** A paired series is an ordinary self-describing
 `xarray.Dataset` with CF cells, not a bundle entry: it is a per-call
 intermediate that Phase 6 will request per event, and the phase's saved
-product is the output grid (§11.6). Its attributes:
+product is the output grid (§11.7). Its attributes:
 
 | attribute | meaning |
 |---|---|
@@ -2443,7 +2494,7 @@ On a ~1950 ppb background that is small; against the enhancements these
 canisters exist to attribute it is not, and it is entirely an artefact of
 which fraction of two edge samples counts.
 
-### 11.4 Circular statistics for angular variables
+### 11.5 Circular statistics for angular variables
 
 Supersedes the §1.5 stub. A direction is a point on a circle, so directions
 are averaged as unit vectors, never arithmetically. Config:
@@ -2492,7 +2543,7 @@ documented limit, not a correction TSARA applies.
 meaningless and is reported anyway, beside the *R* that says so; picking a
 cut-off would put a magic number in the library where the judgement belongs
 to the user. Guarding on *R* is left to the caller, exactly as the pairing
-coverage guard is (§11.3).
+coverage guard is (§11.4).
 
 **One numerical threshold is applied**, and it is a fact about float64 rather
 than about wind. Directions that cancel mathematically do not cancel
@@ -2525,13 +2576,13 @@ binning a record onto its own cells returned it to within **5.7e-14 degrees**
 over 19 470 samples, and the table above reproduces an independent script's
 numbers exactly.
 
-### 11.5 Auxiliary fields **[stub — lands with its stage]**
+### 11.6 Auxiliary fields **[stub — lands with its stage]**
 
-### 11.6 Output grid
+### 11.7 Output grid
 
 Construction **[stub — lands with its stage]**.
 
-#### 11.6.1 Why there is no median binning option
+#### 11.7.1 Why there is no median binning option
 
 `OutputGridConfig.bin_statistic` was specified in Phase 1 with values `mean`
 and `median`, and removed in Phase 4 before it was ever implemented — Phase 4
@@ -2570,7 +2621,7 @@ which overlap weighting does not provide.
 A caller who wants robustness has the tools: QA/QC `range` bounds and `flag`
 columns act where the information about what is a glitch actually lives (§9.5).
 
-### 11.7 The AR(1) model against generated ground truth **[stub — lands with its stage]**
+### 11.8 The AR(1) model against generated ground truth **[stub — lands with its stage]**
 
 ---
 
@@ -2588,7 +2639,7 @@ columns act where the information about what is a glitch actually lives (§9.5).
   atmospheric applications: the importance of appropriate weighting.
   *Atmospheric Measurement Techniques*, 11, 1233–1250.
 - Mardia, K. V., & Jupp, P. E. (2000). *Directional Statistics.* Wiley.
-  (Circular mean, mean resultant length and circular standard deviation, §11.4.)
+  (Circular mean, mean resultant length and circular standard deviation, §11.5.)
 - Yamartino, R. J. (1984). A comparison of several "single-pass" estimators
   of the standard deviation of wind direction. *Journal of Climate and
   Applied Meteorology*, 23, 1362–1366.

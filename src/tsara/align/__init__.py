@@ -1,20 +1,24 @@
-"""Putting two measurements on one clock, without inventing either.
+"""Putting measurements on a common support, without inventing any.
 
 This is the first stage that **combines** measurements. Everything before it
 applies declared, exact, one-to-one maps — a unit conversion, a per-point
 sigma from a declared budget, a timestamp moved to its cell midpoint — and
 each of those is recoverable from what the product records. Nothing here is:
-a paired value is a weighted mean no instrument reported, and there is no way
+a joined value is a weighted mean no instrument reported, and there is no way
 back to the values that went into it.
 
 Shape of the subpackage
 -----------------------
+``binning``
+    The one joining operation: any set of variables onto any set of cells,
+    with uncertainty, counts and coverage travelling automatically. Everything
+    else here is a choice of *which cells*.
 ``pairing``
-    The cross-species product of ``docs/METHODS.md`` §1.3: two species, one
-    pairing clock, real pairs only.
+    Two species for a regression, on the cells of the wider-supported member
+    (``docs/METHODS.md`` §1.3).
 
-Modules for auxiliary-field interpolation and the output grid land with their
-stages.
+Modules for auxiliary-field interpolation and the uniform output grid land
+with their stages, and both are the same binner with a different target.
 
 The arithmetic itself is not here. Overlap-weighted binning lives in
 :mod:`tsara.core.support`, angular averaging in :mod:`tsara.core.circular`,
@@ -26,10 +30,13 @@ configuration, streams and provenance.
 
 from __future__ import annotations
 
-from tsara.align.pairing import PairedSpecies, TsaraAlignError, pair_species
+from tsara.align.binning import TsaraAlignError, bin_streams_onto_cells, resolve_variable
+from tsara.align.pairing import PairedSpecies, pair_species
 
 __all__ = [
     "PairedSpecies",
     "TsaraAlignError",
+    "bin_streams_onto_cells",
     "pair_species",
+    "resolve_variable",
 ]

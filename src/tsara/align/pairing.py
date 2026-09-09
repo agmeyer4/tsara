@@ -1,57 +1,55 @@
 """Pairing two species measured on different clocks.
 
-The operation
--------------
-To regress one species against another they must be compared over the same
-air. When the two come from instruments running at different rates, that
-means choosing a clock and moving one stream onto it. TSARA's rule
-(``docs/METHODS.md`` §1.3):
+A thin layer, deliberately
+---------------------------
+Pairing is not its own operation. It is
+:func:`~tsara.align.binning.bin_streams_onto_cells` with three decisions
+layered on top:
 
-1. The **pairing clock** is the cells of whichever stream has the **wider
-   support**. The other is averaged onto them, weighted by overlap.
-2. A cell with no contributing data from either species is dropped. A pair
-   is never fabricated.
-3. Every surviving pair records how much of its cell was actually covered.
+1. **which cells** -- those of the wider-supported of the two streams;
+2. **which stretch** -- optionally restricted to an event or window;
+3. **which rows survive** -- a pair needs a real measurement of *both*
+   species, so a cell missing either is dropped.
+
+Everything else, including the averaging, the uncertainty propagation and the
+counts and coverage that qualify each value, belongs to the binner and is
+shared with the campaign-wide grid. Writing pairing as its own implementation
+was a design inversion: the two-species case is the general case with two
+variables selected, and building the special one first would have left two
+implementations of one idea to drift apart.
 
 Why *wider*, not *slower*
 --------------------------
-Before Phase 3.5 this rule said "the slower instrument", and rate and support
-can disagree. Measured on the 2024 drives, the iWAS canisters sample every
-441 s but each sample integrates for only 14.7 s. Against a 60 s stationary
-mean, the canister is thirty times slower by rate and four times *narrower*
-by support. Pairing on the canister's clock would evaluate a 60 s mean over
-15 s, which is exactly what the interval model forbids; pairing on the mean's
-clock is admissible, and the coverage of 0.25 is what says how much to trust
-it.
+Before Phase 3.5 the rule in ``docs/METHODS.md`` §1.3 said "the slower
+instrument", and rate and support can disagree. Measured on the 2024 drives,
+the iWAS canisters sample every 441 s but each sample integrates for only
+14.7 s. Against a 60 s stationary mean, the canister is thirty times slower by
+rate and four times *narrower* by support. Pairing on the canister's clock
+would evaluate a 60 s mean over 15 s, which is exactly what the interval model
+forbids; pairing on the mean's clock is admissible, and the coverage of 0.25
+is what says how much to trust it.
 
 So the direction is always the same: a value may be averaged onto a wider
 support, never split onto a narrower one.
 
+Why a pair-specific clock exists at all
+----------------------------------------
+A campaign-wide grid's period is set by the *worst* instrument in it; a pair's
+clock by the worse of *that pair*. With 60 s stationary means in the archive,
+every 1 Hz-against-1 Hz ratio computed off a single grid would come from sixty
+times fewer points -- roughly eight times the confidence interval -- with every
+sub-minute plume flattened before the fit saw it. The grid is what makes a
+whole campaign comparable; the pair clock is what keeps a fast pair from being
+punished for a slow instrument elsewhere. Both are wanted, and they are the
+same code.
+
 What N means afterwards
 ------------------------
-Every returned pair contains at least one real measurement of each species,
-so the regression sample size is the number of real pairs. That is the whole
+Every returned pair contains at least one real measurement of each species, so
+the regression sample size is the number of real pairs. That is the whole
 reason gases are binned rather than interpolated: interpolated points pose as
 independent samples and silently inflate the degrees of freedom of every fit
 downstream (§1.2).
-
-Uncertainty travels with the values
-------------------------------------
-Both members arrive carrying whatever uncertainty budget ingestion could
-resolve, and pairing does two things with it, in order:
-
-1. If a declared figure was quoted at a different interval from the cells it
-   sits on (``uncertainty_at_width``, recorded but never acted on at
-   ingestion — §10.8), it is moved onto those cells here, at the point of
-   use. Without a decorrelation timescale that move is refused and recorded
-   as ``unscaled``, because the naive root-N is not merely imprecise but
-   confidently wrong.
-2. The binned member's uncertainty is propagated through the same overlap
-   weights that formed its value (§3), random and systematic separately.
-
-Every one of those decisions is recorded in the output's attributes. A sigma
-that was reduced by averaging and a sigma that was not look identical once
-written to a file.
 """
 
 from __future__ import annotations
@@ -62,57 +60,34 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-import xarray as xr
 
-from tsara import __version__
-from tsara.core.bundle import pin_time_encoding
-from tsara.core.exceptions import TsaraError
-from tsara.core.naming import (
-    CELL_METHODS_ATTR,
-    TIME_BOUNDS_VAR,
-    TIME_COORD,
-    sigma_rand_name,
-    sigma_sys_name,
+from tsara.align.binning import (
+    TsaraAlignError,
+    bin_streams_onto_cells,
+    median_width_s,
+    resolve_variable,
+    stream_cells,
 )
-from tsara.core.propagation import (
-    PropagationForm,
-    propagate_random_binned,
-    propagate_systematic_binned,
-    sigma_at_support,
-)
-from tsara.core.support import CellBounds, attach_time_bounds, overlap_pairs
+from tsara.core.naming import TIME_COORD
+from tsara.core.support import CellBounds
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Mapping
 
+    import xarray as xr
+
+    from tsara.core.propagation import PropagationForm
+
 logger = logging.getLogger(__name__)
 
-__all__ = ["PairedSpecies", "TsaraAlignError", "pair_species"]
+__all__ = ["PairedSpecies", "pair_species"]
 
-#: Attrs the paired product carries, documented in ``docs/METHODS.md`` §11.3.
+#: Attrs the paired product adds on top of the binner's, documented in §11.4.
 PAIRING_CLOCK_ATTR = "tsara_pairing_clock"
 PAIRING_REASON_ATTR = "tsara_pairing_clock_reason"
 PAIRING_COVERAGE_ATTR = "tsara_pairing_min_coverage"
 PAIRING_DROPPED_ATTR = "tsara_pairing_cells_dropped"
 PAIRING_CANDIDATE_ATTR = "tsara_pairing_cells_considered"
-PAIRING_INSTRUMENT_ATTR = "tsara_source_instrument"
-PAIRING_BINNED_ATTR = "tsara_pairing_binned"
-PROPAGATION_FORM_ATTR = "tsara_propagation_form"
-SIGMA_AT_SUPPORT_ATTR = "tsara_sigma_at_support"
-
-#: Seconds per nanosecond, for turning cell widths into the units the
-#: propagation module speaks.
-_NS_PER_S = 1_000_000_000.0
-
-
-class TsaraAlignError(TsaraError):
-    """Raised when two streams cannot be paired as asked.
-
-    Its own type because the failures are about *combining* streams rather
-    than about reading them: a species that no stream declares, a name two
-    streams both declare, a stream with no cells, or a pair whose records
-    never overlap in time.
-    """
 
 
 @dataclass(frozen=True)
@@ -128,7 +103,7 @@ class PairedSpecies:
         described by CF ``time_bnds`` exactly as a stream's are, so the
         product says what interval each pair describes.
     y_name, x_name : str
-        Canonical names of the two species, in the dataset.
+        Names of the two species as they appear in the dataset.
     clock : str
         Instrument whose cells were used, i.e. the wider-supported one.
     n_pairs : int
@@ -146,106 +121,8 @@ class PairedSpecies:
         return self.n_pairs
 
 
-def _resolve(
-    streams: Mapping[str, xr.Dataset], reference: str | tuple[str, str]
-) -> tuple[str, str]:
-    """Return ``(instrument, variable)`` for a species reference.
-
-    A bare name is searched for across the streams. Two instruments measuring
-    the same canonical name is a real situation -- it is how a campaign
-    compares two analyzers -- so the ambiguity is an error naming both rather
-    than a silent choice of the first.
-    """
-    if isinstance(reference, tuple):
-        instrument, variable = reference
-        if instrument not in streams:
-            raise TsaraAlignError(
-                f"No stream named '{instrument}'; available: {sorted(map(str, streams))}."
-            )
-        if variable not in streams[instrument].data_vars:
-            raise TsaraAlignError(
-                f"Stream '{instrument}' has no variable '{variable}'; available: "
-                f"{sorted(map(str, streams[instrument].data_vars))}."
-            )
-        return instrument, variable
-    holders = [name for name, stream in streams.items() if reference in stream.data_vars]
-    if not holders:
-        raise TsaraAlignError(
-            f"No stream measures '{reference}'. Streams and their variables: "
-            + "; ".join(f"{n}: {sorted(map(str, s.data_vars))}" for n, s in streams.items())
-        )
-    if len(holders) > 1:
-        raise TsaraAlignError(
-            f"'{reference}' is measured by more than one instrument ({sorted(holders)}), "
-            "so naming it alone is ambiguous. Pass a (instrument, variable) pair to "
-            "say which one."
-        )
-    return holders[0], reference
-
-
-def _cells(stream: xr.Dataset, instrument: str) -> CellBounds:
-    """Return a stream's cells, or raise naming the instrument."""
-    if TIME_BOUNDS_VAR not in stream.coords and TIME_BOUNDS_VAR not in stream.data_vars:
-        raise TsaraAlignError(
-            f"Stream '{instrument}' carries no '{TIME_BOUNDS_VAR}', so there is no "
-            "interval to pair over. Streams gain cells at ingestion (METHODS §10); "
-            "a bundle written before format 2 must be reloaded to acquire them."
-        )
-    bounds = np.asarray(stream[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]").astype(np.int64)
-    if bounds.size == 0:
-        raise TsaraAlignError(f"Stream '{instrument}' has no cells to pair over.")
-    return CellBounds(start_ns=bounds[:, 0].copy(), stop_ns=bounds[:, 1].copy())
-
-
-def _median_width_s(cells: CellBounds) -> float:
-    """Return the median cell width in seconds."""
-    return float(np.median(cells.width_ns)) / _NS_PER_S
-
-
-def _sigma_on_cells(
-    stream: xr.Dataset,
-    variable: str,
-    sigma_variable: str,
-    cell_width_s: float,
-    form: PropagationForm,
-) -> tuple[np.ndarray, str] | None:
-    """Return a sigma restated on the stream's own cells, and how.
-
-    Ingestion stores a declared figure exactly as declared and records the
-    interval it was quoted at, deliberately performing no arithmetic on it
-    (§10.8). This is the point of use, so this is where the arithmetic
-    happens -- or is refused and said so.
-    """
-    if sigma_variable not in stream.data_vars:
-        return None
-    values = np.asarray(stream[sigma_variable].values, dtype=np.float64)
-    quoted = stream[variable].attrs.get("uncertainty_at_width")
-    if quoted is None:
-        return values, "unchanged"
-    tau = stream[variable].attrs.get("decorrelation_timescale")
-    tau_s = float(pd.Timedelta(tau).total_seconds()) if tau is not None else None
-    quoted_s = float(pd.Timedelta(quoted).total_seconds())
-    moved, provenance = sigma_at_support(
-        values,
-        quoted_width_s=quoted_s,
-        target_width_s=cell_width_s,
-        tau_s=tau_s,
-        form=form,
-    )
-    if provenance == "unscaled":
-        logger.warning(
-            "%s declares its uncertainty at %s but its cells are %.3f s wide, and no "
-            "decorrelation timescale was declared, so the figure is used unscaled. "
-            "Declare decorrelation_timescale to move it onto the cells.",
-            variable,
-            quoted,
-            cell_width_s,
-        )
-    return np.asarray(moved, dtype=np.float64), provenance
-
-
-def _restrict(cells: CellBounds, interval: tuple[pd.Timestamp, pd.Timestamp]) -> np.ndarray:
-    """Return the indices of cells overlapping ``interval``.
+def _restrict(cells: CellBounds, interval: tuple[pd.Timestamp, pd.Timestamp]) -> CellBounds:
+    """Return the cells overlapping ``interval``.
 
     Overlap rather than containment: an event boundary rarely falls on a cell
     edge, and dropping the two partly-covered end cells would quietly shorten
@@ -256,12 +133,8 @@ def _restrict(cells: CellBounds, interval: tuple[pd.Timestamp, pd.Timestamp]) ->
         raise TsaraAlignError(
             f"Pairing interval must have positive duration; got {interval[0]} to {interval[1]}."
         )
-    return np.flatnonzero((cells.stop_ns > start) & (cells.start_ns < stop))
-
-
-def _subset(cells: CellBounds, index: np.ndarray) -> CellBounds:
-    """Return the cells at ``index``."""
-    return CellBounds(start_ns=cells.start_ns[index], stop_ns=cells.stop_ns[index])
+    keep = np.flatnonzero((cells.stop_ns > start) & (cells.start_ns < stop))
+    return CellBounds(start_ns=cells.start_ns[keep], stop_ns=cells.stop_ns[keep])
 
 
 def pair_species(
@@ -278,20 +151,17 @@ def pair_species(
     Parameters
     ----------
     streams : mapping of str to xarray.Dataset
-        A campaign's native-rate streams, e.g. a
-        :class:`~tsara.ingest.campaign.StreamCollection` or the ``streams``
-        of a :class:`~tsara.synthetic.generator.SyntheticDataset`.
+        A campaign's native-rate streams.
     y, x : str or tuple of (str, str)
         The two species. A bare canonical name is looked up across the
-        streams and must be unambiguous; a tuple names the instrument
-        explicitly.
+        streams and must be unambiguous; a tuple names the instrument.
     interval : tuple of pandas.Timestamp, optional
-        Restrict pairing to cells overlapping this window — an event, in
+        Restrict pairing to cells overlapping this window -- an event, in
         Phase 6. ``None`` pairs the whole record.
     min_coverage : float, optional
         Drop pairs whose cell was covered by less than this fraction of
-        contributing partner data. Default 0.0 drops nothing; coverage is
-        recorded either way (:class:`~tsara.config.analysis.PairingConfig`).
+        contributing data. Default 0.0 drops nothing; coverage is recorded
+        either way (:class:`~tsara.config.analysis.PairingConfig`).
     propagation_form : {'ar1_neff', 'ar1_asymptotic', 'ar1_double_sum'}, optional
         Which registered form reduces a correlated random component (§3.4).
 
@@ -303,119 +173,76 @@ def pair_species(
     Raises
     ------
     TsaraAlignError
-        If a species cannot be resolved, a stream has no cells, or the two
-        records never overlap in time.
-
-    Notes
-    -----
-    When both species come from the same instrument they already share a
-    clock, and no binning happens at all — the values pass through
-    untouched. That path is not merely an optimization: overlap-weighted
-    averaging of a cell onto itself is the identity mathematically but not
-    in floating point, and same-instrument species pairs (several gases
-    retrieved from one spectrum) are the most common case there is.
+        If a species cannot be resolved, a stream has no cells, the interval
+        selects nothing, or no cell holds a real measurement of both species.
     """
     if not streams:
         raise TsaraAlignError("No streams to pair.")
-    y_instrument, y_name = _resolve(streams, y)
-    x_instrument, x_name = _resolve(streams, x)
-    if y_name == x_name and y_instrument == x_instrument:
+    y_instrument, y_variable = resolve_variable(streams, y)
+    x_instrument, x_variable = resolve_variable(streams, x)
+    if (y_instrument, y_variable) == (x_instrument, x_variable):
         raise TsaraAlignError(
-            f"Cannot pair '{y_name}' on '{y_instrument}' with itself; a ratio of a "
-            "species to itself is 1 by construction."
+            f"Cannot pair '{y_variable}' on '{y_instrument}' with itself; a ratio of "
+            "a species to itself is 1 by construction."
         )
 
-    y_cells = _cells(streams[y_instrument], y_instrument)
-    x_cells = _cells(streams[x_instrument], x_instrument)
-    same_clock = y_instrument == x_instrument
-
-    if same_clock:
-        clock, reason = y_instrument, "both species share one instrument"
-        target_cells = y_cells
-    elif _median_width_s(y_cells) >= _median_width_s(x_cells):
-        clock, reason = (
-            y_instrument,
-            f"wider cells ({_median_width_s(y_cells):.6g} s vs {_median_width_s(x_cells):.6g} s)",
-        )
-        target_cells = y_cells
+    y_cells = stream_cells(streams[y_instrument], y_instrument)
+    x_cells = stream_cells(streams[x_instrument], x_instrument)
+    y_width, x_width = median_width_s(y_cells), median_width_s(x_cells)
+    if y_instrument == x_instrument:
+        clock, target = y_instrument, y_cells
+        reason = "both species share one instrument"
+    elif y_width >= x_width:
+        clock, target = y_instrument, y_cells
+        reason = f"wider cells ({y_width:.6g} s vs {x_width:.6g} s)"
     else:
-        clock, reason = (
-            x_instrument,
-            f"wider cells ({_median_width_s(x_cells):.6g} s vs {_median_width_s(y_cells):.6g} s)",
-        )
-        target_cells = x_cells
+        clock, target = x_instrument, x_cells
+        reason = f"wider cells ({x_width:.6g} s vs {y_width:.6g} s)"
 
-    keep = np.arange(len(target_cells), dtype=np.int64)
     if interval is not None:
-        keep = _restrict(target_cells, interval)
-        if keep.size == 0:
+        target = _restrict(target, interval)
+        if len(target) == 0:
             raise TsaraAlignError(
                 f"No cells of '{clock}' overlap the interval {interval[0]} to {interval[1]}."
             )
-        target_cells = _subset(target_cells, keep)
-    n_considered = len(target_cells)
+    n_considered = len(target)
 
-    columns: dict[str, tuple[np.ndarray, dict[str, object]]] = {}
-    for instrument, name in ((y_instrument, y_name), (x_instrument, x_name)):
-        native = instrument == clock
-        columns.update(
-            _one_species(
-                streams[instrument],
-                instrument=instrument,
-                name=name,
-                target_cells=target_cells,
-                keep=keep if native else None,
-                native=native,
-                propagation_form=propagation_form,
-            )
-        )
-
-    finite = np.isfinite(columns[y_name][0]) & np.isfinite(columns[x_name][0])
-    covered = (columns[f"coverage_{y_name}"][0] >= min_coverage) & (
-        columns[f"coverage_{x_name}"][0] >= min_coverage
+    joined = bin_streams_onto_cells(
+        streams,
+        target,
+        [(y_instrument, y_variable), (x_instrument, x_variable)],
+        propagation_form=propagation_form,
     )
-    surviving = np.flatnonzero(finite & covered)
+    # The binner names a column after its variable, suffixing with the
+    # instrument only when two selected streams claim the same name -- which
+    # for a pair means one species compared across two analyzers.
+    collides = y_variable == x_variable
+    y_name = f"{y_variable}_{y_instrument}" if collides else y_variable
+    x_name = f"{x_variable}_{x_instrument}" if collides else x_variable
+
+    surviving = np.flatnonzero(
+        np.isfinite(joined[y_name].values)
+        & np.isfinite(joined[x_name].values)
+        & (joined[f"coverage_{y_name}"].values >= min_coverage)
+        & (joined[f"coverage_{x_name}"].values >= min_coverage)
+    )
     if surviving.size == 0:
         raise TsaraAlignError(
-            f"'{y_name}' and '{x_name}' produced no usable pairs over "
-            f"{n_considered} candidate cell(s) of '{clock}'. Either the records do "
-            "not overlap, or every candidate cell was masked or below "
-            f"min_coverage={min_coverage}."
+            f"'{y_name}' and '{x_name}' produced no usable pairs over {n_considered} "
+            f"candidate cell(s) of '{clock}'. Either the records do not overlap, or "
+            f"every candidate cell was masked or below min_coverage={min_coverage}."
         )
-    final_cells = _subset(target_cells, surviving)
-
-    data_vars = {
-        column: (TIME_COORD, values[surviving], attrs)
-        for column, (values, attrs) in columns.items()
-    }
-    dataset = xr.Dataset(
-        data_vars=data_vars,
-        coords={TIME_COORD: np.asarray(final_cells.midpoint_ns, dtype="datetime64[ns]")},
-        attrs={
-            "tsara_version": __version__,
+    dataset = joined.isel({TIME_COORD: surviving})
+    dataset.attrs.update(
+        {
             "tsara_stage": "paired",
             PAIRING_CLOCK_ATTR: clock,
             PAIRING_REASON_ATTR: reason,
             PAIRING_COVERAGE_ATTR: float(min_coverage),
             PAIRING_CANDIDATE_ATTR: int(n_considered),
             PAIRING_DROPPED_ATTR: int(n_considered - surviving.size),
-            PROPAGATION_FORM_ATTR: propagation_form,
-        },
+        }
     )
-    # One implementation of the CF layout, shared with ingestion and the
-    # generator: bounds coordinate, the `bounds` attribute, the axis
-    # declarations, and the exclusion of the sigma companions -- a sigma
-    # describes the uncertainty OF a cell's value, and where that value is an
-    # average the two differ by exactly sqrt(N_eff), so `time: mean` on a
-    # sigma would be a false claim (§10.2).
-    attach_time_bounds(dataset, final_cells, "mean")
-    _correct_cell_methods(dataset, streams, y_instrument, y_name, x_instrument, x_name, clock)
-    # Pinned here rather than by whoever eventually writes the file. A paired
-    # series is a plain Dataset with no bundle of its own, so a user
-    # inspecting one in a notebook is the one who calls `to_netcdf` -- and
-    # without the pin xarray picks different reference epochs for `time` and
-    # `time_bnds` and warns that the result is counter to CF (METHODS §10.2).
-    pin_time_encoding(dataset)
     logger.info(
         "Paired %s vs %s on '%s' (%s): %d of %d candidate cells kept.",
         y_name,
@@ -432,230 +259,3 @@ def pair_species(
         clock=clock,
         n_pairs=int(surviving.size),
     )
-
-
-def _correct_cell_methods(
-    dataset: xr.Dataset,
-    streams: Mapping[str, xr.Dataset],
-    y_instrument: str,
-    y_name: str,
-    x_instrument: str,
-    x_name: str,
-    clock: str,
-) -> None:
-    """Fix the cell methods that a blanket ``time: mean`` gets wrong.
-
-    :func:`~tsara.core.support.attach_time_bounds` stamps one method on every
-    non-sigma variable, which is right for a species that was binned onto
-    these cells and wrong for three other things this product carries.
-
-    * The species already on the pairing clock was not averaged by this
-      stage at all, so it keeps whatever its own stream declared -- stamping
-      ``time: mean`` on a point sample would assert an averaging that never
-      happened.
-    * A contributing-sample count is a **sum** over the cell, which is CF's
-      own word for it.
-    * A coverage fraction is a property of the cell rather than a statistic
-      of the data inside it, so it gets no cell method for the same reason
-      the sigma companions get none. What it is is said by its description.
-    """
-    for instrument, name in ((y_instrument, y_name), (x_instrument, x_name)):
-        if instrument == clock:
-            declared = streams[instrument][name].attrs.get(CELL_METHODS_ATTR)
-            if declared is None:
-                dataset[name].attrs.pop(CELL_METHODS_ATTR, None)
-            else:
-                dataset[name].attrs[CELL_METHODS_ATTR] = declared
-        dataset[f"n_source_{name}"].attrs[CELL_METHODS_ATTR] = f"{TIME_COORD}: sum"
-        dataset[f"coverage_{name}"].attrs.pop(CELL_METHODS_ATTR, None)
-
-
-def _one_species(
-    stream: xr.Dataset,
-    *,
-    instrument: str,
-    name: str,
-    target_cells: CellBounds,
-    keep: np.ndarray | None,
-    native: bool,
-    propagation_form: PropagationForm,
-) -> dict[str, tuple[np.ndarray, dict[str, object]]]:
-    """Return one species' columns on the pairing clock.
-
-    ``native`` means this species already lives on the target cells, so its
-    values pass through and are merely restricted to ``keep``. Otherwise it
-    is averaged onto them with overlap weights, and its uncertainty is
-    propagated through the same weights.
-    """
-    source_cells = _cells(stream, instrument)
-    cell_width_s = _median_width_s(source_cells)
-    values = np.asarray(stream[name].values, dtype=np.float64)
-    base_attrs: dict[str, object] = dict(stream[name].attrs)
-    base_attrs[PAIRING_INSTRUMENT_ATTR] = instrument
-    base_attrs[PAIRING_BINNED_ATTR] = int(not native)
-
-    sigmas = {
-        component: _sigma_on_cells(stream, name, sigma_name(name), cell_width_s, propagation_form)
-        for component, sigma_name in (("random", sigma_rand_name), ("systematic", sigma_sys_name))
-    }
-
-    if native:
-        index = keep if keep is not None else np.arange(len(source_cells), dtype=np.int64)
-        columns: dict[str, tuple[np.ndarray, dict[str, object]]] = {
-            name: (values[index], base_attrs)
-        }
-        n_cells = index.size
-        columns[f"n_source_{name}"] = (
-            np.ones(n_cells, dtype=np.int64),
-            _count_attrs(name, native=True),
-        )
-        columns[f"coverage_{name}"] = (
-            np.ones(n_cells, dtype=np.float64),
-            _coverage_attrs(name, native=True),
-        )
-        for component, resolved in sigmas.items():
-            if resolved is None:
-                continue
-            sigma_values, provenance = resolved
-            columns[_sigma_column(component, name)] = (
-                sigma_values[index],
-                _sigma_attrs(stream, name, component, provenance, form="native"),
-            )
-        return columns
-
-    pairs = overlap_pairs(source_cells, target_cells)
-    n_target = len(target_cells)
-    weight = pairs.overlap_ns.astype(np.float64)
-    paired = values[pairs.source_index]
-    contributes = np.isfinite(paired) & (weight > 0)
-    effective_weight = np.where(contributes, weight, 0.0)
-    weight_sum = np.bincount(pairs.target_index, weights=effective_weight, minlength=n_target)
-    value_sum = np.bincount(
-        pairs.target_index,
-        weights=effective_weight * np.where(contributes, paired, 0.0),
-        minlength=n_target,
-    )
-    binned = np.full(n_target, np.nan, dtype=np.float64)
-    filled = weight_sum > 0
-    binned[filled] = value_sum[filled] / weight_sum[filled]
-    counts = np.bincount(
-        pairs.target_index, weights=contributes.astype(np.float64), minlength=n_target
-    ).astype(np.int64)
-    width = target_cells.width_ns.astype(np.float64)
-    # Coverage can exceed 1 slightly, and is left alone when it does. Fixed
-    # width cells centred on jittered timestamps overlap each other, so their
-    # overlaps with one target cell can sum past its width (METHODS §10.2,
-    # where the effect is documented as benign: the value is a weighted MEAN,
-    # so the weights normalize). Clipping would hide a real property of the
-    # source record behind a tidier number.
-    coverage = np.zeros(n_target, dtype=np.float64)
-    wide = width > 0
-    coverage[wide] = weight_sum[wide] / width[wide]
-
-    columns = {name: (binned, base_attrs)}
-    columns[f"n_source_{name}"] = (counts, _count_attrs(name, native=False))
-    columns[f"coverage_{name}"] = (coverage, _coverage_attrs(name, native=False))
-
-    tau = stream[name].attrs.get("decorrelation_timescale")
-    tau_s = float(pd.Timedelta(tau).total_seconds()) if tau is not None else None
-    spacing_s = _spacing_s(source_cells)
-    for component, resolved in sigmas.items():
-        if resolved is None:
-            continue
-        sigma_values, provenance = resolved
-        long_form = sigma_values[pairs.source_index]
-        if component == "random":
-            result = propagate_random_binned(
-                long_form,
-                effective_weight,
-                pairs.target_index,
-                n_target,
-                spacing_s=spacing_s,
-                tau_s=tau_s,
-                form=propagation_form,
-            )
-        else:
-            result = propagate_systematic_binned(
-                long_form, effective_weight, pairs.target_index, n_target
-            )
-        columns[_sigma_column(component, name)] = (
-            result.sigma,
-            _sigma_attrs(stream, name, component, provenance, form=result.form),
-        )
-    return columns
-
-
-def _spacing_s(cells: CellBounds) -> float:
-    """Return the source stream's sampling interval, in seconds.
-
-    The median gap between consecutive cell starts, which is the cadence in
-    the sense the correlation correction needs -- how far apart the samples
-    are, not how wide each one is. Falls back to the cell width for a
-    single-cell record, where there is no gap to measure.
-    """
-    if len(cells) < 2:
-        return max(_median_width_s(cells), 1.0 / _NS_PER_S)
-    deltas = np.diff(cells.start_ns)
-    positive = deltas[deltas > 0]
-    if positive.size == 0:
-        return max(_median_width_s(cells), 1.0 / _NS_PER_S)
-    return float(np.median(positive)) / _NS_PER_S
-
-
-def _sigma_column(component: str, name: str) -> str:
-    """Return the output column for one uncertainty component."""
-    return sigma_rand_name(name) if component == "random" else sigma_sys_name(name)
-
-
-def _count_attrs(name: str, *, native: bool) -> dict[str, object]:
-    """Return attrs for a contributing-sample count."""
-    return {
-        "description": (
-            f"Native cells of {name} contributing to each pair."
-            + (" One by construction: this species is on the pairing clock." if native else "")
-        ),
-        "units": "1",
-    }
-
-
-def _coverage_attrs(name: str, *, native: bool) -> dict[str, object]:
-    """Return attrs for a coverage fraction."""
-    return {
-        "description": (
-            f"Fraction of each pairing cell covered by contributing {name} data."
-            + (" One by construction: this species defines the cell." if native else "")
-        ),
-        "units": "1",
-    }
-
-
-def _sigma_attrs(
-    stream: xr.Dataset,
-    name: str,
-    component: str,
-    at_support: str,
-    *,
-    form: str,
-) -> dict[str, object]:
-    """Return attrs for a propagated uncertainty component.
-
-    Carries three separate facts a reader cannot re-derive from the number:
-    where the budget came from (ingestion's provenance), whether the declared
-    figure had to be moved onto the stream's own cells and how, and which
-    form propagated it through the binning.
-    """
-    # Spelled in full rather than built from a prefix. The suite discovers the
-    # attribute vocabulary by reading string constants out of the source, so a
-    # prefix plus an f-string would enter that vocabulary as a fragment that
-    # matches nothing in the methods document and can never be documented.
-    source_key = (
-        "uncertainty_source_random" if component == "random" else "uncertainty_source_systematic"
-    )
-    return {
-        "units": stream[name].attrs.get("units", ""),
-        "description": f"{component.capitalize()} 1-sigma for {name} on the pairing clock.",
-        "uncertainty_component": component,
-        "uncertainty_source": stream[name].attrs.get(source_key, "unknown"),
-        SIGMA_AT_SUPPORT_ATTR: at_support,
-        PROPAGATION_FORM_ATTR: form,
-    }

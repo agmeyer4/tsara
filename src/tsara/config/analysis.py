@@ -54,7 +54,7 @@ class OutputGridConfig(_StrictModel):
     1 Hz mobile CH4 record, a 60 s median discards 19.3 % of the enhancement
     mass and up to 100 % of an individual cell's — a low bias that scales
     with how sharp each species' plumes are, so it corrupts exactly the
-    between-species ratios TSARA exists to compute (METHODS.md §11.6). It is
+    between-species ratios TSARA exists to compute (METHODS.md §11.7). It is
     the same argument that deleted the QA/QC spike rule (§9.5).
     """
 
