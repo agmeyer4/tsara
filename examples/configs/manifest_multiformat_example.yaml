@@ -67,13 +67,16 @@ instruments:
         convert: {from_unit: ppm, to_unit: ppb, scale: 1000.0}
         uncertainty:
           # `at_width` says these figures are the manufacturer's 1-second
-          # precision, while the data above are 1-minute means. Without it
-          # TSARA would read a 1 s sigma as though it described the minute.
-          # Rescaling needs `decorrelation_timescale`, because how much
-          # averaging actually helps depends on how quickly the error
-          # decorrelates -- at tau = 5 min the 60 samples in a cell are worth
-          # barely more than one, so the naive square-root-of-N answer would
-          # be far too optimistic (METHODS.md 3.4).
+          # precision, while the data above are 1-minute means. Ingestion
+          # stores them exactly as written and records the mismatch (here,
+          # cells 60x the quoted interval); it does not reconcile the two,
+          # because that needs `decorrelation_timescale` -- how much averaging
+          # helps depends entirely on how quickly the error decorrelates, and
+          # at tau = 5 min the 60 samples in a cell are worth barely more than
+          # one, so the naive square-root-of-N answer would be far too
+          # optimistic. The stage that wants a sigma at a particular support
+          # does that in one step, from these three declarations
+          # (METHODS.md 3.4, 10.8).
           random: {mode: declared, absolute: 0.7, relative: 0.0005, at_width: 1s}
           systematic: {mode: declared, relative: 0.002}
           decorrelation_timescale: 5min

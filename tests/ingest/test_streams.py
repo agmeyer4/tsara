@@ -564,9 +564,11 @@ def test_a_clock_correction_is_recorded_but_not_reapplied() -> None:
     )
 
 
-def test_a_rescaled_sigma_says_so_in_the_saved_product() -> None:
+def test_a_quoted_interval_is_written_into_the_saved_product() -> None:
     """ "This sigma describes a different interval from its own cells" cannot
-    be re-derived from the numbers, so it is written down."""
+    be re-derived from the numbers, so it is written down. Ingestion does not
+    reconcile the two -- that needs a decorrelation timescale and an averaging
+    model (METHODS 10.8) -- which is exactly why the record has to travel."""
     instrument = _instrument(
         ch4={
             "column": "CH4_dry",
@@ -586,17 +588,24 @@ def test_a_rescaled_sigma_says_so_in_the_saved_product() -> None:
         support=_resolved(),
     )
     assert stream["ch4"].attrs["uncertainty_at_width"] == "1s"
-    assert stream["ch4"].attrs["uncertainty_at_width_status"] == "rescaled"
-    assert stream["ch4"].attrs["uncertainty_n_eff"] == pytest.approx(2.0)
+    # The fixture's cells are 2 s wide, so two 1 s intervals fit in each.
+    assert stream["ch4"].attrs["uncertainty_at_width_ratio"] == pytest.approx(2.0)
+    # And the figure itself is untouched, which is the claim that matters.
+    assert float(stream["sigma_rand_ch4"].values[0]) == pytest.approx(1.0)
 
 
-def test_an_unrescalable_sigma_records_why_not() -> None:
+def test_a_systematic_quoted_interval_reaches_the_product_too() -> None:
+    """It can never be acted on, but a manifest that states one has said
+    something, and the product should not be quieter than the manifest."""
     instrument = _instrument(
         ch4={
             "column": "CH4_dry",
             "role": "gas",
             "units": "ppm",
-            "uncertainty": {"random": {"mode": "declared", "absolute": 1.0, "at_width": "1s"}},
+            "uncertainty": {
+                "random": {"mode": "declared", "absolute": 1.0},
+                "systematic": {"mode": "declared", "relative": 0.01, "at_width": "1s"},
+            },
         }
     )
     stream = build_stream(
@@ -606,7 +615,24 @@ def test_an_unrescalable_sigma_records_why_not() -> None:
         platform=StationaryPlatform(latitude=40.0, longitude=-111.0),
         support=_resolved(),
     )
-    assert stream["ch4"].attrs["uncertainty_at_width_status"] == (
-        "unscaled: no decorrelation_timescale"
+    assert stream["ch4"].attrs["uncertainty_systematic_at_width"] == "1s"
+    assert "uncertainty_at_width" not in stream["ch4"].attrs
+
+
+def test_a_stream_without_cells_still_carries_the_declaration() -> None:
+    instrument = _instrument(
+        ch4={
+            "column": "CH4_dry",
+            "role": "gas",
+            "units": "ppm",
+            "uncertainty": {"random": {"mode": "declared", "absolute": 1.0, "at_width": "1s"}},
+        }
     )
-    assert "uncertainty_n_eff" not in stream["ch4"].attrs
+    stream = build_stream(
+        _frame(),
+        instrument,
+        name="picarro",
+        platform=StationaryPlatform(latitude=40.0, longitude=-111.0),
+    )
+    assert stream["ch4"].attrs["uncertainty_at_width"] == "1s"
+    assert "uncertainty_at_width_ratio" not in stream["ch4"].attrs

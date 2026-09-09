@@ -193,10 +193,12 @@ class DeclaredUncertainty(_StrictModel):
             "default) means they already describe this stream's own cells. "
             "Set it when a spec-sheet precision quoted at one interval is "
             "being applied to data delivered at another -- a 1 s precision "
-            "pasted onto 1-minute means is the case this exists for. TSARA "
-            "rescales to the cell only when decorrelation_timescale is also "
-            "declared, since without it the correct N_eff is unknowable "
-            "(METHODS.md 3.4); otherwise it keeps sigma as given and warns."
+            "pasted onto 1-minute means is the case this exists for. "
+            "Ingestion stores the figures exactly as declared and records "
+            "both this interval and how many of them fit in a cell; moving a "
+            "sigma onto another support needs a decorrelation timescale and "
+            "an averaging model, so it is done by the stage that needs one "
+            "(METHODS.md 3.4, 10.8)."
         ),
     )
 

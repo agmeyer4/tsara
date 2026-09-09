@@ -10,7 +10,6 @@ manifest says nothing about it.
 from __future__ import annotations
 
 import logging
-import math
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +21,6 @@ from tsara.config.manifest import UncertaintySpec, UnitConversion
 from tsara.ingest.base import TsaraIngestError
 from tsara.ingest.uncertainty import (
     ResolvedUncertainty,
-    rescale_to_cell,
     resolve_uncertainty,
 )
 
@@ -339,152 +337,149 @@ def test_negative_sentinel_masking_survives_a_negative_scale() -> None:
 
 # ---------------------------------------------------------------------------
 # A declared sigma quoted at a different interval (Phase 3.5)
+#
+# Ingestion records the declaration and changes nothing. Moving a sigma onto
+# another support needs a decorrelation timescale and an averaging model, so
+# it belongs to the stage that wants a sigma at a particular support
+# (METHODS 3.4, 10.8). These tests exist to keep that boundary where it is:
+# the one that would fail loudest if a correction crept back in is
+# `test_the_declared_figures_are_stored_untouched`.
 # ---------------------------------------------------------------------------
 
 
-def _widths(n: int = 60, seconds: int = 60) -> np.ndarray:
-    return np.full(n, seconds * 1_000_000_000, dtype=np.int64)
+def _widths(n: int = 60, seconds: float = 60.0) -> np.ndarray:
+    return np.full(n, int(seconds * 1_000_000_000), dtype=np.int64)
 
 
-def _rescale(**kwargs: Any) -> tuple[np.ndarray, str, float | None]:
-    fields: dict[str, Any] = {
-        "at_width": "1s",
-        "decorrelation_timescale": None,
-        "cell_width_ns": _widths(),
-        "variable": "ch4",
-        "path": Path("f.csv"),
-    }
-    fields.update(kwargs)
-    return rescale_to_cell(np.full(60, 1.0), **fields)
+def _quoted(at_width: str | None = "1s", **spec: Any) -> UncertaintySpec:
+    random: dict[str, Any] = {"mode": "declared", "absolute": 1.0}
+    if at_width is not None:
+        random["at_width"] = at_width
+    return UncertaintySpec.model_validate({"random": random, **spec})
 
 
-def test_independent_errors_average_down_by_root_n() -> None:
-    """The textbook case, and the only one where root-N is right.
-
-    A very short timescale means each quoted interval is uncorrelated with
-    the next, so sixty of them are worth sixty.
-    """
-    sigma, status, n_eff = _rescale(decorrelation_timescale="1ns")
-    assert status == "rescaled"
-    assert n_eff == pytest.approx(60.0)
-    assert sigma[0] == pytest.approx(1.0 / math.sqrt(60.0))
-
-
-def test_a_long_timescale_leaves_almost_no_benefit() -> None:
-    """The case that makes naive root-N dangerous rather than merely wrong."""
-    sigma, status, n_eff = _rescale(decorrelation_timescale="20s")
-    assert status == "rescaled"
-    assert n_eff == pytest.approx(1.5, abs=0.05)
-    # Six times less improvement than root-N would have claimed.
-    assert sigma[0] / (1.0 / math.sqrt(60.0)) == pytest.approx(6.3, abs=0.2)
-
-
-def test_a_timescale_longer_than_the_record_gives_no_benefit_at_all() -> None:
-    """At which point the error is systematic in all but name (METHODS 3.3)."""
-    _, status, n_eff = _rescale(decorrelation_timescale="10000D")
-    assert status == "rescaled"
-    assert n_eff == pytest.approx(1.0)
-
-
-def test_without_a_timescale_the_figure_is_left_alone(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Guessing a timescale to justify a correction is worse than not
-    correcting: the answer would look more precise and be less true."""
-    with caplog.at_level(logging.WARNING, logger="tsara.ingest.uncertainty"):
-        sigma, status, n_eff = _rescale()
-    assert status == "unscaled: no decorrelation_timescale"
-    assert n_eff is None
-    assert np.all(sigma == 1.0)
-    assert "unknowable" in caplog.text
-
-
-def test_scaling_up_to_finer_cells_is_refused(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Recovering noise below the quoted interval assumes the error is white
-    down there, which is a claim about the instrument, not about the data."""
-    with caplog.at_level(logging.WARNING, logger="tsara.ingest.uncertainty"):
-        sigma, status, _ = _rescale(
-            at_width="60s", cell_width_ns=_widths(seconds=1), decorrelation_timescale="20s"
-        )
-    assert status == "unscaled: cells are finer than the quoted interval"
-    assert np.all(sigma == 1.0)
-
-
-def test_a_stream_without_cells_cannot_be_rescaled(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    with caplog.at_level(logging.WARNING, logger="tsara.ingest.uncertainty"):
-        _, status, _ = _rescale(cell_width_ns=None, decorrelation_timescale="20s")
-    assert status == "unscaled: stream has no cells"
-
-
-def test_per_row_widths_give_per_row_corrections() -> None:
-    """A sampler whose fills vary corrects each cell by its own count."""
-    widths = np.array([60, 60, 600], dtype=np.int64) * 1_000_000_000
-    sigma, status, _ = rescale_to_cell(
-        np.full(3, 1.0),
-        at_width="1s",
-        decorrelation_timescale="1ns",
-        cell_width_ns=widths,
+def _resolve_quoted(
+    spec: UncertaintySpec, widths: np.ndarray | None, n: int = 3
+) -> ResolvedUncertainty:
+    values = pd.Series([100.0] * n, index=pd.date_range("2026-01-01", periods=n, freq="60s"))
+    return resolve_uncertainty(
+        values,
+        spec,
+        pd.DataFrame(index=values.index),
+        conversion=None,
         variable="ch4",
-        path=Path("f.csv"),
+        path=PATH,
+        cell_width_ns=widths,
     )
-    assert status == "rescaled"
-    assert sigma[0] == pytest.approx(1.0 / math.sqrt(60.0))
-    assert sigma[2] == pytest.approx(1.0 / math.sqrt(600.0))
 
 
-def test_a_systematic_at_width_is_reported_and_ignored(
+def test_the_declared_figures_are_stored_untouched() -> None:
+    """The whole point of the boundary: a 1 s figure on 60 s cells is 60 s
+    cells' worth of mismatch, and ingestion still stores 1.0."""
+    resolved = _resolve_quoted(_quoted(decorrelation_timescale="1ns"), _widths(3))
+    assert resolved.random is not None
+    assert np.all(resolved.random == 1.0), "no sigma is rescaled at ingestion"
+
+
+def test_the_quoted_interval_is_recorded_verbatim() -> None:
+    resolved = _resolve_quoted(_quoted("1s"), _widths(3))
+    assert resolved.at_width == "1s"
+
+
+def test_the_ratio_is_how_many_quoted_intervals_fit_in_a_cell() -> None:
+    """N of METHODS 3.4 -- the count a later stage corrects to N_eff."""
+    resolved = _resolve_quoted(_quoted("1s"), _widths(3, seconds=60.0))
+    assert resolved.at_width_ratio == pytest.approx(60.0)
+
+
+def test_the_ratio_takes_the_median_of_varying_widths() -> None:
+    """Widths are per row, and a duty-cycled sampler's genuinely vary. The
+    median is not the mean here: a single long cell must not drag the summary
+    of the other two with it."""
+    widths = np.array([60, 60, 600], dtype=np.int64) * 1_000_000_000
+    resolved = _resolve_quoted(_quoted("1s"), widths)
+    assert resolved.at_width_ratio == pytest.approx(60.0), "the mean would be 240"
+
+
+def test_a_finer_cell_gives_a_ratio_below_one_rather_than_a_refusal() -> None:
+    """Cells finer than the quoted interval are a real configuration, not an
+    error: the figure simply describes a longer interval than a cell. The
+    number says so and nothing is inflated to compensate."""
+    resolved = _resolve_quoted(_quoted("60s"), _widths(3, seconds=1.0))
+    assert resolved.at_width_ratio == pytest.approx(1.0 / 60.0)
+    assert resolved.random is not None
+    assert np.all(resolved.random == 1.0)
+
+
+def test_a_stream_without_cells_records_the_declaration_anyway(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A systematic error does not average down, so the interval it was
-    quoted at cannot change it (METHODS 3.3)."""
+    """Nothing to compare against is not nothing to say."""
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.uncertainty"):
+        resolved = _resolve_quoted(_quoted("1s"), None)
+    assert resolved.at_width == "1s"
+    assert resolved.at_width_ratio is None
+    assert caplog.text == ""
+
+
+def test_a_mismatch_is_warned_about_and_says_where_it_gets_resolved(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.uncertainty"):
+        _resolve_quoted(_quoted("1s"), _widths(3))
+    assert "stored exactly as declared" in caplog.text
+    assert "60" in caplog.text, "the size of the mismatch is in the message"
+
+
+def test_a_figure_quoted_at_its_own_cell_is_not_worth_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.uncertainty"):
+        resolved = _resolve_quoted(_quoted("60s"), _widths(3))
+    assert resolved.at_width_ratio == pytest.approx(1.0)
+    assert caplog.text == ""
+
+
+def test_an_undeclared_interval_records_nothing() -> None:
+    resolved = _resolve_quoted(_quoted(at_width=None), _widths(3))
+    assert resolved.at_width is None
+    assert resolved.at_width_ratio is None
+
+
+def test_a_systematic_interval_is_recorded_and_can_never_be_acted_on(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A systematic error does not average down, so no interval can change it
+    (METHODS 3.3). Recording it anyway keeps the product as informative as
+    the manifest that produced it."""
     spec = UncertaintySpec.model_validate(
         {
             "random": {"mode": "declared", "absolute": 1.0},
             "systematic": {"mode": "declared", "relative": 0.01, "at_width": "1s"},
         }
     )
-    values = pd.Series([100.0, 100.0], index=pd.date_range("2026-01-01", periods=2, freq="s"))
     with caplog.at_level(logging.WARNING, logger="tsara.ingest.uncertainty"):
-        resolved = resolve_uncertainty(
-            values,
-            spec,
-            pd.DataFrame(index=values.index),
-            conversion=None,
-            variable="ch4",
-            path=Path("f.csv"),
-            cell_width_ns=_widths(2),
-        )
+        resolved = _resolve_quoted(spec, _widths(3))
+    assert resolved.systematic_at_width == "1s"
+    assert resolved.at_width is None, "the random component declared none"
     assert "does not average down" in caplog.text
     assert resolved.systematic is not None
     assert resolved.systematic[0] == pytest.approx(1.0)
-    assert resolved.at_width is None, "only the random component records one"
 
 
-def test_a_random_at_width_is_rescaled_and_recorded() -> None:
-    """Through the resolver rather than the primitive, so the plumbing is
-    covered too: what gets rescaled, and what gets written down about it."""
-    spec = UncertaintySpec.model_validate(
-        {
-            "random": {"mode": "declared", "absolute": 1.0, "at_width": "1s"},
-            "decorrelation_timescale": "1ns",
-        }
-    )
-    values = pd.Series([100.0] * 3, index=pd.date_range("2026-01-01", periods=3, freq="60s"))
+def test_a_reported_component_carries_no_interval() -> None:
+    """A per-point sigma column describes the rows it sits beside, so there
+    is no second interval to reconcile."""
+    spec = UncertaintySpec.model_validate({"random": {"mode": "reported", "column": "sigma"}})
+    values = pd.Series([100.0, 100.0], index=pd.date_range("2026-01-01", periods=2, freq="60s"))
     resolved = resolve_uncertainty(
         values,
         spec,
-        pd.DataFrame(index=values.index),
+        pd.DataFrame({"sigma": [0.5, 0.5]}, index=values.index),
         conversion=None,
         variable="ch4",
-        path=Path("f.csv"),
-        cell_width_ns=_widths(3),
+        path=PATH,
+        cell_width_ns=_widths(2),
     )
-    assert resolved.at_width == "1s"
-    assert resolved.at_width_status == "rescaled"
-    assert resolved.n_eff == pytest.approx(60.0)
-    assert resolved.random is not None
-    assert resolved.random[0] == pytest.approx(1.0 / math.sqrt(60.0))
+    assert resolved.at_width is None
+    assert resolved.at_width_ratio is None

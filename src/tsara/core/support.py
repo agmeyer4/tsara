@@ -598,15 +598,16 @@ def attach_time_bounds(
     attribute pointing at it from the time coordinate, and a
     ``cell_methods`` attribute on every time-varying data variable.
 
-    **Not on the sigma companions**, and that exclusion is measured rather
-    than fastidious. ``cell_methods`` says what operation produced a value
-    *from* its cell, so ``time: mean`` on ``sigma_rand_ch4`` asserts the
-    stored number is the mean of the random sigmas over the cell. It is not:
-    it is the standard error of the cell mean, smaller by exactly the square
-    root of N_eff (METHODS §10.8) -- on a 60 s cell of 1 s
-    data with a 2 s decorrelation time, measured, 0.130 ppb against 0.5, a
-    factor of 3.83 that the very same file records in ``uncertainty_n_eff``.
-    The file contradicted itself.
+    **Not on the sigma companions**, and the exclusion is a correctness
+    matter rather than a fastidious one. ``cell_methods`` says what operation
+    produced a value *from* its cell, so ``time: mean`` on ``sigma_rand_ch4``
+    asserts the stored number is the mean of the random sigmas over the cell.
+    It is not. A sigma describes the uncertainty *of the cell's value*, and
+    where that value is an average the two differ by exactly the square root
+    of N_eff (METHODS §3.4) -- the factor that makes averaging worth doing in
+    the first place. Stamping ``time: mean`` on it would put a false claim in
+    the file, off by the one quantity the two-component design exists to keep
+    track of.
 
     The systematic companion happens to satisfy ``time: mean`` exactly, since
     a fully correlated error does not average down and every within-cell value

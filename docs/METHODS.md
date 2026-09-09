@@ -167,8 +167,9 @@ carrying τ for the random component (§3.4).
 `DeclaredUncertainty.at_width` (added in Phase 3.5) records the averaging
 interval the `absolute`/`relative` figures were *quoted* at, for the ordinary
 case of a spec-sheet precision stated at one second being applied to a
-one-minute product; §10.8 sets out when TSARA will move it onto the stream's
-own cells and the three cases in which it refuses to. Omitting a component means "not
+one-minute product; §10.8 sets out what ingestion records about it and why the
+arithmetic that reconciles the two belongs to the stage that consumes a sigma
+rather than to the one that reads it. Omitting a component means "not
 modeled here": an omitted `systematic` is zero; an omitted `random` falls back
 to the empirical estimator (§2.5) at runtime. A `ReportedUncertainty.column`
 is scaled by the parent variable's `convert.scale` at ingestion (a spread has
@@ -311,10 +312,15 @@ sum (§3.1) remains available as a slower, assumption-free alternative; τ → 0
 recovers §3.2 and τ → ∞ is handled by declaring the component systematic
 instead. *(Exact N_eff form is an open flag — see CLAUDE.md §5.)*
 
-This form has one implemented consumer so far: moving a declared σ from the
-interval it was quoted at onto the cells it actually describes (§10.8), where
-$N$ is the number of quoted intervals per cell. Worked numbers there show why
-the naive $\sqrt{N}$ shortcut is not merely imprecise but confidently wrong.
+This form has **no implemented consumer yet, deliberately**. Its callers are
+the stages that combine values across a support: §4 binning a fast stream onto
+a slow cell, §5 rolling a window over cells, §7 weighting a fit, and moving a
+declared σ from the interval it was quoted at onto whichever support is wanted
+(§10.8, where $N$ is the number of quoted intervals per cell, and where the
+worked numbers show why the naive $\sqrt{N}$ shortcut is not merely imprecise
+but confidently wrong). Ingestion records what a manifest declares and leaves
+the arithmetic to them, so this form has exactly one implementation when it
+arrives rather than one per stage.
 
 ### 3.5 Median binning
 
@@ -532,6 +538,24 @@ v1:
   (§10.7) lets a manifest *declare* an offset; deriving one by correlating a
   species against a trusted reference is a registered estimator waiting to be
   written. The 2026 campaign's own alignment stage does exactly this.
+- **Decorrelation-timescale estimation.** τ is what every $N_{\mathrm{eff}}$
+  correction needs (§3.4) and what no file declares: `UncertaintySpec.
+  decorrelation_timescale` lets a manifest *state* one, but establishing it for
+  an instrument is a measurement, and a field most data owners cannot fill
+  honestly should not be what decides whether a stored sigma is right. That is
+  why ingestion records declarations instead of acting on them (§10.8), and it
+  is the strongest argument for the package estimating τ itself: TSARA is a
+  time-series package whose subject is uncertainty, and this is a time-series
+  measurement. The classic instrument tool is the Allan deviation — average a
+  record over increasing windows and find where the deviation stops falling as
+  $1/\sqrt{N}$ — with a variogram or a fit to the first-difference
+  autocorrelation as siblings. One constraint is known in advance and shapes
+  the design: the campaign this package was built for has **no plume-free
+  stretches**, so an estimator that assumes a quiet segment will measure the
+  atmosphere rather than the instrument. It must work on plume-dense records —
+  robust, difference-based, or fitted on the quietest quantile of windows —
+  and it must report a provenance the way every other estimate here does.
+  Registered by name, like the noise estimators of §2.5.
 - **Instrument response deconvolution.** A laser analyzer's reading is a
   convolution of the truth with a response function, which is why `point` is
   the honest description of it rather than `mean` (§10.3). Recovering the
@@ -1630,14 +1654,14 @@ without a translation layer. Per stream:
 - `cell_methods = "time: mean"` or `"time: point"` on every time-varying
   variable **except** the `sigma_rand_`/`sigma_sys_` companions.
 
-The exception is measured rather than fastidious. `cell_methods` says what
-operation produced a value *from* its cell, so `time: mean` on
-`sigma_rand_ch4` asserts the stored number is the mean of the random sigmas
-over that cell. It is not — it is the standard error of the cell mean, smaller
-by exactly √N_eff (§10.8). On a 60 s cell of 1 s data with a 2 s decorrelation
-time: 0.130 ppb stored against 0.5 declared, a ratio of 3.83, and the same
-file records `uncertainty_n_eff = 14.7` two attributes away. The file
-contradicted itself.
+The exception is a correctness matter rather than a fastidious one.
+`cell_methods` says what operation produced a value *from* its cell, so
+`time: mean` on `sigma_rand_ch4` asserts the stored number is the mean of the
+random sigmas over that cell. It is not: a sigma describes the uncertainty
+*of the cell's value*, and where that value is an average the two differ by
+exactly √N_eff (§3.4) — the factor that makes averaging worth doing at all.
+Stamping `time: mean` on a sigma would put a false claim in the file, wrong by
+the one quantity the two-component design exists to track.
 
 The systematic companion happens to satisfy `time: mean` exactly, since a
 fully correlated error does not average down and every within-cell value is
@@ -1733,7 +1757,7 @@ line TSARA draws is operational rather than physical:
 
 Declaring `point` is therefore a *guard*, not a shrug: it is what stops a
 later stage rescaling a 1 s precision figure onto a 2 s cell as though
-averaging had happened. Instrument response and cavity residence are
+averaging had happened — a duty §10.8 leaves explicitly with that stage. Instrument response and cavity residence are
 deliberately not modelled (§10.9); they are a deconvolution problem, not a
 cell method.
 
@@ -1950,13 +1974,24 @@ estimator, not this field.
 was quoted at, for the ordinary and easily-mishandled case of a spec-sheet
 precision stated at 1 s being applied to 1-minute means.
 
-**Rescaling happens only when `decorrelation_timescale` is declared.** How
-much averaging helps depends entirely on how quickly the error forgets itself,
-and nothing in a file reveals that. With $\rho_1 = e^{-w/\tau}$ for a quoted
-interval $w$ and a cell holding $N = W/w$ of them, the §3.4 form gives
-$N_{\mathrm{eff}} = N(1-\rho_1)/(1+\rho_1)$ clamped to $[1, N]$, and
-$\sigma_{\mathrm{cell}} = \sigma/\sqrt{N_{\mathrm{eff}}}$. For a 1 s figure on
-60 s cells:
+**Ingestion records that declaration and acts on nothing.** The figures are
+stored exactly as the manifest states them; the variable carries
+`uncertainty_at_width` (the interval they describe) and
+`uncertainty_at_width_ratio` (the median cell width divided by it — the $N$
+below, not $N_{\mathrm{eff}}$), and a mismatch is warned about by name at
+ingestion time.
+
+That boundary is the same one drawn for the empirical noise estimator (§2.3)
+and for the closure diagnostic, and it is worth stating why it is not the same
+as a unit conversion. A unit conversion is a declared scale and offset: exact,
+invertible, and assumption-free, so ingestion applies it. Moving a sigma from
+one interval to another is not. It needs a decorrelation timescale, an AR(1)
+model of how the error forgets itself (§3.4), and the assumption that
+averaging is what produced the cell — three modelling choices, none of them
+stated by any file. With $\rho_1 = e^{-w/\tau}$ for a quoted interval $w$ and
+a cell holding $N = W/w$ of them, the §3.4 form gives $N_{\mathrm{eff}} =
+N(1-\rho_1)/(1+\rho_1)$ clamped to $[1, N]$, and $\sigma_{\mathrm{cell}} =
+\sigma/\sqrt{N_{\mathrm{eff}}}$. For a 1 s figure on 60 s cells:
 
 | τ | N_eff | σ falls by | Naive √N would claim |
 |---|---|---|---|
@@ -1966,19 +2001,52 @@ $\sigma_{\mathrm{cell}} = \sigma/\sqrt{N_{\mathrm{eff}}}$. For a 1 s figure on
 | 5 min | 1.00 | 1.00× | 7.75× |
 
 At τ = 20 s the naive answer is over six times too confident; at τ = 5 min the
-averaging buys nothing at all. Guessing a timescale in order to apply a
-correction would be worse than applying none, so three cases are refused, each
-recorded in `uncertainty_at_width_status` rather than only logged:
+averaging buys nothing at all. So the correction cannot be skipped *or*
+guessed, and τ is not a number most data owners have: it is not in any file,
+no ICARTT or parquet product in the archive declares one, and establishing it
+for an instrument means measuring it (§7 names that estimator as a future
+avenue). A field that usually cannot be filled honestly must not be what
+decides whether a stored number is right.
 
-1. **No decorrelation timescale** — the correction is unknowable.
-2. **Cells finer than the quoted interval** — recovering noise below that
-   interval assumes the error is white down there, a claim about the
-   instrument that no manifest has made.
-3. **A systematic component quoted at an interval** — a systematic error is
-   correlated across samples by definition and does not average down at all
-   (§3.3), so the interval cannot change it.
+Three consequences follow, and they are why the arithmetic belongs to the
+stage that consumes a sigma rather than to the stage that reads one:
 
-Widths are per row, so a sampler whose fills vary is corrected cell by cell.
+1. **The invariant was never available.** Ingestion could rescale only when τ
+   was declared, so "every sigma describes its own cell" was best-effort. A
+   consumer had to read the recorded interval regardless, which is exactly
+   what it must do now — with the difference that it is now true uniformly.
+2. **One hop beats two.** A sigma quoted at 1 s, moved onto 60 s cells at
+   ingestion and then onto a 5-minute pairing clock in §4, applies the AR(1)
+   approximation twice, and the second hop needs the autocorrelation *between
+   cell means*, which is not $e^{-W/\tau}$. Going once, from the quoted
+   interval to the support actually being used, is both better arithmetic and
+   easier to state.
+3. **One implementation.** The same $N_{\mathrm{eff}}$ machinery is needed
+   when §4 bins a fast stream onto a slow cell, when §5 rolls a window over
+   cells, and when §7 weights a fit. A copy in ingestion would fork the
+   load-bearing uncertainty maths before its main consumer was written.
+
+Two facts a consumer needs are therefore recorded rather than resolved, both
+per variable, both travelling into the saved product:
+
+- `uncertainty_at_width` and `uncertainty_at_width_ratio` for the **random**
+  component. Widths are per row, and a duty-cycled sampler's genuinely vary
+  (§10.5), so the ratio is a median and the exact per-row widths stay in the
+  bounds variable.
+- `uncertainty_systematic_at_width` when a **systematic** component declares
+  an interval. No stage may ever act on it: a systematic error is correlated
+  across samples by definition and does not average down at all (§3.3), so no
+  interval can change it. It is recorded because a manifest that states one
+  has said something about its instrument, and a product should not be
+  quieter than the manifest that produced it.
+
+A consumer wanting a sigma at some support therefore reads three things — the
+quoted interval, the decorrelation timescale, and the cell boundaries — and
+resolves them in one step. What it must *also* read is `cell_methods`: the
+$N_{\mathrm{eff}}$ correction assumes averaging produced the value, so it
+applies to a `time: mean` cell and not to a `time: point` one (§10.3), whose
+value averaged nothing whatever the cell's width. That check has no
+implementation to live in yet, which is the point of writing it here.
 
 ### 10.9 The manufactured side, and what the harness catches
 
@@ -2061,6 +2129,24 @@ from the pinned time encoding, which no test could see because nothing ever
 built bounds at a resolution other than nanoseconds. With tests for both, plus
 one for the sigma `cell_methods` exclusion, the suite catches **eight of
 eight**.
+
+A fifth round aimed at the **uncertainty layer**, when it still moved a
+declared sigma onto the cells: ten bugs in the $N_{\mathrm{eff}}$ arithmetic
+and its plumbing — the correlation factor inverted, ρ's ratio swapped, the
+root dropped, the clamp lowered, the count inverted, the scaling-up refusal
+removed, quadrature turned into a sum, a rescaling claimed but not applied,
+the cell widths never delivered, and the reported N_eff summarised by mean
+rather than median. **The suite caught nine; the round trip caught none.**
+The round trip's blindness was structural rather than an oversight, and worth
+recording because it is the harness's one real limit here: the generator draws
+noise at the delivered support, so `export_raw` cannot honestly declare that a
+figure was quoted at a *finer* interval, and a truthful declaration at the
+cell's own width exercises only the do-nothing case. Making that path testable
+end to end means rendering noise on the fine grid and averaging it — the
+alternative rejected in the design above. The arithmetic has since been
+removed from ingestion entirely (§10.8), which retires eight of the ten
+mutations rather than answering them; what remains is that ingestion records a
+declaration and changes no number, which the suite covers.
 
 A third round aimed at the **readers and the orchestrator** — the layer that
 decides what interval each row describes and in what order the deciding

@@ -294,14 +294,18 @@ def _add_variable(
         attrs["description"] = variable.description
     if resolved.decorrelation_timescale is not None:
         attrs["decorrelation_timescale"] = resolved.decorrelation_timescale
+    # The interval a declared figure was quoted at, and how many of those
+    # intervals fit in a cell. Nothing here rescales a sigma -- that needs a
+    # decorrelation timescale and belongs to the stage that wants a sigma at
+    # a particular support (METHODS 10.8) -- so these two attrs are how the
+    # product stays honest about a figure that describes a different interval
+    # from the cells it sits on. A reader cannot re-derive either.
     if resolved.at_width is not None:
-        # Written even when nothing was done with it: "this sigma describes a
-        # different interval from its own cells" is a fact a reader cannot
-        # re-derive from the numbers.
         attrs["uncertainty_at_width"] = resolved.at_width
-        attrs["uncertainty_at_width_status"] = str(resolved.at_width_status)
-    if resolved.n_eff is not None:
-        attrs["uncertainty_n_eff"] = float(resolved.n_eff)
+    if resolved.at_width_ratio is not None:
+        attrs["uncertainty_at_width_ratio"] = float(resolved.at_width_ratio)
+    if resolved.systematic_at_width is not None:
+        attrs["uncertainty_systematic_at_width"] = resolved.systematic_at_width
     # Recorded per variable rather than per stream because that is the
     # scope of the fact: a below-detection count belongs to the species it
     # censors. Keyed on the RAW column name, the only name a reader knows.
