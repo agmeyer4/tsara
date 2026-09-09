@@ -16,9 +16,13 @@ Shape of the subpackage
 ``pairing``
     Two species for a regression, on the cells of the wider-supported member
     (``docs/METHODS.md`` §1.3).
+``auxiliary``
+    The one exception to the interpolation rule: smooth fields evaluated
+    between samples, under a gap guard, and the mobile position join that
+    ingestion deliberately left undone (§1.2).
 
-Modules for auxiliary-field interpolation and the uniform output grid land
-with their stages, and both are the same binner with a different target.
+The module for the uniform output grid lands with its stage, and it is the
+same binner with a different target.
 
 The arithmetic itself is not here. Overlap-weighted binning lives in
 :mod:`tsara.core.support`, angular averaging in :mod:`tsara.core.circular`,
@@ -30,13 +34,17 @@ configuration, streams and provenance.
 
 from __future__ import annotations
 
+from tsara.align.auxiliary import InterpolatedField, attach_positions, interpolate_onto_cells
 from tsara.align.binning import TsaraAlignError, bin_streams_onto_cells, resolve_variable
 from tsara.align.pairing import PairedSpecies, pair_species
 
 __all__ = [
+    "InterpolatedField",
     "PairedSpecies",
     "TsaraAlignError",
+    "attach_positions",
     "bin_streams_onto_cells",
+    "interpolate_onto_cells",
     "pair_species",
     "resolve_variable",
 ]

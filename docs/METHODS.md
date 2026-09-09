@@ -2279,7 +2279,9 @@ row, in the direction that overlaps its neighbour.
   cell on a 60 s cadence; TSARA honours what the file says rather than
   rounding it.
 - **Spatial support on mobile platforms.** A 15 s canister at 15 m/s covers
-  about 225 m. Cell position is the track at the cell midpoint; a
+  about 225 m. **Measured since, on the 32 iWAS fills of the 2024-07-18
+  drive against their own MetNav track: a median of 127 m and a maximum of
+  307 m.** Cell position is the track at the cell midpoint; a
   `path_length_m` attribute is a future addition for clustering.
 - **The declared-versus-empirical closure diagnostic** proposed during
   scoping — comparing a declared σ against `diff_mad` at the delivered support
@@ -2576,7 +2578,98 @@ binning a record onto its own cells returned it to within **5.7e-14 degrees**
 over 19 470 samples, and the table above reproduces an independent script's
 numbers exactly.
 
-### 11.6 Auxiliary fields **[stub — lands with its stage]**
+### 11.6 Auxiliary fields, and the only interpolation TSARA performs
+
+Implemented in `tsara.align.auxiliary`. §1.2 states the prohibition —
+quantified species are never interpolated, only bin-averaged — and this
+section is its single exception. Position and ambient meteorology vary
+smoothly on sampling timescales, so evaluating them *between* samples is
+physically justified where evaluating a concentration between samples is not.
+This is the only module in TSARA that interpolates anything.
+
+**Two guards, both refusals.**
+
+*What.* A variable declaring `role: gas` is refused outright, and so is one
+declaring **no role at all**. The second is deliberate: TSARA's own streams
+always carry roles, so an absent one means the dataset came from elsewhere and
+its smoothness is unknown. Admitting it on the assumption that someone would
+have said otherwise is exactly how a prohibition erodes.
+
+*How far.* A target instant whose bracketing samples are further apart than
+`AlignmentConfig.max_interp_gap` gets `nan` rather than a bridged value, and
+nothing is extrapolated past either end of a record. Both counts are reported
+separately, because "there was no position here" and "the position here was
+too uncertain to state" are different facts about a cell.
+
+One case is deliberately exempt from the gap guard: a target landing **exactly
+on** a source sample. That value was measured, not interpolated, so refusing it
+would discard real data — which matters, because a GPS fix every 60 s against
+1 s gas cells leaves the coinciding cells positioned and the rest not, and that
+is the correct answer rather than an all-or-nothing one.
+
+**Where a value is placed: the cell midpoint.** For a smooth field under a
+linear model that is the representative instant, identical to the cell mean for
+a straight constant-speed path and different only where the path curves.
+Interpolation rather than binning is also what makes a *sparse* auxiliary
+record usable at all: a fix every 10 s cannot fill 1 s cells by averaging,
+since most cells contain no fix.
+
+**Circular fields are interpolated as unit vectors** (§11.5), so a direction
+crossing the compass seam takes the short way — 359° to 1° passes through 0°,
+not through 180°.
+
+**The mobile position join.** Ingestion attaches a stationary site's single
+position, which is exact and free, and deliberately leaves a moving platform's
+track alone: putting it on a gas instrument's clock is interpolation, and its
+guard lives in a config object ingestion has no business reading (§9.7). The
+binding is recorded in stream attributes there and consumed here. The resulting
+coordinates are named exactly as a stationary platform's are, so downstream
+code reads position identically and only has to care about the shape.
+
+**Antimeridian: detected, not modelled.** Longitude is interpolated linearly,
+which is right everywhere except across ±180°, where a step from 179.9 to
+−179.9 would read as a journey most of the way round the planet. A track whose
+longitudes span more than 180° is refused with a message saying so. The
+alternative — treating longitude as circular always — would put a sine and
+cosine round trip into every position on Earth to serve a case the target
+archive does not contain, and a silently wrong position cannot be recovered
+downstream.
+
+**Spatial extent is not modelled.** Measured on the 32 iWAS fills of the
+2024-07-18 drive, the van covers a median of **127 m** and up to **307 m**
+during a single canister fill. TSARA reports the midpoint position and records
+that limit (§10.10) rather than inventing a path length it has no information
+for.
+
+**Attributes** an interpolated coordinate carries:
+
+| attribute | meaning |
+|---|---|
+| `tsara_interpolated_from` | the stream and variable the values came from |
+| `tsara_max_interp_gap` | the guard that was applied |
+| `tsara_interp_gap_masked` | targets refused because the gap was too long |
+| `tsara_interp_outside_record` | targets beyond either end of the source |
+
+**How it is checked** (§11.1): both refusals are asserted directly, since a
+refusal that quietly stops refusing is invisible; a straight line interpolates
+to itself exactly, which is also what would catch a timestamp-precision bug,
+since epoch nanoseconds do not fit a float64 mantissa and converting them
+directly quantises every timestamp onto a ~378 ns grid; and a direction across
+the seam is checked against the short path with the non-circular case beside it
+for contrast.
+
+**And on real data.** The 2024-07-18 drive's MetNav track was attached to the
+same 32 iWAS canister cells the pairing section uses: all 32 positioned, none
+gap-masked, none outside the record, two landing exactly on a GPS second and
+thirty interpolated between two. Wind direction interpolated circularly onto
+the same cells stayed inside [0, 360) throughout.
+
+One trap found while writing it, worth recording because it is the same family:
+`pd.Timedelta("1ns").total_seconds()` is **0.0**, so validating a duration by
+reading seconds off it rejects every sub-microsecond value as non-positive.
+Positivity is tested by comparing `Timedelta` objects, matching
+`tsara.config.base.validate_positive_timedelta` and TSARA's integer-nanosecond
+convention everywhere else.
 
 ### 11.7 Output grid
 
