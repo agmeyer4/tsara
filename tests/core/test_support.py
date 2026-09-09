@@ -38,6 +38,7 @@ from tsara.core.support import (
     declared_bounds_name,
     ensure_time_bounds,
     nominal_cadence_ns,
+    overlap_pairs,
     support_attrs,
 )
 
@@ -808,3 +809,115 @@ def test_support_attrs_record_a_repair_only_when_one_happened() -> None:
     )
     assert SUPPORT_WIDENED_ATTR not in plain
     assert repaired[SUPPORT_WIDENED_ATTR] == 644.0
+
+
+# ---------------------------------------------------------------------------
+# overlap_pairs
+# ---------------------------------------------------------------------------
+#
+# Extracted from `bin_onto_cells` when circular binning became the second
+# caller. It has direct tests because it is now the single place that decides
+# which measurements describe which interval -- if it is wrong, a cell's wind
+# direction and its methane silently come from different stretches of air.
+
+
+def test_overlap_pairs_finds_every_overlap_and_no_others() -> None:
+    source = CellBounds(
+        start_ns=_times(0, SECOND, 5),
+        stop_ns=_times(0, SECOND, 5) + SECOND,
+    )
+    target = CellBounds(
+        start_ns=np.array([2 * SECOND], dtype=np.int64),
+        stop_ns=np.array([4 * SECOND], dtype=np.int64),
+    )
+    pairs = overlap_pairs(source, target)
+    contributing = pairs.overlap_ns > 0
+    assert sorted(pairs.source_index[contributing].tolist()) == [2, 3]
+    assert pairs.overlap_ns[contributing].tolist() == [SECOND, SECOND]
+    assert pairs.n_target == 1
+
+
+def test_overlap_pairs_measures_a_partial_overlap_exactly() -> None:
+    """A source cell straddling the target boundary contributes its share."""
+    source = CellBounds(
+        start_ns=np.array([0], dtype=np.int64),
+        stop_ns=np.array([10 * SECOND], dtype=np.int64),
+    )
+    target = CellBounds(
+        start_ns=np.array([7 * SECOND], dtype=np.int64),
+        stop_ns=np.array([20 * SECOND], dtype=np.int64),
+    )
+    pairs = overlap_pairs(source, target)
+    assert pairs.overlap_ns.tolist() == [3 * SECOND]
+
+
+def test_overlap_pairs_is_empty_when_the_records_do_not_meet() -> None:
+    source = CellBounds(start_ns=_times(0, SECOND, 3), stop_ns=_times(0, SECOND, 3) + SECOND)
+    target = CellBounds(
+        start_ns=np.array([100 * SECOND], dtype=np.int64),
+        stop_ns=np.array([101 * SECOND], dtype=np.int64),
+    )
+    pairs = overlap_pairs(source, target)
+    assert pairs.overlap_ns.size == 0
+    assert pairs.n_target == 1
+
+
+def test_overlap_pairs_handles_empty_inputs() -> None:
+    empty = CellBounds(start_ns=np.empty(0, dtype=np.int64), stop_ns=np.empty(0, dtype=np.int64))
+    filled = CellBounds(start_ns=_times(0, SECOND, 3), stop_ns=_times(0, SECOND, 3) + SECOND)
+    assert overlap_pairs(empty, filled).overlap_ns.size == 0
+    assert overlap_pairs(empty, filled).n_target == 3
+    assert overlap_pairs(filled, empty).n_target == 0
+
+
+def test_overlap_pairs_requires_sorted_source_cells() -> None:
+    source = CellBounds(
+        start_ns=np.array([5 * SECOND, 0], dtype=np.int64),
+        stop_ns=np.array([6 * SECOND, SECOND], dtype=np.int64),
+    )
+    target = CellBounds(
+        start_ns=np.array([0], dtype=np.int64), stop_ns=np.array([SECOND], dtype=np.int64)
+    )
+    with pytest.raises(TsaraSupportError, match="sorted by start time"):
+        overlap_pairs(source, target)
+
+
+def test_overlap_pairs_tolerates_slightly_overlapping_source_cells() -> None:
+    """Fixed-width cells centred on jittered stamps overlap each other.
+
+    Their stops are then not sorted even though their starts are, which is why
+    the candidate search runs on a cumulative maximum. Documented as a known
+    limit in METHODS §10; here it is pinned as behaviour.
+    """
+    start = np.array([0, 900_000_000, 2 * SECOND], dtype=np.int64)
+    source = CellBounds(start_ns=start, stop_ns=start + SECOND)
+    target = CellBounds(
+        start_ns=np.array([0], dtype=np.int64),
+        stop_ns=np.array([3 * SECOND], dtype=np.int64),
+    )
+    pairs = overlap_pairs(source, target)
+    assert sorted(pairs.source_index.tolist()) == [0, 1, 2]
+    assert int(pairs.overlap_ns.sum()) == 3 * SECOND
+
+
+def test_the_two_binners_weight_by_the_same_overlaps() -> None:
+    """The reason the search was extracted rather than copied.
+
+    A scalar and an angle measured over the same interval must be averaged
+    over the same interval. Comparing the contributing counts and coverage of
+    the two paths is how that stays true.
+    """
+    from tsara.core.circular import bin_circular_onto_cells
+
+    source = CellBounds(_times(0, SECOND, 30), _times(0, SECOND, 30) + SECOND)
+    target = CellBounds(
+        start_ns=np.array([2 * SECOND, 11 * SECOND], dtype=np.int64),
+        stop_ns=np.array([9 * SECOND, 40 * SECOND], dtype=np.int64),
+    )
+    values = np.arange(30.0)
+    values[5] = np.nan
+    scalar = bin_onto_cells(source, values, target)
+    angular = bin_circular_onto_cells(source, values, target)
+    assert scalar.n_source.tolist() == angular.n_source.tolist()
+    assert scalar.n_overlapping.tolist() == angular.n_overlapping.tolist()
+    assert scalar.coverage == pytest.approx(angular.coverage)

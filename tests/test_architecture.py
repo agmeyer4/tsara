@@ -240,6 +240,17 @@ UNREFERENCED: dict[str, str] = {
         "arithmetic Phase 3.5 deliberately removed from ingestion (METHODS "
         "§10.8). Phase 4 pairing is its first caller."
     ),
+    "bin_circular_onto_cells": (
+        "Vector-averages an angular variable onto cells. Its caller is the "
+        "Phase 4 output grid, which lands in a later commit of this phase; a "
+        "manifest can already declare `circular: true`, so the variables it "
+        "will act on exist before it does."
+    ),
+    "circular_mean": (
+        "The single-window form of the same operation, for a caller holding "
+        "one set of directions rather than a stream. Listed separately from "
+        "the binning form so that wiring one in does not excuse the other."
+    ),
 }
 
 

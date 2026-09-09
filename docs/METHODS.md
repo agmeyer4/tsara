@@ -117,11 +117,15 @@ with `n_native = 0`, never interpolated. Config: `OutputGridConfig`
 the aux-interpolation guard, since neither streams nor cross-species pairing
 (§1.3) use it; it exists solely for this output boundary.
 
-### 1.5 Circular statistics for angular variables **[stub — Phase 4]**
+### 1.5 Circular statistics for angular variables
 
-Wind direction and other angular quantities are averaged as unit vectors
-(never arithmetically). Dispersion via the Yamartino (1984) single-pass
-estimator or exact circular standard deviation — to be specified in Phase 4.
+Wind direction and other angular quantities are averaged as unit vectors, never
+arithmetically — on the real drive data the arithmetic mean is wrong by more
+than 45° in 26.7 % of 60 s cells. A binned direction carries the mean
+resultant length *R* alongside it, and the dispersion reported is the **exact**
+circular standard deviation rather than the Yamartino (1984) single-pass
+approximation, which is bounded where the exact form correctly is not.
+Specified in full, with the measurements behind each choice, in **§11.4**.
 
 ---
 
@@ -2343,9 +2347,95 @@ Implemented in `tsara.core.propagation`, specified in §3. The two components
 never mix, the weights are the operation's rather than the estimator's (§3.2),
 and every propagated σ carries the name of the form that produced it.
 
-**[remaining subsections land with their stages — §11.3 pairing, §11.4
-circular statistics, §11.5 auxiliary fields and the mobile position join,
-§11.6 the output grid, §11.7 the AR(1) model against generated ground truth]**
+### 11.3 Pairing **[stub — lands with its stage]**
+
+### 11.4 Circular statistics for angular variables
+
+Supersedes the §1.5 stub. A direction is a point on a circle, so directions
+are averaged as unit vectors, never arithmetically. Config:
+`VariableConfig.circular`, valid only for `role: met`.
+
+Measured on the ten 2024 mobile-lab drive days, 3337 sixty-second cells of
+1 Hz wind direction: the arithmetic mean differs from the vector mean by more
+than 45° in **26.7 %** of cells, with a median error of 7.0° and a maximum of
+180.0°.
+
+**What a binned direction carries.** Summing unit vectors gives two numbers,
+not one: the mean direction, and the mean resultant length *R* — the length
+of the average vector, 1 when every sample agrees and 0 when they cancel.
+TSARA stores *R*, because every dispersion statistic in the circular
+literature is a transform of it, so choosing between them is choosing a
+presentation rather than an estimator.
+
+The dispersion reported alongside it is the **exact circular standard
+deviation**, $s = \sqrt{-2\ln R}$, exact for a wrapped normal (whose
+resultant length is $e^{-\sigma^2/2}$) and the standard definition otherwise.
+It is unbounded: as directions spread toward uniform it runs to infinity,
+which is the honest description of a direction that has ceased to exist.
+
+**Yamartino (1984) is deliberately not implemented.** It approximates the same
+quantity in a single pass, for dataloggers that could not hold the sample
+vectors in memory — not a constraint TSARA operates under. Measured on the
+same drive data, the two agree to 0.16° in the median cell and diverge by up
+to 66.5°, entirely in the tumbling cells where Yamartino saturates near 105°
+and the exact form correctly does not. Anyone needing it has *R* and one line
+of arithmetic.
+
+**Why the dispersion is not decoration.** On a moving platform a 60 s mean
+direction is usually not a well-determined quantity:
+
+| resultant length | cells | share | exact sd, median |
+|---|---|---|---|
+| steady, *R* > 0.99 | 58 | 1.7 % | 7.1° |
+| *R* 0.90–0.99 | 1140 | 34.2 % | 18.5° |
+| *R* 0.50–0.90 | 1713 | 51.3 % | 40.6° |
+| tumbling, *R* < 0.50 | 426 | 12.8 % | 80.5° |
+
+Part of that spread is the van turning rather than the atmosphere — a
+documented limit, not a correction TSARA applies.
+
+**No scientific threshold is applied.** A direction with *R* = 0.001 is
+meaningless and is reported anyway, beside the *R* that says so; picking a
+cut-off would put a magic number in the library where the judgement belongs
+to the user. Guarding on *R* is left to the caller, exactly as the pairing
+coverage guard is (§11.3).
+
+**One numerical threshold is applied**, and it is a fact about float64 rather
+than about wind. Directions that cancel mathematically do not cancel
+numerically: `sin(180°)` is 1.22e-16, so a north/south pair leaves a residual
+vector of length 6.1e-17 pointing due *east*, and `atan2` reports 90.000°
+with complete confidence. Summed in three different orders the four compass
+points give **129.60°, 153.43° and 132.19°** — a number that changes when its
+inputs are reordered is not a measurement. So a resultant length at or below
+$N\epsilon$, the rounding floor of the sum of *N* unit vectors that produced
+it, is snapped to exactly zero and its direction reported as `nan`; *R* = 0,
+a `nan` direction and an infinite dispersion then all say the same thing.
+This is distinct from *R* = `nan`, which means nothing contributed at all.
+
+A related defect in the same family: `-1e-17 % 360` is `360.0` in float64, so
+the wrap can leave the half-open interval it documents and two readings either
+side of north can average to 360.0 rather than 0.0. Angles landing on a full
+turn are folded back to zero.
+
+**Shared weighting.** `bin_circular_onto_cells` and `bin_onto_cells` both call
+`tsara.core.support.overlap_pairs`, so a cell's wind direction and its methane
+are averaged over exactly the same interval; a test compares the contributing
+counts and coverage of the two paths.
+
+**How it is checked** (§11.1): pencil-checkable fixtures (359° and 1° average
+to 0°; the compass points cancel); the closed form above, over three decades
+of σ, plus a 200 000-draw sample of a wrapped normal recovering its σ to 2 %;
+an independent O(N·M) reimplementation written from the definition, agreeing
+with the vectorized path to 1e-12; and on real data, the identity invariant —
+binning a record onto its own cells returned it to within **5.7e-14 degrees**
+over 19 470 samples, and the table above reproduces an independent script's
+numbers exactly.
+
+### 11.5 Auxiliary fields **[stub — lands with its stage]**
+
+### 11.6 Output grid **[stub — lands with its stage]**
+
+### 11.7 The AR(1) model against generated ground truth **[stub — lands with its stage]**
 
 ---
 
@@ -2362,6 +2452,8 @@ circular statistics, §11.5 auxiliary fields and the mobile position join,
 - Wu, C., & Yu, J. Z. (2018). Evaluation of linear regression techniques for
   atmospheric applications: the importance of appropriate weighting.
   *Atmospheric Measurement Techniques*, 11, 1233–1250.
+- Mardia, K. V., & Jupp, P. E. (2000). *Directional Statistics.* Wiley.
+  (Circular mean, mean resultant length and circular standard deviation, §11.4.)
 - Yamartino, R. J. (1984). A comparison of several "single-pass" estimators
   of the standard deviation of wind direction. *Journal of Climate and
   Applied Meteorology*, 23, 1362–1366.
