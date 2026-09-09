@@ -226,19 +226,17 @@ UNREFERENCED: dict[str, str] = {
         "which is a lookup rather than a call site the parser can see."
     ),
     "propagate_random": (
-        "Uncertainty propagation under averaging. Its first caller is Phase 4 "
-        "pairing, which lands in a later commit of this phase; until then it "
-        "is reached only by its own tests."
+        "The readable reference implementation of §3.2/§3.4, which the "
+        "vectorized `propagate_random_binned` is scored against by test and "
+        "which the Monte Carlo checks measure. It also derives its sample "
+        "spacing from real timestamps, which the binned form cannot. Kept as "
+        "a specification rather than for a future caller -- put it on the "
+        "ballot at the walkthrough if it never gains one."
     ),
     "propagate_systematic": (
-        "The systematic half of the same pair, and unreachable for the same "
-        "reason. Listed separately so that wiring one in does not silently "
-        "excuse the other."
-    ),
-    "sigma_at_support": (
-        "Moves a declared sigma onto the support a stage actually wants, the "
-        "arithmetic Phase 3.5 deliberately removed from ingestion (METHODS "
-        "§10.8). Phase 4 pairing is its first caller."
+        "The systematic half of that reference pair, unreferenced for the "
+        "same reason and listed separately so wiring one in does not excuse "
+        "the other."
     ),
     "bin_circular_onto_cells": (
         "Vector-averages an angular variable onto cells. Its caller is the "

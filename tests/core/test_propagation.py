@@ -22,7 +22,9 @@ from tsara.core.propagation import (
     lag1_correlation,
     n_effective,
     propagate_random,
+    propagate_random_binned,
     propagate_systematic,
+    propagate_systematic_binned,
     sigma_at_support,
 )
 from tsara.core.propagation import (
@@ -686,3 +688,93 @@ def test_worked_example_checkable_by_hand() -> None:
     assert propagate_random(sigmas, weights).sigma == pytest.approx(np.sqrt(9.25))
     assert propagate_random(sigmas, weights).sigma == pytest.approx(3.041381, abs=1e-6)
     assert propagate_systematic(sigmas, weights).sigma == pytest.approx(3.5)
+
+
+# ---------------------------------------------------------------------------
+# The vectorized form, bound to the scalar one it was derived from
+# ---------------------------------------------------------------------------
+#
+# Two implementations of one piece of arithmetic is the risk this module was
+# written to avoid, so the binned form is not tested on its own merits. It is
+# tested by being made to agree with the scalar form, which is the one the
+# Monte Carlo checks above measured against an experiment. That keeps the
+# chain unbroken: observed scatter -> scalar form -> binned form.
+
+
+def cell_slices(counts: list[int]) -> tuple[np.ndarray, np.ndarray]:
+    """Return long-form target indices and the slice boundaries they imply."""
+    index = np.concatenate([np.full(n, c, dtype=np.int64) for c, n in enumerate(counts)])
+    edges = np.cumsum([0, *counts])
+    return index, edges
+
+
+@pytest.mark.parametrize("tau", [None, 20.0])
+def test_binned_random_agrees_with_the_scalar_form(tau: float | None) -> None:
+    rng = np.random.default_rng(20260916)
+    counts = [4, 7, 1, 12]
+    index, edges = cell_slices(counts)
+    sigma = rng.uniform(0.5, 3.0, size=index.size)
+    weights = rng.uniform(0.1, 2.0, size=index.size)
+    times = np.arange(float(index.size))
+    binned = propagate_random_binned(sigma, weights, index, len(counts), spacing_s=1.0, tau_s=tau)
+    for cell in range(len(counts)):
+        lo, hi = edges[cell], edges[cell + 1]
+        scalar = propagate_random(sigma[lo:hi], weights[lo:hi], tau_s=tau, times_s=times[lo:hi])
+        assert binned.sigma[cell] == pytest.approx(scalar.sigma, rel=1e-12)
+        assert binned.n_effective[cell] == pytest.approx(scalar.n_effective, rel=1e-12)
+
+
+def test_binned_systematic_agrees_with_the_scalar_form() -> None:
+    rng = np.random.default_rng(20260917)
+    counts = [3, 5, 2]
+    index, edges = cell_slices(counts)
+    sigma = rng.uniform(0.5, 3.0, size=index.size)
+    weights = rng.uniform(0.1, 2.0, size=index.size)
+    binned = propagate_systematic_binned(sigma, weights, index, len(counts))
+    for cell in range(len(counts)):
+        lo, hi = edges[cell], edges[cell + 1]
+        scalar = propagate_systematic(sigma[lo:hi], weights[lo:hi])
+        assert binned.sigma[cell] == pytest.approx(scalar.sigma, rel=1e-12)
+
+
+def test_binned_forms_leave_an_empty_cell_as_nan() -> None:
+    index = np.array([0, 0, 2, 2], dtype=np.int64)
+    sigma, weights = np.full(4, 1.0), np.ones(4)
+    for result in (
+        propagate_random_binned(sigma, weights, index, 3),
+        propagate_systematic_binned(sigma, weights, index, 3),
+    ):
+        assert np.isnan(result.sigma[1])
+        assert result.n_effective[1] == 0.0
+        assert np.isfinite(result.sigma[0]) and np.isfinite(result.sigma[2])
+
+
+def test_binned_random_with_nothing_contributing_anywhere() -> None:
+    result = propagate_random_binned(np.full(3, np.nan), np.ones(3), np.zeros(3, dtype=np.int64), 2)
+    assert np.all(np.isnan(result.sigma))
+    assert result.form == INDEPENDENT_FORM
+
+
+def test_binned_random_needs_a_spacing_when_a_timescale_is_declared() -> None:
+    with pytest.raises(TsaraPropagationError, match="how far apart"):
+        propagate_random_binned(np.ones(3), np.ones(3), np.zeros(3, dtype=np.int64), 1, tau_s=20.0)
+
+
+def test_binned_random_rejects_a_nonpositive_timescale() -> None:
+    with pytest.raises(TsaraPropagationError, match="pass None"):
+        propagate_random_binned(
+            np.ones(3), np.ones(3), np.zeros(3, dtype=np.int64), 1, tau_s=0.0, spacing_s=1.0
+        )
+
+
+def test_binned_forms_reject_mismatched_long_form_arrays() -> None:
+    with pytest.raises(TsaraPropagationError, match="correspond one to one"):
+        propagate_random_binned(np.ones(3), np.ones(2), np.zeros(3, dtype=np.int64), 1)
+
+
+def test_binned_forms_reject_negative_weights_and_sigmas() -> None:
+    index = np.zeros(2, dtype=np.int64)
+    with pytest.raises(TsaraPropagationError, match="non-negative"):
+        propagate_random_binned(np.ones(2), np.array([1.0, -1.0]), index, 1)
+    with pytest.raises(TsaraPropagationError, match="non-negative"):
+        propagate_random_binned(np.array([1.0, -1.0]), np.ones(2), index, 1)

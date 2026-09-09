@@ -2353,7 +2353,95 @@ Implemented in `tsara.core.propagation`, specified in §3. The two components
 never mix, the weights are the operation's rather than the estimator's (§3.2),
 and every propagated σ carries the name of the form that produced it.
 
-### 11.3 Pairing **[stub — lands with its stage]**
+### 11.3 Pairing
+
+Implemented in `tsara.align.pairing`, specified in §1.3. Two species, one
+clock, real pairs only.
+
+**Which clock.** The cells of whichever stream has the **wider support**, and
+the other is averaged onto them by overlap. Never the reverse: a value may be
+averaged onto a wider support, never split onto a narrower one. §1.3 records
+why this stopped being "the slower instrument" — measured, the iWAS canisters
+are thirty times slower than a 60 s stationary mean by rate and four times
+*narrower* by support. Ties go to whichever stream is named first, and the
+choice does not depend on which species is numerator.
+
+**Same-instrument species skip the binning entirely.** Several gases retrieved
+from one spectrum already share a clock, and that is the commonest pair there
+is. The fast path is not merely an optimization: averaging a cell onto itself
+is the identity mathematically and *not* in floating point, so the general
+path would perturb values that were never meant to change.
+
+**Uncertainty, in order.** A declared figure quoted at a different interval
+from the cells it sits on is first moved onto those cells (§10.8) — the
+arithmetic ingestion deliberately refuses to do, done here at the point of
+use, or refused again and labelled `unscaled` when no decorrelation timescale
+was declared. Only then is the binned member's uncertainty propagated through
+the *same* overlap weights that formed its value (§3), the two components
+separately.
+
+**Cell methods.** The binned species is a mean over its cell. The species
+already on the clock was not averaged by this stage at all and keeps its own
+stream's method, since stamping `time: mean` on a point sample would assert an
+averaging that never happened. Counts are `time: sum`, CF's own word for
+them. Coverage fractions and the sigma companions carry no cell method: a
+coverage is a property of the cell rather than a statistic of the data inside
+it, and a sigma describes the uncertainty *of* the cell's value, which differs
+from a mean of sigmas by exactly √N_eff (§10.2).
+
+**Coverage may slightly exceed 1**, and is left alone when it does. Fixed-width
+cells centred on jittered timestamps overlap each other, so their overlaps
+with one target cell can sum past its width — documented as benign in §10.2,
+since the value is a weighted *mean* and the weights normalize. Clipping would
+hide a real property of the source record behind a tidier number.
+
+**What the product carries.** A paired series is an ordinary self-describing
+`xarray.Dataset` with CF cells, not a bundle entry: it is a per-call
+intermediate that Phase 6 will request per event, and the phase's saved
+product is the output grid (§11.6). Its attributes:
+
+| attribute | meaning |
+|---|---|
+| `tsara_pairing_clock` | instrument whose cells the pairs sit on |
+| `tsara_pairing_clock_reason` | why that one, with both median cell widths |
+| `tsara_pairing_min_coverage` | the guard applied (`PairingConfig.min_coverage`) |
+| `tsara_pairing_cells_considered` | candidate cells before dropping |
+| `tsara_pairing_cells_dropped` | how many produced no usable pair |
+| `tsara_propagation_form` | registered form used for correlated random error (§3.4) |
+
+and per variable:
+
+| attribute | meaning |
+|---|---|
+| `tsara_source_instrument` | which stream this species came from |
+| `tsara_pairing_binned` | 1 if averaged onto the clock, 0 if already on it |
+| `tsara_sigma_at_support` | how a declared σ was moved onto its own cells, or `unscaled` |
+
+**How it is checked** (§11.1): a two-cell fixture whose paired values (1.5 and
+5.5) can be worked out on paper; an independent O(N·M) reimplementation
+written from the definition of §1.3, agreeing to 1e-12 on random cells with a
+masked sample; two closed forms — the mean of a linear ramp over a cell equals
+the ramp at the cell midpoint, and a species paired against a constant
+multiple of itself returns that multiple exactly, which is the property that
+would fail if the two members were averaged over different air; and invariants
+needing no ground truth — binning a stream onto matching cells returns it, and
+a cell with no partner data yields no pair rather than an interpolation.
+
+**And on real data.** The 2024-07-18 mobile-lab drive carries both members of
+the canister case: 32 iWAS fills of median width 14.7 s at a 441 s cadence,
+and a 1 Hz Picarro. Pairing benzene against CH₄ chooses the canister as the
+clock (14.7 s vs 1 s), keeps all 32 cells at coverage 1.000, and draws a
+median of 16 one-second samples into each. Recomputing every pair with a
+Python loop straight from §1.3 reproduces the paired values **exactly** — a
+maximum difference of 0.000e+00 ppb over the 32 pairs.
+
+The same comparison shows what the overlap weighting is worth. Scoring
+instead against a plain unweighted mean of the samples whose *start* falls
+inside the fill window — the obvious shortcut, which gives a partial edge cell
+either full weight or none — the two disagree by up to **17.89 ppb** of CH₄.
+On a ~1950 ppb background that is small; against the enhancements these
+canisters exist to attribute it is not, and it is entirely an artefact of
+which fraction of two edge samples counts.
 
 ### 11.4 Circular statistics for angular variables
 

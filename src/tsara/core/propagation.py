@@ -73,6 +73,7 @@ if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt
 
 __all__ = [
+    "BinnedSigma",
     "PROPAGATION_FORMS",
     "PropagatedSigma",
     "PropagationForm",
@@ -81,7 +82,9 @@ __all__ = [
     "lag1_correlation",
     "n_effective",
     "propagate_random",
+    "propagate_random_binned",
     "propagate_systematic",
+    "propagate_systematic_binned",
     "sigma_at_support",
 ]
 
@@ -718,3 +721,188 @@ def sigma_at_support(
     count = max(int(round(quoted_width_s / target_width_s)), 1)
     effective = float(n_effective(count, target_width_s, tau_s, form=form)[0])
     return np.asarray(values * np.sqrt(effective), dtype=np.float64), form
+
+
+@dataclass(frozen=True)
+class BinnedSigma:
+    """Propagated uncertainties for many cells at once.
+
+    The vectorized counterpart of :class:`PropagatedSigma`. Binning a stream
+    onto a day of one-second grid cells is 86 400 propagations, and calling
+    the scalar form in a Python loop for each of them costs seconds per
+    species per sweep point.
+
+    Attributes
+    ----------
+    sigma : numpy.ndarray
+        Propagated 1-sigma per target cell, ``nan`` where nothing contributed.
+    form : str
+        The registered form used, or ``'independent'`` / ``'systematic'``.
+        One label for the whole call, because one call uses one form.
+    n_effective : numpy.ndarray
+        Effective sample size per cell.
+    """
+
+    sigma: npt.NDArray[np.float64]
+    form: str
+    n_effective: npt.NDArray[np.float64]
+
+
+def _binned_totals(
+    sigmas: npt.ArrayLike,
+    weights: npt.ArrayLike,
+    target_index: npt.ArrayLike,
+    n_target: int,
+) -> tuple[
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+]:
+    """Return per-cell weight, weight-squared, weighted-sigma and weighted-variance sums.
+
+    Shared by both components so that a masked sample is excluded from each
+    of them identically. Everything is "long form": one entry per
+    (target cell, source cell) pair, aggregated with ``bincount``.
+    """
+    sigma = _as_1d(sigmas, name="sigmas")
+    w = _as_1d(weights, name="weights")
+    index = np.asarray(target_index, dtype=np.int64)
+    if not (sigma.shape == w.shape == index.shape):
+        raise TsaraPropagationError(
+            f"Long-form arrays must correspond one to one; got {sigma.size} sigma(s), "
+            f"{w.size} weight(s) and {index.size} target index/indices."
+        )
+    if np.any(w < 0):
+        raise TsaraPropagationError("Weights must be non-negative.")
+    if np.any(sigma[np.isfinite(sigma)] < 0):
+        raise TsaraPropagationError("Uncertainties must be non-negative.")
+    keep = np.isfinite(sigma) & (w > 0)
+    w = np.where(keep, w, 0.0)
+    sigma = np.where(keep, sigma, 0.0)
+
+    def total_of(values: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        # `bincount` returns an integer array when it is handed no weights at
+        # all, which happens for an empty long form; asking for float64 keeps
+        # every caller's arithmetic in one dtype.
+        return np.asarray(np.bincount(index, weights=values, minlength=n_target), dtype=np.float64)
+
+    return (
+        total_of(w),
+        total_of(w * w),
+        total_of(w * sigma),
+        total_of(w * w * sigma * sigma),
+    )
+
+
+def propagate_random_binned(
+    sigmas: npt.ArrayLike,
+    weights: npt.ArrayLike,
+    target_index: npt.ArrayLike,
+    n_target: int,
+    *,
+    spacing_s: float | None = None,
+    tau_s: float | None = None,
+    form: PropagationForm = "ar1_neff",
+) -> BinnedSigma:
+    """Propagate the random component onto many cells at once.
+
+    Identical arithmetic to :func:`propagate_random`, evaluated with
+    ``bincount`` instead of one call per cell; a test binds the two together
+    so they cannot drift.
+
+    One difference is deliberate. The scalar form derives the sample spacing
+    from the timestamps it is given, per call. This one takes a single
+    ``spacing_s`` for the whole operation -- normally the source stream's
+    nominal cadence -- because a per-cell median would have to be computed
+    group by group, which is the Python loop this function exists to avoid.
+    The two agree exactly on evenly sampled data, and where a cell contains a
+    gap the effective sample size is still reduced through the Kish weights,
+    which count the samples that are actually there.
+
+    Parameters
+    ----------
+    sigmas, weights, target_index : array_like
+        Long form: one entry per (target cell, source cell) pair. ``nan``
+        sigmas and zero weights are excluded together.
+    n_target : int
+        Number of target cells, which sets the output length.
+    spacing_s : float, optional
+        Sample spacing in seconds, required when ``tau_s`` is given.
+    tau_s : float, optional
+        Decorrelation timescale. ``None`` treats the samples as independent.
+    form : {'ar1_neff', 'ar1_asymptotic'}, optional
+        Which registered form supplies the effective sample size.
+
+    Returns
+    -------
+    BinnedSigma
+        Per-cell sigma, the form used, and per-cell effective sample size.
+
+    Raises
+    ------
+    TsaraPropagationError
+        If the long-form arrays disagree, a value is negative, or ``tau_s``
+        is given without ``spacing_s``.
+    """
+    total, total_sq, _, weighted_var = _binned_totals(sigmas, weights, target_index, n_target)
+    sigma = np.full(n_target, np.nan, dtype=np.float64)
+    effective = np.zeros(n_target, dtype=np.float64)
+    filled = total > 0
+    if not filled.any():
+        return BinnedSigma(sigma=sigma, form=INDEPENDENT_FORM, n_effective=effective)
+    independent_variance = weighted_var[filled] / (total[filled] ** 2)
+    kish = total[filled] ** 2 / total_sq[filled]
+    effective[filled] = kish
+    if tau_s is None:
+        sigma[filled] = np.sqrt(independent_variance)
+        return BinnedSigma(sigma=sigma, form=INDEPENDENT_FORM, n_effective=effective)
+    if not tau_s > 0:
+        raise TsaraPropagationError(
+            f"Decorrelation timescale must be positive, got {tau_s} s; pass None to "
+            "declare the samples uncorrelated."
+        )
+    if spacing_s is None:
+        raise TsaraPropagationError(
+            "A decorrelation timescale was declared but no spacing_s was given. "
+            "Correcting for correlation needs to know how far apart the samples "
+            "are; supply the source stream's cadence, or pass tau_s=None."
+        )
+    corrected = n_effective(kish, spacing_s, tau_s, form=form)
+    effective[filled] = corrected
+    sigma[filled] = np.sqrt(independent_variance * kish / corrected)
+    return BinnedSigma(sigma=sigma, form=form, n_effective=effective)
+
+
+def propagate_systematic_binned(
+    sigmas: npt.ArrayLike,
+    weights: npt.ArrayLike,
+    target_index: npt.ArrayLike,
+    n_target: int,
+) -> BinnedSigma:
+    """Propagate the systematic component onto many cells at once.
+
+    The weighted mean of the sigmas per cell (§3.3), with no reduction by
+    sample count. Vectorized counterpart of :func:`propagate_systematic`.
+
+    Parameters
+    ----------
+    sigmas, weights, target_index : array_like
+        Long form, one entry per (target cell, source cell) pair.
+    n_target : int
+        Number of target cells.
+
+    Returns
+    -------
+    BinnedSigma
+        Per-cell sigma, the label ``'systematic'``, and the Kish sample size
+        of the contributing weights -- reported for symmetry, never used as a
+        divisor.
+    """
+    total, total_sq, weighted_sigma, _ = _binned_totals(sigmas, weights, target_index, n_target)
+    sigma = np.full(n_target, np.nan, dtype=np.float64)
+    effective = np.zeros(n_target, dtype=np.float64)
+    filled = total > 0
+    sigma[filled] = weighted_sigma[filled] / total[filled]
+    effective[filled] = total[filled] ** 2 / total_sq[filled]
+    return BinnedSigma(sigma=sigma, form="systematic", n_effective=effective)
