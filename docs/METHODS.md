@@ -80,8 +80,16 @@ timestamps is physically justified there — but never across gaps longer than
 To regress species *y* against species *x* within an event or rolling window,
 when they come from instruments with different rates:
 
-1. The **pairing clock** is the *slower* of the two instruments' own **cells**,
-   restricted to the event/window.
+1. The **pairing clock** is the **wider-supported** of the two instruments'
+   own **cells**, restricted to the event/window. Phase 3.5 sharpened this:
+   before cells existed the rule read "the slower instrument", and rate and
+   support can disagree. Measured on the 2024 drives, the iWAS canisters
+   sample every 441 s (median) but each sample integrates for only 14.7 s, so
+   against a 60 s stationary mean the canister is thirty times slower by rate
+   and four times *narrower* by support. Pairing on the canister's clock would
+   split a 60 s mean onto 15 s, which the interval model forbids; pairing on
+   the mean's clock is admissible, and the coverage of 0.25 is what says how
+   much to trust it.
 2. The faster stream is averaged onto those cells **weighted by overlap**
    (`tsara.core.support.bin_onto_cells`), with uncertainty propagated per §3,
    the count of contributing samples recorded, and the fraction of each cell
@@ -90,7 +98,10 @@ when they come from instruments with different rates:
    timestamp; now it is read from the stream's own boundaries, so a canister
    that integrated for 14.1 s is paired over exactly 14.1 s (§10).
 3. Cells with `n_native = 0` for either species are dropped — a pair is never
-   fabricated.
+   fabricated. Cells with *some* data are kept, with their coverage recorded;
+   `PairingConfig.min_coverage` (default 0.0, i.e. drop nothing) is the one
+   knob that acts on it, because how much of a cell must be measured is a
+   question about the science and not about the arithmetic.
 
 Consequences: every regression point contains at least one real measurement
 of *each* species, and the regression sample size N equals the number of real
@@ -106,13 +117,15 @@ be comparable as estimates.
 
 A single uniform master grid — the familiar `(time × species)` cube — is
 constructed **only** for the continuous rolling state and the PMF export
-matrix, which inherently require one. Construction is binning-only
-(`bin_statistic`), with per-cell propagated uncertainties and `n_native`
-counts carried alongside values. Grid cells carry CF boundaries like any
+matrix, which inherently require one. Construction is binning-only, by
+overlap-weighted mean and no other statistic (§11.6), with per-cell
+propagated uncertainties and `n_native` counts carried alongside values. Grid cells carry CF boundaries like any
 other stream, and `cell_methods = "time: mean (interval: <native>)"` records
 the resolution of the data that went into them (§10.2). Validation requires the grid period to be
-≥ the slowest stream's native period; cells with no native samples are NaN
-with `n_native = 0`, never interpolated. Config: `OutputGridConfig`
+≥ the **widest cell** across the streams, which is the post-Phase-3.5 form of
+"≥ the slowest stream's native period" (§1.3 makes the same correction for
+pairing); cells with no native samples are NaN with `n_native = 0`, never
+interpolated. Config: `OutputGridConfig`
 (`tsara.config.analysis`) — deliberately not named "the grid" or paired with
 the aux-interpolation guard, since neither streams nor cross-species pairing
 (§1.3) use it; it exists solely for this output boundary.
@@ -379,13 +392,6 @@ measured against synthetic ground truth with known τ in §11.1 and §11.7.
 
 Limits: τ → 0 recovers §3.2, and τ → ∞ is properly handled by declaring the
 component systematic (§3.3) rather than by an enormous τ.
-
-### 3.5 Median binning
-
-When `bin_statistic: median` is selected, the standard error of the median is
-inflated relative to the mean by $\sqrt{\pi/2} \approx 1.253$ for Gaussian
-noise; the propagation applies this factor to the random component. (Median
-binning trades this efficiency loss for robustness to sub-grid spikes.)
 
 ---
 
@@ -2433,7 +2439,48 @@ numbers exactly.
 
 ### 11.5 Auxiliary fields **[stub — lands with its stage]**
 
-### 11.6 Output grid **[stub — lands with its stage]**
+### 11.6 Output grid
+
+Construction **[stub — lands with its stage]**.
+
+#### 11.6.1 Why there is no median binning option
+
+`OutputGridConfig.bin_statistic` was specified in Phase 1 with values `mean`
+and `median`, and removed in Phase 4 before it was ever implemented — Phase 4
+would have been its first consumer.
+
+The purpose of a median is robustness to sub-grid spikes. In this science a
+sub-grid spike **is the plume**, which is the same argument that deleted the
+QA/QC spike rule (§9.5): TSARA has no stage that can distinguish a sharp real
+enhancement from a glitch, so it should not offer a statistic whose only job
+is to suppress one.
+
+Measured on the real 1 Hz mobile-lab CH₄, ten drive days, binned to 60 s cells
+with the enhancement taken over a rolling 10-minute 5th-percentile baseline:
+
+| | |
+|---|---|
+| enhanced cells (mean enhancement > 5 ppb) | 2329 |
+| **enhancement mass the median discards** | **19.3 %** |
+| cells whose plume fills less than half the minute | 49 (2.1 %) |
+| …median loses, over those cells | 87.5 % |
+| worst single cell | a 28 ppb enhancement reduced to zero |
+
+The 19.3 % is the number that decides it. It is not noise, it is a *bias*, and
+it scales with how sharp each species' plumes are relative to the cell — so
+two species with different plume widths are biased by different amounts and
+their ratio, computed from a median-binned PMF matrix, is wrong by the
+difference. That is precisely the quantity TSARA exists to produce.
+
+Two lesser costs, recorded because they were part of the decision: an
+overlap-weighted median is a different algorithm from a weighted mean, so it
+would be a second code path through binning *and* uncertainty propagation; and
+the median standard-error inflation factor $\sqrt{\pi/2} \approx 1.253$ that
+the old §3.5 specified is valid only for Gaussian noise under equal weights,
+which overlap weighting does not provide.
+
+A caller who wants robustness has the tools: QA/QC `range` bounds and `flag`
+columns act where the information about what is a glitch actually lives (§9.5).
 
 ### 11.7 The AR(1) model against generated ground truth **[stub — lands with its stage]**
 

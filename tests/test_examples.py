@@ -13,16 +13,17 @@ exactly what proves that.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 import pytest
 from pydantic import BaseModel
 
 from tsara import load_analysis, load_manifest, load_synthetic
+from tsara.config import analysis as analysis_schema
 from tsara.config import manifest as manifest_schema
 
 if TYPE_CHECKING:  # pragma: no cover
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples" / "configs"
 
@@ -88,29 +89,61 @@ EXEMPT_FIELDS: dict[str, str] = {
     "MobilePlatform.alt_variable": "Optional third GPS column; lat/lon show the binding.",
 }
 
-#: Models whose fields a manifest example is expected to reach.
-_MANIFEST_MODELS = [
-    "Manifest",
-    "InstrumentConfig",
-    "VariableConfig",
-    "UnitConversion",
-    "CSVLoader",
-    "ICARTTLoader",
-    "ParquetLoader",
-    "TimeParsing",
-    "SupportSpec",
-    "UncertaintySpec",
-    "DeclaredUncertainty",
-    "ReportedUncertainty",
-    "RangeRule",
-    "FlagRule",
-    "StationaryPlatform",
-    "MobilePlatform",
-]
+#: The two schema roots, each with the examples expected to demonstrate it.
+#:
+#: The models *below* each root are discovered rather than listed. An earlier
+#: version of this check carried a hand-written list of sixteen manifest
+#: models, which is the same shape as the two defects that motivated the check
+#: in the first place: the assertion was right and its coverage was a list
+#: nobody updated. Concretely, that list named no analysis model at all, so
+#: the whole science half of the schema was unguarded -- and when
+#: `OutputGridConfig.bin_statistic` was deleted and `PairingConfig` added, the
+#: suite passed without noticing either.
+SCHEMA_ROOTS: dict[str, tuple[type[BaseModel], str]] = {
+    "manifest": (manifest_schema.Manifest, "manifest_*.yaml"),
+    "analysis": (analysis_schema.AnalysisConfig, "analysis_*.yaml"),
+}
 
 
-def _manifest_text() -> str:
-    return "\n".join(p.read_text(encoding="utf-8") for p in EXAMPLES.glob("manifest_*.yaml"))
+def _nested_models(annotation: object) -> Iterator[type[BaseModel]]:
+    """Yield every Pydantic model reachable through one field annotation.
+
+    Walks into containers, optionals and discriminated unions alike, because
+    the schema uses all three: ``dict[str, InstrumentConfig]``,
+    ``PlatformConfig | None`` and the ``kind``-discriminated loader union
+    would each hide their models from a shallower search.
+    """
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        yield annotation
+        return
+    for argument in get_args(annotation):
+        yield from _nested_models(argument)
+
+
+def _reachable_models(root: type[BaseModel]) -> dict[str, type[BaseModel]]:
+    """Return every model reachable from ``root``, keyed by class name."""
+    found: dict[str, type[BaseModel]] = {root.__name__: root}
+    queue = [root]
+    while queue:
+        for field in queue.pop().model_fields.values():
+            for model in _nested_models(field.annotation):
+                if model.__name__ not in found:
+                    found[model.__name__] = model
+                    queue.append(model)
+    return found
+
+
+def _all_models() -> dict[str, tuple[type[BaseModel], str]]:
+    """Return every reachable model, mapped to the glob that must show it."""
+    out: dict[str, tuple[type[BaseModel], str]] = {}
+    for _, (root, pattern) in SCHEMA_ROOTS.items():
+        for name, model in _reachable_models(root).items():
+            out[name] = (model, pattern)
+    return out
+
+
+def _example_text(pattern: str) -> str:
+    return "\n".join(p.read_text(encoding="utf-8") for p in EXAMPLES.glob(pattern))
 
 
 def _spellings(model: type[BaseModel], name: str) -> set[str]:
@@ -123,12 +156,39 @@ def _spellings(model: type[BaseModel], name: str) -> set[str]:
     return names
 
 
-def test_every_manifest_field_is_demonstrated_or_exempt() -> None:
-    """A schema field with no example is documentation that stopped tracking code."""
-    text = _manifest_text()
+def test_schema_discovery_reaches_both_trees() -> None:
+    """A check parametrized over nothing passes; guard the discovery itself.
+
+    The named models are spot checks at three different depths -- a root, a
+    model two levels down through a dict, and one inside a discriminated
+    union -- so a discovery that stopped walking would fail here rather than
+    silently checking less.
+    """
+    models = _all_models()
+    for expected in (
+        "Manifest",
+        "VariableConfig",
+        "ICARTTLoader",
+        "AnalysisConfig",
+        "PairingConfig",
+    ):
+        assert expected in models, f"schema discovery missed {expected}: {sorted(models)}"
+    assert len(models) >= 20, f"schema discovery found only {sorted(models)}"
+
+
+def test_every_schema_field_is_demonstrated_or_exempt() -> None:
+    """A schema field with no example is documentation that stopped tracking code.
+
+    Known limitation, measured rather than assumed: the search is for the
+    text ``<field>:``, so a field named only in a *comment* would satisfy it.
+    Checked against a real YAML parse of every shipped example, **zero**
+    fields currently pass that way, so the looser form is exactly equivalent
+    today and parsing would be code bought for a case that does not occur.
+    Worth revisiting if that ever stops being true.
+    """
     undemonstrated: list[str] = []
-    for model_name in _MANIFEST_MODELS:
-        model = getattr(manifest_schema, model_name)
+    for model_name, (model, pattern) in _all_models().items():
+        text = _example_text(pattern)
         for field_name in model.model_fields:
             key = f"{model_name}.{field_name}"
             if key in EXEMPT_FIELDS:
@@ -137,7 +197,7 @@ def test_every_manifest_field_is_demonstrated_or_exempt() -> None:
                 undemonstrated.append(key)
 
     assert undemonstrated == [], (
-        "These manifest fields appear in no shipped example: "
+        "These schema fields appear in no shipped example: "
         f"{sorted(undemonstrated)}. Add one to examples/configs/, or record "
         "the reason in EXEMPT_FIELDS."
     )
@@ -146,16 +206,19 @@ def test_every_manifest_field_is_demonstrated_or_exempt() -> None:
 def test_no_exemption_is_stale() -> None:
     """An exemption for a field that no longer exists, or that is now shown
     anyway, is a note nobody will re-read. Both make the list less trustworthy."""
-    text = _manifest_text()
+    models = _all_models()
     unknown: list[str] = []
     redundant: list[str] = []
     for key in EXEMPT_FIELDS:
         model_name, _, field_name = key.partition(".")
-        model = getattr(manifest_schema, model_name, None)
-        if model is None or field_name not in model.model_fields:
+        entry = models.get(model_name)
+        if entry is None or field_name not in entry[0].model_fields:
             unknown.append(key)
             continue
-        if any(f"{spelling}:" in text for spelling in _spellings(model, field_name)):
+        model, pattern = entry
+        if any(
+            f"{spelling}:" in _example_text(pattern) for spelling in _spellings(model, field_name)
+        ):
             redundant.append(key)
 
     assert unknown == [], f"EXEMPT_FIELDS names fields that no longer exist: {unknown}"
