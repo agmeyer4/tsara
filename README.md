@@ -193,8 +193,8 @@ tests/               pytest suite, 100% line + branch coverage enforced
 
 ## Notebooks
 
-Both are committed with their outputs, so they read on GitHub without being run,
-and neither needs any real data:
+All three are committed with their outputs, so they read on GitHub without being
+run, and none needs any real data:
 
 - [`01_synthetic_data_walkthrough.ipynb`](examples/notebooks/01_synthetic_data_walkthrough.ipynb)
   — what the generator makes, and what "ground truth" means for error as well as
@@ -202,6 +202,10 @@ and neither needs any real data:
 - [`02_ingestion_walkthrough.ipynb`](examples/notebooks/02_ingestion_walkthrough.ipynb)
   — a campaign built, exported as raw files, and read back: path templates,
   awkward ICARTT, unit conversion, QA/QC, uncertainty provenance, bundles.
+- [`03_temporal_support_walkthrough.ipynb`](examples/notebooks/03_temporal_support_walkthrough.ipynb)
+  — why a value is not an instant: cells and CF bounds, what a missing label
+  costs in ppb, duty-cycled samplers, the provenance ladder, and binning one
+  stream onto another's cells.
 
 ## Development
 
