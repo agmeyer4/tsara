@@ -225,18 +225,14 @@ UNREFERENCED: dict[str, str] = {
         "Reached by name through the reader registry (@register_reader), "
         "which is a lookup rather than a call site the parser can see."
     ),
-    "propagate_random": (
-        "The readable reference implementation of §3.2/§3.4, which the "
-        "vectorized `propagate_random_binned` is scored against by test and "
-        "which the Monte Carlo checks measure. It also derives its sample "
-        "spacing from real timestamps, which the binned form cannot. Kept as "
-        "a specification rather than for a future caller -- put it on the "
-        "ballot at the walkthrough if it never gains one."
-    ),
     "propagate_systematic": (
-        "The systematic half of that reference pair, unreferenced for the "
-        "same reason and listed separately so wiring one in does not excuse "
-        "the other."
+        "The readable reference implementation of §3.3, which the vectorized "
+        "`propagate_systematic_binned` is scored against by test and which "
+        "the Monte Carlo checks measure. Its random sibling gained a caller "
+        "when the pairwise form became selectable through the binned path -- "
+        "which is exactly why these were listed separately. This one has no "
+        "equivalent, since a systematic component has no pairwise form; if it "
+        "never gains a caller, it goes on the ballot at the walkthrough."
     ),
     "circular_mean": (
         "The single-window form of angular averaging, for a caller holding "

@@ -626,6 +626,10 @@ def _bin_scalar(
                 pairs.target_index,
                 n_target,
                 spacing_s=spacing,
+                # Long-form sample times, which only the pairwise form uses.
+                # Built here rather than inside the propagation module because
+                # this is where the source cells are.
+                times_s=source.midpoint_ns[pairs.source_index].astype(np.float64) / NS_PER_S,
                 tau_s=tau_s,
                 form=propagation_form,
             )

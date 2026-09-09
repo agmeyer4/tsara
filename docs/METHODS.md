@@ -2793,7 +2793,99 @@ which overlap weighting does not provide.
 A caller who wants robustness has the tools: QA/QC `range` bounds and `flag`
 columns act where the information about what is a glitch actually lives (§9.5).
 
-### 11.8 The AR(1) model against generated ground truth **[stub — lands with its stage]**
+### 11.8 The AR(1) model against generated ground truth
+
+§3.4 closed half of the effective-sample-size question by measurement: the
+finite-*N* form *solves* the AR(1) model correctly, and the large-*N*
+approximation does not. It could not close the other half — whether the AR(1)
+model describes real instrument error at all — because that is not a question
+about algebra.
+
+The generator can answer it. It injects error with a **declared** τ, and it
+keeps the noise-free truth beside the observable. Bin both onto wide cells and
+the difference between them *is* the error of the binned value: no baseline
+estimate, no plume, nothing else in it. The scatter of that difference across
+cells is what the uncertainty should have been.
+
+Measured on six hours of 1 Hz data with a 5 ppb absolute random component,
+binned to 60 s cells (358 cells, so the scatter itself is good to about 4 %):
+
+| declared τ | form | observed scatter | reported σ |
+|---|---|---|---|
+| none | `independent` | 0.677 | 0.646 |
+| 30 s | `ar1_neff` | 4.018 | 3.768 |
+| 30 s | `ar1_asymptotic` | 4.018 | 5.000 |
+
+Three things follow.
+
+**The AR(1) model is describing the error.** With a 30 s timescale the binned
+values scatter by 4.0 ppb, and the finite-*N* form predicts 3.8 — inside the
+measurement's own precision. The model is not merely solved correctly; it is
+approximately right about this error.
+
+**The naive rule is not wrong at the margin, it is wrong by a factor of six.**
+Independent averaging would have reported 0.646 ppb for the same cells. A
+confidence interval built on it would be six times too narrow, which is why
+§10.8 refuses to apply √N when no τ is declared rather than applying it
+hopefully.
+
+**The asymptotic form errs the other way, and saturates.** At N = 60 with
+τ = 30 s it returns exactly N_eff = 1 — the whole minute worth one sample —
+and so reports 5.000, overstating the real scatter by 24 %. Between the two
+registered approximations the finite-*N* one is closer to the truth, which
+is the empirical half of the §3.4 argument.
+
+The residual disagreement is real and worth stating rather than rounding away:
+the observed scatter implies N_eff ≈ 1.55 where `ar1_neff` computes 1.76. The
+model is an approximation to a real error process, and this is the size of
+that approximation on generated data whose τ is exactly known. A user whose
+instrument does not decorrelate as an AR(1) process should expect no better.
+
+**Which is also why estimating τ from data is a §7 avenue rather than a
+field.** No file declares one, and this measurement shows what a wrong one
+costs.
+
+### 11.9 The acceptance criterion
+
+One source drives two species. One is measured every second, the other once a
+minute, and the ratio between them is fixed and known. If pairing averages
+both members over the same air, that ratio comes back; if it averages them
+over *different* air — an off-by-one cell, a label read as a midpoint when it
+was a start, an overlap weight applied to the wrong partner — the ratio
+drifts, and nothing else in the suite would say so.
+
+| quantity | result |
+|---|---|
+| mass-weighted ratio, paired | 0.250000034 against a truth of 0.25 |
+| per-cell ratio, median relative error | 8 × 10⁻⁶ |
+| worst per-cell error, fully covered | 3 × 10⁻⁴, on the smallest enhancement |
+
+The per-cell residual is the generator's, not the aligner's: it is the
+midpoint-rule quadrature the slow instrument uses to average truth over its
+own 60 s cells, sixty times coarser than the fast instrument's. It appears as
+a *relative* error only where the enhancement is a couple of ppb, which is the
+signature of a fixed absolute error rather than a ratio bias.
+
+**Coverage was scored against the same truth.** Exactly one cell of 120 is
+partly covered — the fast instrument's record begins inside the slow
+instrument's first cell — and it is the only cell whose ratio is wrong, by
+10 %. The correlation between one-minus-coverage and absolute ratio error is
+**1.000**. The number that qualifies a pair does what it claims.
+
+#### 11.9.1 A grid out of phase with its source blends two cells
+
+Found by running the same check through the grid. The slow instrument's cells
+are centred on its timestamps, so they sit half a cell off an epoch-anchored
+grid of the *same* period. Every grid value is then a weighted mean of two
+adjacent source cells — an honest average, but a smoothed one — and the
+recovered ratio moves from **0.250000034** to **0.249940526**. Aligning the
+grid's start to that instrument's own cell boundaries restores it exactly.
+
+Nothing is silently wrong: `n_source` reports 2 instead of 1, and `grid_cells`
+warns when it detects a source whose cells match the period but not its phase.
+It is a warning rather than a refusal because blending is sometimes
+unavoidable, and which instrument a grid should be in phase with is the user's
+choice, not TSARA's.
 
 ---
 

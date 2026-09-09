@@ -151,9 +151,47 @@ def grid_cells(
             f"The requested grid window is empty: it starts at "
             f"{pd.Timestamp(start_ns)} and ends at {pd.Timestamp(stop_ns)}."
         )
+    _warn_if_out_of_phase(cells, start_ns, period_ns)
     n_cells = int(np.ceil((stop_ns - start_ns) / period_ns))
     edges = start_ns + np.arange(n_cells + 1, dtype=np.int64) * period_ns
     return CellBounds(start_ns=edges[:-1], stop_ns=edges[1:])
+
+
+def _warn_if_out_of_phase(cells: Mapping[str, CellBounds], start_ns: int, period_ns: int) -> None:
+    """Note any stream whose cells are as wide as the grid but offset from it.
+
+    A legitimate but easily-missed situation. When a source's cells are the
+    same width as the grid period and share its phase, each grid value comes
+    from exactly one source cell. When the phases differ, each grid value is a
+    *blend* of two adjacent source cells -- still an honest weighted mean, but
+    a smoothed one, and a ratio taken across two columns treated differently
+    that way carries a small bias.
+
+    Measured on the acceptance campaign: a 60 s instrument whose cells are
+    centred on its timestamps sits half a cell off an epoch-anchored 60 s
+    grid, every grid value then draws from two source cells, and the recovered
+    ratio moves from 0.250000034 to 0.249940526. Aligning the grid start to
+    that instrument's own boundaries removes it entirely.
+
+    The ``n_source`` column already reports the blend, so this is a note
+    rather than a refusal: blending is sometimes unavoidable, and which
+    instrument the grid should be in phase with is the user's choice.
+    """
+    for instrument, bounds in cells.items():
+        widths = bounds.width_ns
+        if not np.all(widths == period_ns):
+            continue
+        offsets = (bounds.start_ns - start_ns) % period_ns
+        if np.any(offsets != 0):
+            logger.warning(
+                "Stream '%s' has cells exactly as wide as the %d ns grid period but "
+                "offset from it by %d ns, so every grid value will blend two of its "
+                "cells (n_source = 2) rather than reproduce one. Set the grid start "
+                "to one of its cell boundaries to avoid the smoothing.",
+                instrument,
+                period_ns,
+                int(offsets[0]),
+            )
 
 
 def build_output_grid(

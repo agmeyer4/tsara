@@ -802,6 +802,7 @@ def propagate_random_binned(
     n_target: int,
     *,
     spacing_s: float | None = None,
+    times_s: npt.ArrayLike | None = None,
     tau_s: float | None = None,
     form: PropagationForm = "ar1_neff",
 ) -> BinnedSigma:
@@ -820,6 +821,13 @@ def propagate_random_binned(
     gap the effective sample size is still reduced through the Kish weights,
     which count the samples that are actually there.
 
+    ``'ar1_double_sum'`` is the exception: it correlates every pair of samples
+    by the time between them, which no per-cell summary can supply, so it is
+    evaluated cell by cell through :func:`propagate_random`. That is slow and
+    is meant to be -- it is the reference the cheap forms are scored against,
+    not a production default -- but it is *selectable*, because a registered
+    name that cannot be chosen where forms are chosen is not registered.
+
     Parameters
     ----------
     sigmas, weights, target_index : array_like
@@ -828,11 +836,14 @@ def propagate_random_binned(
     n_target : int
         Number of target cells, which sets the output length.
     spacing_s : float, optional
-        Sample spacing in seconds, required when ``tau_s`` is given.
+        Sample spacing in seconds, required when ``tau_s`` is given for one
+        of the effective-sample-size forms.
+    times_s : array_like, optional
+        Long-form sample times in seconds, required by ``'ar1_double_sum'``.
     tau_s : float, optional
         Decorrelation timescale. ``None`` treats the samples as independent.
-    form : {'ar1_neff', 'ar1_asymptotic'}, optional
-        Which registered form supplies the effective sample size.
+    form : {'ar1_neff', 'ar1_asymptotic', 'ar1_double_sum'}, optional
+        Which registered form to use.
 
     Returns
     -------
@@ -842,9 +853,11 @@ def propagate_random_binned(
     Raises
     ------
     TsaraPropagationError
-        If the long-form arrays disagree, a value is negative, or ``tau_s``
-        is given without ``spacing_s``.
+        If the long-form arrays disagree, a value is negative, or the form's
+        required companion argument is missing.
     """
+    if tau_s is not None and form == "ar1_double_sum":
+        return _double_sum_binned(sigmas, weights, target_index, n_target, times_s, tau_s)
     total, total_sq, _, weighted_var = _binned_totals(sigmas, weights, target_index, n_target)
     sigma = np.full(n_target, np.nan, dtype=np.float64)
     effective = np.zeros(n_target, dtype=np.float64)
@@ -872,6 +885,56 @@ def propagate_random_binned(
     effective[filled] = corrected
     sigma[filled] = np.sqrt(independent_variance * kish / corrected)
     return BinnedSigma(sigma=sigma, form=form, n_effective=effective)
+
+
+def _double_sum_binned(
+    sigmas: npt.ArrayLike,
+    weights: npt.ArrayLike,
+    target_index: npt.ArrayLike,
+    n_target: int,
+    times_s: npt.ArrayLike | None,
+    tau_s: float,
+) -> BinnedSigma:
+    """Evaluate the pairwise form one cell at a time.
+
+    A deliberate Python loop. The pairwise form correlates every pair of
+    samples by the time between them, so there is no per-cell summary to
+    vectorize over -- and this is the reference form, whose whole job is to
+    be obviously right rather than fast. Each cell goes through
+    :func:`propagate_random`, so the reference implementation is literally
+    what runs.
+    """
+    if times_s is None:
+        raise TsaraPropagationError(
+            "'ar1_double_sum' needs times_s: it correlates each pair by the time "
+            "between them, which a spacing cannot supply."
+        )
+    sigma = _as_1d(sigmas, name="sigmas")
+    w = _as_1d(weights, name="weights")
+    times = _as_1d(times_s, name="times_s")
+    index = np.asarray(target_index, dtype=np.int64)
+    if not (sigma.shape == w.shape == index.shape == times.shape):
+        raise TsaraPropagationError(
+            "Long-form arrays must correspond one to one for 'ar1_double_sum'; got "
+            f"{sigma.size} sigma(s), {w.size} weight(s), {index.size} target "
+            f"index/indices and {times.size} time(s)."
+        )
+    out_sigma = np.full(n_target, np.nan, dtype=np.float64)
+    out_effective = np.zeros(n_target, dtype=np.float64)
+    order = np.argsort(index, kind="stable")
+    sorted_index = index[order]
+    starts = np.searchsorted(sorted_index, np.arange(n_target), side="left")
+    stops = np.searchsorted(sorted_index, np.arange(n_target), side="right")
+    for cell, (lo, hi) in enumerate(zip(starts, stops)):
+        if hi <= lo:
+            continue
+        rows = order[lo:hi]
+        result = propagate_random(
+            sigma[rows], w[rows], tau_s=tau_s, times_s=times[rows], form="ar1_double_sum"
+        )
+        out_sigma[cell] = result.sigma
+        out_effective[cell] = result.n_effective
+    return BinnedSigma(sigma=out_sigma, form="ar1_double_sum", n_effective=out_effective)
 
 
 def propagate_systematic_binned(

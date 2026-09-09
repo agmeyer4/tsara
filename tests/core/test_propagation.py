@@ -778,3 +778,72 @@ def test_binned_forms_reject_negative_weights_and_sigmas() -> None:
         propagate_random_binned(np.ones(2), np.array([1.0, -1.0]), index, 1)
     with pytest.raises(TsaraPropagationError, match="non-negative"):
         propagate_random_binned(np.array([1.0, -1.0]), np.ones(2), index, 1)
+
+
+# ---------------------------------------------------------------------------
+# The pairwise form through the binned interface
+# ---------------------------------------------------------------------------
+#
+# It is reachable there because a registered name that cannot be chosen where
+# forms are chosen is not really registered. Under the hood it loops cells and
+# calls the scalar form, so the reference implementation is literally what
+# runs -- which is also how `propagate_random` came to have a caller.
+
+
+def test_binned_double_sum_agrees_with_the_scalar_form_per_cell() -> None:
+    rng = np.random.default_rng(20260918)
+    counts = [5, 9, 4]
+    index, edges = cell_slices(counts)
+    sigma = rng.uniform(0.5, 3.0, size=index.size)
+    weights = rng.uniform(0.1, 2.0, size=index.size)
+    times = np.arange(float(index.size))
+    binned = propagate_random_binned(
+        sigma, weights, index, len(counts), times_s=times, tau_s=15.0, form="ar1_double_sum"
+    )
+    assert binned.form == "ar1_double_sum"
+    for cell in range(len(counts)):
+        lo, hi = edges[cell], edges[cell + 1]
+        scalar = propagate_random(
+            sigma[lo:hi], weights[lo:hi], tau_s=15.0, times_s=times[lo:hi], form="ar1_double_sum"
+        )
+        assert binned.sigma[cell] == pytest.approx(scalar.sigma, rel=1e-12)
+
+
+def test_binned_double_sum_leaves_an_empty_cell_alone() -> None:
+    index = np.array([0, 0, 2, 2], dtype=np.int64)
+    result = propagate_random_binned(
+        np.ones(4),
+        np.ones(4),
+        index,
+        3,
+        times_s=np.arange(4.0),
+        tau_s=10.0,
+        form="ar1_double_sum",
+    )
+    assert np.isnan(result.sigma[1])
+    assert np.isfinite(result.sigma[0]) and np.isfinite(result.sigma[2])
+
+
+def test_binned_double_sum_needs_times() -> None:
+    with pytest.raises(TsaraPropagationError, match="needs times_s"):
+        propagate_random_binned(
+            np.ones(3),
+            np.ones(3),
+            np.zeros(3, dtype=np.int64),
+            1,
+            tau_s=10.0,
+            form="ar1_double_sum",
+        )
+
+
+def test_binned_double_sum_needs_matching_long_form_arrays() -> None:
+    with pytest.raises(TsaraPropagationError, match="correspond one to one"):
+        propagate_random_binned(
+            np.ones(3),
+            np.ones(3),
+            np.zeros(3, dtype=np.int64),
+            1,
+            times_s=np.arange(2.0),
+            tau_s=10.0,
+            form="ar1_double_sum",
+        )
