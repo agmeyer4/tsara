@@ -44,20 +44,31 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 
-from tsara.core.naming import LOD_COUNT_KEY
+from tsara.core.naming import LOD_COUNT_KEY, SupportLabel
+from tsara.core.support import nominal_cadence_ns
+from tsara.core.timebase import epoch_ns
 from tsara.ingest.base import TsaraIngestError
 from tsara.ingest.crawler import crawl
 from tsara.ingest.registry import read_file
 from tsara.ingest.streams import build_stream
+from tsara.ingest.support import (
+    LABEL_HINT_KEY,
+    ResolvedSupport,
+    resolve_support,
+    shift_and_centre,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Iterator, Sequence
     from pathlib import Path
 
+    import numpy.typing as npt
     import xarray as xr
 
     from tsara.config.manifest import InstrumentConfig, Manifest
@@ -126,6 +137,10 @@ class _Ingested:
     """One instrument's concatenated table plus the files behind it."""
 
     frame: pd.DataFrame
+    #: What TSARA concluded about this instrument's cells, and on what basis.
+    #: Resolved here rather than in stream assembly because the per-file
+    #: boundaries this is derived from only exist before concatenation.
+    support: ResolvedSupport
     sources: list[Path] = field(default_factory=list)
     #: What the files said about themselves, reconciled across all of them.
     #: See :func:`_merge_file_attrs`.
@@ -235,6 +250,8 @@ def ingest_campaign(
             campaign=manifest.name,
             sources=ingested.sources,
             file_attrs=ingested.file_attrs,
+            support=ingested.support,
+            time_shift=instrument.time_shift,
         )
         logger.info(
             "Instrument '%s': %d samples from %d file(s).",
@@ -267,6 +284,14 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
     frames: list[pd.DataFrame] = []
     sources: list[Path] = []
     file_attrs: list[Mapping[str, object]] = []
+    # Cadence is measured per FILE, and that is load-bearing rather than
+    # incidental: one instrument's files can legitimately disagree about it.
+    # Measured in the target archive, some met records run at 1 s in one file
+    # and 5 s in another, and a single instrument-wide cadence would give one
+    # of them cells of the wrong width. Here is the only place the per-file
+    # boundaries still exist.
+    cadences: list[int | None] = []
+    hints: list[str | None] = []
     failures = 0
     for match in matches:
         try:
@@ -280,6 +305,9 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
             continue
         frames.append(table.frame)
         sources.append(match.path)
+        cadences.append(nominal_cadence_ns(epoch_ns(pd.DatetimeIndex(table.frame.index))))
+        hint = table.attrs.get(LABEL_HINT_KEY)
+        hints.append(str(hint) if hint is not None else None)
         # Kept, not discarded: this is what the file said about *itself*
         # (PI, mission, revision, LOD flags), as distinct from what the
         # manifest says about it. Dropping it here used to make the reader's
@@ -299,16 +327,141 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
             len(matches),
         )
 
-    # Counted here, where the per-file boundaries still exist. After
-    # concatenation the two causes are indistinguishable.
-    n_within = sum(int(f.index.duplicated(keep="first").sum()) for f in frames)
-
     combined = frames[0] if len(frames) == 1 else pd.concat(frames)
+    # Resolved before ordering, because the per-row width array below is
+    # built in concatenation order; sorting first would misalign every file's
+    # cadence with the rows it belongs to.
+    combined, support = resolve_support(
+        combined,
+        instrument.loader.support,
+        widths_ns=_per_row_widths(frames, cadences),
+        label_hint=_agreed_hint(hints),
+        path=sources[0] if len(sources) == 1 else Path(f"<{len(sources)} files>"),
+    )
+    # Correct the clock and centre the axis before ordering, not after:
+    # centring can reorder rows when widths vary per file, so the sort has to
+    # see the axis the stream will actually carry.
+    combined = shift_and_centre(combined, shift_ns=_shift_ns(instrument.time_shift, name=name))
+    # Counted last, on the axis the rows are actually de-duplicated on. See
+    # `_n_within_file` for why counting it any earlier was wrong.
+    n_within = _n_within_file(combined.index, [len(frame) for frame in frames])
     return _Ingested(
         frame=_order(combined, name, n_within=n_within),
         sources=sources,
         file_attrs=_merge_file_attrs(file_attrs),
+        support=support,
     )
+
+
+def _n_within_file(index: pd.Index, sizes: Sequence[int]) -> int:
+    """Count the duplicate timestamps one file explains, on the FINAL axis.
+
+    :func:`_order` reports its dropped rows split two ways -- duplicated
+    inside a single file, or duplicated because two files cover the same
+    period -- because the two call for opposite fixes. That split is only
+    meaningful if both halves are counted on the *same* time axis, and they
+    were not: within-file duplicates were counted on each file's raw index
+    before concatenation, while the total is counted after centring.
+
+    Centring is not a translation when widths vary per row. A row whose cell
+    is wide moves further than its neighbour, so two rows sharing a raw
+    timestamp but declaring different stops land on *different* midpoints and
+    stop being duplicates. The raw count could then exceed the final total
+    and the reported overlap came out **negative** -- pointing a user at the
+    manifest's path templates for rows that no two files ever shared. That is
+    the same wrong accusation the Phase-3 walkthrough removed from this
+    message once already, arrived at from the other direction.
+
+    Counting per file on the final axis makes the split exact rather than
+    approximate. For one instant held by ``c_i`` rows in each of ``k`` files,
+    the total counts ``sum(c_i) - 1`` and this counts ``sum(c_i - 1)``, so the
+    remainder is ``k - 1``: the number of *extra files* holding that instant,
+    which is precisely what "overlap between files" means, and which cannot
+    be negative.
+
+    Parameters
+    ----------
+    index : pandas.Index
+        The concatenated record's timestamps, still in concatenation order --
+        which is what makes the per-file slices below correct. Neither
+        :func:`~tsara.ingest.support.resolve_support` nor
+        :func:`~tsara.ingest.support.shift_and_centre` reorders rows; the sort
+        happens afterwards, inside :func:`_order`.
+    sizes : Sequence of int
+        Row count of each file, in the same order.
+
+    Returns
+    -------
+    int
+        How many rows duplicate an earlier row *of their own file*.
+    """
+    edges = np.cumsum([0, *sizes])
+    return sum(
+        int(index[start:stop].duplicated(keep="first").sum())
+        for start, stop in zip(edges[:-1], edges[1:], strict=True)
+    )
+
+
+def _shift_ns(time_shift: str | None, *, name: str) -> int:
+    """Return an instrument's declared clock correction in nanoseconds."""
+    if time_shift is None:
+        return 0
+    shift = int(pd.Timedelta(time_shift).value)
+    if shift:
+        # Logged because a silent clock change is the one correction nobody
+        # can spot afterwards: the numbers stay plausible and only their
+        # relationship to another instrument moves.
+        logger.info("Instrument '%s': applying declared time_shift %s.", name, time_shift)
+    return shift
+
+
+def _per_row_widths(
+    frames: Sequence[pd.DataFrame], cadences: Sequence[int | None]
+) -> npt.NDArray[np.int64] | None:
+    """Expand each file's measured cadence to one width per row.
+
+    A file too short to have a cadence borrows the median of the files that
+    do, which is the least-surprising stand-in and is only ever reached by a
+    file of one or two rows. When *no* file was long enough, there is nothing
+    to borrow and None says so rather than inventing a number.
+    """
+    known = [cadence for cadence in cadences if cadence is not None]
+    if not known:
+        return None
+    fallback = int(np.median(known))
+    per_file = [fallback if cadence is None else cadence for cadence in cadences]
+    return np.repeat(
+        np.asarray(per_file, dtype=np.int64),
+        np.asarray([len(frame) for frame in frames], dtype=np.int64),
+    )
+
+
+#: The label vocabulary, as a lookup that both validates and types.
+#:
+#: A hint arrives from ``RawTable.attrs``, which is untyped by design, so it
+#: has to be checked before it can be trusted as a label. A dict does that and
+#: gives the checker a typed result, where a membership test would give
+#: neither.
+_LABELS: dict[str, SupportLabel] = {
+    "start": "start",
+    "mid": "mid",
+    "end": "end",
+    "unknown": "unknown",
+}
+
+
+def _agreed_hint(hints: Sequence[str | None]) -> SupportLabel | None:
+    """Return the label hint only when every file agrees on it.
+
+    A disagreement means the instrument's files do not share a convention,
+    and picking a winner would put half of them half a cell out. Returning
+    None instead lets the resolver fall back to a centred cell, which is
+    wrong by at most half that on every file rather than fully wrong on some.
+    """
+    distinct = {hint for hint in hints if hint is not None}
+    if len(distinct) != 1 or any(hint is None for hint in hints):
+        return None
+    return _LABELS.get(distinct.pop())
 
 
 def _order(frame: pd.DataFrame, name: str, *, n_within: int = 0) -> pd.DataFrame:
@@ -342,11 +495,12 @@ def _order(frame: pd.DataFrame, name: str, *, n_within: int = 0) -> pd.DataFrame
     duplicated = ordered.index.duplicated(keep="first")
     n_duplicate = int(duplicated.sum())
     if n_duplicate:
-        # `n_within` is counted per file before concatenation, which is
-        # what makes the split exact rather than heuristic: a timestamp
-        # repeated inside one file is still duplicated in the combined
-        # table, so it is the part of the total that overlap cannot
-        # explain, and the remainder is the part it can.
+        # `n_within` is counted per file on this same axis, which is what
+        # makes the split exact rather than heuristic: a timestamp repeated
+        # inside one file is still duplicated in the combined table, so it is
+        # the part of the total that overlap cannot explain, and the
+        # remainder is the part it can. See `_n_within_file` for why the
+        # axis, not just the grouping, is the load-bearing part.
         n_across = n_duplicate - n_within
         logger.warning(
             "Instrument '%s': dropped %d row(s) sharing a timestamp with an "

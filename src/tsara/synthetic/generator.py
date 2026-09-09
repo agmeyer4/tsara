@@ -43,7 +43,7 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -57,6 +57,8 @@ from tsara.core.naming import (
     sigma_rand_name,
     sigma_sys_name,
 )
+from tsara.core.support import CellBounds, attach_time_bounds, support_attrs
+from tsara.core.timebase import NS_PER_S
 from tsara.core.timebase import epoch_ns as _epoch_ns
 from tsara.core.timebase import epoch_s as _epoch_s
 from tsara.core.timebase import timestamp_epoch_ns as _stamp_ns
@@ -141,8 +143,13 @@ class SyntheticDataset:
         if instrument not in self.streams:
             raise KeyError(f"No stream named '{instrument}'; available: {sorted(self.streams)}.")
         stream = self.streams[instrument]
-        keep = [str(name) for name in stream.data_vars if not str(name).startswith(TRUTH_PREFIX)]
-        return stream[keep]
+        # Dropping the answer key rather than selecting the observables:
+        # selecting by name returns only the coordinates those variables
+        # need, which quietly discards the cell boundaries. This view is
+        # meant to be exactly what ingestion would have produced from real
+        # files, and a real stream has cells.
+        answer_key = [name for name in stream.data_vars if str(name).startswith(TRUTH_PREFIX)]
+        return stream.drop_vars(answer_key)
 
     def save(self, path: str | Path) -> Path:
         """Write this dataset as a TSARA bundle directory.
@@ -478,26 +485,44 @@ def _render_instrument(
     list of GroundTruthEvent
         Truth rows for the species this instrument measures.
     """
+    import pandas as pd
     import xarray as xr
+
+    # Cells first: everything below is rendered per cell, and for the default
+    # point/mid configuration a cell is centred on its own timestamp, so the
+    # fine grid collapses to the timestamps themselves and this whole path
+    # reduces exactly to evaluating truth at each sample.
+    bounds, fine_ns = _build_cells(times, instrument)
+    n_sub = int(fine_ns.shape[1])
+    midpoints = pd.DatetimeIndex(bounds.midpoint_ns.astype("datetime64[ns]"), name=TIME_COORD)
+    fine_times = pd.DatetimeIndex(fine_ns.reshape(-1).astype("datetime64[ns]"))
 
     data_vars: dict[str, tuple[str, npt.NDArray[np.float64], dict[str, object]]] = {}
     truth_rows: list[GroundTruthEvent] = []
 
     for species_name, species in instrument.species.items():
-        background = render_background(species.background, times, rng, profiles)
+        # Rendered on the fine grid and averaged, not evaluated once per cell:
+        # a mean instrument must actually average the background's wander,
+        # otherwise `mean` would be a label rather than an operation.
+        background = (
+            render_background(species.background, fine_times, rng, profiles)
+            .reshape(-1, n_sub)
+            .mean(axis=1)
+        )
 
         # Plume injection: only gases receive enhancements. Each event's
         # contribution is rendered on its own support window, which keeps
         # this O(events x window) rather than O(events x record) and yields
         # the per-event sampled peak needed for the answer key.
-        enhancement = np.zeros(len(times), dtype=np.float64)
+        enhancement = np.zeros(len(bounds), dtype=np.float64)
         event_rows: list[GroundTruthEvent] = []
         if species.role == "gas":
             enhancement, event_rows = _inject_plumes(
                 config=config,
                 instrument_name=instrument_name,
                 species_name=species_name,
-                times=times,
+                bounds=bounds,
+                fine_ns=fine_ns,
                 background=background,
                 events=events,
                 track=track,
@@ -505,7 +530,11 @@ def _render_instrument(
             truth_rows.extend(event_rows)
 
         truth_signal = background + enhancement
-        applied = apply_uncertainty(truth_signal, species.uncertainty, times, rng)
+        # Noise is drawn at the CELL, never on the fine grid. That keeps a
+        # declared sigma meaning "the spread of the numbers this instrument
+        # publishes", which is what an instrument specification states and
+        # what `to_manifest_uncertainty` promises ingestion it can reproduce.
+        applied = apply_uncertainty(truth_signal, species.uncertainty, midpoints, rng)
         observable = applied.values
 
         if species.quantization is not None:
@@ -560,11 +589,47 @@ def _render_instrument(
 
     dataset = xr.Dataset(
         data_vars=data_vars,
-        coords={TIME_COORD: times},
-        attrs=_stream_attrs(config, instrument_name, instrument),
+        coords={TIME_COORD: midpoints},
+        attrs=_stream_attrs(config, instrument_name, instrument, bounds),
     )
-    _attach_platform_coords(dataset, config, times, track)
+    attach_time_bounds(dataset, bounds, instrument.support.method)
+    _attach_platform_coords(dataset, config, midpoints, track)
     return dataset, truth_rows
+
+
+def _build_cells(times: pd.DatetimeIndex, instrument: InstrumentSpec) -> tuple[CellBounds, Any]:
+    """Build one instrument's cells and the fine grid used to average them.
+
+    The fine grid is ``subsamples`` points per cell at the midpoints of equal
+    sub-intervals -- the midpoint rule, whose error falls as the inverse
+    square of the count. Integer arithmetic throughout, so that with one
+    subsample the single point lands exactly on the cell midpoint and, for
+    the default centred label, exactly on the original timestamp. That
+    exactness is what lets one code path serve both methods without changing
+    any existing output by a single bit.
+
+    Parameters
+    ----------
+    times : pandas.DatetimeIndex
+        The instrument's native timestamps.
+    instrument : InstrumentSpec
+        Its configuration, including the support to manufacture.
+
+    Returns
+    -------
+    CellBounds
+        One cell per timestamp.
+    numpy.ndarray
+        Fine-grid epoch nanoseconds, shape ``(n_cells, subsamples)``.
+    """
+    import pandas as pd
+
+    support = instrument.support
+    width_ns = int(pd.Timedelta(support.width or instrument.native_rate).value)
+    bounds = CellBounds.from_label(_epoch_ns(times), width_ns, support.label)
+    n_sub = 1 if support.method == "point" else support.subsamples
+    offsets = ((2 * np.arange(n_sub, dtype=np.int64) + 1) * width_ns) // (2 * n_sub)
+    return bounds, bounds.start_ns[:, None] + offsets[None, :]
 
 
 def _inject_plumes(
@@ -572,7 +637,8 @@ def _inject_plumes(
     config: SyntheticConfig,
     instrument_name: str,
     species_name: str,
-    times: pd.DatetimeIndex,
+    bounds: CellBounds,
+    fine_ns: Any,
     background: npt.NDArray[np.float64],
     events: list[RealizedEvent],
     track: tuple[pd.DatetimeIndex, npt.NDArray[np.float64], npt.NDArray[np.float64]] | None,
@@ -587,11 +653,17 @@ def _inject_plumes(
         Instrument measuring this species.
     species_name : str
         Species being rendered.
-    times : pandas.DatetimeIndex
-        Native timestamps.
+    bounds : CellBounds
+        The instrument's cells, one per emitted row.
+    fine_ns : numpy.ndarray
+        Fine-grid epoch nanoseconds, shape ``(n_cells, subsamples)``. Each
+        event is evaluated on this grid and averaged per cell, which is what
+        makes a narrow plume inside a wide cell come out diluted rather than
+        at full height -- the physically right answer, and the one that makes
+        an unresolvable event visible in the answer key.
     background : numpy.ndarray
-        Already-rendered background, used to record the true baseline under
-        each peak.
+        Already-averaged background per cell, used to record the true
+        baseline under each peak.
     events : list of RealizedEvent
         All scheduled events; those not emitting this species are skipped.
     track : tuple or None
@@ -606,11 +678,26 @@ def _inject_plumes(
     """
     import pandas as pd
 
-    enhancement = np.zeros(len(times), dtype=np.float64)
+    enhancement = np.zeros(len(bounds), dtype=np.float64)
     rows: list[GroundTruthEvent] = []
 
-    epoch_ns = _epoch_ns(times)
-    epoch_s = _epoch_s(times)
+    n_sub = int(fine_ns.shape[1])
+    epoch_s = fine_ns.reshape(-1) / NS_PER_S
+    midpoint_s = bounds.midpoint_ns / NS_PER_S
+    # Events are located against the CELL BOUNDARIES, never against the
+    # flattened fine grid. The flat grid looks sortable and is not: timestamp
+    # jitter is permitted up to just under half the sampling interval, so
+    # full-width cells centred on jittered stamps overlap, and the grid then
+    # descends. Measured on a 1 Hz stream with 0.4 s jitter, 151 of 300
+    # adjacent cells overlap and the flat grid has 146 descending steps —
+    # enough for a binary search over it to select the wrong cells, by up to
+    # 0.8 % of a plume's peak in the harshest configuration the schema allows.
+    #
+    # Cell starts are sorted whatever the jitter, since they are a constant
+    # shift of an increasing clock, so the running maximum of the stops makes
+    # a valid lower bound. Same pattern as `bin_onto_cells`.
+    cell_start = bounds.start_ns
+    running_stop = np.maximum.accumulate(bounds.stop_ns)
 
     for event in events:
         amplitude = event.amplitudes.get(species_name)
@@ -623,17 +710,30 @@ def _inject_plumes(
         end_time = center + pd.Timedelta(seconds=kernel.support_after_s)
         peak_time = event.species_peak_time(species_name)
 
-        # Restrict to the support window: searchsorted keeps this cheap even
-        # with tens of thousands of events over a long record.
-        lo = int(np.searchsorted(epoch_ns, _stamp_ns(start_time), side="left"))
-        hi = int(np.searchsorted(epoch_ns, _stamp_ns(end_time), side="right"))
+        # Every cell that OVERLAPS the support window, which is the unit the
+        # instrument emits: a cell partly inside the window is partly affected
+        # by the event.
+        #
+        # This is a wider selection than the timestamps-in-window rule it
+        # replaces, and it costs nothing, because `PlumeKernel.evaluate`
+        # returns exactly zero outside the support rather than a very small
+        # number. So the extra cells contribute exact zeros and the default
+        # point path is unchanged bit for bit -- verified against a hash taken
+        # before any of this phase was written.
+        lo = int(np.searchsorted(running_stop, _stamp_ns(start_time), side="right"))
+        hi = int(np.searchsorted(cell_start, _stamp_ns(end_time), side="left"))
 
         sampled_peak = float("nan")
         if hi > lo:
-            dt_s = epoch_s[lo:hi] - _stamp_s(center)
+            dt_s = epoch_s[lo * n_sub : hi * n_sub] - _stamp_s(center)
             contribution = amplitude * kernel.evaluate(dt_s)
-            enhancement[lo:hi] += contribution
-            sampled_peak = float(contribution.max())
+            per_cell = contribution.reshape(-1, n_sub).mean(axis=1)
+            enhancement[lo:hi] += per_cell
+            # The peak as this instrument could actually see it. For a wide
+            # cell that is the diluted peak, not the true amplitude, which is
+            # exactly the quantity a later stage needs to decide whether an
+            # event was resolvable at all.
+            sampled_peak = float(per_cell.max())
 
         rows.append(
             GroundTruthEvent(
@@ -648,7 +748,7 @@ def _inject_plumes(
                 end_time=end_time,
                 true_amplitude=float(amplitude),
                 sampled_peak_amplitude=sampled_peak,
-                true_baseline_at_peak=float(np.interp(_stamp_s(peak_time), epoch_s, background)),
+                true_baseline_at_peak=float(np.interp(_stamp_s(peak_time), midpoint_s, background)),
                 true_ratio_to_reference=float(event.ratios[species_name]),
                 **_event_position(config, peak_time, track),
             )
@@ -728,9 +828,16 @@ def _build_gps_stream(
         The GPS stream, with ``gps_lat``/``gps_lon`` roles matching the
         manifest vocabulary.
     """
+    import pandas as pd
     import xarray as xr
 
-    return xr.Dataset(
+    # A track is a sequence of position fixes, so `point` is the honest
+    # method; the cells exist so that a later stage can bin the track onto a
+    # gas instrument's cells by overlap like any other stream.
+    width_ns = int(pd.Timedelta(getattr(config.platform, "gps_rate", "1s")).value)
+    bounds = CellBounds.from_label(_epoch_ns(times), width_ns, "mid")
+
+    stream = xr.Dataset(
         data_vars={
             LATITUDE_COORD: (
                 TIME_COORD,
@@ -750,12 +857,25 @@ def _build_gps_stream(
             "synthetic_config_name": config.name,
             "instrument": getattr(config.platform, "gps_instrument", "gps"),
             "platform_kind": config.platform.kind,
+            **support_attrs(
+                label="mid",
+                width_ns=width_ns,
+                coverage=bounds.coverage_fraction,
+                label_source="declared",
+                width_source="declared",
+                method_source="declared",
+            ),
         },
     )
+    attach_time_bounds(stream, bounds, "point")
+    return stream
 
 
 def _stream_attrs(
-    config: SyntheticConfig, instrument_name: str, instrument: InstrumentSpec
+    config: SyntheticConfig,
+    instrument_name: str,
+    instrument: InstrumentSpec,
+    bounds: CellBounds,
 ) -> dict[str, object]:
     """Build the self-describing attrs every stream carries.
 
@@ -772,12 +892,18 @@ def _stream_attrs(
         Stream name.
     instrument : InstrumentSpec
         Instrument configuration.
+    bounds : CellBounds
+        The stream's cells, for the coverage diagnostic.
 
     Returns
     -------
     dict
         Attribute mapping.
     """
+    import pandas as pd
+
+    support = instrument.support
+    width_ns = int(pd.Timedelta(support.width or instrument.native_rate).value)
     return {
         "tsara_version": __version__,
         "tsara_stage": "synthetic",
@@ -786,6 +912,17 @@ def _stream_attrs(
         "instrument": instrument_name,
         "native_rate": instrument.native_rate,
         "platform_kind": config.platform.kind,
+        # Everything about this stream's support was stated by the config that
+        # manufactured it, so every field is `declared` -- the generator never
+        # has to guess about data it invented.
+        **support_attrs(
+            label=support.label,
+            width_ns=width_ns,
+            coverage=bounds.coverage_fraction,
+            label_source="declared",
+            width_source="declared",
+            method_source="declared",
+        ),
         "description": (
             "SYNTHETIC DATA generated by tsara.synthetic — not a measurement. "
             "Variables prefixed 'truth_' are the answer key and must not be "

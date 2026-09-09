@@ -31,8 +31,13 @@ import pytest
 import yaml
 
 from tsara.config.loader import load_manifest
-from tsara.config.manifest import CSVLoader
-from tsara.core.naming import sigma_rand_name, sigma_sys_name
+from tsara.config.manifest import CSVLoader, SupportSpec
+from tsara.core.naming import (
+    TIME_BOUNDS_VAR,
+    TIME_COORD,
+    sigma_rand_name,
+    sigma_sys_name,
+)
 from tsara.ingest import ingest_campaign, load_streams, save_streams
 from tsara.synthetic import generate
 from tsara.synthetic.background import TsaraSyntheticError
@@ -40,6 +45,8 @@ from tsara.synthetic.config import SyntheticConfig
 from tsara.synthetic.export import (
     EXPORT_MANIFEST,
     EXPORT_RAW_DIR,
+    START_COLUMN,
+    STOP_COLUMN,
     RawUnits,
     export_raw,
 )
@@ -505,3 +512,383 @@ def test_an_upper_bound_alone_is_declarable(tmp_path: Path) -> None:
     manifest_path = export_raw(generated, tmp_path / "export", qaqc_bounds={"ch4": (None, cutoff)})
     ingested = ingest_campaign(load_manifest(manifest_path))["analyzer"]
     np.testing.assert_array_equal(np.isnan(ingested["ch4"].values), truth > cutoff)
+
+
+# ---------------------------------------------------------------------------
+# Temporal support: what the exported archive says about its own cells
+# ---------------------------------------------------------------------------
+
+
+def _cell_config(**support: Any) -> SyntheticConfig:
+    """One 60 s instrument whose support the test chooses."""
+    return SyntheticConfig.model_validate(
+        {
+            "name": "cells",
+            "start": "2026-01-01T00:00:00Z",
+            "duration": "20min",
+            "seed": 4,
+            "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
+            "instruments": {
+                "slow": {
+                    "native_rate": "60s",
+                    "support": support,
+                    "species": {
+                        "ch4": {
+                            "units": "ppb",
+                            "background": {"kind": "parametric", "offset": 1900.0},
+                        }
+                    },
+                }
+            },
+            "sources": {},
+        }
+    )
+
+
+def _export(tmp_path: Path, config: SyntheticConfig, **kwargs: Any) -> tuple[Any, Any]:
+    """Export and return (manifest, the slow stream's frame)."""
+    manifest_path = export_raw(generate(config), tmp_path / "archive", **kwargs)
+    manifest = load_manifest(manifest_path)
+    frame = pd.read_csv(tmp_path / "archive" / EXPORT_RAW_DIR / "slow.csv")
+    return manifest, frame
+
+
+def test_declared_support_restates_what_the_generator_did(tmp_path: Path) -> None:
+    manifest, frame = _export(
+        tmp_path, _cell_config(method="mean", label="start"), support_declaration="declared"
+    )
+    support = manifest.instruments["slow"].loader.support
+    assert (support.label, support.width, support.method) == ("start", "60s", "mean")
+    assert STOP_COLUMN not in frame.columns
+
+
+def test_reported_support_names_columns_the_file_actually_carries(tmp_path: Path) -> None:
+    manifest, frame = _export(
+        tmp_path, _cell_config(method="mean", label="start"), support_declaration="reported"
+    )
+    support = manifest.instruments["slow"].loader.support
+    assert support.stop_column == STOP_COLUMN
+    assert support.start_column is None, "the time column is already the cell start"
+    assert support.label is None and support.width == "cadence"
+    assert STOP_COLUMN in frame.columns
+    stop = pd.to_datetime(frame[STOP_COLUMN])
+    start = pd.to_datetime(frame[TIME_COORD])
+    assert ((stop - start) == pd.Timedelta("60s")).all()
+
+
+def test_a_mid_labelled_stream_needs_both_boundary_columns(tmp_path: Path) -> None:
+    """The time axis is not the start, so the start has to be given too."""
+    manifest, frame = _export(
+        tmp_path, _cell_config(method="mean", label="mid"), support_declaration="reported"
+    )
+    support = manifest.instruments["slow"].loader.support
+    assert support.start_column == START_COLUMN
+    assert support.stop_column == STOP_COLUMN
+    middle = pd.to_datetime(frame[TIME_COORD])
+    assert (middle - pd.to_datetime(frame[START_COLUMN]) == pd.Timedelta("30s")).all()
+
+
+def test_no_declaration_leaves_the_archive_silent(tmp_path: Path) -> None:
+    """The negative control: start times written, nothing saying so."""
+    manifest, frame = _export(
+        tmp_path, _cell_config(method="mean", label="start"), support_declaration="none"
+    )
+    support = manifest.instruments["slow"].loader.support
+    assert (support.label, support.method, support.stop_column) == (None, None, None)
+    assert STOP_COLUMN not in frame.columns
+
+
+def test_the_time_column_carries_the_labelled_instant_not_the_midpoint(
+    tmp_path: Path,
+) -> None:
+    """A start-labelled product writes start times.
+
+    Writing midpoints would hand ingestion the answer, and the label would
+    stop being something it has to be told.
+    """
+    config = _cell_config(method="mean", label="start")
+    dataset = generate(config)
+    export_raw(dataset, tmp_path / "archive", support_declaration="declared")
+    frame = pd.read_csv(tmp_path / "archive" / EXPORT_RAW_DIR / "slow.csv")
+
+    written = np.asarray(pd.to_datetime(frame[TIME_COORD]), dtype="datetime64[ns]")
+    stream = dataset.streams["slow"]
+    starts = np.asarray(stream[TIME_BOUNDS_VAR].values[:, 0], dtype="datetime64[ns]")
+    midpoints = np.asarray(stream[TIME_COORD].values, dtype="datetime64[ns]")
+    assert np.array_equal(written, starts)
+    assert not np.array_equal(written, midpoints)
+
+
+def test_a_clock_offset_is_written_wrong_and_declared_right(tmp_path: Path) -> None:
+    """Same bargain as raw_units: break the archive, declare the fix.
+
+    The manifest carries the correction a real one would, and the file
+    carries timestamps moved the other way, so ingestion applying the
+    declared shift has to land back on the generator's truth.
+    """
+    config = _cell_config()
+    dataset = generate(config)
+    export_raw(dataset, tmp_path / "plain", support_declaration="declared")
+    export_raw(
+        dataset, tmp_path / "shifted", support_declaration="declared", time_shift={"slow": "-4s"}
+    )
+    plain = pd.to_datetime(
+        pd.read_csv(tmp_path / "plain" / EXPORT_RAW_DIR / "slow.csv")[TIME_COORD]
+    )
+    shifted = pd.to_datetime(
+        pd.read_csv(tmp_path / "shifted" / EXPORT_RAW_DIR / "slow.csv")[TIME_COORD]
+    )
+    assert ((shifted - plain) == pd.Timedelta("4s")).all()
+    manifest = load_manifest(tmp_path / "shifted" / EXPORT_MANIFEST)
+    assert manifest.instruments["slow"].time_shift == "-4s"
+
+
+def test_the_offset_moves_the_boundaries_too(tmp_path: Path) -> None:
+    """A clock offset moves a cell; it does not resize one."""
+    _, frame = _export(
+        tmp_path,
+        _cell_config(method="mean", label="start"),
+        support_declaration="reported",
+        time_shift={"slow": "-4s"},
+    )
+    width = pd.to_datetime(frame[STOP_COLUMN]) - pd.to_datetime(frame[TIME_COORD])
+    assert (width == pd.Timedelta("60s")).all()
+
+
+def test_shifting_an_unknown_instrument_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(TsaraSyntheticError, match="Cannot export"):
+        export_raw(generate(_cell_config()), tmp_path / "a", time_shift={"nope": "1s"})
+
+
+def test_a_species_colliding_with_a_boundary_column_is_refused(tmp_path: Path) -> None:
+    """`time_stop` is a legal species name, and writing a cell boundary over a
+    measurement would leave the round trip comparing the wrong column."""
+    config = SyntheticConfig.model_validate(
+        {
+            "name": "clash",
+            "start": "2026-01-01T00:00:00Z",
+            "duration": "5min",
+            "seed": 1,
+            "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
+            "instruments": {
+                "slow": {
+                    "native_rate": "60s",
+                    "species": {
+                        STOP_COLUMN: {
+                            "units": "ppb",
+                            "background": {"kind": "parametric", "offset": 1.0},
+                        }
+                    },
+                }
+            },
+            "sources": {},
+        }
+    )
+    with pytest.raises(TsaraSyntheticError, match="would be overwritten"):
+        export_raw(generate(config), tmp_path / "a", support_declaration="reported")
+    # The other declarations write no such column, so they are unaffected.
+    export_raw(generate(config), tmp_path / "b", support_declaration="declared")
+
+
+def test_a_mobile_archive_can_also_declare_nothing(tmp_path: Path) -> None:
+    """The GPS track is manufactured from the platform rather than listed as
+    an instrument, so its support declaration takes a separate path and needs
+    its own check that 'none' really writes nothing."""
+    config = _config(
+        platform={
+            "kind": "mobile",
+            "start_latitude": 40.77,
+            "start_longitude": -111.85,
+            "speed_m_s": 15.0,
+        }
+    )
+    manifest_path = export_raw(generate(config), tmp_path / "archive", support_declaration="none")
+    manifest = load_manifest(manifest_path)
+    assert manifest.instruments["gps"].loader.support == SupportSpec()
+
+
+def test_a_mobile_archive_declares_its_track_support(tmp_path: Path) -> None:
+    config = _config(
+        platform={
+            "kind": "mobile",
+            "start_latitude": 40.77,
+            "start_longitude": -111.85,
+            "speed_m_s": 15.0,
+        }
+    )
+    manifest_path = export_raw(
+        generate(config), tmp_path / "archive", support_declaration="declared"
+    )
+    support = load_manifest(manifest_path).instruments["gps"].loader.support
+    assert (support.method, support.label) == ("point", "mid")
+
+
+def test_a_declared_label_is_read_back_exactly(tmp_path: Path) -> None:
+    """The loop closes: what the archive declares, ingestion recovers.
+
+    This replaces a characterization test that pinned the gap while the
+    reading side was being built. It asserted the timestamps came back half a
+    cell late; the same fixture now asserts they come back exactly.
+    """
+    config = _cell_config(method="mean", label="start")
+    dataset = generate(config)
+    manifest_path = export_raw(dataset, tmp_path / "archive", support_declaration="declared")
+    ingested = ingest_campaign(load_manifest(manifest_path))
+
+    generated = dataset.streams["slow"]
+    stream = ingested["slow"]
+    assert np.array_equal(
+        np.asarray(stream[TIME_COORD].values, dtype="datetime64[ns]"),
+        np.asarray(generated[TIME_COORD].values, dtype="datetime64[ns]"),
+    )
+    assert np.array_equal(
+        np.asarray(stream[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]"),
+        np.asarray(generated[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]"),
+    )
+    assert stream["ch4"].attrs["cell_methods"] == "time: mean"
+    assert stream.attrs["tsara_support_label"] == "start"
+    assert stream.attrs["tsara_support_label_source"] == "declared"
+
+
+def test_a_file_that_states_its_cells_is_read_back_exactly(tmp_path: Path) -> None:
+    """The strongest rung: boundary columns, so nothing is inferred at all."""
+    dataset = generate(_cell_config(method="mean", label="start"))
+    manifest_path = export_raw(dataset, tmp_path / "archive", support_declaration="reported")
+    stream = ingest_campaign(load_manifest(manifest_path))["slow"]
+    assert np.array_equal(
+        np.asarray(stream[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]"),
+        np.asarray(dataset.streams["slow"][TIME_BOUNDS_VAR].values, dtype="datetime64[ns]"),
+    )
+    assert stream.attrs["tsara_support_label_source"] == "reported"
+    assert stream.attrs["tsara_support_width_source"] == "reported"
+
+
+def test_an_archive_that_says_nothing_is_read_back_wrong_and_says_so(
+    tmp_path: Path,
+) -> None:
+    """The negative control, and the reason the ladder is worth having.
+
+    The same start-labelled product, exported with no declaration, comes back
+    half a cell late. Nothing about the data changed; only what the archive
+    said about it did. Every field of the stream's provenance admits the
+    guess, which is the difference between being wrong and being wrong
+    silently.
+    """
+    dataset = generate(_cell_config(method="mean", label="start"))
+    manifest_path = export_raw(dataset, tmp_path / "archive", support_declaration="none")
+    stream = ingest_campaign(load_manifest(manifest_path))["slow"]
+
+    generated = np.asarray(dataset.streams["slow"][TIME_COORD].values, dtype="datetime64[ns]")
+    read_back = np.asarray(stream[TIME_COORD].values, dtype="datetime64[ns]")
+    offset = (generated - read_back) / np.timedelta64(1, "s")
+    assert np.all(offset == 30.0), "half a cell, exactly the label being unknown"
+    assert stream.attrs["tsara_support_label_source"] == "assumed"
+    assert stream.attrs["tsara_support_method_source"] == "assumed"
+    assert stream["ch4"].attrs["cell_methods"] == "time: point"
+    # The width is still right, because it is measured from the file's own
+    # cadence rather than guessed. This is the ONLY path that exercises that
+    # measurement -- the other two declarations take the width from the
+    # manifest or from columns -- so without this assertion a wrong cadence
+    # would go unnoticed.
+    bounds = np.asarray(stream[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]")
+    assert np.all(bounds[:, 1] - bounds[:, 0] == np.timedelta64(60, "s"))
+
+
+def test_a_declared_clock_offset_is_applied_and_recorded(tmp_path: Path) -> None:
+    """The archive is written wrong and declares the fix; ingestion applies
+    it and says it did, which is the guard against correcting twice."""
+    dataset = generate(_cell_config(method="mean", label="start"))
+    manifest_path = export_raw(
+        dataset,
+        tmp_path / "archive",
+        support_declaration="declared",
+        time_shift={"slow": "-4s"},
+    )
+    stream = ingest_campaign(load_manifest(manifest_path))["slow"]
+    assert np.array_equal(
+        np.asarray(stream[TIME_COORD].values, dtype="datetime64[ns]"),
+        np.asarray(dataset.streams["slow"][TIME_COORD].values, dtype="datetime64[ns]"),
+    )
+    assert stream.attrs["tsara_time_shift"] == "-4s"
+
+
+def test_an_archive_written_in_local_time_round_trips(tmp_path: Path) -> None:
+    """Boundaries are parsed on the same convention as the axis they bound.
+
+    Added after a mutation test: dropping the declared timezone from
+    cell-boundary parsing changed nothing any test could see, because the
+    exporter only ever wrote UTC. Written in a real zone, a boundary parsed
+    on the wrong convention lands hours from the start it belongs to.
+    """
+    dataset = generate(_cell_config(method="mean", label="start"))
+    manifest_path = export_raw(
+        dataset,
+        tmp_path / "archive",
+        support_declaration="reported",
+        timezone="Etc/GMT-2",
+    )
+    # The file really is in local time, or this proves nothing.
+    written = pd.read_csv(tmp_path / "archive" / EXPORT_RAW_DIR / "slow.csv")
+    first = pd.Timestamp(written[TIME_COORD].iloc[0])
+    generated = dataset.streams["slow"]
+    truth = np.asarray(generated[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]")
+    assert first - pd.Timestamp(truth[0, 0].item()) == pd.Timedelta("2h")
+
+    stream = ingest_campaign(load_manifest(manifest_path))["slow"]
+    assert np.array_equal(
+        np.asarray(stream[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]"),
+        np.asarray(generated[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]"),
+    )
+
+
+def test_files_of_one_instrument_keep_their_own_cadences(tmp_path: Path) -> None:
+    """The decision the archive census makes load-bearing, now round-trip
+    testable: some met records run at 1 s in one file and 5 s in another, and
+    one instrument-wide cadence would give a whole file the wrong width.
+
+    Written as two files, the second taking every third row.
+    """
+    dataset = generate(_cell_config(method="mean"))
+    manifest_path = export_raw(
+        dataset,
+        tmp_path / "archive",
+        support_declaration="none",
+        split={"slow": (1, 3)},
+    )
+    written = sorted(p.name for p in (tmp_path / "archive" / EXPORT_RAW_DIR).glob("slow*.csv"))
+    assert written == ["slow_000.csv", "slow_001.csv"]
+
+    stream = ingest_campaign(load_manifest(manifest_path))["slow"]
+    bounds = np.asarray(stream[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]")
+    widths = (bounds[:, 1] - bounds[:, 0]) / np.timedelta64(1, "s")
+    # 60 s cells from the first file, 180 s from the decimated second.
+    assert set(np.unique(widths)) == {60.0, 180.0}
+    # And so the instrument has no single nominal width to report.
+    assert "tsara_nominal_cell_width_s" not in stream.attrs
+
+
+def test_a_zero_width_cell_in_a_real_file_is_repaired(tmp_path: Path) -> None:
+    """Round-trip cover for the repair, which was previously checked only
+    against expectations written by the same person who wrote it."""
+    dataset = generate(_cell_config(method="mean", label="start"))
+    manifest_path = export_raw(
+        dataset,
+        tmp_path / "archive",
+        support_declaration="reported",
+        zero_width_cells={"slow": 3},
+    )
+    frame = pd.read_csv(tmp_path / "archive" / EXPORT_RAW_DIR / "slow.csv")
+    degenerate = (pd.to_datetime(frame[STOP_COLUMN]) == pd.to_datetime(frame[TIME_COORD])).sum()
+    assert degenerate == 3, "the fixture must really contain them"
+
+    stream = ingest_campaign(load_manifest(manifest_path))["slow"]
+    bounds = np.asarray(stream[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]")
+    assert np.all(bounds[:, 1] > bounds[:, 0]), "none left with zero duration"
+    assert stream.attrs["tsara_cells_widened"] == 3.0
+
+
+def test_exporting_for_an_instrument_that_does_not_exist_is_refused(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(TsaraSyntheticError, match="Cannot export"):
+        export_raw(generate(_cell_config()), tmp_path / "a", split={"nope": (1, 2)})

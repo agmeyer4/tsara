@@ -98,6 +98,12 @@ _MANIFEST_MODELS = [
     "ICARTTLoader",
     "ParquetLoader",
     "TimeParsing",
+    "SupportSpec",
+    "UncertaintySpec",
+    "DeclaredUncertainty",
+    "ReportedUncertainty",
+    "RangeRule",
+    "FlagRule",
     "StationaryPlatform",
     "MobilePlatform",
 ]

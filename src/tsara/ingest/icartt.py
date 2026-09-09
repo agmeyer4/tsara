@@ -80,6 +80,11 @@ from tsara.ingest.base import (
     float_precision_kwarg,
 )
 from tsara.ingest.registry import register_reader
+from tsara.ingest.support import (
+    CANDIDATE_COLUMNS_KEY,
+    LABEL_HINT_KEY,
+    attach_declared_boundaries,
+)
 from tsara.ingest.timeparse import to_utc_naive_ns
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -653,7 +658,23 @@ def read_icartt(path: Path, loader: LoaderConfig, /) -> RawTable:
 
     times = _build_time_index(frame, header, path, loader.max_dropped_fraction)
     frame = frame.set_axis(times, axis=0)
-    return RawTable(frame=frame, path=path, attrs=_provenance(header, lod_counts))
+    # Captured BEFORE the boundary columns are attached. The candidate list is
+    # a statement about what is in the *file*, and `attach_declared_boundaries`
+    # adds TSARA's own reserved columns -- one of which is literally named
+    # `_tsara_time_stop`, so reading the list afterwards told every correctly
+    # configured instrument that it might like to name a column TSARA invented.
+    file_columns = list(frame.columns)
+    frame = attach_declared_boundaries(
+        frame,
+        loader.support,
+        parse=lambda column: _time_like_column(
+            frame[column], header, path, what=f"cell boundary column '{column}'"
+        ),
+        path=path,
+        max_dropped_fraction=loader.max_dropped_fraction,
+        reader_logger=logger,
+    )
+    return RawTable(frame=frame, path=path, attrs=_provenance(header, lod_counts, file_columns))
 
 
 def _modal_field_count(body: list[str]) -> int:
@@ -1006,7 +1027,46 @@ def _build_time_index(
             f"columns {list(frame.columns)[:8]}."
         )
 
-    raw = frame[name]
+    times = _time_like_column(frame[name], header, path, what=f"independent variable '{name}'")
+    # As an array, not an Index: pandas-stubs types `.notna()` as Index[bool],
+    # which supports neither `~` nor `.any()`.
+    valid = np.asarray(times.notna())
+    if not bool(valid.any()):
+        raise TsaraIngestError(
+            f"'{path}': independent variable '{name}' is neither numeric "
+            "seconds nor parseable timestamps."
+        )
+    n_bad = int((~valid).sum())
+    if n_bad:
+        check_dropped_rows(
+            n_dropped=n_bad,
+            n_total=len(times),
+            path=path,
+            reason="timestamp did not parse",
+            max_fraction=max_dropped_fraction,
+            logger=logger,
+        )
+        frame.drop(frame.index[~valid], inplace=True)
+        times = times[valid]
+    return times
+
+
+def _time_like_column(
+    raw: pd.Series, header: IcarttHeader, path: Path, *, what: str
+) -> pd.DatetimeIndex:
+    """Turn one ICARTT time-like column into timestamps.
+
+    Shared by the independent variable and by any cell-boundary column the
+    manifest names, because the ambiguity is identical in both: the format
+    says seconds past the header's date, and part of the archive writes
+    datetime strings instead. Deciding it in one place is what stops a stop
+    column being read on a different convention from the start it belongs to.
+
+    Keys off the *values*, not the declared name or units, and takes the
+    majority when a column is genuinely mixed -- the rule that replaced an
+    ``.any()`` test which let two stray numeric tokens reduce two real files
+    to two rows apiece.
+    """
     seconds = pd.to_numeric(raw, errors="coerce")
     n_numeric = int(seconds.notna().sum())
     n_rows = len(raw)
@@ -1036,10 +1096,10 @@ def _build_time_index(
         # default when the evidence does not actually distinguish them.
         use_seconds = n_numeric >= n_datetime
         logger.warning(
-            "%s: independent variable '%s' is mixed — %d of %d values parse as "
-            "numeric seconds and %d as timestamps. Reading it as %s (majority).",
+            "%s: %s is mixed — %d of %d values parse as numeric seconds and %d "
+            "as timestamps. Reading it as %s (majority).",
             path,
-            name,
+            what,
             n_numeric,
             n_rows,
             n_datetime,
@@ -1056,32 +1116,83 @@ def _build_time_index(
         if parsed is None:
             parsed = pd.to_datetime(raw, errors="coerce", format="mixed")
         times = pd.DatetimeIndex(parsed)
-        if not bool(np.asarray(times.notna()).any()):
-            raise TsaraIngestError(
-                f"'{path}': independent variable '{name}' is neither numeric "
-                "seconds nor parseable timestamps."
-            )
 
-    times = to_utc_naive_ns(times, "UTC", path)
-    # As an array, not an Index: pandas-stubs types `.notna()` as Index[bool],
-    # which supports neither `~` nor `.any()`.
-    valid = np.asarray(times.notna())
-    n_bad = int((~valid).sum())
-    if n_bad:
-        check_dropped_rows(
-            n_dropped=n_bad,
-            n_total=len(times),
-            path=path,
-            reason="timestamp did not parse",
-            max_fraction=max_dropped_fraction,
-            logger=logger,
-        )
-        frame.drop(frame.index[~valid], inplace=True)
-        times = times[valid]
-    return times
+    return to_utc_naive_ns(times, "UTC", path)
 
 
-def _provenance(header: IcarttHeader, lod_counts: dict[str, int] | None = None) -> dict[str, Any]:
+#: Column names that look like they hold a cell boundary or a midpoint.
+#:
+#: Both halves are required: "stop" alone matches a stop *flag*, and "time"
+#: alone matches the time axis itself. Used only to report what a file offers,
+#: never to decide anything -- see :mod:`tsara.ingest.support` for why
+#: guessing a boundary column is refused.
+#: Names that could be a cell boundary a manifest is able to *name*.
+#:
+#: ``mid`` is deliberately absent. The schema accepts a ``start_column`` and a
+#: ``stop_column``; a midpoint column is neither, so listing one answers a
+#: question the user cannot act on and invites the one manifest entry that
+#: would be silently wrong -- ``stop_column: Time_Mid`` halves every cell.
+#: Measured across all 1122 files of the 2024 archive, dropping it costs
+#: nothing: every file carrying a mid column either carries a real stop column
+#: beside it (64 files) or is one of the 20 whose *independent variable* is
+#: itself named ``Time_Mid``, where the "candidate" was the file's own time
+#: axis handed back to the user.
+_BOUNDARY_NAME = re.compile(r"(stop|end)", re.IGNORECASE)
+_TIME_NAME = re.compile(r"(time|utc|sec)", re.IGNORECASE)
+
+#: Independent-variable names that justify a label without guessing.
+_START_NAME = re.compile(r"start", re.IGNORECASE)
+_MID_NAME = re.compile(r"mid", re.IGNORECASE)
+
+
+def _label_hint(header: IcarttHeader) -> str | None:
+    """Infer where the timestamp sits from the independent variable's name.
+
+    The ICARTT specification says the independent variable is a start time,
+    and most of the archive agrees -- but not all of it, and the exceptions
+    are not exotic: two instruments publish ``Time_Mid``, and one vendor
+    writes ``TIMESTAMP_UTC``, which is the analyzer's own resampling grid and
+    not a specification start time at all.
+
+    So the name is read rather than the specification trusted. A name that
+    says ``start`` or ``mid`` justifies a label; anything else yields None,
+    which the resolver turns into ``unknown`` and treats as centred. Assuming
+    ``start`` for every file because the specification says so would put a
+    30 s error on every cell of the minute-average suite, in the direction
+    nobody would think to check.
+    """
+    name = header.independent_variable.name
+    if _START_NAME.search(name):
+        return "start"
+    if _MID_NAME.search(name):
+        return "mid"
+    return None
+
+
+def _boundary_candidates(columns: list[str]) -> tuple[str, ...]:
+    """Return columns a manifest could *name* as a cell boundary, as evidence.
+
+    Read by a human deciding what to write in ``support.start_column`` /
+    ``support.stop_column``, so every entry has to be something they can
+    actually write there. Two kinds of entry are not, and both used to appear:
+    a midpoint column, which fits neither field (see :data:`_BOUNDARY_NAME`),
+    and TSARA's own reserved boundary columns, which the caller excludes by
+    reading the file's columns before they are attached.
+
+    Measured across the 2024 archive: 169 of 1122 files offer a boundary
+    column a manifest could name -- ``Time_Stop`` on 123, ``StopTime_UTC`` on
+    35 and ``iWAS_Stop_UTC`` on 11 -- and every one of them is now actionable.
+    """
+    return tuple(
+        column for column in columns if _BOUNDARY_NAME.search(column) and _TIME_NAME.search(column)
+    )
+
+
+def _provenance(
+    header: IcarttHeader,
+    lod_counts: dict[str, int] | None = None,
+    columns: list[str] | None = None,
+) -> dict[str, Any]:
     """Extract the header fields worth carrying alongside the data.
 
     Limit-of-detection flags are included deliberately. ICARTT files mark
@@ -1102,6 +1213,14 @@ def _provenance(header: IcarttHeader, lod_counts: dict[str, int] | None = None) 
         "icartt_revision_date": header.revision_date.isoformat(),
         "icartt_interval": header.interval,
     }
+    hint = _label_hint(header)
+    if hint is not None:
+        provenance[LABEL_HINT_KEY] = hint
+    candidates = _boundary_candidates(columns or [])
+    if candidates:
+        # Reported so a user can see what their manifest could be naming;
+        # nothing here acts on it (see tsara.ingest.support for why).
+        provenance[CANDIDATE_COLUMNS_KEY] = ", ".join(candidates)
     for key in ("REVISION", "PLATFORM", "LOCATION", "ULOD_FLAG", "LLOD_FLAG", "LLOD_VALUE"):
         if key in header.metadata:
             provenance[f"icartt_{key.lower()}"] = header.metadata[key]

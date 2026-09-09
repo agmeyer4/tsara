@@ -33,7 +33,8 @@ from tsara.ingest.base import (
     float_precision_kwarg,
 )
 from tsara.ingest.registry import register_reader
-from tsara.ingest.timeparse import build_time_index
+from tsara.ingest.support import attach_declared_boundaries
+from tsara.ingest.timeparse import build_boundary_index, build_time_index
 
 if TYPE_CHECKING:  # pragma: no cover
     from pathlib import Path
@@ -109,6 +110,14 @@ def read_csv(path: Path, loader: LoaderConfig, /) -> RawTable:
         times = times[valid]
 
     frame = frame.set_axis(pd.DatetimeIndex(times, name=TIME_INDEX_NAME), axis=0)
+    frame = attach_declared_boundaries(
+        frame,
+        loader.support,
+        parse=lambda column: build_boundary_index(frame, column, loader.time, path),
+        path=path,
+        max_dropped_fraction=loader.max_dropped_fraction,
+        reader_logger=logger,
+    )
     return RawTable(frame=frame, path=path, attrs={})
 
 

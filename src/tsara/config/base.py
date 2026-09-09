@@ -68,11 +68,12 @@ def validate_positive_timedelta(value: str, *, field: str) -> None:
     """Validate a pandas-style strictly positive timedelta string ('30s', '10min').
 
     For *durations* — window lengths, grid spacings, gap tolerances — where a
-    non-positive value is physically meaningless. Signed time quantities
-    (e.g. a future per-instrument ``time_shift`` for inlet-lag correction,
-    which is legitimately negative) are a different physical animal and must
-    NOT use this validator; add a parse-only ``validate_signed_timedelta``
-    sibling when such a field first appears.
+    non-positive value is physically meaningless. Signed time quantities are a
+    different physical animal and must NOT use this validator; they go through
+    :func:`validate_signed_timedelta`, which now exists. Both fields this
+    docstring once anticipated have landed: ``InstrumentConfig.time_shift``
+    (signed, since a clock can be fast or slow) and ``SupportSpec.width`` /
+    ``DeclaredUncertainty.at_width`` (durations, and so validated here).
 
     Raises ``ValueError`` (which Pydantic converts into a field-scoped
     validation error) if the string doesn't parse or is non-positive. The
@@ -108,8 +109,10 @@ def validate_signed_timedelta(value: str, *, field: str) -> None:
     an *offset*, not a duration — a species that arrives at the inlet 15 s
     *before* the reference species is a physically meaningful configuration
     (different stacks, different transport paths), so zero and negative values
-    must both be accepted here. The same will apply to a per-instrument
-    ``time_shift`` for inlet-lag correction whenever that lands.
+    must both be accepted here. The second such field has now landed:
+    ``InstrumentConfig.time_shift``, where a logger running fast and an inlet
+    lag both produce a negative correction, and a logger running slow a
+    positive one.
 
     Raises ``ValueError`` (which Pydantic converts into a field-scoped
     validation error) if the string doesn't parse. Unlike its positive-only

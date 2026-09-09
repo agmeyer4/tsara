@@ -56,8 +56,12 @@ from tsara.core.bundle import (
     BUNDLE_MANIFEST,
     BUNDLE_STAGE_KEY,
     BUNDLE_STREAMS_DIR,
+    BUNDLE_VERSION_WITH_CELLS,
+    SUPPORTED_BUNDLE_VERSIONS,
     TsaraBundleError,
+    pin_time_encoding,
 )
+from tsara.core.support import check_bounds_intact, ensure_time_bounds
 from tsara.synthetic.config import SyntheticConfig
 from tsara.synthetic.plumes import GroundTruth
 
@@ -137,6 +141,12 @@ def save_bundle(dataset: SyntheticDataset, path: str | Path) -> Path:
         # attr that breaks the invariant fails here, at save, with a backend
         # error that does not name the offending key — so keep new attrs to
         # those three types.
+        # Pinned before writing so `time` and `time_bnds` cannot end up with
+        # different reference epochs, and checked so that a stream whose
+        # bounds were destroyed upstream is caught here rather than
+        # inherited by everything downstream.
+        check_bounds_intact(stream)
+        pin_time_encoding(stream)
         stream.to_netcdf(target, engine="netcdf4")
 
     (bundle / BUNDLE_MANIFEST).write_text(
@@ -202,10 +212,10 @@ def load_bundle(path: str | Path) -> SyntheticDataset:
         raise TsaraBundleError(f"'{bundle}' is not a TSARA bundle: no {BUNDLE_MANIFEST} found.")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     found_version = manifest.get("bundle_format_version")
-    if found_version != BUNDLE_FORMAT_VERSION:
+    if found_version not in SUPPORTED_BUNDLE_VERSIONS:
         raise TsaraBundleError(
             f"Bundle '{bundle}' has format version {found_version!r}, but this "
-            f"TSARA understands version {BUNDLE_FORMAT_VERSION}."
+            f"TSARA reads versions {list(SUPPORTED_BUNDLE_VERSIONS)}."
         )
 
     # Checked before the stage-specific files, so that pointing this loader
@@ -229,15 +239,35 @@ def load_bundle(path: str | Path) -> SyntheticDataset:
         raise TsaraBundleError(f"Bundle '{bundle}' is missing {BUNDLE_GROUND_TRUTH}.")
     ground_truth = GroundTruth.from_frame(pd.read_parquet(truth_path))
 
+    # See the same gate in `tsara.ingest.bundle`: an absent `time_bnds` means
+    # "the format could not record one" in version 1 and "nothing could be
+    # known" from version 2 on, and only the first is safe to complete.
+    predates_cells = int(found_version) < BUNDLE_VERSION_WITH_CELLS
+
     streams: dict[str, xr.Dataset] = {}
+    migrated: list[str] = []
     for name in manifest.get("streams", []):
         stream_path = bundle / BUNDLE_STREAMS_DIR / f"{name}.nc"
         if not stream_path.is_file():
             raise TsaraBundleError(
                 f"Bundle '{bundle}' lists stream '{name}' but '{stream_path.name}' is missing."
             )
-        with xr.open_dataset(stream_path, engine="netcdf4") as opened:
+        # decode_coords="all" so the CF `bounds` attribute is honoured and
+        # `time_bnds` returns as a coordinate, the shape it was saved in.
+        with xr.open_dataset(stream_path, engine="netcdf4", decode_coords="all") as opened:
             streams[name] = opened.load()
+        if predates_cells and ensure_time_bounds(streams[name]):
+            migrated.append(name)
 
+    if migrated:
+        # Said out loud rather than applied quietly: the reading is a weak one
+        # and a user comparing results against a freshly generated bundle
+        # deserves to know which streams got assumed cells.
+        logger.info(
+            "Attached assumed cells (cadence width, centred) to %d stream(s) "
+            "written before cell boundaries existed: %s.",
+            len(migrated),
+            ", ".join(migrated),
+        )
     logger.info("Loaded synthetic bundle from %s (%d streams).", bundle, len(streams))
     return SyntheticDataset(streams=streams, ground_truth=ground_truth, config=config)

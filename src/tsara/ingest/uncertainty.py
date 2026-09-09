@@ -25,6 +25,19 @@ business reading. What ingestion does instead is *label* the variable
 is the shape of METHODS §2.3's promise: there is no code path in which an
 uncertainty of unstated origin enters a confidence interval.
 
+For the same reason it does **not** move a declared sigma onto the stream's
+cells. A manifest may say its figures were quoted at one second while the
+product is a one-minute mean (``DeclaredUncertainty.at_width``), and the
+arithmetic that reconciles the two needs a decorrelation timescale, an AR(1)
+model of how the error forgets itself, and the assumption that averaging is
+what produced the cell (METHODS §3.4, §10.8). A unit conversion needs none of
+those: it is a declared scale and offset, exact and assumption-free, which is
+why *that* is applied here and this is not. So the figures are stored exactly
+as declared and the mismatch is written down — the interval they describe, and
+how many of those intervals fit in a cell — for the stage that needs a sigma
+at a particular support to resolve in one hop, from the declaration to the
+support it actually wants.
+
 The five provenance values, and why "zero" is not "unknown"
 -----------------------------------------------------------
 ``declared``
@@ -97,6 +110,25 @@ class ResolvedUncertainty:
         The random component's correlation timescale as declared, passed
         through untouched for the alignment and regression stages that
         consume it (METHODS §3.4).
+    at_width : str or None
+        The averaging interval a declared *random* sigma was quoted at, when
+        the manifest said. The figures are stored as declared; this records
+        what they describe, which is a fact a reader six months later needs
+        and cannot re-derive from the numbers.
+    at_width_ratio : float or None
+        Median cell width divided by that quoted interval — the *N* of
+        METHODS §3.4, and emphatically not N_eff. A 1 s figure on 60 s cells
+        gives 60.0, so the size of the mismatch is legible at a glance and a
+        later stage has the count it needs without re-reading bounds. None
+        when the stream has no cells to compare against.
+    systematic_at_width : str or None
+        The same declaration on the *systematic* component. Recorded rather
+        than acted on in a stronger sense than the random one: a systematic
+        error is correlated across samples by definition, so it does not
+        average down at all (METHODS §3.3) and no interval can change it.
+        Recorded anyway, because a manifest that states one has said
+        something about its instrument, and silently dropping it would make
+        the product quieter than the manifest.
     """
 
     random: npt.NDArray[np.float64] | None
@@ -104,6 +136,9 @@ class ResolvedUncertainty:
     random_source: UncertaintySource
     systematic_source: UncertaintySource
     decorrelation_timescale: str | None = None
+    at_width: str | None = None
+    at_width_ratio: float | None = None
+    systematic_at_width: str | None = None
 
     @property
     def source(self) -> str:
@@ -134,6 +169,7 @@ def resolve_uncertainty(
     conversion: UnitConversion | None,
     variable: str,
     path: Path,
+    cell_width_ns: npt.NDArray[np.int64] | None = None,
 ) -> ResolvedUncertainty:
     """Resolve a variable's uncertainty budget into per-point sigmas.
 
@@ -153,6 +189,11 @@ def resolve_uncertainty(
         Canonical variable name, for messages.
     path : pathlib.Path
         Source file, for messages.
+    cell_width_ns : numpy.ndarray or None
+        Each row's cell width. Used **only** to record how a declared
+        ``at_width`` compares with the cells the figures landed on; no sigma
+        is rescaled here (see the module docstring). None when the stream has
+        no cell boundaries.
 
     Returns
     -------
@@ -192,13 +233,83 @@ def resolve_uncertainty(
         path=path,
         absent_source="zero",
     )
+
+    at_width, at_width_ratio = None, None
+    if isinstance(spec.random, DeclaredUncertainty) and spec.random.at_width is not None:
+        at_width = spec.random.at_width
+        at_width_ratio = _cells_per_quoted_interval(
+            at_width, cell_width_ns, variable=variable, path=path
+        )
+
+    systematic_at_width = (
+        spec.systematic.at_width if isinstance(spec.systematic, DeclaredUncertainty) else None
+    )
+    if systematic_at_width is not None:
+        # Worth a warning of its own rather than the same one: for the random
+        # component the interval is a real fact that a later stage will act
+        # on, while here it can never do anything, and a manifest author who
+        # wrote it probably expects otherwise.
+        logger.warning(
+            "%s: '%s' declares a systematic uncertainty at %s. A systematic "
+            "error does not average down, so no averaging interval can change "
+            "it (METHODS 3.3); the figure is used as given and the "
+            "declaration is recorded.",
+            path,
+            variable,
+            systematic_at_width,
+        )
     return ResolvedUncertainty(
         random=random,
         systematic=systematic,
         random_source=random_source,
         systematic_source=systematic_source,
         decorrelation_timescale=spec.decorrelation_timescale,
+        at_width=at_width,
+        at_width_ratio=at_width_ratio,
+        systematic_at_width=systematic_at_width,
     )
+
+
+def _cells_per_quoted_interval(
+    at_width: str,
+    cell_width_ns: npt.NDArray[np.int64] | None,
+    *,
+    variable: str,
+    path: Path,
+) -> float | None:
+    """How many quoted intervals fit in a cell, recorded and never applied.
+
+    This is the *N* of METHODS §3.4 — the count a later stage divides by,
+    after correcting it to N_eff with a decorrelation timescale. Returning
+    the raw count rather than a category ("wider", "finer") avoids inventing
+    a tolerance: measured cadences are jittered, so 60 s cells against a 1 s
+    figure give 59.98 rather than 60, and a category boundary would have to
+    guess how close is equal. The number says it exactly.
+
+    The median is used because widths are per row and a duty-cycled sampler's
+    cells genuinely vary (canister fills of 14-16 s, METHODS §10.5). One
+    summary number belongs in an attribute; the per-row widths are in the
+    bounds variable for anyone who needs them.
+    """
+    if cell_width_ns is None:
+        # No cells to compare against — a record too short to have a
+        # measurable cadence. The declaration is still recorded.
+        return None
+    quoted_ns = float(pd.Timedelta(at_width).value)
+    ratio = float(np.median(np.asarray(cell_width_ns, dtype="float64"))) / quoted_ns
+    if ratio != 1.0:
+        logger.warning(
+            "%s: '%s' declares its uncertainty at %s, but its cells are %.4g "
+            "times that interval. The figures are stored exactly as declared. "
+            "Moving them onto another support needs a decorrelation timescale "
+            "and is done by the stage that needs it (METHODS 3.4, 10.8), not "
+            "at ingestion.",
+            path,
+            variable,
+            at_width,
+            ratio,
+        )
+    return ratio
 
 
 def _resolve_component(

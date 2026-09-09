@@ -48,6 +48,17 @@ instruments:
         join: " "
         format: "%Y-%m-%d %H:%M:%S.%f"
         timezone: UTC
+      # What interval of air each row describes. This analyzer samples
+      # continuously and publishes 1-minute averages, so a row is not an
+      # instant: it is a 60 s cell, and the timestamp names its START. Say so
+      # and TSARA pairs it against faster instruments over exactly the right
+      # minute; leave it out and every cell is silently misplaced by 30 s.
+      # `method: mean` is a claim that an explicit averaging step produced the
+      # number -- see the aeris entry below for the other case.
+      support:
+        label: start
+        width: 60s
+        method: mean
     variables:
       ch4:
         column: CH4_dry
@@ -55,7 +66,18 @@ instruments:
         units: ppm
         convert: {from_unit: ppm, to_unit: ppb, scale: 1000.0}
         uncertainty:
-          random: {mode: declared, absolute: 0.7, relative: 0.0005}
+          # `at_width` says these figures are the manufacturer's 1-second
+          # precision, while the data above are 1-minute means. Ingestion
+          # stores them exactly as written and records the mismatch (here,
+          # cells 60x the quoted interval); it does not reconcile the two,
+          # because that needs `decorrelation_timescale` -- how much averaging
+          # helps depends entirely on how quickly the error decorrelates, and
+          # at tau = 5 min the 60 samples in a cell are worth barely more than
+          # one, so the naive square-root-of-N answer would be far too
+          # optimistic. The stage that wants a sigma at a particular support
+          # does that in one step, from these three declarations
+          # (METHODS.md 3.4, 10.8).
+          random: {mode: declared, absolute: 0.7, relative: 0.0005, at_width: 1s}
           systematic: {mode: declared, relative: 0.002}
           decorrelation_timescale: 5min
         qaqc:
@@ -91,6 +113,13 @@ instruments:
   # --- Processed stage stored as parquet ------------------------------------
   aeris:
     description: Ethane analyzer, instrument-aligned stage stored as parquet.
+    # A property of the INSTRUMENT, not of its files: how its clock relates to
+    # true air-at-inlet time. Added to every timestamp and to both cell
+    # boundaries, so cells move without changing width. Here the logger ran
+    # 4 s fast. Leave it out (the default) when the archive is already
+    # lag-corrected upstream, which is the usual case -- the value applied is
+    # recorded in the stream attributes so a double correction is visible.
+    time_shift: -4s
     loader:
       format: parquet
       # One instrument nesting a level deeper than its siblings is common.
@@ -103,6 +132,19 @@ instruments:
       exclude:
         - "**/bad/**"
         - "**/bad_timestamp/**"
+      # The honest description of a laser analyzer that publishes a reading
+      # per second. It is not a point sampler -- gas in the cell is a mixture
+      # of the last few seconds -- but neither did anything average it over a
+      # known interval, so `mean` would license arithmetic the data does not
+      # support. `point` claims less and is therefore safe; the bounds are a
+      # tiling convention rather than an instrument claim. `width: cadence`
+      # takes the width from the file's own median sampling interval, and an
+      # unknown label centres the cell, which leaves the timestamps where the
+      # file put them.
+      support:
+        label: unknown
+        width: cadence
+        method: point
       # No `time:` block: parquet stores the dataframe index, so there is
       # usually no timestamp to parse. Declare one only for files that keep
       # time in an ordinary column instead.
@@ -149,6 +191,18 @@ instruments:
       # ingestion time -- so turn it on when bitwise reproducibility matters
       # more than throughput (METHODS.md 9.2.2).
       float_precision: exact
+      # Canisters are the case a uniform width cannot express: each one fills
+      # for however long it fills, commonly 14-16 s, and the file states the
+      # boundaries per row. Naming the columns is the strongest rung of the
+      # ladder -- the cell is read, not inferred. `start_column` is needed
+      # only because this file's own time axis is the MIDPOINT; when the time
+      # axis is already the start, `stop_column` alone is enough. Note there
+      # is no `label` or `width` here: per-row boundaries and a uniform
+      # declaration are alternatives, and giving both is refused.
+      support:
+        start_column: Time_Start
+        stop_column: Time_Stop
+        method: mean
     metadata:
       institution: noaa
     variables:

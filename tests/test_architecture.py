@@ -206,3 +206,177 @@ def test_export_discovery_finds_more_than_the_packages() -> None:
     """
     assert len(MODULES_WITH_EXPORTS) > len(PACKAGES_WITH_EXPORTS)
     assert set(PACKAGES_WITH_EXPORTS) <= set(MODULES_WITH_EXPORTS)
+
+
+#: Public names that legitimately have no caller inside ``src/``.
+#:
+#: Kept explicit and small. Two dead helpers reached review in one phase --
+#: ``floor_width``, which guarded a case that occurs on 644 real rows, and
+#: ``weakest``, which reconciled something the architecture never assembles --
+#: and both were written, documented and unit-tested. A test that only their
+#: authors' own expectations guard is not much of a guard, so the rule is now
+#: enforced and every exception has to say why.
+UNREFERENCED: dict[str, str] = {
+    "bin_onto_cells": (
+        "The cross-rate pairing primitive. Phase 4 is its first caller; until "
+        "then it is reached only by its own tests."
+    ),
+    "read_icartt": (
+        "Reached by name through the reader registry (@register_reader), "
+        "which is a lookup rather than a call site the parser can see."
+    ),
+}
+
+
+def _public_names() -> dict[str, str]:
+    """Return every module-level ``__all__`` entry, mapped to its module."""
+    found: dict[str, str] = {}
+    for path in sorted(SRC.rglob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        for node in ast.parse(path.read_text(encoding="utf-8")).body:
+            if not isinstance(node, ast.Assign):
+                continue
+            if not any(getattr(t, "id", None) == "__all__" for t in node.targets):
+                continue
+            assert isinstance(node.value, ast.List)  # noqa: S101 - __all__ is a list
+            for element in node.value.elts:
+                assert isinstance(element, ast.Constant)  # noqa: S101
+                found[str(element.value)] = str(path.relative_to(SRC))
+    return found
+
+
+def _referenced() -> set[str]:
+    """Return every name loaded anywhere in ``src/``, plus package re-exports.
+
+    A name re-exported from a package ``__init__`` is a public entry point by
+    definition, so it needs no caller inside the package.
+    """
+    names: set[str] = set()
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if path.name == "__init__.py":
+            for node in tree.body:
+                if not isinstance(node, ast.Assign):
+                    continue
+                if not any(getattr(t, "id", None) == "__all__" for t in node.targets):
+                    continue
+                assert isinstance(node.value, ast.List)  # noqa: S101
+                names |= {str(e.value) for e in node.value.elts if isinstance(e, ast.Constant)}
+        for expr in ast.walk(tree):
+            if isinstance(expr, ast.Name):
+                names.add(expr.id)
+            elif isinstance(expr, ast.Attribute):
+                names.add(expr.attr)
+    return names
+
+
+def test_no_public_name_is_unreachable() -> None:
+    """A helper nothing calls is a claim about the architecture, not a guard.
+
+    Asked of the syntax tree rather than the text: a first attempt at this
+    audit counted the word 'weakest' inside its own docstring and concluded
+    the function was used. Prose is not a call site.
+    """
+    declared = _public_names()
+    used = _referenced()
+    orphans = sorted(n for n in declared if n not in used and n not in UNREFERENCED)
+    assert orphans == [], (
+        "These public names are never referenced from src/: "
+        f"{ {n: declared[n] for n in orphans} }. Either wire them in, delete "
+        "them, or record why in UNREFERENCED."
+    )
+
+
+def test_no_unreferenced_exemption_is_stale() -> None:
+    """An exemption for a name that has gained a caller, or that no longer
+    exists, makes the list less trustworthy than no list."""
+    declared = _public_names()
+    used = _referenced()
+    gone = sorted(n for n in UNREFERENCED if n not in declared)
+    now_used = sorted(n for n in UNREFERENCED if n in used)
+    assert gone == [], f"UNREFERENCED names that no longer exist: {gone}"
+    assert now_used == [], f"UNREFERENCED names that now have a caller: {now_used}. Drop them."
+
+
+# ---------------------------------------------------------------------------
+# Every attribute a product carries is documented
+# ---------------------------------------------------------------------------
+
+#: The methods document is where a reader looks up what an attribute means, so
+#: an attribute nobody wrote down is a number in a file with no definition.
+#: Exemptions need a reason, and `test_no_attr_exemption_is_stale` deletes the
+#: reason's shelf life.
+EXEMPT_ATTRS: dict[str, str] = {}
+
+#: Attribute names are TSARA's own vocabulary when they carry one of these
+#: prefixes. CF's own names (`bounds`, `cell_methods`, `units`) are governed by
+#: CF and documented where they are used.
+ATTR_PREFIXES = ("tsara_", "uncertainty_")
+
+
+def _attr_names() -> dict[str, str]:
+    """Every namespaced attribute name written anywhere in ``src/``.
+
+    Discovered from string constants in the syntax tree rather than from a
+    list, because the two families are spelled differently in the code: the
+    support attributes are constants in ``core.naming``, the uncertainty ones
+    are literals at the point of use. A test that enumerated either one by
+    hand would cover half the vocabulary and look complete.
+    """
+    found: dict[str, str] = {}
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            name = node.value
+            if name.startswith(ATTR_PREFIXES) and name.replace("_", "").isalnum():
+                found.setdefault(name, f"{path.relative_to(SRC)}:{node.lineno}")
+    return found
+
+
+def _methods_text() -> str:
+    return (SRC.parent.parent / "docs" / "METHODS.md").read_text()
+
+
+def test_discovery_finds_the_attribute_vocabulary() -> None:
+    """A test parametrized over nothing passes. Guard the discovery itself."""
+    names = _attr_names()
+    assert len(names) >= 10, f"attribute discovery found only {sorted(names)}"
+
+
+def test_every_attribute_a_product_carries_is_documented() -> None:
+    """An attribute is a promise to a reader six months later, and the only
+    place that promise is explained is METHODS.md.
+
+    This has failed for real: both provenance families were documented by
+    halves -- the support section named the label and width sources but
+    abbreviated the method one to `_method_source`, and the uncertainty
+    section named the species-level label while the per-component attributes
+    that carry it went unmentioned.
+    """
+    doc = _methods_text()
+    undocumented = {
+        name: where
+        for name, where in _attr_names().items()
+        if f"`{name}`" not in doc and name not in EXEMPT_ATTRS
+    }
+    assert undocumented == {}, (
+        "These attributes are written into products but named nowhere in "
+        f"docs/METHODS.md: {undocumented}. Document them where their family "
+        "is discussed, or record why not in EXEMPT_ATTRS."
+    )
+
+
+def test_no_attr_exemption_is_stale() -> None:
+    """An exemption for an attribute that is gone, or that is now documented
+    anyway, makes the list less trustworthy than no list."""
+    doc = _methods_text()
+    names = _attr_names()
+    gone = sorted(a for a in EXEMPT_ATTRS if a not in names)
+    documented = sorted(a for a in EXEMPT_ATTRS if f"`{a}`" in doc)
+    assert gone == [], f"EXEMPT_ATTRS names attributes no longer written: {gone}"
+    assert documented == [], (
+        f"EXEMPT_ATTRS excuses attributes that ARE documented: {documented}. Drop them."
+    )

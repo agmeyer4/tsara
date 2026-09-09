@@ -41,10 +41,23 @@ A reader returns a :class:`RawTable` whose ``frame``:
 3. has **not** been masked, converted, sorted, or de-duplicated. Those are
    cross-file, campaign-level operations, and doing them per file would give
    a rolling QA/QC window a different answer depending on how the archive
-   happened to be split into files.
+   happened to be split into files;
+4. **may** carry two reserved columns,
+   :data:`~tsara.core.naming.RAW_TIME_START_COLUMN` and
+   :data:`~tsara.core.naming.RAW_TIME_STOP_COLUMN`, holding each row's cell
+   boundaries when the *file itself* states them. Both or neither: a start
+   with no stop describes no interval.
 
-Points 1 and 2 are enforced at runtime by :func:`check_raw_table`, which the
-registry applies to every reader's output — including readers registered by
+Why bounds arrive as columns rather than as a separate field: a reader's
+whole contract is ``(path, loader config) -> RawTable``, and the boundaries
+have to survive concatenation, sorting and de-duplication alongside the rows
+they belong to. As columns they do that for free. Under a reserved,
+underscore-prefixed name they cannot collide with an instrument's own
+column, and naming them in :mod:`tsara.core.naming` rather than in each
+reader is what stops the three readers and the assembler drifting apart.
+
+Points 1, 2 and 4 are enforced at runtime by :func:`check_raw_table`, which
+the registry applies to every reader's output — including readers registered by
 code outside TSARA.
 """
 
@@ -56,7 +69,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from tsara.core.exceptions import TsaraError
-from tsara.core.naming import TIME_COORD
+from tsara.core.naming import (
+    RAW_TIME_START_COLUMN,
+    RAW_TIME_STOP_COLUMN,
+    TIME_COORD,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     import logging
@@ -231,6 +248,7 @@ def check_raw_table(table: RawTable, *, reader_name: str) -> RawTable:
             "whose timestamp could not be parsed must be dropped by the "
             "reader, not carried forward."
         )
+    _check_boundary_columns(frame, table=table, reader_name=reader_name)
     if frame.columns.has_duplicates:
         duplicated = sorted(set(frame.columns[frame.columns.duplicated()]))
         raise TsaraIngestError(
@@ -238,6 +256,61 @@ def check_raw_table(table: RawTable, *, reader_name: str) -> RawTable:
             f"names {duplicated}; column selection would be ambiguous."
         )
     return table
+
+
+def _check_boundary_columns(frame: pd.DataFrame, *, table: RawTable, reader_name: str) -> None:
+    """Validate the optional per-row cell boundaries a reader may return.
+
+    Applied to every reader's output for the same reason the index checks
+    are: a malformed cell is silent. A stop before its start yields a
+    negative overlap that clips to zero, so the sample simply stops
+    contributing to anything downstream, and a NaT boundary places a cell at
+    an undefined point on the timeline while comparing and sorting perfectly
+    happily.
+
+    Raises
+    ------
+    TsaraIngestError
+        If only one boundary column is present, either is not a tz-naive
+        nanosecond datetime, either contains NaT, or a stop precedes its
+        start.
+    """
+    import numpy as np
+    import pandas as pd
+
+    present = [name for name in (RAW_TIME_START_COLUMN, RAW_TIME_STOP_COLUMN) if name in frame]
+    if not present:
+        return
+    if len(present) == 1:
+        raise TsaraIngestError(
+            f"Reader '{reader_name}' returned {table.path} with '{present[0]}' but "
+            "not its partner. Cell boundaries come in pairs; one alone describes "
+            "no interval."
+        )
+
+    start = frame[RAW_TIME_START_COLUMN]
+    stop = frame[RAW_TIME_STOP_COLUMN]
+    for name, values in ((RAW_TIME_START_COLUMN, start), (RAW_TIME_STOP_COLUMN, stop)):
+        if values.dtype != "datetime64[ns]":
+            raise TsaraIngestError(
+                f"Reader '{reader_name}' returned {table.path} with column "
+                f"'{name}' of dtype {values.dtype}; cell boundaries must be "
+                "tz-naive datetime64[ns], like the index."
+            )
+        n_missing = int(np.count_nonzero(np.asarray(pd.isna(values))))
+        if n_missing:
+            raise TsaraIngestError(
+                f"Reader '{reader_name}' returned {table.path} with {n_missing} "
+                f"missing value(s) in '{name}'. A row whose cell cannot be "
+                "placed must be dropped by the reader, not carried forward."
+            )
+    backwards = int(np.count_nonzero(np.asarray(stop < start)))
+    if backwards:
+        raise TsaraIngestError(
+            f"Reader '{reader_name}' returned {table.path} with {backwards} row(s) "
+            "whose cell stop precedes its start. Check the boundary column, and "
+            "whether it needs the same epoch base as the time axis."
+        )
 
 
 def check_dropped_rows(

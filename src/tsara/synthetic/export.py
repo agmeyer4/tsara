@@ -81,17 +81,23 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
+import numpy as np
 import yaml
 
 from tsara.config.manifest import Manifest
-from tsara.core.naming import LATITUDE_COORD, LONGITUDE_COORD, TIME_COORD
+from tsara.core.naming import (
+    LATITUDE_COORD,
+    LONGITUDE_COORD,
+    TIME_BOUNDS_VAR,
+    TIME_COORD,
+)
 from tsara.synthetic.background import TsaraSyntheticError
 from tsara.synthetic.config import MobileTrack, StationarySite
 
 if TYPE_CHECKING:  # pragma: no cover
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     import xarray as xr
 
@@ -100,7 +106,30 @@ if TYPE_CHECKING:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["EXPORT_MANIFEST", "EXPORT_RAW_DIR", "RawUnits", "export_raw"]
+__all__ = [
+    "EXPORT_MANIFEST",
+    "EXPORT_RAW_DIR",
+    "RawUnits",
+    "START_COLUMN",
+    "STOP_COLUMN",
+    "SupportDeclaration",
+    "export_raw",
+]
+
+#: How much an exported archive says about its own temporal support.
+#:
+#: The three rungs a real archive actually occupies, so the round trip can be
+#: run against each. ``reported`` writes per-row boundary columns and names
+#: them, the way a canister sampler publishes its fill times. ``declared``
+#: states a uniform label, width and method in the manifest, the way a
+#: producer describes a 1-minute product in prose that a human transcribes.
+#: ``none`` says nothing at all, which is the case for hundreds of real files
+#: and the one where ingestion must fall back to assumptions and label them.
+SupportDeclaration = Literal["reported", "declared", "none"]
+
+#: Column names an exported file uses for per-row cell boundaries.
+START_COLUMN = f"{TIME_COORD}_start"
+STOP_COLUMN = f"{TIME_COORD}_stop"
 
 #: Manifest written beside the raw files it describes.
 EXPORT_MANIFEST = "manifest.yaml"
@@ -141,6 +170,11 @@ def export_raw(
     *,
     raw_units: Mapping[str, RawUnits] | None = None,
     qaqc_bounds: Mapping[str, tuple[float | None, float | None]] | None = None,
+    support_declaration: SupportDeclaration = "declared",
+    time_shift: Mapping[str, str] | None = None,
+    timezone: str = "UTC",
+    split: Mapping[str, Sequence[int]] | None = None,
+    zero_width_cells: Mapping[str, int] | None = None,
 ) -> Path:
     """Write a synthetic dataset as raw CSV files with a matching manifest.
 
@@ -164,6 +198,59 @@ def export_raw(
         units. Present so the round trip can check that QA/QC bounds are
         applied after unit conversion rather than before
         (``docs/METHODS.md`` §9.4); either bound may be ``None``.
+    support_declaration : {'declared', 'reported', 'none'}, optional
+        How much the exported archive says about its own cells. The three
+        rungs a real archive occupies; see :data:`SupportDeclaration`. The
+        default declares, because a harness whose default exercises the
+        weakest path is weaker than it looks -- the lesson ``raw_units``
+        exists to remember (``docs/METHODS.md`` §9.9).
+
+        Note what ``none`` does *not* change: the file still carries whatever
+        timestamps the instrument's label implies, so exporting a
+        start-labelled instrument with ``none`` writes start times that
+        nothing identifies as such. Ingestion must then centre them and be
+        wrong by half a cell. That is not a flaw in the fixture, it is the
+        measurement the negative control exists to make.
+    time_shift : Mapping of str to str, optional
+        Per-instrument clock offsets to simulate, keyed by instrument name.
+        The value is what the *manifest* will declare, and the file receives
+        timestamps moved the other way, so ingestion must apply the
+        correction to recover the generator's truth. Same shape as
+        ``raw_units``: write the archive wrong, declare the fix, check that
+        the answer comes back right.
+    split : Mapping of str to sequence of int, optional
+        Write an instrument's record as several files instead of one, keyed
+        by instrument name. Each entry gives one stride per file: ``(1, 2)``
+        splits the rows in half and writes the second half taking every
+        second row, so the two files have different sampling intervals.
+
+        This exists because a fixture of one file per instrument cannot test
+        anything that only matters across files. Measured by mutation, a
+        round trip through a single-file archive missed all four multi-file
+        bugs it was pointed at, including cadence measured per instrument
+        rather than per file -- the decision the archive census makes
+        load-bearing, since some met records really do run at 1 s in one file
+        and 5 s in another.
+    zero_width_cells : Mapping of int, optional
+        Write this many cells per instrument with stop equal to start. Only
+        meaningful alongside ``support_declaration='reported'``, since that
+        is the only mode in which the file states its own boundaries.
+
+        Real files do this: one airborne spectrometer in the target archive
+        declares zero duration on 0.71 % of its rows. A cell of zero duration
+        carries no weight in any overlap, so ingestion widens it; without a
+        fixture that produces one, that repair is testable only against
+        expectations written by the same person who wrote it.
+    timezone : str, optional
+        IANA zone the file's timestamps are written in, declared in the
+        manifest so ingestion converts them back. Defaults to UTC, which
+        writes the same numbers TSARA works in.
+
+        Exists because a harness that only ever writes UTC cannot notice a
+        reader that ignores the declared zone: measured by mutation, dropping
+        the timezone from cell-boundary parsing changed nothing any test
+        could see. Set it to a real zone and a boundary parsed on the wrong
+        convention lands hours from the start it belongs to.
 
     Returns
     -------
@@ -174,8 +261,10 @@ def export_raw(
     Raises
     ------
     TsaraSyntheticError
-        If ``path`` exists and is not a directory, or if ``raw_units`` or
-        ``qaqc_bounds`` names a species the dataset does not contain.
+        If ``path`` exists and is not a directory, if ``raw_units`` or
+        ``qaqc_bounds`` names a species the dataset does not contain, if
+        ``time_shift`` names an unknown instrument, or if a species collides
+        with a boundary column name this exporter needs to write.
     """
     root = Path(path)
     if root.exists() and not root.is_dir():
@@ -187,16 +276,46 @@ def export_raw(
 
     scales = dict(raw_units or {})
     bounds = dict(qaqc_bounds or {})
+    shifts = dict(time_shift or {})
+    strides = {name: tuple(v) for name, v in (split or {}).items()}
+    degenerate = dict(zero_width_cells or {})
     _check_species_exist(dataset.config, scales, bounds)
+    _check_instruments_exist(dataset, shifts)
+    _check_instruments_exist(dataset, strides)
+    _check_instruments_exist(dataset, degenerate)
+    if support_declaration == "reported":
+        _check_boundary_columns_are_free(dataset)
 
     raw_dir = root / EXPORT_RAW_DIR
     raw_dir.mkdir(parents=True, exist_ok=True)
 
     sigma_columns = _reported_sigma_columns(dataset.config)
     for name in dataset.streams:
-        _write_csv(dataset.observable(name), raw_dir / f"{name}.csv", scales, sigma_columns)
+        for suffix, chunk, n_zero in _chunks(
+            dataset.observable(name), strides.get(name), degenerate.get(name, 0)
+        ):
+            _write_csv(
+                chunk,
+                raw_dir / f"{name}{suffix}.csv",
+                scales,
+                sigma_columns,
+                label=_label_of(dataset.config, name),
+                write_boundaries=support_declaration == "reported",
+                shift_ns=_shift_ns(shifts.get(name)),
+                timezone=timezone,
+                n_zero_width=n_zero,
+            )
 
-    manifest = _build_manifest(dataset.config, raw_dir, scales, bounds)
+    manifest = _build_manifest(
+        dataset.config,
+        raw_dir,
+        scales,
+        bounds,
+        support_declaration,
+        shifts,
+        timezone,
+        set(strides),
+    )
     manifest_path = root / EXPORT_MANIFEST
     manifest_path.write_text(
         yaml.safe_dump(manifest.model_dump(mode="json", exclude_none=False), sort_keys=False),
@@ -233,14 +352,145 @@ def _check_species_exist(
         )
 
 
+def _label_of(config: SyntheticConfig, name: str) -> str:
+    """Return the support label of one emitted stream.
+
+    The GPS track is not in ``config.instruments`` -- it is manufactured from
+    the platform -- so it is answered separately rather than by a lookup that
+    would raise on it.
+    """
+    instrument = config.instruments.get(name)
+    return "mid" if instrument is None else instrument.support.label
+
+
+def _width_of(config: SyntheticConfig, name: str) -> str:
+    """Return the cell width of one emitted stream, as a duration string."""
+    instrument = config.instruments.get(name)
+    if instrument is None:
+        return str(getattr(config.platform, "gps_rate", "1s"))
+    return instrument.support.width or instrument.native_rate
+
+
+def _method_of(config: SyntheticConfig, name: str) -> str:
+    """Return the support method of one emitted stream."""
+    instrument = config.instruments.get(name)
+    return "point" if instrument is None else instrument.support.method
+
+
+def _shift_ns(shift: str | None) -> int:
+    """Return the nanoseconds a written timestamp must be moved by.
+
+    The file receives ``truth - shift`` so that ingestion, adding the
+    manifest's declared ``time_shift``, lands back on truth. Inverting here
+    rather than in the manifest keeps the manifest holding the numbers a real
+    one would, exactly as :class:`RawUnits` does for units.
+    """
+    import pandas as pd
+
+    return 0 if shift is None else int(pd.Timedelta(shift).value)
+
+
+def _check_instruments_exist(dataset: SyntheticDataset, requested: Mapping[str, object]) -> None:
+    """Refuse any per-instrument request naming a stream that does not exist.
+
+    Same reasoning as :func:`_check_species_exist`: silently ignoring a
+    misspelled name would leave the harness passing while testing less than
+    it claims.
+    """
+    unknown = sorted(set(requested) - set(dataset.streams))
+    if unknown:
+        raise TsaraSyntheticError(
+            f"Cannot export {unknown}: this dataset has {sorted(dataset.streams)}."
+        )
+
+
+def _check_boundary_columns_are_free(dataset: SyntheticDataset) -> None:
+    """Refuse to write boundary columns over a species of the same name.
+
+    Species names are validated as identifiers, so ``time_start`` is a legal
+    one. Writing the cell boundary into it would overwrite a measurement with
+    a timestamp, and the round trip would then compare the wrong column
+    against the answer key.
+    """
+    taken = sorted(
+        {
+            species
+            for instrument in dataset.config.instruments.values()
+            for species in instrument.species
+        }
+        & {START_COLUMN, STOP_COLUMN}
+    )
+    if taken:
+        raise TsaraSyntheticError(
+            f"Cannot export per-row cell boundaries: species {taken} would be "
+            f"overwritten by the columns '{START_COLUMN}'/'{STOP_COLUMN}'. "
+            "Rename the species, or export with support_declaration='declared'."
+        )
+
+
+def _chunks(
+    stream: xr.Dataset, strides: tuple[int, ...] | None, n_zero_width: int
+) -> list[tuple[str, xr.Dataset, int]]:
+    """Split one stream into the files it should be written as.
+
+    An instrument whose record arrives as several files, each with its own
+    sampling interval, is the ordinary case in a real archive and the one a
+    single-file fixture cannot reproduce. Each stride writes one file: ``(1,
+    2)`` halves the record and takes every second row of the second half, so
+    the two files disagree about cadence exactly as some real met records do.
+
+    Any requested zero-width cells go in the first file, since one file is
+    enough to exercise the repair and spreading them would only make the
+    expectation harder to state.
+
+    Returns
+    -------
+    list of (str, xarray.Dataset, int)
+        Filename suffix, the rows for that file, and how many of its cells
+        should be written with no duration.
+    """
+    if not strides:
+        return [("", stream, n_zero_width)]
+    total = int(stream.sizes[TIME_COORD])
+    edges = np.linspace(0, total, len(strides) + 1).astype(int)
+    out: list[tuple[str, xr.Dataset, int]] = []
+    for i, (first, last) in enumerate(zip(edges[:-1], edges[1:], strict=True)):
+        rows = np.arange(first, last, strides[i])
+        out.append((f"_{i:03d}", stream.isel({TIME_COORD: rows}), n_zero_width if i == 0 else 0))
+    return out
+
+
 def _write_csv(
     stream: xr.Dataset,
     target: Path,
     scales: Mapping[str, RawUnits],
     sigma_columns: Mapping[str, str],
+    *,
+    label: str,
+    write_boundaries: bool,
+    shift_ns: int,
+    timezone: str,
+    n_zero_width: int = 0,
 ) -> None:
-    """Write one observable stream as a CSV with an ISO 8601 time column."""
-    frame = stream.to_dataframe()
+    """Write one observable stream as a CSV with an ISO 8601 time column.
+
+    The time column carries the timestamp the instrument's *label* implies,
+    not the cell midpoint TSARA stores internally. That is what makes the
+    fixture faithful: a start-labelled product writes start times, and
+    ingestion has to be told (or assume) which it is looking at. Writing
+    midpoints instead would quietly hand ingestion the answer.
+    """
+    import pandas as pd
+
+    cells = stream[TIME_BOUNDS_VAR].values.astype("datetime64[ns]").astype(np.int64)
+    midpoints = stream[TIME_COORD].values.astype("datetime64[ns]").astype(np.int64)
+    stamps = {"start": cells[:, 0], "end": cells[:, 1]}.get(label, midpoints)
+
+    # Bounds dropped before `to_dataframe`: a two-dimensional coordinate turns
+    # the frame into a (time, nv) MultiIndex and every row would appear twice.
+    # They are re-emitted below as ordinary columns, which is how a file can
+    # actually carry them.
+    frame = stream.drop_vars(TIME_BOUNDS_VAR, errors="ignore").to_dataframe()
     # `to_dataframe` brings coordinates along as columns. Platform position
     # attached to a gas stream is a coordinate, not a measurement, and would
     # otherwise appear as an undeclared column. Dropped by asking the dataset
@@ -261,9 +511,31 @@ def _write_csv(
         if sigma_column is not None and sigma_column in frame.columns:
             frame[sigma_column] = frame[sigma_column] / raw.scale
 
-    # Full precision, not `%f`: the generator's timestamp jitter puts real
-    # information in the nanosecond digits, and strftime truncates at µs.
-    frame.insert(0, TIME_COORD, [stamp.isoformat() for stamp in frame.index])
+    def _iso(values: np.ndarray) -> list[str]:
+        # Full precision, not `%f`: the generator's timestamp jitter puts real
+        # information in the nanosecond digits, and strftime truncates at µs.
+        # The shift is applied here so it reaches the boundary columns too --
+        # a clock offset moves a cell, it does not resize it.
+        moved = pd.DatetimeIndex((values - shift_ns).astype("datetime64[ns]"))
+        if timezone != "UTC":
+            # Written naive in local time, exactly as a logger that knows
+            # nothing about UTC would write it; the manifest declares the zone.
+            moved = moved.tz_localize("UTC").tz_convert(timezone).tz_localize(None)
+        return [stamp.isoformat() for stamp in moved]
+
+    if write_boundaries:
+        stops = cells[:, 1].copy()
+        if n_zero_width:
+            # Written as the file would write them: a stop identical to the
+            # start, which is a statement of zero duration rather than a
+            # missing value.
+            stops[:n_zero_width] = cells[:n_zero_width, 0]
+        frame.insert(0, STOP_COLUMN, _iso(stops))
+        if label != "start":
+            # Only needed when the time column is not already the cell start;
+            # a start column duplicating it would say nothing.
+            frame.insert(0, START_COLUMN, _iso(cells[:, 0]))
+    frame.insert(0, TIME_COORD, _iso(stamps))
     frame.to_csv(target, index=False)
 
 
@@ -287,11 +559,39 @@ def _reported_sigma_columns(config: SyntheticConfig) -> dict[str, str]:
     return columns
 
 
+def _support_block(
+    config: SyntheticConfig, name: str, declaration: SupportDeclaration
+) -> dict[str, Any] | None:
+    """Return the manifest's ``support:`` block for one stream, if any.
+
+    The three rungs, built from what the generator actually did. ``reported``
+    names the boundary columns the writer emitted; ``declared`` restates the
+    label, width and method; ``none`` returns None, leaving ingestion to
+    assume and to say that it assumed.
+    """
+    if declaration == "none":
+        return None
+    label = _label_of(config, name)
+    method = _method_of(config, name)
+    if declaration == "declared":
+        return {"label": label, "width": _width_of(config, name), "method": method}
+    # Per-row boundaries: no label or width, which the schema refuses to
+    # accept alongside them, since the columns already fix every cell.
+    block: dict[str, Any] = {"method": method, "stop_column": STOP_COLUMN}
+    if label != "start":
+        block["start_column"] = START_COLUMN
+    return block
+
+
 def _build_manifest(
     config: SyntheticConfig,
     raw_dir: Path,
     scales: Mapping[str, RawUnits],
     bounds: Mapping[str, tuple[float | None, float | None]],
+    support_declaration: SupportDeclaration,
+    shifts: Mapping[str, str],
+    timezone: str,
+    split_instruments: set[str],
 ) -> Manifest:
     """Build the manifest that describes the files just written."""
     instruments: dict[str, Any] = {}
@@ -338,15 +638,22 @@ def _build_manifest(
                     mode="json", exclude_none=True
                 )
             variables[species_name] = variable
-        instruments[name] = {
+        loader: dict[str, Any] = {
+            "format": "csv",
+            "path_template": f"{name}_*.csv" if name in split_instruments else f"{name}.csv",
+            "time": {"column": TIME_COORD, "format": "iso8601", "timezone": timezone},
+        }
+        support = _support_block(config, name, support_declaration)
+        if support is not None:
+            loader["support"] = support
+        entry: dict[str, Any] = {
             "description": f"Synthetic instrument '{name}' at {instrument.native_rate}.",
-            "loader": {
-                "format": "csv",
-                "path_template": f"{name}.csv",
-                "time": {"column": TIME_COORD, "format": "iso8601"},
-            },
+            "loader": loader,
             "variables": variables,
         }
+        if name in shifts:
+            entry["time_shift"] = shifts[name]
+        instruments[name] = entry
 
     if isinstance(config.platform, MobileTrack):
         # The generator already emits the track as its own stream at its own
@@ -354,13 +661,21 @@ def _build_manifest(
         # any other. What is missing is only its *declaration*: the platform
         # is not in `config.instruments`, so nothing above described it.
         gps_instrument = config.platform.gps_instrument
+        gps_loader: dict[str, Any] = {
+            "format": "csv",
+            "path_template": (
+                f"{gps_instrument}_*.csv"
+                if gps_instrument in split_instruments
+                else f"{gps_instrument}.csv"
+            ),
+            "time": {"column": TIME_COORD, "format": "iso8601", "timezone": timezone},
+        }
+        gps_support = _support_block(config, gps_instrument, support_declaration)
+        if gps_support is not None:
+            gps_loader["support"] = gps_support
         instruments[gps_instrument] = {
             "description": f"Synthetic GPS track at {config.platform.gps_rate}.",
-            "loader": {
-                "format": "csv",
-                "path_template": f"{gps_instrument}.csv",
-                "time": {"column": TIME_COORD, "format": "iso8601"},
-            },
+            "loader": gps_loader,
             "variables": {
                 LATITUDE_COORD: {
                     "column": LATITUDE_COORD,

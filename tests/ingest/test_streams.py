@@ -21,9 +21,21 @@ from tsara.config.manifest import (
     MobilePlatform,
     StationaryPlatform,
 )
-from tsara.core.naming import LOD_COUNT_KEY, sigma_rand_name, sigma_sys_name
+from tsara.core.naming import (
+    CELL_METHODS_ATTR,
+    LOD_COUNT_KEY,
+    RAW_TIME_START_COLUMN,
+    RAW_TIME_STOP_COLUMN,
+    SUPPORT_COVERAGE_ATTR,
+    SUPPORT_LABEL_ATTR,
+    TIME_BOUNDS_VAR,
+    TIME_SHIFT_ATTR,
+    sigma_rand_name,
+    sigma_sys_name,
+)
 from tsara.ingest.base import TsaraIngestError
 from tsara.ingest.streams import build_stream
+from tsara.ingest.support import ResolvedSupport
 
 SITE = StationaryPlatform(latitude=40.77, longitude=-111.85, altitude_m=1300.0)
 MOBILE = MobilePlatform(gps_instrument="gps", lat_variable="latitude", lon_variable="longitude")
@@ -433,3 +445,194 @@ def test_declared_file_attrs_reach_the_dataset() -> None:
     """A stream found on disk has to explain itself (CLAUDE.md 5)."""
     stream = _build(_frame(), _instrument(), file_attrs={"icartt_pi": "Hu, Lu"})
     assert stream.attrs["icartt_pi"] == "Hu, Lu"
+
+
+# ---------------------------------------------------------------------------
+# Cells (Phase 3.5)
+# ---------------------------------------------------------------------------
+
+
+def _resolved(**overrides: Any) -> ResolvedSupport:
+    fields: dict[str, Any] = {
+        "label": "start",
+        "method": "mean",
+        "width_ns": 2_000_000_000,
+        "label_source": "declared",
+        "width_source": "declared",
+        "method_source": "declared",
+    }
+    fields.update(overrides)
+    return ResolvedSupport(**fields)
+
+
+def _bounded_frame() -> pd.DataFrame:
+    frame = _frame()
+    frame[RAW_TIME_START_COLUMN] = frame.index
+    frame[RAW_TIME_STOP_COLUMN] = frame.index + pd.Timedelta("2s")
+    return frame
+
+
+def test_a_stream_carries_its_cells_and_their_provenance() -> None:
+    stream = build_stream(
+        _bounded_frame(),
+        _instrument(),
+        name="picarro",
+        platform=StationaryPlatform(latitude=40.0, longitude=-111.0),
+        support=_resolved(),
+    )
+    assert TIME_BOUNDS_VAR in stream.coords
+    assert stream["ch4"].attrs[CELL_METHODS_ATTR] == "time: mean"
+    assert stream.attrs[SUPPORT_LABEL_ATTR] == "start"
+    assert stream.attrs["tsara_support_label_source"] == "declared"
+    assert stream.attrs[SUPPORT_COVERAGE_ATTR] == pytest.approx(1.0)
+
+
+def test_a_sigma_carries_no_cell_method() -> None:
+    """A sigma shares its species' cell but not its cell *method*.
+
+    `cell_methods` says what operation produced a value FROM its cell, so
+    "time: mean" on `sigma_rand_ch4` asserts the stored number is the mean of
+    the random sigmas over that cell. It is not — it is the standard error of
+    the cell mean, smaller by exactly the square root of N_eff, a factor the
+    same stream records in `uncertainty_n_eff`. Measured on a 60 s cell of
+    1 s data with a 2 s decorrelation time: 0.130 ppb stored against 0.5
+    declared, a ratio of 3.83.
+
+    The systematic companion happens to satisfy "time: mean" exactly, because
+    a fully correlated error does not average down. It is excluded anyway —
+    true by coincidence is not a reason to assert it, and one string on both
+    invites a reader to treat two components that behave oppositely under
+    averaging as though they were alike.
+    """
+    instrument = _instrument(
+        ch4={
+            "column": "CH4_dry",
+            "role": "gas",
+            "units": "ppm",
+            "uncertainty": {
+                "random": {"mode": "declared", "absolute": 0.5},
+                "systematic": {"mode": "declared", "absolute": 0.2},
+            },
+        }
+    )
+    stream = build_stream(
+        _bounded_frame(),
+        instrument,
+        name="picarro",
+        platform=StationaryPlatform(latitude=40.0, longitude=-111.0),
+        support=_resolved(),
+    )
+    # The species says how it relates to its cell; its companions do not.
+    assert stream["ch4"].attrs[CELL_METHODS_ATTR] == "time: mean"
+    assert CELL_METHODS_ATTR not in stream["sigma_rand_ch4"].attrs
+    assert CELL_METHODS_ATTR not in stream["sigma_sys_ch4"].attrs
+    # They are still identified, by the seam both producers share.
+    assert stream["sigma_rand_ch4"].attrs["uncertainty_component"] == "random"
+
+
+def test_a_stream_whose_cells_could_not_be_determined_still_builds() -> None:
+    """One sample implies no interval, and the stream says so rather than
+    refusing to exist."""
+    stream = build_stream(
+        _frame(),
+        _instrument(),
+        name="picarro",
+        platform=StationaryPlatform(latitude=40.0, longitude=-111.0),
+        support=_resolved(width_ns=None, width_source="assumed"),
+    )
+    assert TIME_BOUNDS_VAR not in stream.coords
+    assert stream.attrs["tsara_support_width_source"] == "assumed"
+    assert np.isnan(stream.attrs[SUPPORT_COVERAGE_ATTR])
+
+
+def test_a_clock_correction_is_recorded_but_not_reapplied() -> None:
+    """Assembly receives a frame whose axis is already final; shifting again
+    here would move timestamps out from under the ordering that ran on them."""
+    frame = _bounded_frame()
+    stream = build_stream(
+        frame,
+        _instrument(),
+        name="picarro",
+        platform=StationaryPlatform(latitude=40.0, longitude=-111.0),
+        support=_resolved(),
+        time_shift="-9s",
+    )
+    assert stream.attrs[TIME_SHIFT_ATTR] == "-9s"
+    assert np.array_equal(
+        np.asarray(stream["time"].values, dtype="datetime64[ns]"),
+        np.asarray(frame.index, dtype="datetime64[ns]"),
+    )
+
+
+def test_a_quoted_interval_is_written_into_the_saved_product() -> None:
+    """ "This sigma describes a different interval from its own cells" cannot
+    be re-derived from the numbers, so it is written down. Ingestion does not
+    reconcile the two -- that needs a decorrelation timescale and an averaging
+    model (METHODS 10.8) -- which is exactly why the record has to travel."""
+    instrument = _instrument(
+        ch4={
+            "column": "CH4_dry",
+            "role": "gas",
+            "units": "ppm",
+            "uncertainty": {
+                "random": {"mode": "declared", "absolute": 1.0, "at_width": "1s"},
+                "decorrelation_timescale": "1ns",
+            },
+        }
+    )
+    stream = build_stream(
+        _bounded_frame(),
+        instrument,
+        name="picarro",
+        platform=StationaryPlatform(latitude=40.0, longitude=-111.0),
+        support=_resolved(),
+    )
+    assert stream["ch4"].attrs["uncertainty_at_width"] == "1s"
+    # The fixture's cells are 2 s wide, so two 1 s intervals fit in each.
+    assert stream["ch4"].attrs["uncertainty_at_width_ratio"] == pytest.approx(2.0)
+    # And the figure itself is untouched, which is the claim that matters.
+    assert float(stream["sigma_rand_ch4"].values[0]) == pytest.approx(1.0)
+
+
+def test_a_systematic_quoted_interval_reaches_the_product_too() -> None:
+    """It can never be acted on, but a manifest that states one has said
+    something, and the product should not be quieter than the manifest."""
+    instrument = _instrument(
+        ch4={
+            "column": "CH4_dry",
+            "role": "gas",
+            "units": "ppm",
+            "uncertainty": {
+                "random": {"mode": "declared", "absolute": 1.0},
+                "systematic": {"mode": "declared", "relative": 0.01, "at_width": "1s"},
+            },
+        }
+    )
+    stream = build_stream(
+        _bounded_frame(),
+        instrument,
+        name="picarro",
+        platform=StationaryPlatform(latitude=40.0, longitude=-111.0),
+        support=_resolved(),
+    )
+    assert stream["ch4"].attrs["uncertainty_systematic_at_width"] == "1s"
+    assert "uncertainty_at_width" not in stream["ch4"].attrs
+
+
+def test_a_stream_without_cells_still_carries_the_declaration() -> None:
+    instrument = _instrument(
+        ch4={
+            "column": "CH4_dry",
+            "role": "gas",
+            "units": "ppm",
+            "uncertainty": {"random": {"mode": "declared", "absolute": 1.0, "at_width": "1s"}},
+        }
+    )
+    stream = build_stream(
+        _frame(),
+        instrument,
+        name="picarro",
+        platform=StationaryPlatform(latitude=40.0, longitude=-111.0),
+    )
+    assert stream["ch4"].attrs["uncertainty_at_width"] == "1s"
+    assert "uncertainty_at_width_ratio" not in stream["ch4"].attrs

@@ -19,12 +19,28 @@ import pytest
 
 from tsara.config.manifest import InstrumentConfig, Manifest, StationaryPlatform
 from tsara.core.bundle import BUNDLE_MANIFEST, BUNDLE_STREAMS_DIR, TsaraBundleError
-from tsara.core.naming import LOD_COUNT_KEY
+from tsara.core.naming import (
+    LOD_COUNT_KEY,
+    RAW_TIME_START_COLUMN,
+    RAW_TIME_STOP_COLUMN,
+    SUPPORT_WIDTH_ATTR,
+    SUPPORT_WIDTH_SOURCE_ATTR,
+    TIME_BOUNDS_VAR,
+    TIME_SHIFT_ATTR,
+)
+from tsara.core.support import (
+    CellBounds,
+    attach_time_bounds,
+    declared_bounds_name,
+    nominal_cadence_ns,
+)
 from tsara.ingest.base import TsaraIngestError
 from tsara.ingest.bundle import BUNDLE_MANIFEST_CONFIG, load_streams, save_streams
 from tsara.ingest.campaign import (
     StreamCollection,
+    _ingest_instrument,
     _merge_file_attrs,
+    _n_within_file,
     ingest_campaign,
 )
 from tsara.ingest.streams import build_stream
@@ -555,3 +571,303 @@ def test_unrelated_files_in_the_streams_directory_are_left_alone(tmp_path: Path)
     save_streams(collection, bundle)
 
     assert note.is_file()
+
+
+def test_ingested_streams_carry_cells_of_their_own(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Assembly resolves support now, so nothing is left for the loader.
+
+    Until stream assembly read the manifest's declaration, a saved ingest
+    bundle had no cells and the loader completed it with assumed ones. It
+    does not any more, and the absence of that notice is the check.
+    """
+    save_streams(ingest_campaign(_manifest(_archive(tmp_path))), tmp_path / "bundle")
+    with caplog.at_level(logging.INFO, logger="tsara.ingest.bundle"):
+        reloaded = load_streams(tmp_path / "bundle")
+    assert "assumed cells" not in caplog.text
+    for name in reloaded.streams:
+        assert declared_bounds_name(reloaded[name]) is not None, name
+        assert TIME_BOUNDS_VAR in reloaded[name].coords, name
+
+
+def test_streams_that_already_carry_cells_are_left_alone(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The shape the reader stage will produce: declared cells must survive.
+
+    Start-labelled, because that is the only geometry an assumed migration
+    could not accidentally reproduce -- centred cadence cells would be
+    identical to the real ones and the substitution would be invisible.
+    """
+    collection = ingest_campaign(_manifest(_archive(tmp_path)))
+    expected = {}
+    for name, stream in collection.streams.items():
+        stamps = stream["time"].values.astype("datetime64[ns]").astype(np.int64)
+        cadence = nominal_cadence_ns(stamps)
+        assert cadence is not None
+        attach_time_bounds(stream, CellBounds.from_label(stamps, cadence, "start"), "mean")
+        expected[name] = stream[TIME_BOUNDS_VAR].values.copy()
+
+    save_streams(collection, tmp_path / "bundle")
+    with caplog.at_level(logging.INFO, logger="tsara.ingest.bundle"):
+        reloaded = load_streams(tmp_path / "bundle")
+
+    assert "assumed cells" not in caplog.text
+    for name, bounds in expected.items():
+        assert np.array_equal(reloaded[name][TIME_BOUNDS_VAR].values, bounds), name
+
+
+# ---------------------------------------------------------------------------
+# Support resolution across an instrument's files (Phase 3.5)
+# ---------------------------------------------------------------------------
+
+
+def test_each_file_keeps_its_own_cadence(tmp_path: Path) -> None:
+    """Cadence is measured per FILE, and that is load-bearing.
+
+    One instrument's files can legitimately disagree: in the target archive
+    some met records run at 1 s in one file and 5 s in another. A single
+    instrument-wide cadence would give one of them cells of the wrong width,
+    and it would be a whole file's worth rather than a stray row.
+    """
+    base = tmp_path / "data"
+    _write_csv(
+        base / "picarro" / "a_fast.csv",
+        [("2026-01-01 00:00:00", 1900.0), ("2026-01-01 00:00:01", 1901.0)],
+    )
+    _write_csv(
+        base / "picarro" / "b_slow.csv",
+        [("2026-01-01 01:00:00", 1902.0), ("2026-01-01 01:00:05", 1903.0)],
+    )
+    ingested = _ingest_instrument(
+        _manifest(base), "picarro", _manifest(base).instruments["picarro"]
+    )
+    widths = (ingested.frame[RAW_TIME_STOP_COLUMN] - ingested.frame[RAW_TIME_START_COLUMN]).tolist()
+    assert widths == [pd.Timedelta("1s")] * 2 + [pd.Timedelta("5s")] * 2
+    # And so no single nominal width is reported for the instrument.
+    assert ingested.support.width_ns is None
+    assert ingested.support.width_source == "inferred"
+
+
+def test_a_gap_does_not_widen_the_cell_before_it(tmp_path: Path) -> None:
+    """The rule the whole width design rests on: a dropped row leaves a hole
+    in the tiling, never a wider cell. Under the rejected alternative the
+    widest cell in the real archive would have been 23 days."""
+    base = tmp_path / "data"
+    _write_csv(
+        base / "picarro" / "a.csv",
+        [
+            ("2026-01-01 00:00:00", 1900.0),
+            ("2026-01-01 00:00:01", 1901.0),
+            ("2026-01-01 03:00:00", 1902.0),
+            ("2026-01-01 03:00:01", 1903.0),
+        ],
+    )
+    ingested = _ingest_instrument(
+        _manifest(base), "picarro", _manifest(base).instruments["picarro"]
+    )
+    widths = (ingested.frame[RAW_TIME_STOP_COLUMN] - ingested.frame[RAW_TIME_START_COLUMN]).unique()
+    assert list(widths) == [pd.Timedelta("1s")]
+
+
+def _write_csv_cells(path: Path, rows: list[tuple[str, str, float]]) -> None:
+    """A file that states each row's own cell.
+
+    The shape 169 of the 2024 archive's 1122 ICARTT files have: a start time
+    on the axis and a companion stop column, so widths can differ row to row.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = "\n".join(f"{start},{stop},{value}" for start, stop, value in rows)
+    path.write_text(f"t,stop,CH4\n{body}\n", encoding="utf-8")
+
+
+def _cells_manifest(base: Path) -> Manifest:
+    """The same manifest, with the stop column declared."""
+    spec = _manifest(base).model_dump(mode="json")
+    spec["instruments"]["picarro"]["loader"]["support"] = {"stop_column": "stop"}
+    return Manifest.model_validate(spec)
+
+
+def test_cells_are_centred_before_the_record_is_sorted(tmp_path: Path) -> None:
+    """Centring can genuinely reorder a stream, so the sort has to come after.
+
+    With one width per row, centring is not a translation: a wide cell moves
+    its timestamp further than a narrow one. Here a 100 s cell starts first
+    but is centred *after* the 10 s cell that starts ten seconds later, so
+    sorting the raw axis and centring afterwards leaves the stream
+    non-monotonic -- which `build_stream` refuses, failing an archive that is
+    perfectly legitimate.
+
+    The ordering was already correct and already explained in a comment; what
+    was missing was anything that would notice if it changed. Swapping the two
+    calls passed the entire suite.
+    """
+    base = tmp_path / "data"
+    _write_csv_cells(
+        base / "picarro" / "a.csv",
+        [
+            ("2026-01-01 00:00:00", "2026-01-01 00:01:40", 1900.0),  # 100 s, mid :50
+            ("2026-01-01 00:00:10", "2026-01-01 00:00:20", 1901.0),  # 10 s, mid :15
+        ],
+    )
+    manifest = _cells_manifest(base)
+    ingested = _ingest_instrument(manifest, "picarro", manifest.instruments["picarro"])
+
+    assert ingested.frame.index.is_monotonic_increasing
+    # The narrow cell comes first, because its midpoint does.
+    assert ingested.frame["CH4"].tolist() == [1901.0, 1900.0]
+    assert [str(stamp) for stamp in ingested.frame.index] == [
+        "2026-01-01 00:00:15",
+        "2026-01-01 00:00:50",
+    ]
+
+
+def test_the_duplicate_split_is_counted_on_the_axis_rows_are_dropped_on(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The two halves of the dropped-row message must describe one axis.
+
+    Three rows share a start; two declare the same stop and one a longer one.
+    On the raw axis all three are duplicates, but after centring only the two
+    identical cells still collide -- so a within-file count taken before
+    centring exceeded the total taken after it, and the "overlap between
+    files" remainder came out **negative**, telling the user to check path
+    templates for a single-file instrument.
+    """
+    base = tmp_path / "data"
+    _write_csv_cells(
+        base / "picarro" / "a.csv",
+        [
+            ("2026-01-01 00:00:10", "2026-01-01 00:00:20", 1900.0),
+            ("2026-01-01 00:00:10", "2026-01-01 00:00:20", 1901.0),
+            ("2026-01-01 00:00:10", "2026-01-01 00:00:30", 1902.0),
+            ("2026-01-01 00:00:40", "2026-01-01 00:00:50", 1903.0),
+        ],
+    )
+    manifest = _cells_manifest(base)
+    with caplog.at_level(logging.WARNING):
+        ingested = _ingest_instrument(manifest, "picarro", manifest.instruments["picarro"])
+
+    # The duplicated cell is dropped; the wider cell sharing its start is not,
+    # because it describes a different interval of air.
+    assert len(ingested.frame) == 3
+    message = "\n".join(record.getMessage() for record in caplog.records)
+    assert "dropped 1 row(s)" in message
+    assert "1 duplicated within a single file" in message
+    assert "0 from overlap between files" in message
+
+
+def test_overlap_between_files_is_still_counted(tmp_path: Path) -> None:
+    """The other half of the split still works: two files, one shared cell."""
+    base = tmp_path / "data"
+    for name in ("a.csv", "b.csv"):
+        _write_csv_cells(
+            base / "picarro" / name,
+            [("2026-01-01 00:00:00", "2026-01-01 00:00:10", 1900.0)],
+        )
+    manifest = _cells_manifest(base)
+    frames = [pd.DataFrame(index=pd.DatetimeIndex(["2026-01-01 00:00:05"]))] * 2
+    assert _n_within_file(pd.concat(frames).index, [1, 1]) == 0
+    ingested = _ingest_instrument(manifest, "picarro", manifest.instruments["picarro"])
+    assert len(ingested.frame) == 1
+
+
+def test_boundaries_survive_sorting_and_de_duplication(tmp_path: Path) -> None:
+    """Cells ride along as columns precisely so this needs no special care."""
+    ingested = _ingest_instrument(
+        _manifest(_archive(tmp_path)),
+        "picarro",
+        _manifest(_archive(tmp_path)).instruments["picarro"],
+    )
+    assert ingested.frame.index.is_monotonic_increasing
+    starts = ingested.frame[RAW_TIME_START_COLUMN]
+    assert starts.is_monotonic_increasing
+    assert (ingested.frame.index - starts == pd.Timedelta("1s")).all()
+
+
+def test_a_version_1_ingest_bundle_is_still_migrated(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Bundles written before cells existed stay readable.
+
+    Assembly gives every new stream its cells, so the loader's migration path
+    is now reached only by an older bundle -- which is exactly the population
+    it was built for.
+    """
+    import json
+
+    import xarray as xr
+
+    bundle = tmp_path / "bundle"
+    save_streams(ingest_campaign(_manifest(_archive(tmp_path))), bundle)
+    for target in sorted((bundle / BUNDLE_STREAMS_DIR).glob("*.nc")):
+        with xr.open_dataset(target, engine="netcdf4", decode_coords="all") as opened:
+            stream = opened.load()
+        stream = stream.drop_vars(TIME_BOUNDS_VAR)
+        stream["time"].attrs = {
+            key: value for key, value in stream["time"].attrs.items() if key != "bounds"
+        }
+        stream["time"].encoding = {}
+        stream.to_netcdf(target, engine="netcdf4")
+    descriptor = json.loads((bundle / BUNDLE_MANIFEST).read_text())
+    descriptor["bundle_format_version"] = 1
+    (bundle / BUNDLE_MANIFEST).write_text(json.dumps(descriptor))
+
+    with caplog.at_level(logging.INFO, logger="tsara.ingest.bundle"):
+        reloaded = load_streams(bundle)
+    assert "assumed cells" in caplog.text
+    for name in reloaded.streams:
+        assert declared_bounds_name(reloaded[name]) is not None, name
+
+
+def test_a_version_2_stream_without_cells_is_left_alone(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two absences that look identical on disk and mean opposite things.
+
+    In a version-1 stream, no `time_bnds` means the format could not record
+    one, so completing it adds information. In a version-2 stream it means
+    ingestion *could not know*: no declared width, and no file long enough to
+    measure a cadence — and it said so instead of inventing a number.
+
+    The loader ran the migration on every stream regardless of version, so
+    saving and reloading this instrument attached 60 s cells and moved
+    `width_source` from `assumed` to `inferred`. A stream was promoted up the
+    provenance ladder by nothing but a trip through disk, and the log line
+    said it had been "written before cell boundaries existed" about a bundle
+    written a moment earlier at version 2.
+    """
+    base = tmp_path / "data"
+    # One row per file, so no file has a measurable cadence — but the
+    # concatenated record has three timestamps a minute apart, which is
+    # exactly what the migration would have measured.
+    for i, stamp in enumerate(("00:00:00", "00:01:00", "00:02:00")):
+        _write_csv(base / "picarro" / f"c{i}.csv", [(f"2026-01-01 {stamp}", 1900.0 + i)])
+
+    streams = ingest_campaign(_manifest(base))
+    assert declared_bounds_name(streams["picarro"]) is None
+    assert streams["picarro"].attrs[SUPPORT_WIDTH_SOURCE_ATTR] == "assumed"
+
+    bundle = tmp_path / "bundle"
+    save_streams(streams, bundle)
+    with caplog.at_level(logging.INFO, logger="tsara.ingest.bundle"):
+        reloaded = load_streams(bundle)
+
+    assert declared_bounds_name(reloaded["picarro"]) is None
+    assert reloaded["picarro"].attrs[SUPPORT_WIDTH_SOURCE_ATTR] == "assumed"
+    assert SUPPORT_WIDTH_ATTR not in reloaded["picarro"].attrs
+    assert "assumed cells" not in caplog.text
+
+
+def test_a_zero_clock_correction_is_not_announced(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Declaring no offset is a legitimate way of saying "already corrected",
+    and it should not read like something happened."""
+    manifest = _manifest(_archive(tmp_path))
+    manifest.instruments["picarro"].__dict__["time_shift"] = "0s"
+    with caplog.at_level(logging.INFO, logger="tsara.ingest.campaign"):
+        streams = ingest_campaign(manifest)
+    assert "time_shift" not in caplog.text
+    assert streams["picarro"].attrs[TIME_SHIFT_ATTR] == "0s"

@@ -40,6 +40,8 @@ from pydantic import (
 
 from tsara.config.base import StrictModel as _StrictModel
 from tsara.config.base import validate_positive_timedelta as _validate_duration
+from tsara.config.base import validate_signed_timedelta as _validate_offset
+from tsara.core.naming import SupportLabel, SupportMethod
 
 # ---------------------------------------------------------------------------
 # Units
@@ -184,6 +186,28 @@ class DeclaredUncertainty(_StrictModel):
     relative: float = Field(
         default=0.0, ge=0, lt=1, description="Fraction of reading, e.g. 0.02 for 2 %."
     )
+    at_width: str | None = Field(
+        default=None,
+        description=(
+            "Averaging interval these figures refer to, e.g. '1s'. None (the "
+            "default) means they already describe this stream's own cells. "
+            "Set it when a spec-sheet precision quoted at one interval is "
+            "being applied to data delivered at another -- a 1 s precision "
+            "pasted onto 1-minute means is the case this exists for. "
+            "Ingestion stores the figures exactly as declared and records "
+            "both this interval and how many of them fit in a cell; moving a "
+            "sigma onto another support needs a decorrelation timescale and "
+            "an averaging model, so it is done by the stage that needs one "
+            "(METHODS.md 3.4, 10.8)."
+        ),
+    )
+
+    @field_validator("at_width")
+    @classmethod
+    def _valid_at_width(cls, value: str | None) -> str | None:
+        if value is not None:
+            _validate_duration(value, field="DeclaredUncertainty.at_width")
+        return value
 
     @model_validator(mode="after")
     def _nonzero(self) -> DeclaredUncertainty:
@@ -432,6 +456,150 @@ class TimeParsing(_StrictModel):
         return self
 
 
+class SupportSpec(_StrictModel):
+    """What interval of air each row of this instrument's files describes.
+
+    TSARA's rule is that it never evaluates a value on a finer support than
+    it was delivered on. Most real archives label *intervals* rather than
+    instants -- a 1-minute mean, a canister fill, a 1 s sample whose stamp is
+    a start time by ICARTT specification -- so a stream needs three facts
+    beyond its timestamps: how wide each cell is, where in the cell the
+    timestamp sits, and whether the value is an average over the cell or a
+    sample inside it.
+
+    Every field is optional, and the defaults are deliberately the weakest
+    reading of the data: an unknown label treated as centred, a width taken
+    from the file's own cadence, and ``point``, which claims no averaging at
+    all. Hundreds of files in a real archive declare nothing, and admitting
+    them with the assumption recorded is better than refusing them. What TSARA
+    records is not just the values but where each came from, so a later stage
+    can tell a declared width from a guessed one.
+
+    Two ways to say it, and they do not mix
+    ---------------------------------------
+    Either the file carries per-row boundaries, in which case name the
+    columns and TSARA reads an exact cell for every row (this is how canister
+    samplers publish their 14-16 s fills), or it does not, in which case
+    declare a uniform ``label``/``width``/``method``. Declaring both would be
+    ambiguous, so it is refused.
+    """
+
+    label: SupportLabel | None = Field(
+        default=None,
+        description=(
+            "Where the timestamp sits in its cell: start, mid, end, or "
+            "unknown. None lets TSARA infer it from the file (ICARTT column "
+            "names such as Time_Start), falling back to a centred cell. "
+            "Getting this wrong shifts every cell by up to its own width, "
+            "which is under a second on 1 Hz data but 30 s on 1-minute means."
+        ),
+    )
+    width: str = Field(
+        default="cadence",
+        description=(
+            "Cell width as a duration ('60s'), or 'cadence' (the default) to "
+            "use the file's own median sampling interval. One nominal width "
+            "per file, applied to every row -- never the distance to the next "
+            "row, which would turn a data gap into a single enormous cell "
+            "(METHODS.md 10). Declare a duration when the instrument is duty "
+            "cycled, i.e. averages for less than it waits."
+        ),
+    )
+    method: SupportMethod | None = Field(
+        default=None,
+        description=(
+            "'mean' if the value is an average over the whole cell, 'point' "
+            "if it is a sample taken inside it. None is treated as 'point' "
+            "and recorded as an assumption. This is a claim about what "
+            "arithmetic is licensed rather than about instrument physics: "
+            "declare 'mean' only when an explicit averaging step over a known "
+            "interval produced the number. TSARA never infers this, because "
+            "the only evidence real files carry is English prose in a header."
+        ),
+    )
+    start_column: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Column holding each row's cell start. Needed only when the "
+            "file's own time axis is NOT the start -- an independent variable "
+            "named Time_Mid, for instance. Requires stop_column."
+        ),
+    )
+    stop_column: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Column holding each row's cell stop. Naming it makes cell widths "
+            "exact and per row, which is the only way to represent a sampler "
+            "whose fill times genuinely vary."
+        ),
+    )
+
+    @field_validator("width")
+    @classmethod
+    def _valid_width(cls, value: str) -> str:
+        """Accept the 'cadence' sentinel or any strictly positive duration.
+
+        A near-miss on the sentinel is reported as such rather than as a bad
+        duration: someone who wrote ``cadance`` was reaching for the keyword,
+        and being told to try ``30s`` does not help them find the typo.
+        """
+        if value == "cadence":
+            return value
+        try:
+            _validate_duration(value, field="SupportSpec.width")
+        except ValueError as exc:
+            if not any(char.isdigit() for char in value):
+                raise ValueError(
+                    f"SupportSpec.width: '{value}' is neither a duration nor the "
+                    "keyword 'cadence', which is the only non-duration value "
+                    "accepted here. Use 'cadence' to take the width from the "
+                    "file's own sampling interval, or give a duration like '60s'."
+                ) from exc
+            raise
+        return value
+
+    @model_validator(mode="after")
+    def _columns_are_complete_and_exclusive(self) -> SupportSpec:
+        """Per-row boundaries and a uniform declaration are alternatives.
+
+        A start column with no stop column describes no interval at all --
+        it is just the timestamp under another name. And if the file states
+        every cell exactly, a manifest-declared label or width can only
+        contradict it, so saying both is refused rather than silently
+        resolved in favour of one.
+        """
+        if self.start_column is not None and self.stop_column is None:
+            raise ValueError(
+                "SupportSpec.start_column names a cell start but no stop_column "
+                "gives its end, which describes no interval. Give both, or "
+                "neither and declare a width instead."
+            )
+        if self.start_column is not None and self.start_column == self.stop_column:
+            raise ValueError(
+                f"SupportSpec.start_column and stop_column both name "
+                f"'{self.start_column}'; a cell needs two distinct boundaries."
+            )
+        if self.stop_column is not None:
+            conflicting = [
+                name
+                for name, given in (
+                    ("label", self.label is not None),
+                    ("width", self.width != "cadence"),
+                )
+                if given
+            ]
+            if conflicting:
+                raise ValueError(
+                    f"SupportSpec names stop_column='{self.stop_column}', so every "
+                    f"cell is read from the file, but also declares {conflicting}. "
+                    "Per-row boundaries and a uniform declaration are alternatives; "
+                    "drop whichever is not authoritative."
+                )
+        return self
+
+
 class _BaseLoader(_StrictModel):
     """Fields common to every file format.
 
@@ -472,6 +640,16 @@ class _BaseLoader(_StrictModel):
             "files are ingested silently. Write e.g. '**/bad/**' to exclude "
             "them. Excluded files are counted and reported, never dropped "
             "without a word."
+        ),
+    )
+
+    support: SupportSpec = Field(
+        default_factory=SupportSpec,
+        description=(
+            "What interval of air each row describes. Lives on the loader "
+            "rather than the instrument because it is a property of the data "
+            "product being read: the same analyzer publishes 0.5 Hz samples "
+            "on a drive and 1-minute means when stationary."
         ),
     )
 
@@ -772,6 +950,30 @@ class InstrumentConfig(_StrictModel):
             "here are treated as wildcards and harvested from matched paths."
         ),
     )
+    time_shift: str | None = Field(
+        default=None,
+        description=(
+            "Signed offset ADDED to every timestamp and to both cell "
+            "boundaries, correcting the instrument clock onto true "
+            "air-at-inlet time. A logger running 5 s fast takes '-5s'; a 9 s "
+            "inlet lag also takes '-9s'. Default None applies nothing, which "
+            "is right for an archive already lag-corrected upstream -- and "
+            "the applied value is recorded in the stream attributes, so a "
+            "double correction is visible rather than silent. Support (what "
+            "interval a value describes) and offset (how its clock relates to "
+            "UTC) are separate concepts and are kept apart deliberately; "
+            "estimating a shift by cross-correlation is a future stage, not "
+            "this field."
+        ),
+    )
+
+    @field_validator("time_shift")
+    @classmethod
+    def _valid_time_shift(cls, value: str | None) -> str | None:
+        """Either sign is meaningful, so this is parse-only."""
+        if value is not None:
+            _validate_offset(value, field="InstrumentConfig.time_shift")
+        return value
 
     @field_validator("variables")
     @classmethod
