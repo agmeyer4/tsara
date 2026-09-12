@@ -808,9 +808,13 @@ def propagate_random_binned(
 ) -> BinnedSigma:
     """Propagate the random component onto many cells at once.
 
-    Identical arithmetic to :func:`propagate_random`, evaluated with
+    The same arithmetic as :func:`propagate_random`, evaluated with
     ``bincount`` instead of one call per cell; a test binds the two together
-    so they cannot drift.
+    so they cannot drift. The same arithmetic in a different *order*, though,
+    not the same floating-point operations: this form sums the raw weights and
+    normalizes at the end, where the scalar form normalizes first. Measured
+    over 200 random cells the two agree to within about six float64 epsilons,
+    which is why the test that binds them compares approximately.
 
     One difference is deliberate. The scalar form derives the sample spacing
     from the timestamps it is given, per call. This one takes a single

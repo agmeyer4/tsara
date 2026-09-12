@@ -391,6 +391,26 @@ linear time, so there is no reason to prefer the asymptotic one. It does not
 resolve whether the AR(1) *model* describes real instrument error; that is
 measured against synthetic ground truth with known τ in §11.1 and §11.8.
 
+**What "exact when equally spaced" costs when they are not.** The default form
+summarises a cell by two numbers, how many samples it holds and how far apart
+they are, so it cannot see *where* in the cell they sit. A dropout that splits
+a cell into two clumps is where that matters, and the size of the difference
+was measured rather than left as a caveat. Thirty samples drawn from an AR(1)
+error with τ = 20 s, 20 000 realizations, arranged two ways:
+
+| thirty samples arranged as | observed σ of the mean | `ar1_neff` | `ar1_double_sum` |
+|---|---|---|---|
+| one consecutive run | 1.608 | 1.604 (0.997×) | 1.604 (0.997×) |
+| two blocks of 15, 30 s apart | 1.344 | 1.604 (**1.194×**) | 1.343 (0.999×) |
+
+The same thirty samples carry *more* information when spread across the cell,
+because the two blocks have had time to decorrelate from each other. The cheap
+form does not know that and overstates σ by about a fifth. The error is in the
+conservative direction and is bounded by how badly a cell's samples clump,
+which `n_source` and `coverage` already report — and `ar1_double_sum` is
+selectable wherever a form is selectable, which is what makes the reference
+form useful rather than decorative.
+
 Limits: τ → 0 recovers §3.2, and τ → ∞ is properly handled by declaring the
 component systematic (§3.3) rather than by an enormous τ.
 
