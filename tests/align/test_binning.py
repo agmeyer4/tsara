@@ -325,3 +325,144 @@ def test_the_joined_product_carries_cells_and_its_own_provenance() -> None:
     assert "time_bnds" in joined.coords
     assert joined["time"].attrs["bounds"] == "time_bnds"
     assert joined["ch4"].attrs["tsara_source_instrument"] == "a"
+
+
+# ---------------------------------------------------------------------------
+# The one direction this operation must not run in
+# ---------------------------------------------------------------------------
+
+
+def test_a_slow_stream_is_refused_onto_fast_cells() -> None:
+    """Evaluating a 60 s mean on 1 s cells hands back rows nobody measured.
+
+    The value in each of them is real; the *rows* are not, and they would
+    enter a fit as independent measurements. Both callers of the primitive
+    already prevent this by choosing their target, so the refusal here is
+    about the primitive being public.
+    """
+    slow = make_stream(0.0, 60.0, 5, {"minute_ch4": np.arange(5.0)})
+    with pytest.raises(TsaraAlignError, match="resolution the instrument never had"):
+        bin_streams_onto_cells({"minute": slow}, cells(0.0, 1.0, 300))
+
+
+def test_the_refusal_names_the_stream_the_widths_and_the_damage() -> None:
+    slow = make_stream(0.0, 60.0, 2, {"minute_ch4": np.arange(2.0)})
+    with pytest.raises(TsaraAlignError) as raised:
+        bin_streams_onto_cells({"minute": slow}, cells(0.0, 1.0, 120))
+    message = str(raised.value)
+    assert "'minute'" in message
+    assert "60 s cells" in message
+    assert "1 s" in message
+    # 60 whole 1 s cells fit inside one 60 s cell.
+    assert "fill 60 target cells" in message
+
+
+def test_a_duty_cycled_sampler_is_refused_onto_a_fine_grid() -> None:
+    """A canister fills for 15 s and then waits; the 15 s is still an average.
+
+    Its cells are narrower than its spacing, so a width-versus-cadence rule
+    would get this backwards. What matters is that one fill would fill many
+    one-second rows.
+    """
+    start = (np.arange(4, dtype=np.int64) * 90 * SECOND) + 0
+    canister = CellBounds(start_ns=start, stop_ns=start + 15 * SECOND)
+    stream = xr.Dataset(
+        {"can_ch4": ("time", np.arange(4.0), {"units": "ppb"})},
+        coords={
+            "time": canister.midpoint_ns.astype("datetime64[ns]"),
+            "time_bnds": (
+                ("time", "nv"),
+                np.stack([canister.start_ns, canister.stop_ns], axis=1).astype("datetime64[ns]"),
+            ),
+        },
+    )
+    stream["time"].attrs["bounds"] = "time_bnds"
+    with pytest.raises(TsaraAlignError, match="fill 15 target cells"):
+        bin_streams_onto_cells({"canister": stream}, cells(0.0, 1.0, 360))
+
+
+def test_cells_that_differ_only_by_jitter_are_not_refused() -> None:
+    """The guard is aimed at replication, not at a comparison of medians.
+
+    Two real analyzers in the 2026 archive nominally sample at 1 s and measure
+    0.993 s and 1.024 s. Binning the wider onto the narrower is a hair's worth
+    of support mismatch, not an invention of rows, and a median-width rule
+    would refuse it while this one does not.
+    """
+    wider = make_stream(0.0, 1.024, 40, {"ch4": np.arange(40.0)})
+    joined = bin_streams_onto_cells({"a": wider}, cells(0.0, 0.993, 40))
+    assert np.isfinite(joined["ch4"].values).any()
+
+
+def test_a_grid_out_of_phase_with_an_equal_width_source_is_not_refused() -> None:
+    """Half a period out of phase, every source cell straddles two targets.
+
+    So no target cell lies wholly inside a source cell, nothing is replicated,
+    and the operation is allowed. It is documented as lossy elsewhere and
+    warned about by the grid builder; it is not this guard's business.
+    """
+    source = make_stream(0.0, 10.0, 6, {"ch4": np.arange(6.0)})
+    offset = cells(5.0, 10.0, 5)
+    joined = bin_streams_onto_cells({"a": source}, offset)
+    assert np.all(joined["n_source_ch4"].values == 2)
+
+
+def test_a_zero_width_target_cell_does_not_count_as_replication() -> None:
+    """A degenerate cell sits inside everything and means nothing.
+
+    Counting it would make any binning onto a grid containing one look like
+    replication, which would refuse the whole call over a single bad row.
+    """
+    degenerate = CellBounds(
+        start_ns=np.array([0, SECOND, 2 * SECOND], dtype=np.int64),
+        stop_ns=np.array([0, SECOND, 2 * SECOND], dtype=np.int64),
+    )
+    stream = make_stream(0.0, 10.0, 1, {"ch4": np.array([5.0])})
+    joined = bin_streams_onto_cells({"a": stream}, degenerate)
+    assert np.all(np.isnan(joined["ch4"].values))
+
+
+# ---------------------------------------------------------------------------
+# Companion columns are not variables
+# ---------------------------------------------------------------------------
+
+
+def test_a_joined_product_can_be_joined_again() -> None:
+    """Phase 5 will bin a baseline it computed from an already-binned product.
+
+    The default selection must therefore leave this stage's own bookkeeping
+    alone, or a second pass grows `coverage_coverage_ch4` and a third grows
+    another layer.
+    """
+    streams = {"a": make_stream(0.0, 1.0, 120, {"ch4": np.arange(120.0)})}
+    once = bin_streams_onto_cells(streams, cells(0.0, 10.0, 12))
+    twice = bin_streams_onto_cells({"binned": once}, cells(0.0, 60.0, 2))
+    assert "ch4" in twice.data_vars
+    assert not [name for name in twice.data_vars if str(name).startswith("coverage_coverage")]
+    assert not [name for name in twice.data_vars if str(name).startswith("n_source_n_source")]
+
+
+def test_angular_quality_columns_are_not_rebinned_either() -> None:
+    """A resultant length and a dispersion describe a cell, not the air in it."""
+    attrs: dict[str, dict[str, object]] = {"wind_dir": {"units": "degrees", "circular": 1}}
+    met = make_stream(0.0, 1.0, 60, {"wind_dir": np.linspace(0.0, 50.0, 60)}, attrs=attrs)
+    once = bin_streams_onto_cells({"met": met}, cells(0.0, 10.0, 6))
+    assert "wind_dir_resultant_length" in once.data_vars
+    twice = bin_streams_onto_cells({"binned": once}, cells(0.0, 30.0, 2))
+    assert "wind_dir_resultant_length_resultant_length" not in twice.data_vars
+    assert "wind_dir_dispersion_dispersion" not in twice.data_vars
+
+
+def test_cell_boundaries_carried_as_a_data_variable_are_not_selected() -> None:
+    """`stream_cells` accepts that shape, so the default selection must too."""
+    stream = make_stream(0.0, 1.0, 20, {"ch4": np.arange(20.0)}).reset_coords("time_bnds")
+    assert "time_bnds" in stream.data_vars
+    joined = bin_streams_onto_cells({"a": stream}, cells(0.0, 5.0, 4))
+    assert sorted(map(str, joined.data_vars)) == ["ch4", "coverage_ch4", "n_source_ch4"]
+
+
+def test_a_variable_that_is_not_one_value_per_cell_is_named_not_broadcast() -> None:
+    """Asking for the boundaries explicitly is a mistake worth a clear error."""
+    stream = make_stream(0.0, 1.0, 20, {"ch4": np.arange(20.0)}).reset_coords("time_bnds")
+    with pytest.raises(TsaraAlignError, match="only one value per cell can be binned"):
+        bin_streams_onto_cells({"a": stream}, cells(0.0, 5.0, 4), [("a", "time_bnds")])

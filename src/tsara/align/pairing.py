@@ -69,7 +69,7 @@ from tsara.align.binning import (
     resolve_variable,
     stream_cells,
 )
-from tsara.core.naming import TIME_COORD
+from tsara.core.naming import TIME_COORD, coverage_name
 from tsara.core.support import CellBounds
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -224,8 +224,8 @@ def pair_species(
     surviving = np.flatnonzero(
         np.isfinite(joined[y_name].values)
         & np.isfinite(joined[x_name].values)
-        & (joined[f"coverage_{y_name}"].values >= min_coverage)
-        & (joined[f"coverage_{x_name}"].values >= min_coverage)
+        & (joined[coverage_name(y_name)].values >= min_coverage)
+        & (joined[coverage_name(x_name)].values >= min_coverage)
     )
     if surviving.size == 0:
         raise TsaraAlignError(

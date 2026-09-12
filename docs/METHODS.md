@@ -2401,6 +2401,67 @@ suffixed with their instrument rather than one silently winning. The spelling
 therefore depends on the selection, which is why every column also records its
 source instrument.
 
+#### 11.2.1 The operation is symmetric in the code and must not be in use
+
+Averaging a fast stream onto slow cells discards resolution the slow
+instrument never had, which is honest. Evaluating a slow value on fast cells
+invents no value — every row holds a number the instrument really reported —
+but it invents **rows**, which is the interpolation rule (§1.2) restated for a
+step function. Sixty rows from one 60 s mean enter a least-squares fit as sixty
+independent measurements; the slope estimate survives and its standard error
+shrinks by √60 ≈ 7.7, which is exactly the pseudo-replication that pairing on
+the wider-supported clock exists to prevent (§1.3).
+
+Both products of this phase already prevent it by choosing their target:
+`pair_species` pairs on the wider-supported member, and `build_output_grid`
+refuses a period shorter than the widest selected cell (§11.7). The primitive
+they share refuses it too, and has to, because it is public and is the
+documented route to a receptor-model matrix over a caller's own target cells.
+Neither `coverage` nor `n_source` would have flagged it: a replicated row
+reports coverage 1.0 and one contributing source cell, which is also what a
+legitimately sparse canister measurement reports.
+
+**The test is replication, not a comparison of widths**, and that choice is
+load-bearing. A width comparison needs a tolerance, because real instruments
+disagree about their own nominal rate — the 2026 archive's two Aeris analyzers
+measure 0.993 s and 1.024 s against a nominal 1 s — and a strict median-width
+rule would refuse binning one onto the other over a 3 % difference that
+replicates nothing. So TSARA counts, on the actual overlaps, how many target
+cells fall *entirely* inside a single source cell. Two or more is replication;
+jitter never reaches two however the medians compare. A grid half a period out
+of phase with an equal-width source is likewise not refused, because each
+source cell then straddles two targets and wholly contains neither — that case
+is lossy for a different reason and is warned about separately (§11.9.1).
+
+The escape route for the legitimate case is the one that already exists: a
+smooth non-gas field wanted on a finer clock is *interpolated* under a gap
+guard by `tsara.align.auxiliary` (§11.6), which refuses a variable declaring
+`role: gas`.
+
+#### 11.2.2 A companion column is not a variable
+
+Four families of column exist only to qualify the column they are named after:
+the two uncertainty components, `n_source_*`, `coverage_*`, and the resultant
+length and dispersion an angular variable carries instead of a sigma. The
+default selection excludes all four, through one predicate
+(`tsara.core.naming.is_companion_name`) rather than a list per caller.
+
+This is not tidiness. Three of the four families are produced *by this
+function*, so a joined product that is joined again — which is what §5 does
+with a baseline computed from one — would otherwise grow a
+`coverage_coverage_ch4` on every pass: a column with no parent, no meaning, and
+an arithmetic mean taken of a quantity whose own `cell_methods` says `sum`.
+Asking about the name is the only test available, exactly as for the sigma
+companions, since nothing else in a stream marks them and a stream may have
+come from the generator, from ingestion, or from a file reloaded from disk.
+
+Cell boundaries are excluded for a related reason: they describe the rows
+rather than varying over them. They are usually a coordinate and therefore
+invisible to a selection, but `stream_cells` deliberately accepts a stream that
+carries them as a data variable, so the selection accepts that shape too. Any
+variable that is not one value per cell is refused by name rather than reaching
+the weighting as a shape mismatch.
+
 ### 11.3 Propagation
 
 Implemented in `tsara.core.propagation`, specified in §3. The two components

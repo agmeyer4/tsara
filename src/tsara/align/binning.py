@@ -60,9 +60,13 @@ from tsara.core.circular import bin_circular_onto_cells
 from tsara.core.exceptions import TsaraError
 from tsara.core.naming import (
     CELL_METHODS_ATTR,
+    DISPERSION_SUFFIX,
+    RESULTANT_LENGTH_SUFFIX,
     TIME_BOUNDS_VAR,
     TIME_COORD,
-    is_sigma_name,
+    coverage_name,
+    is_companion_name,
+    n_source_name,
     sigma_rand_name,
     sigma_sys_name,
 )
@@ -96,8 +100,6 @@ SOURCE_INSTRUMENT_ATTR = "tsara_source_instrument"
 BINNED_ATTR = "tsara_binned"
 PROPAGATION_FORM_ATTR = "tsara_propagation_form"
 SIGMA_AT_SUPPORT_ATTR = "tsara_sigma_at_support"
-RESULTANT_SUFFIX = "_resultant_length"
-DISPERSION_SUFFIX = "_dispersion"
 
 #: Nanoseconds per second, for turning cell widths into the units the
 #: propagation module speaks.
@@ -248,10 +250,20 @@ def select_variables(
 
     Notes
     -----
-    Sigma companions are excluded from the default because they are not
-    variables in their own right: each travels automatically with the value
-    it describes, and selecting one directly would produce a column with no
-    parent and no meaning.
+    Companion columns are excluded from the default because they are not
+    variables in their own right: each travels automatically with the value it
+    describes, and selecting one directly would produce a column with no parent
+    and no meaning (:func:`~tsara.core.naming.is_companion_name`). That covers
+    the uncertainty components a stream arrives with *and* the counts, coverage
+    fractions and angular quality numbers this module itself adds, so a joined
+    product can be joined again — which is what Phase 5 does with a baseline —
+    without growing a ``coverage_coverage_ch4`` on every pass.
+
+    The cell boundaries are excluded too. They are metadata describing the
+    rows rather than a variable over them, and they are *usually* a coordinate
+    and therefore invisible here; a stream that carries them as a data variable
+    is a shape :func:`stream_cells` deliberately accepts, so this must accept
+    it as well rather than trying to average a set of boundaries.
     """
     if variables is not None:
         return [resolve_variable(streams, reference) for reference in variables]
@@ -259,7 +271,7 @@ def select_variables(
         (instrument, str(name))
         for instrument, stream in streams.items()
         for name in stream.data_vars
-        if not is_sigma_name(str(name))
+        if not is_companion_name(str(name)) and str(name) != TIME_BOUNDS_VAR
     ]
 
 
@@ -324,6 +336,74 @@ def _sigma_on_cells(
             cell_width_s,
         )
     return np.asarray(moved, dtype=np.float64), provenance
+
+
+def _worst_replication(source: CellBounds, target: CellBounds) -> int:
+    """Return the most target cells any one source cell would fill on its own.
+
+    The test for the one direction this operation must not run in. Averaging a
+    fast stream onto slow cells discards resolution the slow instrument never
+    had, which is honest; evaluating a slow value on fast cells hands back rows
+    the instrument never reported, which is the interpolation rule (§1.2)
+    restated for a step function.
+
+    Measured on the overlaps rather than on a comparison of widths, because a
+    width comparison needs a tolerance and this does not. A target cell lying
+    *entirely* inside one source cell is a row that source cell would fill by
+    itself; two or more of them is replication. Cells that merely differ by
+    jitter never reach two, however the medians compare, so the honest
+    near-equal case is not caught by a rule aimed at the 60-into-1 case.
+
+    Parameters
+    ----------
+    source : CellBounds
+        Cells being averaged.
+    target : CellBounds
+        Cells to average onto.
+
+    Returns
+    -------
+    int
+        The largest number of whole target cells inside any single source
+        cell. One or zero for every legitimate direction.
+    """
+    pairs = overlap_pairs(source, target)
+    if pairs.overlap_ns.size == 0:
+        return 0
+    target_width = target.width_ns[pairs.target_index]
+    # A zero-width target cell sits inside everything and means nothing; it
+    # would otherwise make any binning onto a degenerate grid look replicated.
+    whole = (pairs.overlap_ns == target_width) & (target_width > 0)
+    if not whole.any():
+        return 0
+    return int(np.bincount(pairs.source_index[whole], minlength=len(source)).max())
+
+
+def _refuse_upsampling(source: CellBounds, target: CellBounds, instrument: str) -> None:
+    """Raise if binning onto ``target`` would replicate ``source``'s rows.
+
+    Both of this phase's products already prevent this by choosing their
+    target: :func:`~tsara.align.pairing.pair_species` pairs on the
+    wider-supported member, and
+    :func:`~tsara.align.grid.build_output_grid` refuses a period shorter than
+    the widest selected cell. The primitive they share has to refuse it too,
+    because it is public and is the documented way to build a receptor-model
+    matrix from a chosen set of columns — a caller supplying their own target
+    cells would otherwise get the one thing this package promises not to do,
+    with ``coverage`` reporting 1.0 and nothing else to notice it by.
+    """
+    worst = _worst_replication(source, target)
+    if worst < 2:
+        return
+    raise TsaraAlignError(
+        f"Stream '{instrument}' has {median_width_s(source):.6g} s cells and the target "
+        f"cells are {median_width_s(target):.6g} s, so one of its measurements would fill "
+        f"{worst} target cells on its own. Evaluating it on a shorter support is "
+        "resolution the instrument never had (METHODS §11.2), and the replicated rows "
+        "would enter a fit as independent measurements. Bin onto cells at least as wide, "
+        "pair on the wider-supported stream, or — for a smooth non-gas field — "
+        "interpolate it with tsara.align.auxiliary (§11.6)."
+    )
 
 
 def _same_cells(source: CellBounds, target: CellBounds) -> bool:
@@ -391,11 +471,16 @@ def bin_streams_onto_cells(
     selection = select_variables(streams, variables)
     if not selection:
         raise TsaraAlignError(
-            "No variables selected. Every stream holds only uncertainty companions, "
+            "No variables selected. Every stream holds only companion columns — "
+            "uncertainties, counts, coverage fractions, angular quality numbers — "
             "which travel with the values they describe rather than being binned "
             "on their own."
         )
     names = _output_names(selection)
+    # Once per instrument rather than once per variable: the question is about
+    # cells, and a spectral stream can carry a thousand columns on one clock.
+    for instrument in dict.fromkeys(name for name, _ in selection):
+        _refuse_upsampling(stream_cells(streams[instrument], instrument), target, instrument)
     data_vars: dict[str, tuple[str, np.ndarray, dict[str, object]]] = {}
     native: dict[str, str | None] = {}
     for instrument, variable in selection:
@@ -456,9 +541,12 @@ def _correct_cell_methods(
                 dataset[column].attrs.pop(CELL_METHODS_ATTR, None)
             else:
                 dataset[column].attrs[CELL_METHODS_ATTR] = declared
-        dataset[f"n_source_{column}"].attrs[CELL_METHODS_ATTR] = f"{TIME_COORD}: sum"
-        for suffix in ("coverage_{}", "{}" + RESULTANT_SUFFIX, "{}" + DISPERSION_SUFFIX):
-            name = suffix.format(column)
+        dataset[n_source_name(column)].attrs[CELL_METHODS_ATTR] = f"{TIME_COORD}: sum"
+        for name in (
+            coverage_name(column),
+            f"{column}{RESULTANT_LENGTH_SUFFIX}",
+            f"{column}{DISPERSION_SUFFIX}",
+        ):
             if name in dataset.data_vars:
                 dataset[name].attrs.pop(CELL_METHODS_ATTR, None)
 
@@ -479,6 +567,18 @@ def _one_variable(
     only thing the caller cannot re-derive from the columns themselves.
     """
     source = stream_cells(stream, instrument)
+    if stream[variable].dims != (TIME_COORD,):
+        # Named rather than broadcast against: without this the cell
+        # boundaries, or any other array carrying a second dimension, reach
+        # the weighting as a shape mismatch and surface as an untyped
+        # `ValueError: operands could not be broadcast together`, which says
+        # nothing about which stream or which variable was at fault.
+        raise TsaraAlignError(
+            f"'{variable}' on stream '{instrument}' has dimensions "
+            f"{stream[variable].dims}, and only one value per cell can be binned. "
+            f"A variable over ('{TIME_COORD}',) is what this operation averages; "
+            "anything else describes the cells rather than varying over them."
+        )
     values = np.asarray(stream[variable].values, dtype=np.float64)
     attrs: dict[str, object] = dict(stream[variable].attrs)
     attrs[SOURCE_INSTRUMENT_ATTR] = instrument
@@ -489,11 +589,11 @@ def _one_variable(
     if already_here:
         columns: dict[str, tuple[np.ndarray, dict[str, object]]] = {column: (values, attrs)}
         n_cells = len(target)
-        columns[f"n_source_{column}"] = (
+        columns[n_source_name(column)] = (
             np.ones(n_cells, dtype=np.int64),
             _count_attrs(column, native=True),
         )
-        columns[f"coverage_{column}"] = (
+        columns[coverage_name(column)] = (
             np.ones(n_cells, dtype=np.float64),
             _coverage_attrs(column, native=True),
         )
@@ -538,9 +638,9 @@ def _bin_circular(
     units = str(attrs.get("units", "degrees"))
     return {
         column: (result.mean_deg, attrs),
-        f"n_source_{column}": (result.n_source, _count_attrs(column, native=False)),
-        f"coverage_{column}": (result.coverage, _coverage_attrs(column, native=False)),
-        f"{column}{RESULTANT_SUFFIX}": (
+        n_source_name(column): (result.n_source, _count_attrs(column, native=False)),
+        coverage_name(column): (result.coverage, _coverage_attrs(column, native=False)),
+        f"{column}{RESULTANT_LENGTH_SUFFIX}": (
             result.resultant_length,
             {
                 "units": "1",
@@ -604,8 +704,8 @@ def _bin_scalar(
 
     columns: dict[str, tuple[np.ndarray, dict[str, object]]] = {
         column: (binned, attrs),
-        f"n_source_{column}": (counts, _count_attrs(column, native=False)),
-        f"coverage_{column}": (coverage, _coverage_attrs(column, native=False)),
+        n_source_name(column): (counts, _count_attrs(column, native=False)),
+        coverage_name(column): (coverage, _coverage_attrs(column, native=False)),
     }
     tau = stream[variable].attrs.get("decorrelation_timescale")
     tau_s = float(pd.Timedelta(tau).total_seconds()) if tau is not None else None
