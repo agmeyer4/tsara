@@ -51,10 +51,11 @@ class OutputGridConfig(_StrictModel):
     option was specified in Phase 1 and removed in Phase 4 before it ever
     had an implementation: its purpose is robustness to sub-grid spikes, and
     a sub-grid spike in this science *is the plume*. Measured on the real
-    1 Hz mobile CH4 record, a 60 s median discards 19.3 % of the enhancement
-    mass and up to 100 % of an individual cell's — a low bias that scales
-    with how sharp each species' plumes are, so it corrupts exactly the
-    between-species ratios TSARA exists to compute (METHODS.md §11.7). It is
+    mobile-lab CH4 of the ten 2024 drive days, a 60 s median discards 19.6 %
+    of the enhancement mass and up to 100 % of an individual cell's — a low
+    bias that scales with how sharp each species' plumes are, so it corrupts
+    exactly the between-species ratios TSARA exists to compute (METHODS.md
+    §11.7.1). It is
     the same argument that deleted the QA/QC spike rule (§9.5).
     """
 

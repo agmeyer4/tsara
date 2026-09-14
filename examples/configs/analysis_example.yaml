@@ -23,8 +23,8 @@ output_grid:
 # There is deliberately no choice of binning statistic. A median option was
 # specified in Phase 1 and removed before it was ever implemented: its job is
 # robustness to sub-grid spikes, and here a sub-grid spike IS the plume.
-# Measured on real 1 Hz mobile CH4, a 60 s median discards 19.3% of the
-# enhancement mass (METHODS.md §11.7).
+# Measured on real mobile CH4 over ten drive days, a 60 s median discards
+# 19.6% of the enhancement mass (METHODS.md §11.7.1).
 
 # --- Auxiliary-field alignment -------------------------------------------
 # Guards interpolation of SMOOTH fields (GPS, met) onto gas timestamps.

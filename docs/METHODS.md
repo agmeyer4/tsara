@@ -1358,6 +1358,31 @@ ULP away under `fast`, which is why the round-trip tests compare with a
 relative tolerance rather than exact equality, and why one of them sets
 `exact` and asserts bitwise recovery.
 
+### 9.2.3 Interpolated copies beside measured columns
+
+Some merged archives publish a measurement twice: once as measured, with gaps
+where the instrument reported nothing, and once interpolated into every row.
+The 2024 NOAA mobile-lab drive files do this on a shared 1 s merge grid —
+`CO2_ppm` beside `CO2_i_ppm`, `CH4_ppb` beside `CH4_i_ppb`, `O3_ppb` beside
+`O3_ppb_i` — and on the 2024-07-18 drive the measured Picarro columns hold a
+value in 43 % of rows (every second or third) and O₃ in 50 %, while their `_i`
+copies hold one in every row.
+
+TSARA cannot tell the two apart. Both are numeric columns under a name the
+manifest chooses, and nothing in the file marks one as invented. A manifest
+that names an `_i` column with `role: gas` therefore feeds TSARA exactly the
+interpolated gas it exists never to produce (§1.2): every `n_source` and
+coverage downstream then reports full support the instrument never had, and
+the pseudo-replication the binning design prevents arrives through the front
+door. **Name the measured column.** An interpolated copy may be useful as
+`role: aux` for a quick look; it is never a gas.
+
+This is not hypothetical. It happened to this document: two Phase-4 real-data
+results (§11.4, §11.7) were first measured on the `_i` columns and reported
+full coverage that the measured record does not have, and were corrected in
+that phase's final audit. A density check is the quickest guard — count finite
+values *per column*, since a file's widest column can be an interpolated one.
+
 ### 9.3 ICARTT revision selection
 
 Archives hold several revisions of one day's data, and ingesting all of them
@@ -2635,19 +2660,30 @@ overlap, and a fixture of exactly that shape now pins it.
 
 **And on real data.** The 2024-07-18 mobile-lab drive carries both members of
 the canister case: on that day, 32 iWAS fills of median width 14.7 s at a
-441 s cadence, and a 1 Hz Picarro. Pairing benzene against CH₄ chooses the canister as the
-clock (14.7 s vs 1 s), keeps all 32 cells at coverage 1.000, and draws a
-median of 16 one-second samples into each. Recomputing every pair with a
-Python loop straight from §1.3 reproduces the paired values **exactly** — a
-maximum difference of 0.000e+00 ppb over the 32 pairs.
+441 s cadence (exact cells from `iWAS_Stop_UTC`), and the Picarro's measured
+`CH4_ppb`, a 1 s file with a value in every second or third row. Pairing
+benzene against CH₄ chooses the canister as the clock (14.7 s vs 1 s) and keeps
+all 32 fills, each drawing a median of **7** CH₄ readings covering a median
+**0.43** of its fill (0.395 at least) — the analyzer reports every 2–3 s, and
+the coverage says so. Recomputing every pair with a Python loop straight from
+§1.3 reproduces the paired values **exactly**: a maximum difference of
+0.000e+00 ppb over the 32 pairs.
 
 The same comparison shows what the overlap weighting is worth. Scoring
-instead against a plain unweighted mean of the samples whose *start* falls
-inside the fill window — the obvious shortcut, which gives a partial edge cell
-either full weight or none — the two disagree by up to **17.89 ppb** of CH₄.
-On a ~1950 ppb background that is small; against the enhancements these
+instead against a plain unweighted mean of the readings whose *start* falls
+inside the fill window — the obvious shortcut, which gives a partial edge
+reading either full weight or none — the two disagree by up to **38.08 ppb** of
+CH₄. On a ~1950 ppb background that is small; against the enhancements these
 canisters exist to attribute it is not, and it is entirely an artefact of
-which fraction of two edge samples counts.
+which fraction of an edge reading counts.
+
+**Corrected in the Phase-4 final audit.** This paragraph first reported
+coverage 1.000, a median of 16 samples and a 17.89 ppb disagreement. Those
+numbers are right for the file's `CH4_i_ppb` column, which is an *interpolated*
+copy of the measurement filled into every row — so the original measurement
+paired a canister against an interpolated gas, the one thing this section
+exists to prevent. The loop's exact agreement held on both columns. §9.2.3
+records the trap for anyone writing a manifest against these files.
 
 #### 11.4.1 A tie in width, and the reading counted twice
 
@@ -2781,8 +2817,8 @@ Supersedes the §1.5 stub. A direction is a point on a circle, so directions
 are averaged as unit vectors, never arithmetically. Config:
 `VariableConfig.circular`, valid only for `role: met`.
 
-Measured on the ten 2024 mobile-lab drive days, 3337 sixty-second cells of
-1 Hz wind direction: the arithmetic mean differs from the vector mean by more
+Measured on the ten 2024 mobile-lab drive days (MetNav `WindDir_calc_deg`),
+the 3337 epoch-aligned sixty-second cells holding at least 30 readings: the arithmetic mean differs from the vector mean by more
 than 45° in **26.7 %** of cells, with a median error of 7.0° and a maximum of
 180.0°.
 
@@ -3139,20 +3175,33 @@ overlap rule lacks.
 
 Checked against the *selection* rather than against every stream the campaign
 contains, and that is a real lever rather than a formality. Measured on the
-2024-07-18 drive with five instruments loaded:
+2024-07-18 drive with five instruments loaded — the Picarro's measured CO₂ and
+CH₄, the MetNav wind direction and air temperature, NOy-LIF NOy, PTR-MS
+benzene, and iWAS benzene and toluene on their exact fill cells:
 
 | request | outcome |
 |---|---|
 | 5 s over everything | refused — `iwas` has fills of about 15 s that day |
-| 15 s over everything | 1301 cells |
-| 1 s, canisters excluded | 19 501 cells |
+| 15 s over everything | 1302 cells |
+| 1 s, canisters excluded | 19 502 cells |
 
-The same run's 60 s matrix shows what the qualifying columns are for: the five
-continuous instruments come back 100 % filled at a median of 60 contributing
-samples per cell, the PTR benzene 97.5 %, and the two canister species 11.3 %
+(The LIF's mid-labelled cells begin half a second before the others', so an
+epoch-anchored grid over this selection starts one cell earlier than over the
+drive's 19 501 rows.)
+
+The same run's 60 s matrix shows what the qualifying columns are for. MetNav
+wind and temperature come back 99.7 % filled at a median of 60 contributing
+readings per minute and the LIF 100 % at 61; the Picarro's CO₂ and CH₄ 99.4 %
+filled at a median of **26**, because the analyzer reports every 2–3 s and
+`n_source` says so; the PTR benzene 97.2 %; and the two canister species 11.3 %
 with a median of **zero**. A sparse instrument on a campaign grid is mostly
 absent, which is honest, and is exactly why a two-species ratio uses a pair
 clock (§11.4) rather than this product.
+
+**Corrected in the Phase-4 final audit**, like §11.4: the first version of this
+paragraph and table (100 % at a median of 60, 97.5 %, 1301 and 19 501 cells)
+did not state its selection and could only be reproduced with the Picarro's
+interpolated `_i` columns (§9.2.3).
 
 #### Readings that land in more than one row
 
@@ -3291,22 +3340,35 @@ QA/QC spike rule (§9.5): TSARA has no stage that can distinguish a sharp real
 enhancement from a glitch, so it should not offer a statistic whose only job
 is to suppress one.
 
-Measured on the real 1 Hz mobile-lab CH₄, ten drive days, binned to 60 s cells
-with the enhancement taken over a rolling 10-minute 5th-percentile baseline:
+Measured on the real mobile-lab CH₄ of all ten 2024 drive days — the measured
+`CH4_ppb` column, a reading every 2–3 s — with the rule stated so it can be
+re-run: the enhancement of each reading is its value minus a rolling 10-minute
+5th-percentile baseline of the readings themselves; readings are grouped into
+epoch-aligned 60 s cells; a cell is *enhanced* when its mean enhancement
+exceeds 5 ppb; and the median is scored with negative medians counted as zero
+enhancement:
 
 | | |
 |---|---|
-| enhanced cells (mean enhancement > 5 ppb) | 2329 |
-| **enhancement mass the median discards** | **19.3 %** |
-| cells whose plume fills less than half the minute | 49 (2.1 %) |
-| …median loses, over those cells | 87.5 % |
-| worst single cell | a 28 ppb enhancement reduced to zero |
+| enhanced cells | 2147 (median 26 readings each) |
+| **enhancement mass the median discards** | **19.6 %** |
+| cells in which fewer than half the readings exceed 5 ppb | 334 (15.6 %) |
+| …median loses, over those cells | 78.8 % |
+| cells a median reduces to zero | 20, the largest a 42.8 ppb mean enhancement |
 
-The 19.3 % is the number that decides it. It is not noise, it is a *bias*, and
+The 19.6 % is the number that decides it. It is not noise, it is a *bias*, and
 it scales with how sharp each species' plumes are relative to the cell — so
 two species with different plume widths are biased by different amounts and
 their ratio, computed from a median-binned PMF matrix, is wrong by the
 difference. That is precisely the quantity TSARA exists to produce.
+
+**Re-measured in the Phase-4 final audit.** The decision was first recorded as
+19.3 % of 2329 cells, with 49 (2.1 %) half-filled cells losing 87.5 % and a
+28 ppb cell reduced to zero, under a rule the text did not state. It could not
+be reproduced exactly; under the rule above the headline moves by three tenths
+of a point (18.9 % on the interpolated column), which leaves the decision where
+it was, while the sub-counts depend entirely on the unstated definitions. They
+are replaced rather than reconciled.
 
 Two lesser costs, recorded because they were part of the decision: an
 overlap-weighted median is a different algorithm from a weighted mean, so it

@@ -8,9 +8,9 @@ number on a line, and the mean of several directions is the angle of their
 summed unit vectors.
 
 This is not a corner case in the archive TSARA targets. Measured on the ten
-2024 mobile-lab drive days, over 3337 sixty-second cells of 1 Hz wind
-direction, the arithmetic mean differs from the vector mean by more than 45°
-in **26.7 %** of cells, and by up to a full 180°.
+2024 mobile-lab drive days, over the 3337 sixty-second cells of 1 Hz wind
+direction that hold at least 30 readings, the arithmetic mean differs from the
+vector mean by more than 45° in **26.7 %** of cells, and by up to a full 180°.
 
 What a binned direction carries
 --------------------------------
