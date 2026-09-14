@@ -28,15 +28,41 @@ every stream the campaign happens to contain.
 
 The period rule
 ---------------
-**The grid period must be at least the widest cell among the selected
-variables.** A 60 s mean evaluated on 1 s cells is the same value repeated
-sixty times: resolution the instrument never had, and sixty points where there
-is one measurement. That is the prohibition the whole interval model exists to
-enforce (§10), so it is an error naming the offending variable and the
-smallest period that would work, not a warning.
+**A grid may not be so fine that one reading covers two of its cells.** A 60 s
+mean evaluated on 1 s cells is the same value repeated sixty times: resolution
+the instrument never had, and sixty points where there is one measurement.
+That is the prohibition the whole interval model exists to enforce (§10), so
+it is an error naming the offending instrument and a period that would work,
+not a warning. The test is the binner's own
+(:func:`~tsara.align.binning.measure_replication`), run against the grid's
+actual cells before anything is built, so the grid and the operation it calls
+can never disagree about the same data.
 
-Which variables go in is therefore a real lever: a run that excludes the
-canisters can be gridded far finer than one that includes them.
+It replaced a comparison of median widths, which refused a one-second grid
+for an analyzer whose cells measure 1.023 s — a hair's worth of jitter the
+binner itself accepts — while offering no protection the overlap rule lacks.
+
+Which variables are selected is therefore a real lever: a run that excludes
+the canisters can be gridded far finer than one that includes them.
+
+What the rule does not refuse is recorded instead
+--------------------------------------------------
+Below two cells' worth, a reading may still land in more than one row: a 15 s
+canister fill crossing a minute boundary is one measurement in two rows of a
+60 s grid, and on the ten 2024 drive days that happens to 68 of 261 fills. So
+every column records how many distinct readings stand behind it, and a
+warning names the columns holding values in more rows than they have
+readings, because a receptor model treating rows as independent observations
+counts those readings more than once.
+
+A uniform grid spans the gaps
+------------------------------
+The grid runs from the first selected cell to the last, so a campaign of
+separate drives puts every hour between them into the matrix too. Measured:
+one-second cells over the ten 2024 drive days span 29.5 days, 2.55 million
+rows of which 92 % hold no data, about 95 MB per variable with its companion
+columns. Grid each drive with ``start`` and ``end`` when the matrix is for a
+receptor model rather than a continuous state.
 """
 
 from __future__ import annotations
@@ -49,11 +75,14 @@ import pandas as pd
 
 from tsara.align.binning import (
     TsaraAlignError,
+    _output_names,
     bin_streams_onto_cells,
-    median_width_s,
+    measure_replication,
     select_variables,
     stream_cells,
+    touched_readings,
 )
+from tsara.core.naming import n_source_name
 from tsara.core.support import CellBounds
 from tsara.core.timebase import to_utc_naive_stamp
 
@@ -73,6 +102,8 @@ __all__ = ["build_output_grid", "grid_cells"]
 GRID_FREQ_ATTR = "tsara_grid_freq"
 GRID_WIDEST_CELL_ATTR = "tsara_grid_widest_source_cell_s"
 GRID_VARIABLES_ATTR = "tsara_grid_variables"
+#: Per-variable: distinct readings behind the grid's occupied rows (§11.7).
+GRID_READINGS_ATTR = "tsara_grid_readings"
 
 
 def grid_cells(
@@ -100,8 +131,9 @@ def grid_cells(
     Raises
     ------
     TsaraAlignError
-        If the period is shorter than the widest selected cell, if the
-        requested window is empty, or if no variable was selected.
+        If the period is so fine that one selected reading would cover two
+        grid cells' worth of time, if the requested window is empty, or if no
+        variable was selected.
 
     Notes
     -----
@@ -119,18 +151,6 @@ def grid_cells(
     cells = {
         instrument: stream_cells(streams[instrument], instrument) for instrument in instruments
     }
-
-    widest_instrument = max(instruments, key=lambda name: median_width_s(cells[name]))
-    widest_s = median_width_s(cells[widest_instrument])
-    if period_ns < widest_s * 1e9:
-        raise TsaraAlignError(
-            f"Grid period {config.freq} is shorter than the widest selected cell: "
-            f"'{widest_instrument}' has {widest_s:.6g} s cells. Evaluating those on "
-            f"a finer grid would repeat one measurement across several cells, which "
-            f"is resolution the instrument never had (METHODS §11.7). Use a period of "
-            f"at least {widest_s:.6g} s, or leave '{widest_instrument}' out of the "
-            "selection."
-        )
 
     earliest = min(int(bounds.start_ns.min()) for bounds in cells.values())
     latest = max(int(bounds.stop_ns.max()) for bounds in cells.values())
@@ -154,7 +174,37 @@ def grid_cells(
     _warn_if_out_of_phase(cells, start_ns, period_ns)
     n_cells = int(np.ceil((stop_ns - start_ns) / period_ns))
     edges = start_ns + np.arange(n_cells + 1, dtype=np.int64) * period_ns
-    return CellBounds(start_ns=edges[:-1], stop_ns=edges[1:])
+    target = CellBounds(start_ns=edges[:-1], stop_ns=edges[1:])
+    _refuse_a_period_too_fine(cells, target, str(config.freq))
+    return target
+
+
+def _refuse_a_period_too_fine(
+    cells: Mapping[str, CellBounds], target: CellBounds, freq: str
+) -> None:
+    """Raise if any selected instrument would have a reading spread over two grid cells.
+
+    The binner's own test (:func:`~tsara.align.binning.measure_replication`),
+    run here against the grid's actual cells so the refusal can name a period
+    that would work before anything is binned. Checked against the cells
+    inside the requested window, so a wide instrument whose data all falls
+    outside it constrains nothing.
+    """
+    worst: tuple[float, float, str] | None = None
+    for instrument, bounds in cells.items():
+        replicated, multiple, covered_s = measure_replication(bounds, target)
+        if replicated and (worst is None or covered_s > worst[1]):
+            worst = (multiple, covered_s, instrument)
+    if worst is None:
+        return
+    multiple, covered_s, instrument = worst
+    raise TsaraAlignError(
+        f"Grid period {freq} is too fine for '{instrument}': one of its cells would cover "
+        f"{multiple:.3g} grid cells' worth of time on its own. Evaluating it on a finer grid "
+        "would repeat one measurement across rows, which is resolution the instrument never "
+        f"had (METHODS §11.7). Use a period longer than {covered_s / 2:.6g} s, or leave "
+        f"'{instrument}' out of the selection."
+    )
 
 
 def _warn_if_out_of_phase(cells: Mapping[str, CellBounds], start_ns: int, period_ns: int) -> None:
@@ -229,24 +279,24 @@ def build_output_grid(
     Raises
     ------
     TsaraAlignError
-        If the period is shorter than the widest selected cell, or the
-        selection or window is empty.
+        If the period is so fine that one selected reading would cover two
+        grid cells' worth of time, or the selection or window is empty.
     """
     selection = select_variables(streams, variables)
     target = grid_cells(streams, config, variables)
     gridded = bin_streams_onto_cells(streams, target, selection, propagation_form=propagation_form)
-    widest = max(
-        median_width_s(stream_cells(streams[instrument], instrument)) for instrument, _ in selection
-    )
+    instruments = sorted({instrument for instrument, _ in selection})
+    cells = {name: stream_cells(streams[name], name) for name in instruments}
+    widest = max(float(bounds.width_ns.max()) for bounds in cells.values()) / 1e9
     gridded.attrs["tsara_stage"] = "gridded"
     gridded.attrs[GRID_FREQ_ATTR] = str(config.freq)
     gridded.attrs[GRID_WIDEST_CELL_ATTR] = float(widest)
-    # Recorded because the grid period was validated against exactly this
-    # selection, and a reader cannot tell from the columns alone whether a
+    # Recorded because a reader cannot tell from the columns alone whether a
     # variable is absent because it was excluded or because it had no data.
     gridded.attrs[GRID_VARIABLES_ATTR] = ", ".join(
         f"{instrument}.{name}" for instrument, name in selection
     )
+    _record_readings(gridded, streams, selection, cells, target)
     logger.info(
         "Built a %s grid of %d cells over %d variable(s); widest source cell %.6g s.",
         config.freq,
@@ -255,3 +305,45 @@ def build_output_grid(
         widest,
     )
     return gridded
+
+
+def _record_readings(
+    gridded: xr.Dataset,
+    streams: Mapping[str, xr.Dataset],
+    selection: Sequence[tuple[str, str]],
+    cells: Mapping[str, CellBounds],
+    target: CellBounds,
+) -> None:
+    """Record each column's distinct readings, and warn where rows outnumber them.
+
+    The overlaps are found once per instrument and counted per variable, so a
+    canister carrying fifty VOCs costs one overlap search rather than fifty.
+    One warning for the whole grid rather than one per column, naming the
+    worst: a canister's VOCs share one sampling pattern and would otherwise
+    repeat the same sentence fifty times.
+    """
+    names = _output_names(selection)
+    touched = {name: touched_readings(bounds, target) for name, bounds in cells.items()}
+    shared: list[tuple[str, int, int]] = []
+    for instrument, variable in selection:
+        column = names[instrument, variable]
+        finite = np.isfinite(np.asarray(streams[instrument][variable].values, dtype=np.float64))
+        readings = int(np.count_nonzero(touched[instrument] & finite))
+        occupied = int(np.count_nonzero(gridded[n_source_name(column)].values > 0))
+        gridded[column].attrs[GRID_READINGS_ATTR] = readings
+        if readings < occupied:
+            shared.append((column, occupied, readings))
+    if not shared:
+        return
+    column, occupied, readings = max(shared, key=lambda item: item[1] / item[2])
+    logger.warning(
+        "%d grid column(s) hold values in more rows than they have readings, so some "
+        "readings appear in more than one row and a receptor model treating rows as "
+        "independent will count them more than once (METHODS §11.7). Worst: '%s', %d rows "
+        "from %d readings. Affected: %s.",
+        len(shared),
+        column,
+        occupied,
+        readings,
+        ", ".join(name for name, _, _ in shared[:8]) + (" ..." if len(shared) > 8 else ""),
+    )

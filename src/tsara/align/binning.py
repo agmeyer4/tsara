@@ -338,8 +338,8 @@ def _sigma_on_cells(
     return np.asarray(moved, dtype=np.float64), provenance
 
 
-def _worst_replication(source: CellBounds, target: CellBounds) -> int:
-    """Return the most target cells any one source cell would fill on its own.
+def measure_replication(source: CellBounds, target: CellBounds) -> tuple[bool, float, float]:
+    """Say whether any one source cell would be spread over two target cells' worth of time.
 
     The test for the one direction this operation must not run in. Averaging a
     fast stream onto slow cells discards resolution the slow instrument never
@@ -347,12 +347,25 @@ def _worst_replication(source: CellBounds, target: CellBounds) -> int:
     the instrument never reported, which is the interpolation rule (§1.2)
     restated for a step function.
 
-    Measured on the overlaps rather than on a comparison of widths, because a
-    width comparison needs a tolerance and this does not. A target cell lying
-    *entirely* inside one source cell is a row that source cell would fill by
-    itself; two or more of them is replication. Cells that merely differ by
-    jitter never reach two, however the medians compare, so the honest
-    near-equal case is not caught by a rule aimed at the 60-into-1 case.
+    **The rule: a reading is replicated when the time it shares with the
+    target cells adds up to at least twice the width of the widest target cell
+    it touches.** Measured on the overlaps, as the rule it replaces was, and
+    for the same reason — a comparison of median widths needs a tolerance,
+    because real analyzers disagree about their own nominal rate (1.023 s
+    against a nominal 1 s in the 2026 archive), and this needs none:
+
+    * 60 s onto 1 s is sixty cells' worth, refused;
+    * 2 s onto 1 s is two cells' worth at *any* phase, refused;
+    * 1.023 s onto 1 s is a hair over one, allowed;
+    * equal widths half a period apart are one cell's worth, allowed.
+
+    The rule this replaced counted target cells lying *wholly* inside one
+    source cell, refusing at two. It agreed on every case above except one: a
+    perfectly regular 2 s record offset from a 1 s grid by anything but zero
+    wholly contains only one target cell, so it passed, and each of its
+    readings fed two or three rows (§11.2.1). What remains below the line —
+    a reading partly shared between neighbouring rows — is not refused but
+    counted, by :func:`readings_behind`.
 
     Parameters
     ----------
@@ -363,20 +376,89 @@ def _worst_replication(source: CellBounds, target: CellBounds) -> int:
 
     Returns
     -------
-    int
-        The largest number of whole target cells inside any single source
-        cell. One or zero for every legitimate direction.
+    tuple of (bool, float, float)
+        Whether any source cell is replicated; the largest multiple of a
+        touched target cell's width that any one source cell covers; and that
+        source cell's total covered time in seconds, half of which is the
+        widest target cell that would *not* replicate it.
     """
     pairs = overlap_pairs(source, target)
-    if pairs.overlap_ns.size == 0:
-        return 0
     target_width = target.width_ns[pairs.target_index]
-    # A zero-width target cell sits inside everything and means nothing; it
-    # would otherwise make any binning onto a degenerate grid look replicated.
-    whole = (pairs.overlap_ns == target_width) & (target_width > 0)
-    if not whole.any():
-        return 0
-    return int(np.bincount(pairs.source_index[whole], minlength=len(source)).max())
+    # A zero-width target cell overlaps nothing by a positive amount and would
+    # otherwise make a degenerate grid look infinitely replicated.
+    touching = (pairs.overlap_ns > 0) & (target_width > 0)
+    if not touching.any():
+        return False, 0.0, 0.0
+    owner = pairs.source_index[touching]
+    # Integer nanoseconds summed in float64 are exact below 2**53 ns, about
+    # 104 days of overlap for a single source cell, so the comparison with
+    # twice a width is exact for any cell this operation will meet.
+    covered = np.bincount(owner, weights=pairs.overlap_ns[touching], minlength=len(source))
+    widest = np.zeros(len(source), dtype=np.int64)
+    np.maximum.at(widest, owner, target_width[touching])
+    used = widest > 0
+    multiples = covered[used] / widest[used]
+    worst = int(np.argmax(multiples))
+    replicated = bool(np.any(covered[used] >= 2.0 * widest[used]))
+    return replicated, float(multiples[worst]), float(covered[used][worst]) / NS_PER_S
+
+
+def touched_readings(source: CellBounds, target: CellBounds) -> np.ndarray:
+    """Return which source cells overlap at least one target cell by a positive amount.
+
+    The membership half of :func:`readings_behind`, separated so that a caller
+    counting readings for many variables of one instrument — a canister
+    carrying fifty VOCs on a campaign grid — finds the overlaps once rather
+    than once per variable.
+
+    Parameters
+    ----------
+    source : CellBounds
+        The instrument's cells.
+    target : CellBounds
+        The cells whose readings are being counted.
+
+    Returns
+    -------
+    numpy.ndarray
+        One boolean per source cell.
+    """
+    links = overlap_pairs(source, target)
+    touched = np.zeros(len(source), dtype=bool)
+    touched[links.source_index[links.overlap_ns > 0]] = True
+    return touched
+
+
+def readings_behind(
+    stream: xr.Dataset, variable: str, source: CellBounds, target: CellBounds
+) -> int:
+    """Return how many distinct readings of a variable the target cells draw on.
+
+    Every finite source cell overlapping at least one target cell by a positive
+    amount — the same membership rule the binner uses to form a value, so the
+    count describes the numbers actually reported. Fewer readings than occupied
+    target cells means some reading appears in more than one row, which a fit
+    or receptor model treating rows as independent would count more than once
+    (§11.4.1, §11.7).
+
+    Parameters
+    ----------
+    stream : xarray.Dataset
+        The stream holding the variable.
+    variable : str
+        The variable's name in that stream.
+    source : CellBounds
+        The stream's cells.
+    target : CellBounds
+        The cells whose readings are being counted.
+
+    Returns
+    -------
+    int
+        Distinct finite readings behind the target cells.
+    """
+    finite = np.isfinite(np.asarray(stream[variable].values, dtype=np.float64))
+    return int(np.count_nonzero(touched_readings(source, target) & finite))
 
 
 def _refuse_upsampling(source: CellBounds, target: CellBounds, instrument: str) -> None:
@@ -385,24 +467,25 @@ def _refuse_upsampling(source: CellBounds, target: CellBounds, instrument: str) 
     Both of this phase's products already prevent this by choosing their
     target: :func:`~tsara.align.pairing.pair_species` pairs on the
     wider-supported member, and
-    :func:`~tsara.align.grid.build_output_grid` refuses a period shorter than
-    the widest selected cell. The primitive they share has to refuse it too,
-    because it is public and is the documented way to build a receptor-model
-    matrix from a chosen set of columns — a caller supplying their own target
-    cells would otherwise get the one thing this package promises not to do,
-    with ``coverage`` reporting 1.0 and nothing else to notice it by.
+    :func:`~tsara.align.grid.build_output_grid` checks its period with this
+    same rule before building anything. The primitive they share has to refuse
+    it too, because it is public and is the documented way to build a
+    receptor-model matrix from a chosen set of columns — a caller supplying
+    their own target cells would otherwise get the one thing this package
+    promises not to do, with ``coverage`` reporting 1.0 and nothing else to
+    notice it by.
     """
-    worst = _worst_replication(source, target)
-    if worst < 2:
+    replicated, multiple, covered_s = measure_replication(source, target)
+    if not replicated:
         return
     raise TsaraAlignError(
         f"Stream '{instrument}' has {median_width_s(source):.6g} s cells and the target "
-        f"cells are {median_width_s(target):.6g} s, so one of its measurements would fill "
-        f"{worst} target cells on its own. Evaluating it on a shorter support is "
-        "resolution the instrument never had (METHODS §11.2), and the replicated rows "
-        "would enter a fit as independent measurements. Bin onto cells at least as wide, "
-        "pair on the wider-supported stream, or — for a smooth non-gas field — "
-        "interpolate it with tsara.align.auxiliary (§11.6)."
+        f"cells are {median_width_s(target):.6g} s, so one of its measurements would cover "
+        f"{multiple:.3g} target cells' worth of time on its own. Evaluating it on a shorter "
+        "support is resolution the instrument never had (METHODS §11.2.1), and the "
+        "replicated rows would enter a fit as independent measurements. Bin onto cells "
+        f"wider than {covered_s / 2:.6g} s, pair on the wider-supported stream, or — for a "
+        "smooth non-gas field — interpolate it with tsara.align.auxiliary (§11.6)."
     )
 
 

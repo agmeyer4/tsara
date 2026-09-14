@@ -16,6 +16,7 @@ import pytest
 import xarray as xr
 
 from tsara.align import TsaraAlignError, bin_streams_onto_cells, resolve_variable
+from tsara.align.binning import readings_behind, stream_cells
 from tsara.core.naming import sigma_rand_name
 from tsara.core.support import CellBounds
 
@@ -417,8 +418,10 @@ def test_the_refusal_names_the_stream_the_widths_and_the_damage() -> None:
     assert "'minute'" in message
     assert "60 s cells" in message
     assert "1 s" in message
-    # 60 whole 1 s cells fit inside one 60 s cell.
-    assert "fill 60 target cells" in message
+    # One 60 s reading would cover sixty 1 s cells' worth of time, and any
+    # cells wider than 30 s would not be replicated.
+    assert "cover 60 target cells' worth of time" in message
+    assert "wider than 30 s" in message
 
 
 def test_a_duty_cycled_sampler_is_refused_onto_a_fine_grid() -> None:
@@ -441,7 +444,7 @@ def test_a_duty_cycled_sampler_is_refused_onto_a_fine_grid() -> None:
         },
     )
     stream["time"].attrs["bounds"] = "time_bnds"
-    with pytest.raises(TsaraAlignError, match="fill 15 target cells"):
+    with pytest.raises(TsaraAlignError, match="cover 15 target cells' worth"):
         bin_streams_onto_cells({"canister": stream}, cells(0.0, 1.0, 360))
 
 
@@ -456,6 +459,67 @@ def test_cells_that_differ_only_by_jitter_are_not_refused() -> None:
     wider = make_stream(0.0, 1.024, 40, {"ch4": np.arange(40.0)})
     joined = bin_streams_onto_cells({"a": wider}, cells(0.0, 0.993, 40))
     assert np.isfinite(joined["ch4"].values).any()
+
+
+@pytest.mark.parametrize("offset_s", [0.0, 0.3, 0.5])
+def test_a_reading_two_target_cells_wide_is_refused_at_any_phase(offset_s: float) -> None:
+    """The phase hole in the rule this guard replaced (METHODS §11.2.1).
+
+    That rule counted target cells lying wholly inside one source cell. A
+    regular 2 s record exactly in phase with a 1 s grid wholly contains two and
+    was refused; offset by 0.3 s or 0.5 s it wholly contains one, passed, and
+    each reading fed two or three rows. Two cells' worth of time is two cells'
+    worth whatever the phase.
+    """
+    source = make_stream(offset_s, 2.0, 50, {"ch4": np.arange(50.0)})
+    with pytest.raises(TsaraAlignError, match="cover 2 target cells' worth"):
+        bin_streams_onto_cells({"picarro": source}, cells(0.0, 1.0, 102))
+
+
+def test_a_reading_just_under_two_target_cells_wide_is_allowed() -> None:
+    """Below the line nothing is refused; the sharing is counted instead.
+
+    A 1.9 s reading on 1 s cells does feed two rows, and a later count of the
+    readings behind them says so. It does not state a value at a resolution
+    two whole cells finer than the instrument's.
+    """
+    source = make_stream(0.3, 1.9, 50, {"ch4": np.arange(50.0)})
+    joined = bin_streams_onto_cells({"a": source}, cells(0.0, 1.0, 96))
+    assert np.isfinite(joined["ch4"].values).sum() > 50
+
+
+def test_the_rule_is_measured_against_the_widest_target_cell_touched() -> None:
+    """Non-uniform target cells: two cells' worth means of the widest one.
+
+    A 3 s reading across a 1 s cell and a 2 s cell covers one of the wider
+    cells and a half of the narrower, so it is not refused; the same reading
+    across three 1 s cells is.
+    """
+    source = make_stream(0.0, 3.0, 1, {"ch4": np.array([1.0])})
+    mixed = CellBounds(
+        start_ns=np.array([0, SECOND], dtype=np.int64),
+        stop_ns=np.array([SECOND, 3 * SECOND], dtype=np.int64),
+    )
+    assert np.isfinite(bin_streams_onto_cells({"a": source}, mixed)["ch4"].values).all()
+    with pytest.raises(TsaraAlignError):
+        bin_streams_onto_cells({"a": source}, cells(0.0, 1.0, 3))
+
+
+def test_a_zero_width_target_cell_makes_nothing_look_replicated() -> None:
+    source = make_stream(0.0, 10.0, 2, {"ch4": np.arange(2.0)})
+    degenerate = CellBounds(
+        start_ns=np.array([5 * SECOND, 5 * SECOND], dtype=np.int64),
+        stop_ns=np.array([5 * SECOND, 15 * SECOND], dtype=np.int64),
+    )
+    joined = bin_streams_onto_cells({"a": source}, degenerate)
+    assert np.isfinite(joined["ch4"].values[1])
+
+
+def test_readings_behind_counts_distinct_finite_contributors() -> None:
+    """Five readings, one masked, spread over three 2 s cells: four readings."""
+    stream = make_stream(0.0, 1.0, 5, {"ch4": np.array([1.0, np.nan, 3.0, 4.0, 5.0])})
+    count = readings_behind(stream, "ch4", stream_cells(stream, "a"), cells(0.0, 2.0, 3))
+    assert count == 4
 
 
 def test_a_grid_out_of_phase_with_an_equal_width_source_is_not_refused() -> None:

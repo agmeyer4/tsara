@@ -104,11 +104,12 @@ from tsara.align.binning import (
     TsaraAlignError,
     bin_streams_onto_cells,
     median_width_s,
+    readings_behind,
     resolve_variable,
     stream_cells,
 )
 from tsara.core.naming import TIME_COORD, coverage_name
-from tsara.core.support import CellBounds, overlap_pairs
+from tsara.core.support import CellBounds
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Mapping
@@ -268,10 +269,7 @@ def _readings_behind(
     """
     if joined[column].attrs.get(BINNED_ATTR) == 0:
         return len(pairs)
-    links = overlap_pairs(source, pairs)
-    values = np.asarray(stream[variable].values, dtype=np.float64)
-    used = links.source_index[(links.overlap_ns > 0) & np.isfinite(values[links.source_index])]
-    return int(np.unique(used).size)
+    return readings_behind(stream, variable, source, pairs)
 
 
 def pair_species(

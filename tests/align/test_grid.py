@@ -72,26 +72,66 @@ def campaign() -> dict[str, xr.Dataset]:
 # ---------------------------------------------------------------------------
 
 
-def test_a_period_shorter_than_the_widest_cell_is_refused(
+def test_a_period_too_fine_for_a_selected_instrument_is_refused(
     campaign: dict[str, xr.Dataset],
 ) -> None:
     """A 60 s value on 1 s cells is the same number sixty times.
 
     That is resolution the instrument never had, and sixty points where there
-    is one measurement. The message has to name which variable forced it and
-    what period would work, or the user has no way forward.
+    is one measurement. The message has to name which instrument forced it and
+    a period that would work, or the user has no way forward.
     """
-    with pytest.raises(TsaraAlignError, match="shorter than the widest selected cell"):
+    with pytest.raises(TsaraAlignError) as raised:
         grid_cells(campaign, OutputGridConfig(freq="1s"))
+    message = str(raised.value)
+    assert "too fine for 'canister'" in message
+    assert "cover 60 grid cells' worth of time" in message
+    assert "longer than 30 s" in message
 
 
-def test_the_refusal_names_the_offender_and_the_smallest_workable_period(
+def test_the_period_that_the_refusal_suggests_does_work(campaign: dict[str, xr.Dataset]) -> None:
+    """Half the widest reading is the line: 30 s is refused, 31 s is not.
+
+    A 60 s reading on 31 s cells spans two rows, which is sharing rather than
+    replication and is counted by the readings record instead.
+    """
+    with pytest.raises(TsaraAlignError):
+        grid_cells(campaign, OutputGridConfig(freq="30s"))
+    assert len(grid_cells(campaign, OutputGridConfig(freq="31s"))) > 0
+
+
+def test_jitter_just_wider_than_the_period_is_not_refused() -> None:
+    """The 2026 LANL Aeris measures its cells at 1.023 s against a nominal 1 s.
+
+    The rule this replaced compared median widths and refused a one-second grid
+    for it, although the binner accepts the same cells and the only effect is a
+    little over two percent more rows than readings.
+    """
+    aeris = make_stream(cells(0.0, 1.023, 600), {"ch4": np.arange(600.0)})
+    grid = build_output_grid({"aeris": aeris}, OutputGridConfig(freq="1s"))
+    assert grid.sizes["time"] > 600
+
+
+def test_a_two_second_record_is_refused_on_a_one_second_grid_at_any_phase() -> None:
+    """The phase hole the binner's former rule had, closed for the grid too."""
+    for offset in (0.0, 0.3, 0.5):
+        picarro = make_stream(cells(offset, 2.0, 100), {"co2": np.arange(100.0)})
+        with pytest.raises(TsaraAlignError, match="cover 2 grid cells' worth"):
+            grid_cells({"picarro": picarro}, OutputGridConfig(freq="1s"))
+
+
+def test_a_wide_instrument_entirely_outside_the_window_constrains_nothing(
     campaign: dict[str, xr.Dataset],
 ) -> None:
-    with pytest.raises(TsaraAlignError, match="'canister' has 60 s cells"):
-        grid_cells(campaign, OutputGridConfig(freq="1s"))
-    with pytest.raises(TsaraAlignError, match="at least 60 s"):
-        grid_cells(campaign, OutputGridConfig(freq="1s"))
+    """The rule is checked against the cells the grid actually has."""
+    late = make_stream(cells(100_000.0, 60.0, 5), {"benzene": np.arange(5.0)})
+    window = OutputGridConfig(
+        freq="1s",
+        start=pd.Timestamp("1970-01-01 00:00:00").to_pydatetime(),
+        end=pd.Timestamp("1970-01-01 00:10:00").to_pydatetime(),
+    )
+    bounds = grid_cells({"aeris": campaign["aeris"], "canister": late}, window)
+    assert len(bounds) == 600
 
 
 def test_excluding_the_slow_instrument_permits_a_finer_grid(
@@ -216,6 +256,77 @@ def test_the_grid_records_what_it_was_built_from(campaign: dict[str, xr.Dataset]
     assert grid.attrs["tsara_grid_widest_source_cell_s"] == pytest.approx(60.0)
     assert grid.attrs["tsara_grid_variables"] == "aeris.ch4, canister.benzene"
     assert "co2" not in grid.data_vars
+
+
+def test_each_column_records_the_readings_behind_it(campaign: dict[str, xr.Dataset]) -> None:
+    """Six hundred 1 s readings behind ten rows; ten 60 s readings behind ten."""
+    grid = build_output_grid(campaign, OutputGridConfig(freq="60s"), ["ch4", "benzene"])
+    assert grid["ch4"].attrs["tsara_grid_readings"] == 600
+    assert grid["benzene"].attrs["tsara_grid_readings"] == 10
+
+
+def test_a_masked_reading_is_not_counted_behind_a_column() -> None:
+    """Ten of 120 readings masked: 110 readings behind the column, not 120."""
+    values = np.arange(120.0)
+    values[::12] = np.nan
+    fast = make_stream(cells(0.0, 1.0, 120), {"ch4": values})
+    grid = build_output_grid({"fast": fast}, OutputGridConfig(freq="60s"))
+    assert grid["ch4"].attrs["tsara_grid_readings"] == 110
+
+
+def test_the_widest_cell_attribute_is_the_widest_single_cell() -> None:
+    """Canister fills vary; the record is the widest one, not a typical one."""
+    starts = np.array([0, 100, 200], dtype=np.int64) * SECOND
+    widths = np.array([14, 15, 17], dtype=np.int64) * SECOND
+    canister = make_stream(
+        CellBounds(start_ns=starts, stop_ns=starts + widths), {"benzene": np.ones(3)}
+    )
+    grid = build_output_grid({"iwas": canister}, OutputGridConfig(freq="60s"))
+    assert grid.attrs["tsara_grid_widest_source_cell_s"] == pytest.approx(17.0)
+
+
+def test_a_fill_straddling_two_rows_is_counted_once_and_warned_about(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The 2024 drives: 68 of 261 canister fills landed in two 60 s rows.
+
+    Here one 15 s fill sits inside a minute and one crosses the boundary at
+    120 s: three rows hold benzene, and there are two readings behind them.
+    """
+    starts = np.array([20, 112], dtype=np.int64) * SECOND
+    fills = CellBounds(start_ns=starts, stop_ns=starts + 15 * SECOND)
+    canister = make_stream(fills, {"benzene": np.array([1.0, 2.0])})
+    fast = make_stream(cells(0.0, 1.0, 180), {"ch4": np.arange(180.0)})
+    with caplog.at_level("WARNING", logger="tsara.align.grid"):
+        grid = build_output_grid({"fast": fast, "iwas": canister}, OutputGridConfig(freq="60s"))
+    assert int((grid["n_source_benzene"].values > 0).sum()) == 3
+    assert grid["benzene"].attrs["tsara_grid_readings"] == 2
+    assert "1 grid column(s) hold values in more rows than they have readings" in caplog.text
+    assert "Worst: 'benzene', 3 rows from 2 readings" in caplog.text
+
+
+def test_no_readings_warning_when_every_row_has_its_own_readings(
+    caplog: pytest.LogCaptureFixture, campaign: dict[str, xr.Dataset]
+) -> None:
+    with caplog.at_level("WARNING", logger="tsara.align.grid"):
+        build_output_grid(campaign, OutputGridConfig(freq="60s"))
+    assert "more rows than they have readings" not in caplog.text
+
+
+def test_a_readings_warning_lists_at_most_eight_columns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A canister carries dozens of VOCs on one sampling pattern; one warning, not dozens."""
+    starts = np.array([50], dtype=np.int64) * SECOND
+    fills = CellBounds(start_ns=starts, stop_ns=starts + 15 * SECOND)
+    many = {f"voc{k:02d}": np.array([float(k)]) for k in range(10)}
+    canister = make_stream(fills, many)
+    fast = make_stream(cells(0.0, 1.0, 120), {"ch4": np.arange(120.0)})
+    with caplog.at_level("WARNING", logger="tsara.align.grid"):
+        build_output_grid({"fast": fast, "iwas": canister}, OutputGridConfig(freq="60s"))
+    assert caplog.text.count("more rows than they have readings") == 1
+    assert "10 grid column(s)" in caplog.text
+    assert caplog.text.rstrip().endswith("...")
 
 
 def test_a_cell_with_no_data_stays_empty(campaign: dict[str, xr.Dataset]) -> None:

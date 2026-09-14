@@ -128,10 +128,10 @@ matrix, which inherently require one. Construction is binning-only, by
 overlap-weighted mean and no other statistic (§11.7), with per-cell
 propagated uncertainties and `n_source_<name>` counts carried alongside values. Grid cells carry CF boundaries like any
 other stream, and `cell_methods = "time: mean (interval: <native>)"` records
-the resolution of the data that went into them (§10.2). Validation requires the grid period to be
-≥ the **widest cell** across the streams, which is the post-Phase-3.5 form of
-"≥ the slowest stream's native period" (§1.3 makes the same correction for
-pairing); cells with no native samples are NaN with `n_source_<name> = 0`, never
+the resolution of the data that went into them (§10.2). Validation refuses a
+period so fine that one selected reading would cover **two grid cells' worth of
+time**, the post-Phase-3.5 form of "≥ the slowest stream's native period"
+(§11.7; §1.3 makes the same correction for pairing); cells with no native samples are NaN with `n_source_<name> = 0`, never
 interpolated. Config: `OutputGridConfig`
 (`tsara.config.analysis`) — deliberately not named "the grid" or paired with
 the aux-interpolation guard, since neither streams nor cross-species pairing
@@ -2465,24 +2465,48 @@ the wider-supported clock exists to prevent (§1.3).
 
 Both products of this phase already prevent it by choosing their target:
 `pair_species` pairs on the wider-supported member, and `build_output_grid`
-refuses a period shorter than the widest selected cell (§11.7). The primitive
+runs this same test against its cells before binning (§11.7). The primitive
 they share refuses it too, and has to, because it is public and is the
 documented route to a receptor-model matrix over a caller's own target cells.
 Neither `coverage` nor `n_source` would have flagged it: a replicated row
 reports coverage 1.0 and one contributing source cell, which is also what a
 legitimately sparse canister measurement reports.
 
-**The test is replication, not a comparison of widths**, and that choice is
-load-bearing. A width comparison needs a tolerance, because real instruments
-disagree about their own nominal rate — the 2026 archive's two Aeris analyzers
-measure 0.993 s and 1.024 s against a nominal 1 s — and a strict median-width
-rule would refuse binning one onto the other over a 3 % difference that
-replicates nothing. So TSARA counts, on the actual overlaps, how many target
-cells fall *entirely* inside a single source cell. Two or more is replication;
-jitter never reaches two however the medians compare. A grid half a period out
-of phase with an equal-width source is likewise not refused, because each
-source cell then straddles two targets and wholly contains neither — that case
-is lossy for a different reason and is warned about separately (§11.9.1).
+**The test is measured on the overlaps, not on a comparison of widths**, and
+that choice is load-bearing. A width comparison needs a tolerance, because real
+instruments disagree about their own nominal rate — the median cell widths of
+the 2026 archive's three Aeris analyzers are 0.992 s, 0.993 s and 1.024 s
+against a nominal 1 s — and a strict median-width rule refuses binning one onto
+another over a difference that replicates nothing.
+
+**The rule: a reading is replicated when the time it shares with the target
+cells adds up to at least twice the width of the widest target cell it
+touches** (`tsara.align.binning.measure_replication`).
+
+| source cells | target cells | two cells' worth? | outcome |
+|---|---|---|---|
+| 60 s | 1 s | sixty | refused |
+| 2 s, any phase | 1 s | two | refused |
+| 1.9 s | 1 s | no | allowed; the sharing is counted (§11.7) |
+| 1.023 s | 1 s | no | allowed |
+| 10 s, half a period out of phase | 10 s | no | allowed; lossy for another reason (§11.9.1) |
+
+**It replaced a rule with a phase hole.** Until the Phase-4 walkthrough the
+test counted target cells lying *wholly* inside one source cell and refused at
+two. It agreed with the table on every row but one: a perfectly regular 2 s
+record offset from a 1 s grid by 0.3 s or 0.5 s wholly contains only one 1 s
+cell, so it passed, and each of its readings fed two or three rows — while the
+same record exactly in phase was refused. No stream in the permitted archive
+reached it (the 2 s Wyoming Picarro sits exactly on whole seconds, and every
+2026 lag correction is a whole number of seconds), but a fractional
+`time_shift` would have. Twice a width is twice a width whatever the phase, so
+the rule that replaced it has no such case, and it still needs no tolerance:
+the sums are integer nanoseconds.
+
+Below that line a reading can still feed two rows — a 1.9 s cell on a 1 s grid,
+a 15 s canister fill across a minute boundary — and that is not refused but
+counted, in `tsara_pairing_readings` (§11.4.1) and `tsara_grid_readings`
+(§11.7), each with a warning when rows outnumber the readings behind them.
 
 The escape route for the legitimate case is the one that already exists: a
 smooth non-gas field wanted on a finer clock is *interpolated* under a gap
@@ -3093,13 +3117,25 @@ would make the block need editing every time that decision changed.
 
 #### The period rule
 
-**The grid period must be at least the widest cell among the *selected*
-variables.** A 60 s mean evaluated on 1 s cells is the same value repeated
-sixty times: resolution the instrument never had, and sixty points where there
-is one measurement. Every count downstream would then believe there were
-sixty. That is the prohibition the interval model exists to enforce (§10), so
-it is an error naming the offending variable and the smallest period that
-would work, not a warning.
+**A grid may not be so fine that one selected reading would cover two of its
+cells.** A 60 s mean evaluated on 1 s cells is the same value repeated sixty
+times: resolution the instrument never had, and sixty points where there is one
+measurement. Every count downstream would then believe there were sixty. That
+is the prohibition the interval model exists to enforce (§10), so it is an
+error naming the offending instrument and a period that would work — longer
+than half its widest reading — not a warning. The test is the binner's own
+(§11.2.1), run against the grid's actual cells inside the requested window
+before anything is binned, so the grid and the operation it calls cannot
+disagree about the same data.
+
+**It replaced a comparison of median widths**, found wanting in the Phase-4
+walkthrough: "the period must be at least the widest selected cell". On a real
+2026-01-19 LANL record the Aeris pico measures its cells at 1.023 s, so that
+rule refused a one-second grid and said one measurement would be repeated
+across several cells — while the binner accepted the same one-second cells
+with 2.6 % more occupied rows than readings, and the next round period the
+grid allowed was two seconds. The old rule also offered no protection the
+overlap rule lacks.
 
 Checked against the *selection* rather than against every stream the campaign
 contains, and that is a real lever rather than a formality. Measured on the
@@ -3107,14 +3143,9 @@ contains, and that is a real lever rather than a formality. Measured on the
 
 | request | outcome |
 |---|---|
-| 5 s over everything | refused — `iwas` has 14.7 s cells that day |
+| 5 s over everything | refused — `iwas` has fills of about 15 s that day |
 | 15 s over everything | 1301 cells |
 | 1 s, canisters excluded | 19 501 cells |
-
-Fifteen times the resolution, from the same archive, decided entirely by which
-columns the run needs. That refines §1.4's earlier "≥ the slowest stream's
-native period", which was written before cells existed and before it was clear
-that which variables go into a cube is the user's choice.
 
 The same run's 60 s matrix shows what the qualifying columns are for: the five
 continuous instruments come back 100 % filled at a median of 60 contributing
@@ -3122,6 +3153,61 @@ samples per cell, the PTR benzene 97.5 %, and the two canister species 11.3 %
 with a median of **zero**. A sparse instrument on a campaign grid is mostly
 absent, which is honest, and is exactly why a two-species ratio uses a pair
 clock (§11.4) rather than this product.
+
+#### Readings that land in more than one row
+
+What the period rule does not refuse, the grid records. A 15 s canister fill
+that crosses a minute boundary contributes to both minutes, and each row
+reports that fill's value, so the matrix holds one measurement in two rows and
+a receptor model treating rows as independent observations counts it twice.
+Measured over all ten 2024 drive days on a 60 s grid (iWAS fills with exact
+cells from `iWAS_Stop_UTC`): **68 of 261 fills** land in two rows, and **320
+rows** hold benzene from 261 fills. A fill crosses a boundary whenever it
+starts in the last fifteen seconds of a minute, so about a quarter do.
+
+Each gridded column therefore carries `tsara_grid_readings`, the number of
+distinct finite readings behind it, and one warning names the columns whose
+occupied rows outnumber their readings, worst first. One warning for the
+whole grid rather than one per column, because a canister's VOCs share a
+sampling pattern and would otherwise repeat the same sentence fifty times.
+Like the pairing count (§11.4.1) it is a ceiling on independent rows, not an
+estimate: readings shared at small weight between neighbouring rows lower the
+independent information without lowering the count.
+
+**How the rule and the record are checked.** The rule is pinned where it bites
+hardest: a 2 s record refused on a 1 s grid at phases 0, 0.3 s and 0.5 s
+(the case the old rule passed), a 1.9 s record allowed, mixed target widths
+measured against the widest touched, a zero-width target cell ignored, and on
+the grid a 1.023 s record accepted, a 60 s record refused at 30 s and accepted
+at 31 s, and a wide instrument outside the window constraining nothing. The
+record is pinned by a straddling fill (three rows, two readings, one warning),
+a masked reading left uncounted, and ten canister columns producing one
+warning that lists eight. Nine defects were injected — `>` for `>=` at exactly
+two widths, the narrowest touched target instead of the widest, the old
+whole-cell count, zero-width targets counted, the grid skipping its check,
+masked readings counted, a warning when rows merely equal readings, every
+column listed, and the widest-cell attribute taken as a median — and all nine
+were caught, after the first run caught seven: no test had a masked value in a
+gridded column, or cells of varying width, which are the only cases where
+those two defects are visible.
+
+**And on real data**, through the new code: the 2026-01-19 LANL pair now grids
+at one second, with `ch4_pico` warned as 17 517 rows from 17 069 readings and
+the ultra silent; the ten-day 60 s drive grid warns for benzene, 320 rows from
+261 readings.
+
+#### A uniform grid spans the gaps
+
+The grid runs from the first selected cell to the last, so a campaign of
+separate drives puts every hour between them into the matrix. Measured on the
+Picarro CO₂, CH₄ and MetNav wind direction of the ten 2024 drive days: a 60 s
+grid spans 29.5 days in 42 443 rows, 7.9 % of them holding any data; a 1 s grid
+spans the same 29.5 days in **2 546 521 rows, 92.1 % empty**, built in 1.5 s
+but holding 285 MB for three variables — about 95 MB per variable once its
+count, coverage and angular columns are included, so a few dozen VOCs is
+several gigabytes of mostly `nan`. For a receptor-model matrix, grid each drive
+with `start` and `end`; the uniform span is for the continuous state, which
+wants the gaps.
 
 #### Where the cells fall
 
@@ -3137,8 +3223,11 @@ outputs compared at all.
 | attribute | meaning |
 |---|---|
 | `tsara_grid_freq` | the period, as requested |
-| `tsara_grid_widest_source_cell_s` | the widest selected cell the period was validated against |
+| `tsara_grid_widest_source_cell_s` | the widest single selected cell, in seconds |
 | `tsara_grid_variables` | which variables were selected, instrument-qualified |
+
+and per variable, `tsara_grid_readings`: the distinct finite readings behind
+the column's occupied rows.
 
 The last is recorded because a reader cannot tell from the columns alone
 whether a variable is absent because it was excluded or because it had no
