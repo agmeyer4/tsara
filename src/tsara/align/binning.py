@@ -587,16 +587,34 @@ def _one_variable(
     attrs[BINNED_ATTR] = int(not already_here)
 
     if already_here:
+        # The companions below must be exactly what the binned path would
+        # produce for one source cell covering its target, so that a product's
+        # columns and their meaning do not depend on whether a stream happened
+        # to share the target's cells. A masked value contributes nothing,
+        # there as here: no count, no coverage, no quality number.
+        present = np.isfinite(values)
         columns: dict[str, tuple[np.ndarray, dict[str, object]]] = {column: (values, attrs)}
-        n_cells = len(target)
         columns[n_source_name(column)] = (
-            np.ones(n_cells, dtype=np.int64),
+            present.astype(np.int64),
             _count_attrs(column, native=True),
         )
         columns[coverage_name(column)] = (
-            np.ones(n_cells, dtype=np.float64),
+            present.astype(np.float64),
             _coverage_attrs(column, native=True),
         )
+        if circular:
+            # One reading agrees with itself: R is 1 and the dispersion 0,
+            # which is what vector-averaging that single reading returns.
+            # No sigma, matching the binned path (§11.5).
+            columns[f"{column}{RESULTANT_LENGTH_SUFFIX}"] = (
+                np.where(present, 1.0, np.nan),
+                _resultant_attrs(column),
+            )
+            columns[f"{column}{DISPERSION_SUFFIX}"] = (
+                np.where(present, 0.0, np.nan),
+                _dispersion_attrs(column, str(attrs.get("units", "degrees"))),
+            )
+            return columns, stream[variable].attrs.get(CELL_METHODS_ATTR)
         for component, sigma_name in (("random", sigma_rand_name), ("systematic", sigma_sys_name)):
             resolved = _sigma_on_cells(
                 stream, variable, sigma_name(variable), median_width_s(source), propagation_form
@@ -642,23 +660,34 @@ def _bin_circular(
         coverage_name(column): (result.coverage, _coverage_attrs(column, native=False)),
         f"{column}{RESULTANT_LENGTH_SUFFIX}": (
             result.resultant_length,
-            {
-                "units": "1",
-                "description": (
-                    f"Mean resultant length of {column} per cell: 1 when every sample "
-                    "agreed, 0 when they cancelled and there is no direction."
-                ),
-            },
+            _resultant_attrs(column),
         ),
         f"{column}{DISPERSION_SUFFIX}": (
             result.dispersion_deg,
-            {
-                "units": units,
-                "description": (
-                    f"Exact circular standard deviation of {column} per cell, "
-                    "unbounded by construction (METHODS §11.5)."
-                ),
-            },
+            _dispersion_attrs(column, units),
+        ),
+    }
+
+
+def _resultant_attrs(column: str) -> dict[str, object]:
+    """Return attrs for a mean resultant length."""
+    return {
+        "units": "1",
+        "description": (
+            f"Mean resultant length of {column} per cell: 1 when every contributing "
+            "reading agreed, 0 when they cancelled and there is no direction. Biased "
+            "high when few readings contribute; read it with the count (METHODS §11.5)."
+        ),
+    }
+
+
+def _dispersion_attrs(column: str, units: str) -> dict[str, object]:
+    """Return attrs for an exact circular standard deviation."""
+    return {
+        "units": units,
+        "description": (
+            f"Exact circular standard deviation of {column} per cell, "
+            "unbounded by construction (METHODS §11.5)."
         ),
     }
 
@@ -747,7 +776,11 @@ def _count_attrs(column: str, *, native: bool) -> dict[str, object]:
     return {
         "description": (
             f"Source cells of {column} contributing to each target cell."
-            + (" One by construction: already on this support." if native else "")
+            + (
+                " Already on this support: one where a value is present, zero where masked."
+                if native
+                else ""
+            )
         ),
         "units": "1",
     }
@@ -758,7 +791,11 @@ def _coverage_attrs(column: str, *, native: bool) -> dict[str, object]:
     return {
         "description": (
             f"Fraction of each target cell covered by contributing {column} data."
-            + (" One by construction: already on this support." if native else "")
+            + (
+                " Already on this support: one where a value is present, zero where masked."
+                if native
+                else ""
+            )
         ),
         "units": "1",
     }

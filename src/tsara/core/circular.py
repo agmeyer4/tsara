@@ -36,6 +36,25 @@ the same drive data the two agree to 0.16° in the median cell and diverge by
 up to 66.5° — entirely in the cells where the direction is tumbling and the
 unbounded answer is the correct one.
 
+Two things *R* does not say
+----------------------------
+**How many readings it rests on.** *R* is biased high for a small sample:
+uniformly random directions, which have no mean at all, average *R* = 0.64
+from two readings, 0.40 from five and 0.23 from fifteen, and the dispersion
+derived from it is understated to match (a true 40° spread reports about 34°
+from five readings). By sixty readings the bias is a degree. Nothing here
+corrects it, because a correction assumes a distribution; the contributing
+count travels beside every binned direction so a reader can see what *R*
+rests on (``docs/METHODS.md`` §11.5).
+
+**How hard the wind blew.** These are *unit*-vector means: every reading
+counts equally whatever its speed. The other established convention weights
+each reading by speed and reports the direction the air moved in on average.
+Measured on a 2024 drive the two differ by a median 2.2° per minute and by
+more when the wind is light and variable. Unit vectors are used because this
+module knows only angles; a speed-weighted direction is what binning the wind
+components ``u`` and ``v`` as ordinary scalars gives.
+
 Why this earns its own module
 ------------------------------
 The overlap weighting must be *identical* to the scalar case, or the wind

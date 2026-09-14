@@ -1414,6 +1414,7 @@ Fixed, and each step depends on the previous one:
 | Step | Why here |
 |---|---|
 | convert units | so everything downstream reads canonical numbers |
+| wrap a `circular` variable into [0, 360) | a direction's canonical value is on one turn |
 | apply QA/QC | bounds are written in the units the author thinks in |
 | resolve uncertainty | `absolute` is declared in canonical units (§2.2) |
 
@@ -1422,6 +1423,22 @@ example converts ppm→ppb and then bounds in ppb, so masking before
 conversion would compare ppb bounds against ppm numbers and reject the whole
 record. `flag` reads a separate instrument status column, which is never a
 converted quantity.
+
+**The wrap is a step of its own because a conversion can carry a direction
+across north.** The commonest conversion for a direction is an offset — a
+magnetic bearing to a true one, +10.3° at Salt Lake City — and the most
+natural QA/QC rule for a direction is `range: [0, 360]`. Without the wrap,
+352° becomes 362.3° and the range rule masks it, along with every other
+reading within 10.3° west of north: a whole sector of the wind rose deleted,
+silently, rather than a random fraction of the record. The permitted 2026
+archive carries magnetic and true directions side by side
+(`Wind Direction (Deg Mag)` beside `wind_dir_true` on the Wyoming van,
+`mag_dir_deg` and `mag_course_deg` on the LANL instruments), so the conversion
+is one a manifest will plausibly declare. Found in the Phase-4 walkthrough;
+before it, ingestion wrapped nothing, and a logger's `-5` or `365` also
+reached the stream unwrapped. The wrap is exact and changes no direction, so
+it is a consequence of the declaration rather than a model, and it applies
+only to variables declaring `circular: true`.
 
 Rules **mask rather than delete**. Rows are the instrument's clock, and a
 rolling window that closes over a removed sample computes a different answer
@@ -2418,8 +2435,16 @@ to this function with a chosen set of columns.
 resultant length and dispersion instead of a sigma. A stream whose cells
 already *are* the target passes through untouched — tested on the cells, not
 on the instrument name, because averaging a cell onto itself is the identity
-mathematically and not in floating point. And a target cell with no
-contributing data stays `nan`: gases are binned, never interpolated (§1.2).
+mathematically and not in floating point. Its *values* are untouched; its
+companion columns are not a shortcut, and are exactly what the general path
+would produce for one source cell covering its target — a count and coverage
+of 1 where a value is present and 0 where it is masked, and for a direction a
+resultant length of 1 and a dispersion of 0 (§11.5). Before the Phase-4
+walkthrough the pass-through stamped a count and coverage of 1 on masked rows
+too, and gave a direction no quality columns, so a product's columns and their
+meaning depended on whether a stream happened to share the target's cells. And
+a target cell with no contributing data stays `nan`: gases are binned, never
+interpolated (§1.2).
 
 **Column names.** A canonical name is kept as it is when only one selected
 stream carries it. When two do — a campaign comparing two analyzers — both are
@@ -2771,6 +2796,56 @@ direction is usually not a well-determined quantity:
 Part of that spread is the van turning rather than the atmosphere — a
 documented limit, not a correction TSARA applies.
 
+**How far to trust R depends on how many readings made it.** *R* is a
+statistic of a sample and is biased high when the sample is small: even
+directions carrying no information at all cannot average to an *R* near zero
+from a handful of readings, and the dispersion derived from *R* is understated
+correspondingly. Measured, each figure the median (dispersion) or mean (*R*)
+over 3000 draws:
+
+| contributing readings *N* | mean *R*, directions uniformly random (truth 0) | reported dispersion, wrapped normal of true spread 40° |
+|---|---|---|
+| 2 | 0.64 | 19° |
+| 5 | 0.40 | 34° |
+| 10 | 0.28 | 37° |
+| 15 | 0.23 | 38° |
+| 60 | 0.11 | 40° |
+
+For uniformly random directions the mean *R* tracks 1/√*N*. At the 60 readings
+of a minute of 1 Hz wind the bias is a degree; at the ten of a 10 s analyzer
+cell or the fifteen of a canister fill it is not negligible, and a cell with
+two readings says almost nothing. TSARA does not correct for it: a
+bias-corrected *R* assumes a distribution, and `n_source_<name>` travels with
+every binned direction so the reader can see what the *R* rests on. The same
+is true of a cell with one contributing reading, whose *R* is 1 by
+construction — agreement of that reading with itself, not a steady wind.
+
+**Unit vectors, not speed-weighted vectors.** Every reading counts equally
+whatever the wind speed. The other established convention weights each
+reading by its speed, and so reports the direction the air moved in on
+average rather than the direction the vane usually pointed. Measured on 325
+minute cells of the 2024-07-18 drive (`WindDir_calc_deg` and
+`WindSpd_calc_m_s` from the mobile-lab MetNav file, cells with at least 30
+readings), the two differ by a median 2.2°, by more than 8.4° in a tenth of
+cells, by more than 20° in 1.5 %, and by 54.6° at worst; the difference grows as
+the wind becomes variable (median 1.2° where *R* > 0.9, 8.2° where
+*R* < 0.5). TSARA uses unit vectors because the join is variable-agnostic
+(§11.2): speed-weighting would require the binner to know which speed
+variable belongs to which direction, and a direction binned alone is the
+case it must handle. A speed-weighted direction is recoverable by a caller
+who bins the wind components `u` and `v` as ordinary scalars.
+
+**The pass-through path carries the same columns.** A direction whose stream
+already sits on the target cells is not re-averaged (§11.2), but it still
+gains `<name>_resultant_length` (1 where a reading is present) and
+`<name>_dispersion` (0), and carries no sigma, exactly as the general path
+produces for one contributing reading. Until the Phase-4 walkthrough it gained
+neither and kept its sigma, so a product's columns depended on whether a
+stream happened to share the target's cells: the 2024 ground MetNav's 60 s
+`WindDir_calc_deg` on a 60 s grid aligned to its cells — which the grid's own
+phase warning recommends (§11.9.1) — had no *R*, and one grid period later it
+did.
+
 **No scientific threshold is applied.** A direction with *R* = 0.001 is
 meaningless and is reported anyway, beside the *R* that says so; picking a
 cut-off would put a magic number in the library where the judgement belongs
@@ -2806,7 +2881,14 @@ an independent O(N·M) reimplementation written from the definition, agreeing
 with the vectorized path to 1e-12; and on real data, the identity invariant —
 binning a record onto its own cells returned it to within **5.7e-14 degrees**
 over 19 470 samples, and the table above reproduces an independent script's
-numbers exactly.
+numbers exactly. The pass-through path is compared with the general path on
+the same rows (the full cell array takes the pass-through, the same cells less
+one do not), column by column; the ingestion wrap is pinned by the
+magnetic-to-true case above. Eight defects were injected into those two
+changes (no wrap, the wrap after QA/QC, the wrap applied to every variable, a
+masked pass-through value counted or covered, the old pass-through columns,
+*R* of 1 where a reading is masked, the wrong single-reading dispersion) and
+all eight were caught.
 
 ### 11.6 Auxiliary fields, and the only interpolation TSARA performs
 

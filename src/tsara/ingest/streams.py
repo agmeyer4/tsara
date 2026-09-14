@@ -51,6 +51,7 @@ import xarray as xr
 
 from tsara import __version__
 from tsara.config.manifest import MobilePlatform, StationaryPlatform
+from tsara.core.circular import wrap_degrees
 from tsara.core.naming import (
     ALTITUDE_COORD,
     LATITUDE_COORD,
@@ -262,10 +263,18 @@ def _add_variable(
     # declared `absolute` noise floor are both interpreted in canonical
     # units (see tsara.ingest.qaqc and METHODS §2.2).
     raw = pd.to_numeric(frame[variable.column], errors="coerce")
-    converted = pd.Series(
-        convert_values(np.asarray(raw, dtype="float64"), variable.convert),
-        index=frame.index,
-    )
+    values = convert_values(np.asarray(raw, dtype="float64"), variable.convert)
+    if variable.circular:
+        # A direction is wrapped back onto one turn BEFORE QA/QC, for the same
+        # reason conversion comes first: a range bound is a statement about
+        # canonical values. The commonest conversion for a direction is an
+        # offset -- magnetic to true bearing -- and without the wrap it pushes
+        # every reading within that offset of north past 360, where the
+        # natural rule `range: [0, 360]` masks a whole sector of the wind rose
+        # rather than a random fraction of it. The wrap is exact and changes
+        # no direction, so it is a declaration's consequence, not a model.
+        values = wrap_degrees(values)
+    converted = pd.Series(values, index=frame.index)
     masked, reports = apply_qaqc(converted, variable.qaqc, frame, variable=canonical, path=label)
     resolved = resolve_uncertainty(
         masked,

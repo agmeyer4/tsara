@@ -225,6 +225,70 @@ def test_an_angular_variable_gets_no_sigma_column() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The pass-through path must be the general path, only faster
+# ---------------------------------------------------------------------------
+#
+# A stream whose cells already are the target skips the averaging, because
+# averaging a cell onto itself is the identity mathematically and not in
+# floating point. What it must NOT skip is meaning: its companion columns have
+# to be the ones the general path would produce, or a product's columns depend
+# on whether a stream happened to share the target's cells -- which a sweep
+# over grid period changes. Both tests below compare the two paths on the same
+# rows: the full cell array takes the pass-through, and the same cells minus
+# the last one are not identical arrays, so they take the general path.
+
+
+def test_the_pass_through_path_counts_a_masked_value_as_nothing() -> None:
+    """A masked value contributes no count and no coverage on either path."""
+    values = np.array([1.0, np.nan, 3.0, np.nan, 5.0, 6.0])
+    stream = make_stream(0.0, 1.0, 6, {"ch4": values})
+    native = bin_streams_onto_cells({"a": stream}, cells(0.0, 1.0, 6))
+    general = bin_streams_onto_cells({"a": stream}, cells(0.0, 1.0, 5))
+    assert native["ch4"].attrs["tsara_binned"] == 0
+    assert general["ch4"].attrs["tsara_binned"] == 1
+    assert native["n_source_ch4"].values.tolist() == [1, 0, 1, 0, 1, 1]
+    assert native["n_source_ch4"].values[:5].tolist() == general["n_source_ch4"].values.tolist()
+    assert native["coverage_ch4"].values[:5] == pytest.approx(general["coverage_ch4"].values)
+
+
+def test_an_angle_on_its_own_cells_carries_the_same_columns_as_a_binned_one() -> None:
+    """The 60 s ground wind on a 60 s grid aligned to it is the real case.
+
+    Before, the pass-through path gave that wind no resultant length or
+    dispersion and kept its sigma, while one grid period longer it had both and
+    no sigma.
+    """
+    attrs: dict[str, dict[str, object]] = {"wind_dir": {"units": "degrees", "circular": 1}}
+    readings = np.array([350.0, np.nan, 10.0, 90.0, 180.0, 270.0])
+    met = make_stream(
+        0.0,
+        1.0,
+        6,
+        {"wind_dir": readings, sigma_rand_name("wind_dir"): np.full(6, 5.0)},
+        attrs=attrs,
+    )
+    native = bin_streams_onto_cells({"met": met}, cells(0.0, 1.0, 6), ["wind_dir"])
+    general = bin_streams_onto_cells({"met": met}, cells(0.0, 1.0, 5), ["wind_dir"])
+    assert sorted(map(str, native.data_vars)) == sorted(map(str, general.data_vars))
+    assert sigma_rand_name("wind_dir") not in native.data_vars
+    # The dispersion is compared more loosely than the rest, for a float64
+    # reason and not a logical one: the general path's hypot of one unit vector
+    # can land one ULP below R = 1, and sqrt(-2 ln R) turns 1e-16 into 8.5e-7
+    # degrees. The pass-through reports exactly 0, which is the true value.
+    for column, tolerance in (
+        ("n_source_wind_dir", 0.0),
+        ("coverage_wind_dir", 1e-12),
+        ("wind_dir_resultant_length", 1e-12),
+        ("wind_dir_dispersion", 1e-5),
+    ):
+        np.testing.assert_allclose(
+            native[column].values[:5], general[column].values, atol=tolerance, err_msg=column
+        )
+    assert np.isnan(native["wind_dir_resultant_length"].values[1])
+    assert native["wind_dir"].values[:5] == pytest.approx(general["wind_dir"].values, nan_ok=True)
+
+
+# ---------------------------------------------------------------------------
 # Name collisions
 # ---------------------------------------------------------------------------
 
