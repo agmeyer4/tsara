@@ -2418,6 +2418,17 @@ So the finite-*N* form is not merely the tidier algebra: it is the one that
 matches what happens. The last two rows are the cost of the alternatives, and
 the naive √N row is why §10.8 refuses to apply it when no τ is declared.
 
+**The archive numbers re-run from the repository.** Real data has no answer
+key, so the real-data results in this section are evidence of a different kind:
+a loop reimplementation agreeing with TSARA on the files, and numbers that can
+be measured again. `examples/notebooks/04b_alignment_real_data.ipynb` does the
+second. It reads the permitted archive through manifests, runs this section's
+operations, and ends in a ledger setting 83 numbers from §9.2.3 and §11.4–§11.7.1
+beside the values printed here; at the close of the Phase-4 walkthrough all 83
+agreed. It is committed without outputs and needs `TSARA_ARCHIVE`. Not re-run
+there: the archive-wide census in §11.4.1, the Yamartino comparison in §11.5,
+the midpoint-against-mean table in §11.6, and the compression timings in §11.7.
+
 ### 11.2 The joining operation
 
 Everything TSARA does with more than one clock is one operation: **every value
@@ -3004,9 +3015,12 @@ since most cells contain no fix.
 a platform may be allowed to stray from the straight chord between two fixes.
 Measured on real driving: the 1 Hz MetNav track of all ten 2024 mobile-lab
 drive days, scored only while the van was moving (ground speed above 2 m/s;
-median 13.0 m/s, 90th percentile 18.7), thinned to one fix every *k* seconds,
-interpolated linearly, and compared with the removed fixes that sit strictly
-inside a thinned bracket of exactly *k* seconds:
+median 13.0 m/s, 90th percentile 18.7), thinned drive by drive to every *k*-th
+fix with a finite position, interpolated linearly, and compared with the removed
+fixes that sit strictly inside a thinned bracket of exactly *k* seconds. (The
+thinning counts finite fixes, not seconds of clock: keeping one fix per *k*
+seconds from the record's start instead scores 0.5–3.5 % more positions and
+moves the p99 and maximum by up to 5 m.)
 
 | one fix every | positions scored | median error | p90 | p99 | max |
 |---|---|---|---|---|---|

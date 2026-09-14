@@ -205,8 +205,8 @@ tests/               pytest suite, 100% line + branch coverage enforced
 
 ## Notebooks
 
-All three are committed with their outputs, so they read on GitHub without being
-run, and none needs any real data:
+The four walkthroughs are committed with their outputs, so they read on GitHub
+without being run, and none needs any real data:
 
 - [`01_synthetic_data_walkthrough.ipynb`](examples/notebooks/01_synthetic_data_walkthrough.ipynb)
   — what the generator makes, and what "ground truth" means for error as well as
@@ -218,6 +218,20 @@ run, and none needs any real data:
   — why a value is not an instant: cells and CF bounds, what a missing label
   costs in ppb, duty-cycled samplers, the provenance ladder, and binning one
   stream onto another's cells.
+- [`04_alignment_walkthrough.ipynb`](examples/notebooks/04_alignment_walkthrough.ipynb)
+  — combining measurements without inventing any: overlap-weighted binning,
+  uncertainty checked against Monte Carlo, pairing and its clock, circular
+  statistics, the one interpolation and its cost, and the campaign grid.
+
+One companion runs on the real campaign archive instead, and is therefore
+committed **without** outputs:
+
+- [`04b_alignment_real_data.ipynb`](examples/notebooks/04b_alignment_real_data.ipynb)
+  — notebook 04's operations on the 2024 mobile-lab drives and the 2026 van,
+  ending in a ledger that re-measures every archive number `docs/METHODS.md` §11
+  quotes. Set `TSARA_ARCHIVE` to the directory holding the archive's `2024/` and
+  `2026/` trees before starting Jupyter; without it the first cell stops and
+  says so.
 
 ## Development
 
