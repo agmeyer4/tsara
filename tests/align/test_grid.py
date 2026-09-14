@@ -9,6 +9,7 @@ downstream then believes there were several.
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -437,3 +438,69 @@ def test_saving_a_grid_whose_bounds_were_destroyed_is_refused(
     broken = grid.drop_vars("time_bnds")
     with pytest.raises(Exception, match="bounds"):
         save_grid(broken, tmp_path / "bundle")
+
+
+def test_saving_another_stage_s_product_as_a_grid_is_refused(
+    tmp_path: Path, campaign: dict[str, xr.Dataset]
+) -> None:
+    """What save_grid writes, load_grid must read.
+
+    A paired product is written with `to_netcdf`. Before this was refused,
+    save_grid wrote it as `grid.nc` without complaint and load_grid then
+    refused the file, so the mistake surfaced only when someone loaded it.
+    """
+    from tsara.align import pair_species
+
+    paired = pair_species(campaign, "ch4", "co2").dataset
+    with pytest.raises(TsaraBundleError, match="tsara_stage is 'paired'"):
+        save_grid(paired, tmp_path / "bundle")
+    assert not (tmp_path / "bundle").exists()
+
+
+def sparse_grid() -> xr.Dataset:
+    """A one-second grid that is mostly empty, like a campaign of separate drives."""
+    early = make_stream(cells(0.0, 1.0, 600), {"ch4": np.linspace(1900.0, 2100.0, 600)})
+    late = make_stream(cells(20_000.0, 1.0, 600), {"co2": np.linspace(420.0, 440.0, 600)})
+    return build_output_grid({"a": early, "b": late}, OutputGridConfig(freq="1s"))
+
+
+def test_compression_shrinks_a_sparse_grid_and_changes_no_value(tmp_path: Path) -> None:
+    grid = sparse_grid()
+    plain = save_grid(grid, tmp_path / "plain")
+    small = save_grid(grid, tmp_path / "small", compression=4)
+    assert small.stat().st_size < plain.stat().st_size / 3
+    back = load_grid(tmp_path / "small")
+    for name in grid.data_vars:
+        assert np.array_equal(grid[name].values, back[name].values, equal_nan=True), name
+    assert np.array_equal(grid["time_bnds"].values, back["time_bnds"].values)
+
+
+def test_compression_keeps_the_pinned_time_encoding(tmp_path: Path) -> None:
+    """Compression is merged into the time axis's encoding, never replaces it.
+
+    Replacing it drops the pinned units, and xarray then chooses its own: in the
+    walkthrough that wrote `time` as seconds since 00:00:00.5 and its bounds as
+    seconds since 00:00:00, two epochs for one axis, with a CF warning. Values
+    still round-trip on whole-second cells, which is why only the units show it.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        written = save_grid(sparse_grid(), tmp_path / "bundle", compression=4)
+    with xr.open_dataset(written, engine="netcdf4", decode_times=False) as raw:
+        assert raw["time"].attrs["units"] == "nanoseconds since 1970-01-01"
+        assert raw["time"].encoding.get("zlib") is True
+
+
+def test_the_default_writes_uncompressed(tmp_path: Path) -> None:
+    written = save_grid(sparse_grid(), tmp_path / "bundle")
+    with xr.open_dataset(written, engine="netcdf4") as opened:
+        assert not opened["ch4"].encoding.get("zlib", False)
+
+
+@pytest.mark.parametrize("level", [0, 10, True, 4.0, "4"])
+def test_a_compression_level_outside_one_to_nine_is_refused(
+    tmp_path: Path, level: object, campaign: dict[str, xr.Dataset]
+) -> None:
+    grid = build_output_grid(campaign, OutputGridConfig(freq="60s"))
+    with pytest.raises(TsaraBundleError, match="zlib level from 1 to 9"):
+        save_grid(grid, tmp_path / "bundle", compression=level)  # type: ignore[arg-type]

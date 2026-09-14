@@ -35,7 +35,7 @@ __all__ = ["load_grid", "save_grid"]
 GRID_STAGE = "gridded"
 
 
-def save_grid(grid: xr.Dataset, path: str | Path) -> Path:
+def save_grid(grid: xr.Dataset, path: str | Path, *, compression: int | None = None) -> Path:
     """Write a gridded product into a bundle directory.
 
     Parameters
@@ -44,6 +44,15 @@ def save_grid(grid: xr.Dataset, path: str | Path) -> Path:
         The product of :func:`~tsara.align.grid.build_output_grid`.
     path : str or pathlib.Path
         Bundle directory. Created if absent; an existing grid is replaced.
+    compression : int, optional
+        zlib level, 1 (fastest) to 9 (smallest), applied to every array in
+        the file. ``None`` (the default) writes uncompressed, which is
+        fastest to write and read. Worth it for a sparse grid: a one-second
+        grid over the ten 2024 drive days is 92 % empty and shrinks from
+        285 MB to 3.7 MB at level 4, writing in 3.0 s instead of 1.5 s and
+        loading in 1.1 s instead of 0.3 s; level 9 saves little more for three
+        times the write (``docs/METHODS.md`` §11.7). Reading needs nothing
+        different; netCDF decompresses transparently.
 
     Returns
     -------
@@ -53,9 +62,30 @@ def save_grid(grid: xr.Dataset, path: str | Path) -> Path:
     Raises
     ------
     TsaraBundleError
-        If ``path`` exists and is not a directory, or the grid has lost its
-        cell boundaries.
+        If the dataset is not a gridded product, ``path`` exists and is not a
+        directory, the grid has lost its cell boundaries, or ``compression``
+        is not a level from 1 to 9.
     """
+    stage = grid.attrs.get("tsara_stage")
+    if stage != GRID_STAGE:
+        # Refused here for the same reason `load_grid` refuses it there: a
+        # file this function writes must be one that function reads. A paired
+        # product is an ordinary self-describing Dataset and is saved with
+        # `to_netcdf` (METHODS §11.4); written as `grid.nc` it would sit in a
+        # bundle looking like the grid and fail only when someone loaded it.
+        raise TsaraBundleError(
+            f"save_grid writes gridded products, and this dataset's tsara_stage is "
+            f"'{stage}'. Build one with build_output_grid, or write this product "
+            "with to_netcdf."
+        )
+    if compression is not None and (
+        isinstance(compression, bool)
+        or not isinstance(compression, int)
+        or not 1 <= compression <= 9
+    ):
+        raise TsaraBundleError(
+            f"compression must be a zlib level from 1 to 9, or None for none; got {compression!r}."
+        )
     bundle = Path(path)
     if bundle.exists() and not bundle.is_dir():
         raise TsaraBundleError(f"Bundle path '{bundle}' exists and is not a directory.")
@@ -67,7 +97,21 @@ def save_grid(grid: xr.Dataset, path: str | Path) -> Path:
     check_bounds_intact(grid)
     pin_time_encoding(grid)
     target = bundle / BUNDLE_GRID_FILE
-    grid.to_netcdf(target, engine="netcdf4")
+    # Every array with a dimension, the time axis and its bounds included --
+    # on a sparse grid a regular time axis is the most compressible thing in
+    # the file. Merged into each variable's existing encoding rather than
+    # replacing it, so the units `pin_time_encoding` just set still apply and
+    # the time axis still round-trips exactly.
+    encoding = (
+        {
+            str(name): {**variable.encoding, "zlib": True, "complevel": compression}
+            for name, variable in grid.variables.items()
+            if variable.dims
+        }
+        if compression is not None
+        else None
+    )
+    grid.to_netcdf(target, engine="netcdf4", encoding=encoding)
     logger.info(
         "Wrote grid to %s (%d cells, %d variables).",
         target,

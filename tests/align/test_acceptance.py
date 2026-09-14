@@ -1,8 +1,12 @@
 """End-to-end acceptance tests for Phase 4, against generated ground truth.
 
-Everything else in the suite checks a piece. These check the whole path, and
-they check it against numbers the generator *knows* rather than against
-another implementation of the same idea:
+Everything else in the suite checks a piece. These check the whole alignment
+path -- generated streams through binning, pairing and the grid -- and they
+check it against numbers the generator *knows* rather than against another
+implementation of the same idea. They do not read files: the streams come from
+the generator, so an error only ingestion can make (a timestamp label misread,
+say) is outside their reach and is caught by the round-trip harness and the
+support tests instead (``docs/METHODS.md`` §11.9). What they measure is:
 
 * a known ratio between two species measured on different clocks must survive
   pairing exactly, which it can only do if both members were averaged over the
@@ -140,9 +144,10 @@ def test_a_known_ratio_survives_pairing_across_a_sixty_fold_rate_difference() ->
     One source drives two species. One is measured every second, the other
     once a minute. If pairing averages both members over the same air, the
     ratio of the paired enhancements is the ratio the source was given. If it
-    averages them over *different* air -- an off-by-one cell, a label read as
-    a midpoint when it was a start, an overlap weight applied to the wrong
-    partner -- the ratio drifts, and nothing else in the suite would say so.
+    averages them over *different* air -- one stream placed out of time, an
+    off-by-one cell, an overlap weight applied to the wrong partner -- the ratio
+    drifts. How far a stream must be out of place before this notices is
+    pinned by the next test.
 
     The quantity asserted is the mass-weighted ratio, which is what a
     regression slope estimates: the total tracer over the total methane. The
@@ -154,6 +159,31 @@ def test_a_known_ratio_survives_pairing_across_a_sixty_fold_rate_difference() ->
     assert paired.clock == "slow"
     assert paired.n_pairs > 100
     assert y.sum() / x.sum() == pytest.approx(TRUE_RATIO, rel=1e-6)
+
+
+def test_the_ratio_check_notices_a_stream_a_tenth_of_a_second_out_of_place() -> None:
+    """A pass is only worth something if the check fails on the error it is for.
+
+    Moving the fast stream 0.1 s later -- a fraction of a percent of the slow
+    instrument's minute -- already puts both scores past the thresholds the
+    tests above use: measured, the mass-weighted ratio is off by 9.1e-6
+    against a 1e-6 threshold, and the per-cell median by 3.4e-4 against
+    1e-4. Both errors grow in proportion to the shift (METHODS §11.9).
+    """
+    dataset = generate(two_clock_campaign(noisy=False))
+    fast = dataset.streams["fast"]
+    late = np.timedelta64(100_000_000, "ns")
+    moved = fast.assign_coords(
+        time=fast["time"].values + late,
+        time_bnds=(("time", "nv"), fast["time_bnds"].values + late),
+    )
+    streams = {**dataset.streams, "fast": moved}
+    paired = pair_species(streams, "tracer", "ch4", min_coverage=1.0)
+    y = paired.dataset["tracer"].values
+    x = paired.dataset["ch4"].values - 1900.0
+    keep = np.isfinite(x) & np.isfinite(y) & (x > 1.0)
+    assert abs((y[keep].sum() / x[keep].sum()) / TRUE_RATIO - 1.0) > 1e-6
+    assert np.median(np.abs((y[keep] / x[keep]) / TRUE_RATIO - 1.0)) > 1e-4
 
 
 def test_the_per_cell_ratio_is_right_too_and_its_scatter_is_the_generator_s() -> None:

@@ -3243,8 +3243,41 @@ writer never said. The grid carries its own provenance in its attributes
 instead, which is what §1 asks of every saved output anyway — and loading
 checks `tsara_stage`, because a stream and a grid are both netCDF files with a
 time axis and reading one as the other would produce a plausible object with
-the wrong meaning. Writing also refuses a grid whose bounds were destroyed
-upstream, rather than producing a product claiming cells it does not have.
+the wrong meaning. Writing checks the same label: until the Phase-4
+walkthrough `save_grid` wrote any dataset, so a paired product saved through it
+became a `grid.nc` that `load_grid` then refused, and the mistake surfaced only
+when someone loaded it. Writing also refuses a grid whose bounds were
+destroyed upstream, rather than producing a product claiming cells it does not
+have.
+
+**Compression is opt-in** (`save_grid(..., compression=1..9)`, zlib on every
+array including the time axis and its bounds, merged into their pinned
+encoding so they still round-trip exactly). Measured on the one-second grid
+over the ten 2024 drive days (three variables, 2 546 521 rows, 92 % empty), with
+every value identical after reload:
+
+| level | file | write | load |
+|---|---|---|---|
+| none (default) | 285.2 MB | 1.5 s | 0.3 s |
+| 1 | 5.5 MB | 2.7 s | 0.9 s |
+| 4 | 3.7 MB | 3.0 s | 1.1 s |
+| 9 | 3.3 MB | 10.4 s | 1.1 s |
+
+The time axis matters: compressing only the data variables left the same file
+at 64 MB, because a regular time axis and its bounds, 24 bytes per row, are
+the bulk of a sparse grid and the most compressible arrays in it. The default
+stays uncompressed because it is fastest for the dense grids a single drive
+produces.
+
+Both changes are pinned, and six defects were injected against them: no stage
+check, compression of data variables only, the pinned time encoding replaced
+instead of merged, a boolean accepted as a level, level zero accepted, and
+compression on by default. All six were caught after a first run caught five.
+The miss was the encoding replacement, which leaves every *value* intact on
+whole-second cells: xarray then writes `time` as seconds since 00:00:00.5 and
+its bounds as seconds since 00:00:00, two epochs for one axis, with a CF
+warning. The test now reads the stored units and treats that warning as an
+error.
 
 #### 11.7.1 Why there is no median binning option
 
@@ -3305,7 +3338,7 @@ binned to 60 s cells (358 cells, so the scatter itself is good to about 4 %):
 
 | declared τ | form | observed scatter | reported σ |
 |---|---|---|---|
-| none | `independent` | 0.677 | 0.646 |
+| none | `independent` | 0.677 | 0.645 |
 | 30 s | `ar1_neff` | 4.018 | 3.768 |
 | 30 s | `ar1_asymptotic` | 4.018 | 5.000 |
 
@@ -3317,7 +3350,7 @@ measurement's own precision. The model is not merely solved correctly; it is
 approximately right about this error.
 
 **The naive rule is not wrong at the margin, it is wrong by a factor of six.**
-Independent averaging would have reported 0.646 ppb for the same cells. A
+Independent averaging would have reported 0.645 ppb for the same cells. A
 confidence interval built on it would be six times too narrow, which is why
 §10.8 refuses to apply √N when no τ is declared rather than applying it
 hopefully.
@@ -3373,9 +3406,9 @@ fills over how many days.
 One source drives two species. One is measured every second, the other once a
 minute, and the ratio between them is fixed and known. If pairing averages
 both members over the same air, that ratio comes back; if it averages them
-over *different* air — an off-by-one cell, a label read as a midpoint when it
-was a start, an overlap weight applied to the wrong partner — the ratio
-drifts, and nothing else in the suite would say so.
+over *different* air — one stream placed out of time, an off-by-one cell, an
+overlap weight applied to the wrong partner — the ratio drifts, and nothing
+else in the suite would say so.
 
 | quantity | result |
 |---|---|
@@ -3394,6 +3427,45 @@ partly covered — the fast instrument's record begins inside the slow
 instrument's first cell — and it is the only cell whose ratio is wrong, by
 10 %. The correlation between one-minus-coverage and absolute ratio error is
 **1.000**. The number that qualifies a pair does what it claims.
+
+**How small an error it sees.** A pass is only evidence if the check would fail
+on the error it exists for, so the most important one was injected directly:
+the fast stream moved later by a known amount, both scores recomputed with the
+tests' own filtering (fully covered pairs, enhancement above 1 ppb).
+
+| fast stream misplaced by | mass-weighted ratio error | per-cell median error |
+|---|---|---|
+| 0 | 1.4 × 10⁻⁷ | 8.1 × 10⁻⁶ |
+| 0.1 s | 9.1 × 10⁻⁶ | 3.4 × 10⁻⁴ |
+| 1 s | 9.1 × 10⁻⁵ | 3.3 × 10⁻³ |
+| 5 s | 4.6 × 10⁻⁴ | 1.7 × 10⁻² |
+| 30 s, half a slow cell | 3.0 × 10⁻³ | 0.10 |
+
+Both scores are past their thresholds (10⁻⁶ and 10⁻⁴) at every shift down to a
+tenth of a second, and both grow in proportion to the shift, which is what a
+misplacement rather than noise looks like. The mass-weighted ratio is about a
+hundred times less sensitive than the per-cell one, because a shift moves
+methane between neighbouring minutes without much changing the total; its
+threshold is strict enough to compensate. The 0.1 s case is pinned as a test.
+
+**What it cannot see.** The test builds its streams from the generator, so it
+never reads a timestamp label, and the claim once made here — that it would
+catch "a label read as a midpoint when it was a start" — was wrong: labels are
+read only at ingestion. That error is caught there. Measured in the Phase-4
+walkthrough by planting it (a start label handled as a mid label in
+`CellBounds.from_label`), **14 tests fail**, among them the ingestion
+round-trip harness (§9.9) and the support-resolution tests, and none of the
+acceptance tests. What the acceptance campaign adds is the size of the
+consequence. Written as raw files with the slow instrument's timestamps naming
+the start of each minute and ingested:
+
+| label in the manifest | TSARA uses | mass-weighted ratio error | per-cell median error |
+|---|---|---|---|
+| declared | `start` | 9.5 × 10⁻⁸ | 8.4 × 10⁻⁶ |
+| not declared | `unknown`, treated as centred | 2.3 × 10⁻³ | 9.5 × 10⁻² |
+
+An undeclared label is a ratio error of a tenth, cell by cell — the §10
+headline restated as this phase's acceptance criterion.
 
 #### 11.9.1 A grid out of phase with its source blends two cells
 
