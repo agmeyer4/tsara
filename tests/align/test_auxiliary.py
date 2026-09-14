@@ -13,13 +13,20 @@ across the compass seam must not travel the long way round.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import xarray as xr
 
 from tsara.align import TsaraAlignError
 from tsara.align.auxiliary import attach_positions, interpolate_onto_cells
+from tsara.config.loader import load_manifest
 from tsara.core.support import CellBounds
+from tsara.ingest import ingest_campaign
+from tsara.synthetic import generate
+from tsara.synthetic.config import SyntheticConfig
+from tsara.synthetic.export import export_raw
 
 SECOND = 1_000_000_000
 
@@ -157,6 +164,77 @@ def test_a_source_with_no_finite_values_yields_nothing() -> None:
     result = interpolate_onto_cells(streams, "field", cells(0.0, 1.0, 4))
     assert np.all(np.isnan(result.values))
     assert result.n_outside == 4
+
+
+def sparse_record(times_s: list[float]) -> dict[str, xr.Dataset]:
+    """A field sampled at the given instants, on 1 s cells centred on them."""
+    starts = (np.asarray(times_s) * SECOND).astype(np.int64) - SECOND // 2
+    source = CellBounds(start_ns=starts, stop_ns=starts + SECOND)
+    return {"gps": make_stream(source, {"field": np.arange(float(len(times_s)))})}
+
+
+def test_a_record_sampled_more_sparsely_than_the_guard_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The 2024 Wyoming GPS: a fix every 50 s against the 10 s default.
+
+    Every gap is refused, correctly. What must not happen is silence, because
+    the cells landing exactly on a fix still get a value and the result looks
+    like a join that worked.
+    """
+    streams = sparse_record([0.0, 50.0, 100.0, 150.0, 200.0])
+    with caplog.at_level("WARNING", logger="tsara.align.auxiliary"):
+        result = interpolate_onto_cells(
+            streams, "field", cells(-0.5, 1.0, 200), max_interp_gap="10s"
+        )
+    assert result.n_exact == 4
+    assert result.n_gap_masked == 196
+    assert "sampled every 50 s (median), longer than max_interp_gap=10s" in caplog.text
+    assert "refused 196 of 200 cells and only the 4 landing exactly on a sample" in caplog.text
+
+
+def test_a_guard_the_record_can_meet_does_not_warn(caplog: pytest.LogCaptureFixture) -> None:
+    streams = sparse_record([0.0, 50.0, 100.0, 150.0, 200.0])
+    with caplog.at_level("WARNING", logger="tsara.align.auxiliary"):
+        result = interpolate_onto_cells(
+            streams, "field", cells(-0.5, 1.0, 200), max_interp_gap="60s"
+        )
+    assert result.n_gap_masked == 0
+    assert "sampled every" not in caplog.text
+
+
+def test_one_long_dropout_in_a_dense_record_is_not_a_spacing_problem(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The median, not the mean: an ordinary outage must not trip the warning.
+
+    A 1 s record of 100 samples with one 1000 s hole has a mean spacing near
+    11 s, above a 10 s guard, and a median of 1 s. The outage is refused and
+    counted; it is not a misconfigured guard.
+    """
+    times = [float(k) for k in range(50)] + [1049.0 + k for k in range(50)]
+    streams = sparse_record(times)
+    with caplog.at_level("WARNING", logger="tsara.align.auxiliary"):
+        result = interpolate_onto_cells(
+            streams, "field", cells(-0.25, 1.0, 1100), max_interp_gap="10s"
+        )
+    assert result.n_gap_masked > 900
+    assert "sampled every" not in caplog.text
+
+
+def test_a_spacing_equal_to_the_guard_is_not_warned(caplog: pytest.LogCaptureFixture) -> None:
+    """A gap exactly as long as the guard is bridged, so such a record meets it.
+
+    One 30 s hole in a 10 s record is refused, but the record's own spacing is
+    the guard, not more than it.
+    """
+    streams = sparse_record([0.0, 10.0, 20.0, 50.0, 60.0, 70.0])
+    with caplog.at_level("WARNING", logger="tsara.align.auxiliary"):
+        result = interpolate_onto_cells(
+            streams, "field", cells(-0.25, 1.0, 70), max_interp_gap="10s"
+        )
+    assert result.n_gap_masked > 0
+    assert "sampled every" not in caplog.text
 
 
 @pytest.mark.parametrize("gap", ["0s", "-5s"])
@@ -350,3 +428,76 @@ def test_a_sub_microsecond_gap_is_accepted() -> None:
     result = interpolate_onto_cells(streams, "field", cells(0.0, 1.0, 4), max_interp_gap="1ns")
     # Every target is exactly on a source midpoint, so none needs bridging.
     assert result.n_exact == 4
+
+
+# ---------------------------------------------------------------------------
+# Through real ingestion
+# ---------------------------------------------------------------------------
+
+
+def test_the_track_join_survives_real_ingestion(tmp_path: Path) -> None:
+    """Generated campaign -> raw files -> ingestion -> attach_positions.
+
+    The only test that exercises the join on the path production takes: the
+    GPS binding ingestion writes, each file's declared timestamp label, and the
+    cell midpoints ingestion recovers. The fixtures above build all three by
+    hand, so a bug in how they meet would pass every one of them.
+
+    What this proves is CONSISTENCY, not accuracy. The generator's own
+    positions on a gas stream are linear interpolation of its GPS samples
+    (``tsara.core.geodesy.positions_at``), so exact agreement shows the join
+    reproduces that construction through a real archive round trip. How far a
+    straight line between fixes strays from a real van's path is measured on
+    real driving instead, and tabulated in METHODS §11.6.
+
+    The fixture is chosen to be awkward: GPS every 3 s, so almost every gas cell
+    is interpolated rather than landing on a fix, and the gas instrument
+    labels its timestamps by cell START, so a label or midpoint mistake moves
+    every position by a measurable fraction of a second of driving.
+    """
+    spec = {
+        "name": "track_join",
+        "seed": 11,
+        "start": "2026-06-19T15:00:00Z",
+        "duration": "10min",
+        "platform": {
+            "kind": "mobile",
+            "gps_instrument": "gps",
+            "gps_rate": "3s",
+            "start_latitude": 40.76,
+            "start_longitude": -111.89,
+            "speed_m_s": 13.0,
+            "pattern": "random_walk",
+            "heading_volatility": 0.2,
+        },
+        "instruments": {
+            "analyzer": {
+                "native_rate": "1s",
+                "support": {"method": "mean", "label": "start"},
+                "species": {
+                    "ch4": {
+                        "background": {"kind": "parametric", "offset": 1950.0},
+                        "role": "gas",
+                        "units": "ppb",
+                    }
+                },
+            }
+        },
+        "sources": {},
+    }
+    generated = generate(SyntheticConfig.model_validate(spec))
+    streams = ingest_campaign(load_manifest(export_raw(generated, tmp_path / "raw")))
+    assert "latitude" not in streams["analyzer"].coords
+    joined = attach_positions(streams["analyzer"], streams, max_interp_gap="10s")
+    truth = generated.streams["analyzer"]
+    assert np.array_equal(joined["time"].values, truth["time"].values)
+    positioned = np.isfinite(joined["latitude"].values)
+    # Only the cells before the first fix or after the last are unpositioned.
+    assert positioned.sum() >= positioned.size - 4
+    for coord in ("latitude", "longitude"):
+        np.testing.assert_allclose(
+            joined[coord].values[positioned], truth[coord].values[positioned], atol=1e-9, rtol=0
+        )
+    # And the fixture really does interpolate: a join that only ever landed on
+    # fixes would agree trivially.
+    assert joined["latitude"].attrs["tsara_interp_gap_masked"] == 0

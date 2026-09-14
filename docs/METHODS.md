@@ -2915,9 +2915,23 @@ too uncertain to state" are different facts about a cell.
 
 One case is deliberately exempt from the gap guard: a target landing **exactly
 on** a source sample. That value was measured, not interpolated, so refusing it
-would discard real data — which matters, because a GPS fix every 60 s against
-1 s gas cells leaves the coinciding cells positioned and the rest not, and that
-is the correct answer rather than an all-or-nothing one.
+would discard real data.
+
+**A record sparser than its guard says so.** The exemption has a consequence
+worth stating: when a record's own sampling interval is longer than the guard,
+every gap is refused and only the cells whose midpoints happen to land exactly
+on a sample keep a value — in the Phase-4 notebook, a 50 s GPS against a 10 s
+guard positions 36 of 1800 one-second cells, one in fifty, and the result looks
+like a join that worked. This is not hypothetical: 7 of the 13 Univ_Wyoming GPS
+files in the 2024 archive (D06–D12) record a fix every 50 s, and at the default
+guard they position **0.0 %** of 1 s gas cells whose midpoints fall between
+seconds. Until the Phase-4 walkthrough the only record was an INFO log line,
+which a notebook does not show. `interpolate_onto_cells` now logs a **warning**
+when any target was refused *and* the source's median interval between finite
+samples exceeds the guard, naming the interval, the guard and the counts. The
+median rather than the mean, so that an ordinary 1 s record with one long
+outage — refused and counted, correctly — does not trip it; and strictly
+longer, since a gap exactly as long as the guard is bridged.
 
 **Where a value is placed: the cell midpoint.** For a smooth field under a
 linear model that is the representative instant, identical to the cell mean for
@@ -2925,6 +2939,57 @@ a straight constant-speed path and different only where the path curves.
 Interpolation rather than binning is also what makes a *sparse* auxiliary
 record usable at all: a fix every 10 s cannot fill 1 s cells by averaging,
 since most cells contain no fix.
+
+**What the guard costs.** `max_interp_gap` is not a technicality; it is how far
+a platform may be allowed to stray from the straight chord between two fixes.
+Measured on real driving: the 1 Hz MetNav track of all ten 2024 mobile-lab
+drive days, scored only while the van was moving (ground speed above 2 m/s;
+median 13.0 m/s, 90th percentile 18.7), thinned to one fix every *k* seconds,
+interpolated linearly, and compared with the removed fixes that sit strictly
+inside a thinned bracket of exactly *k* seconds:
+
+| one fix every | positions scored | median error | p90 | p99 | max |
+|---|---|---|---|---|---|
+| 5 s | 117 253 | 0.9 m | 2.8 m | 6.1 m | 118 m |
+| 10 s | 131 146 | 2.3 m | 9.5 m | 19.3 m | 133 m |
+| 30 s | 139 222 | 13.5 m | 54.7 m | 92.7 m | 166 m |
+| 50 s | 140 183 | 29.9 m | 108 m | 180 m | 326 m |
+| 60 s | 140 335 | 39.5 m | 137 m | 225 m | 383 m |
+
+So the 10 s default corresponds to about 10 m at the 90th percentile on urban
+driving, and raising the guard to 60 s to use the 50 s Wyoming GPS accepts
+positions about 110 m wrong at the 90th percentile and over 300 m at worst.
+Whether that is acceptable depends on what the position is for — a
+source-complex cluster radius is a different question from a street address —
+which is why it is configuration rather than a constant. The error peaks
+mid-way between fixes, where the van has had longest to turn away from the
+chord (notebook 04 §11 plots the shape).
+
+**Bin, or interpolate?** Interpolation evaluates a field at each cell's
+midpoint. For a record *sparser* than the cells that is the only option: a fix
+every 10 s cannot fill 1 s cells by averaging. For a record *denser* than the
+cells it throws most of the record away and reports an instant for a value
+that describes an interval, and the two can differ a great deal. Measured on
+the 2024-07-18 drive's 1 Hz MetNav record, as the midpoint value against the
+overlap-weighted cell mean (vector mean for direction) over the 32 iWAS fills
+(exact cells from `iWAS_Stop_UTC`) and over epoch-aligned 60 s cells (325
+where both are finite):
+
+| field | 15 s fills: median / p90 / max | 60 s cells: median / p90 / max |
+|---|---|---|
+| wind direction | 7.9° / 30.1° / 59.6° | 13.1° / 39.5° / 159.7° |
+| wind speed | 0.41 / 1.15 / 1.48 m/s | 0.56 / 1.31 / 3.28 m/s |
+| air temperature | 0.04 / 0.10 / 0.28 °C | 0.10 / 0.29 / 0.62 °C |
+| position, north | 0.4 / 3.4 / 4.7 m | 8.5 / 56.7 / 96.4 m |
+| position, east | 0.1 / 3.7 / 7.3 m | 6.8 / 52.0 / 104.7 m |
+
+The rule is therefore: **bin a field that is denser than the cells, interpolate
+one that is sparser.** The output grid follows it — every selected variable,
+met included, is binned (§11.7), and a binned direction carries the resultant
+length that says how much it means. `attach_positions` interpolates because a
+GPS record is often the sparser one and because, for a *position* on
+canister-width cells, the instant costs a few metres against the
+**127 m** median path covered during a fill.
 
 **Circular fields are interpolated as unit vectors** (§11.5), so a direction
 crossing the compass seam takes the short way — 359° to 1° passes through 0°,
@@ -2937,6 +3002,16 @@ guard lives in a config object ingestion has no business reading (§9.7). The
 binding is recorded in stream attributes there and consumed here. The resulting
 coordinates are named exactly as a stationary platform's are, so downstream
 code reads position identically and only has to care about the shape.
+
+The synthetic generator does **not** leave mobile gas streams in that shape: it
+attaches positions to them directly, computed as linear interpolation of its
+own GPS samples (`tsara.core.geodesy.positions_at`), with no binding. Two
+consequences. Code exercised only on generated streams never calls
+`attach_positions` and finds positions an ingested stream lacks — a
+substitutability gap recorded for the phase that first consumes mobile
+positions. And the generator cannot supply accuracy evidence for this join,
+since its "true" positions are the same linear construction; the accuracy
+evidence is the real-driving table above.
 
 **Antimeridian: detected, not modelled.** Longitude is interpolated linearly,
 which is right everywhere except across ±180°, where a step from 179.9 to
@@ -2968,7 +3043,23 @@ to itself exactly, which is also what would catch a timestamp-precision bug,
 since epoch nanoseconds do not fit a float64 mantissa and converting them
 directly quantises every timestamp onto a ~378 ns grid; and a direction across
 the seam is checked against the short path with the non-circular case beside it
-for contrast.
+for contrast. The sparse-record warning is pinned from both sides — it fires
+for a 50 s record against a 10 s guard, and stays silent for a guard the record
+can meet, for one long outage in a dense record, and for a spacing exactly
+equal to the guard.
+
+The join is also checked **through real ingestion**: a generated mobile
+campaign with a fix every 3 s and start-labelled 1 s gas cells is written as
+raw files, ingested, and joined, and must reproduce the generator's positions
+to 1e-9 degrees on every interpolated cell. That is consistency, not accuracy,
+for the reason given above, but it is the only test on the path production
+takes — the binding ingestion writes, the labels it reads, the midpoints it
+recovers. Six defects were injected: three into the warning (equal spacing
+warned, mean instead of median, no warning) were caught by the warning tests;
+of three into the join, a target or source cell's start used in place of its
+midpoint was caught by the hand-built fixtures and the round trip alike, and
+ingestion binding latitude to the longitude column was caught **only** by the
+round trip.
 
 **And on real data.** The 2024-07-18 drive's MetNav track was attached to the
 same 32 iWAS canister cells the pairing section uses: all 32 positioned, none

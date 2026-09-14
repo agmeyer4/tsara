@@ -106,7 +106,12 @@ class AlignmentConfig(_StrictModel):
         description=(
             "Longest data gap that interpolation may bridge when aligning "
             "auxiliary fields (GPS, met) onto gas timestamps. Gaps longer "
-            "than this remain NaN rather than being bridged."
+            "than this remain NaN rather than being bridged. For a moving "
+            "platform's position this is a statement about how far the track "
+            "may stray from a straight line between fixes: on real urban "
+            "driving at a median 13 m/s, 10 s costs about 10 m at the 90th "
+            "percentile, 50 s about 110 m (METHODS.md §11.6). A record sampled "
+            "more sparsely than this is almost entirely refused, with a warning."
         ),
     )
 

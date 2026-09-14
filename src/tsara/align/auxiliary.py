@@ -39,6 +39,27 @@ The spatial extent of a cell is deliberately not modelled. A 15 s canister at
 15 m/s covers about 225 m, and TSARA reports the midpoint position with that
 limit recorded (§10.10) rather than inventing a path length it has no
 information for.
+
+What the guard costs
+---------------------
+``max_interp_gap`` is how far a field may be trusted to follow a straight line
+between samples. For a moving platform's position that is measurable: on the
+real 2024 drives, at a median 13 m/s, bridging 10 s gaps puts a position about
+10 m off at the 90th percentile and bridging 50 s gaps about 110 m
+(``docs/METHODS.md`` §11.6 has the table). A record sampled more sparsely than
+its guard is refused almost everywhere, keeping only the cells that land
+exactly on a sample, and a warning says so rather than letting that pass for a
+join that worked.
+
+Bin, or interpolate?
+---------------------
+Interpolate a field that is **sparser** than the cells — there is nothing to
+average. Bin one that is **denser**, with
+:func:`tsara.align.binning.bin_streams_onto_cells`: an instant read at a cell's
+midpoint is not the interval the cell describes, and on real 1 Hz wind the
+midpoint direction differs from a 15 s fill's vector mean by a median 8° and up
+to 60°. Position is the tolerant case, a few metres over a canister fill, which
+is why :func:`attach_positions` interpolates.
 """
 
 from __future__ import annotations
@@ -221,6 +242,18 @@ def _interpolate(
     )
 
 
+def _median_spacing_s(source_ns: np.ndarray, values: np.ndarray) -> float:
+    """Return the median interval between consecutive finite samples, in seconds.
+
+    ``inf`` for a record with fewer than two finite samples, which has no
+    spacing to compare and is reported by the outside-the-record count instead.
+    """
+    present = np.sort(source_ns[np.isfinite(values)])
+    if present.size < 2:
+        return float("inf")
+    return float(np.median(np.diff(present))) / 1e9
+
+
 def interpolate_onto_cells(
     streams: Mapping[str, xr.Dataset],
     variable: str | tuple[str, str],
@@ -259,14 +292,39 @@ def interpolate_onto_cells(
     max_gap_s = _as_seconds(max_interp_gap)
     source = stream_cells(stream, instrument)
     circular = str(stream[name].attrs.get("circular", 0)) not in ("0", "False", "None", "")
+    values = np.asarray(stream[name].values, dtype=np.float64)
     result = _interpolate(
         source.midpoint_ns,
-        np.asarray(stream[name].values, dtype=np.float64),
+        values,
         target.midpoint_ns,
         max_gap_s,
         circular=circular,
     )
-    if result.n_gap_masked or result.n_outside:
+    spacing_s = _median_spacing_s(source.midpoint_ns, values)
+    if result.n_gap_masked and spacing_s > max_gap_s:
+        # Refusing is right; refusing silently is not. When the record's own
+        # typical spacing is wider than the guard, the guard can almost never
+        # be satisfied, and what survives is only the cells whose midpoints
+        # happen to land exactly on a sample -- a record positioned at one cell
+        # in fifty looks like a working join. The median, not the mean, so an
+        # ordinary 1 s record with one long dropout does not trip it.
+        logger.warning(
+            "'%s' on '%s' is sampled every %.6g s (median), longer than "
+            "max_interp_gap=%s, so the guard refused %d of %d cells and only the %d "
+            "landing exactly on a sample kept a value. That is the guard working as "
+            "configured. If bridging %.6g s is acceptable for this field, raise "
+            "max_interp_gap; METHODS §11.6 tabulates what that costs for a moving "
+            "platform's position.",
+            name,
+            instrument,
+            spacing_s,
+            max_interp_gap,
+            result.n_gap_masked,
+            len(target),
+            result.n_exact,
+            spacing_s,
+        )
+    elif result.n_gap_masked or result.n_outside:
         logger.info(
             "Interpolated %s from '%s' onto %d cells: %d exact, %d interpolated, "
             "%d refused as gaps longer than %s, %d outside the record.",
