@@ -86,31 +86,37 @@ when they come from instruments with different rates:
    support can disagree. Measured on the 2024 drives, the iWAS canisters
    sample every 530 s (median over all 261 fills of the ten 2024 drive days)
    but each sample integrates for only 14.9 s, so against a 60 s stationary
-   mean the canister is thirty-five times slower by rate and four times
-   *narrower* by support. Pairing on the canister's clock would
+   mean the canister is about nine times slower by rate (530 s against 60 s)
+   and four times *narrower* by support (14.9 s against 60 s). Pairing on the
+   canister's clock would
    split a 60 s mean onto 15 s, which the interval model forbids; pairing on
    the mean's clock is admissible, and the coverage of 0.25 is what says how
-   much to trust it.
+   much to trust it. When the two widths are equal, the member with fewer
+   measured values where the records overlap is the clock (§11.4.1).
 2. The faster stream is averaged onto those cells **weighted by overlap**
-   (`tsara.core.support.bin_onto_cells`), with uncertainty propagated per §3,
+   (`tsara.align.binning.bin_streams_onto_cells`), with uncertainty propagated per §3,
    the count of contributing samples recorded, and the fraction of each cell
    actually covered recorded alongside it. Before Phase 3.5 the cell was
    *assumed* to be the slow instrument's sampling period centred on its
    timestamp; now it is read from the stream's own boundaries, so a canister
    that integrated for 14.1 s is paired over exactly 14.1 s (§10).
-3. Cells with `n_native = 0` for either species are dropped — a pair is never
+3. Cells with `n_source_<name> = 0` for either species are dropped — a pair is never
    fabricated. Cells with *some* data are kept, with their coverage recorded;
    `PairingConfig.min_coverage` (default 0.0, i.e. drop nothing) is the one
    knob that acts on it, because how much of a cell must be measured is a
    question about the science and not about the arithmetic.
 
 Consequences: every regression point contains at least one real measurement
-of *each* species, and the regression sample size N equals the number of real
-pairs. This eliminates interpolation pseudo-replication (interpolated points
-posing as independent samples and silently inflating degrees of freedom).
+of *each* species. This eliminates interpolation pseudo-replication
+(interpolated points posing as independent samples and silently inflating
+degrees of freedom). It does not by itself make every pair independent: a
+sparse member whose cells straddle the clock's boundaries can put one reading
+into two pairs, so the product records how many distinct readings of each
+species stand behind its pairs, and that — not the pair count — is the ceiling
+on a regression's N (§11.4.1).
 
 Different species pairs may therefore be paired on different clocks (each pair
-uses its own slower member). Each ratio is an independent slope estimate with
+uses its own wider-supported member). Each ratio is an independent slope estimate with
 its own honest CI; no shared clock across pairs is required for the ratios to
 be comparable as estimates.
 
@@ -120,12 +126,12 @@ A single uniform master grid — the familiar `(time × species)` cube — is
 constructed **only** for the continuous rolling state and the PMF export
 matrix, which inherently require one. Construction is binning-only, by
 overlap-weighted mean and no other statistic (§11.7), with per-cell
-propagated uncertainties and `n_native` counts carried alongside values. Grid cells carry CF boundaries like any
+propagated uncertainties and `n_source_<name>` counts carried alongside values. Grid cells carry CF boundaries like any
 other stream, and `cell_methods = "time: mean (interval: <native>)"` records
 the resolution of the data that went into them (§10.2). Validation requires the grid period to be
 ≥ the **widest cell** across the streams, which is the post-Phase-3.5 form of
 "≥ the slowest stream's native period" (§1.3 makes the same correction for
-pairing); cells with no native samples are NaN with `n_native = 0`, never
+pairing); cells with no native samples are NaN with `n_source_<name> = 0`, never
 interpolated. Config: `OutputGridConfig`
 (`tsara.config.analysis`) — deliberately not named "the grid" or paired with
 the aux-interpolation guard, since neither streams nor cross-species pairing
@@ -2497,10 +2503,14 @@ clock, real pairs only.
 the other is averaged onto them by overlap. Never the reverse: a value may be
 averaged onto a wider support, never split onto a narrower one. §1.3 records
 why this stopped being "the slower instrument" — measured, the iWAS canisters
-are thirty-five times slower than a 60 s stationary mean by rate and four
-times *narrower* by support (median over all 261 fills of the ten 2024 drive
-days). Ties go to whichever stream is named first, and the
-choice does not depend on which species is numerator.
+are about nine times slower than a 60 s stationary mean by rate (530 s against
+60 s) and four times *narrower* by support (14.9 s against 60 s; medians over
+all 261 fills of the ten 2024 drive days).
+
+When the widths are equal, the clock is the member with **fewer measured
+values where the two records overlap**, and if those tie too, the first
+instrument by name (§11.4.1). No step looks at argument order, so which
+species is numerator never changes which air is compared.
 
 **Same-instrument species skip the binning entirely.** Several gases retrieved
 from one spectrum already share a clock, and that is the commonest pair there
@@ -2539,7 +2549,7 @@ product is the output grid (§11.7). Its attributes:
 | attribute | meaning |
 |---|---|
 | `tsara_pairing_clock` | instrument whose cells the pairs sit on |
-| `tsara_pairing_clock_reason` | why that one, with both median cell widths |
+| `tsara_pairing_clock_reason` | why that one: both median cell widths, and on a tie both measured-value counts |
 | `tsara_pairing_min_coverage` | the guard applied (`PairingConfig.min_coverage`) |
 | `tsara_pairing_cells_considered` | candidate cells before dropping |
 | `tsara_pairing_cells_dropped` | how many produced no usable pair |
@@ -2552,6 +2562,7 @@ and per variable:
 | `tsara_source_instrument` | which stream this species came from |
 | `tsara_binned` | 1 if averaged onto the clock, 0 if already on it |
 | `tsara_sigma_at_support` | how a declared σ was moved onto its own cells, or `unscaled` |
+| `tsara_pairing_readings` | distinct readings of this species behind the surviving pairs (§11.4.1) |
 
 **How it is checked** (§11.1): a two-cell fixture whose paired values (1.5 and
 5.5) can be worked out on paper; an independent O(N·M) reimplementation
@@ -2561,7 +2572,17 @@ the ramp at the cell midpoint, and a species paired against a constant
 multiple of itself returns that multiple exactly, which is the property that
 would fail if the two members were averaged over different air; and invariants
 needing no ground truth — binning a stream onto matching cells returns it, and
-a cell with no partner data yields no pair rather than an interpolation.
+a cell with no partner data yields no pair rather than an interpolation. The
+tie rule and the reading counts of §11.4.1 are pinned by fixtures that each
+isolate one decision, and those tests were mutation-scored: nine plausible
+defects injected one at a time (argument order deciding a tie, rows counted
+instead of finite values, whole records counted instead of the shared span,
+the name tie reversed, a zero-overlap or masked cell counted as a reading, a
+binned member credited one reading per pair, the warning firing on equality,
+the denser member preferred), and all nine caught. The first run caught eight;
+the miss was the zero-overlap filter, which is reachable only when one source
+cell nests inside another and the overlap search brackets a cell that does not
+overlap, and a fixture of exactly that shape now pins it.
 
 **And on real data.** The 2024-07-18 mobile-lab drive carries both members of
 the canister case: on that day, 32 iWAS fills of median width 14.7 s at a
@@ -2578,6 +2599,132 @@ either full weight or none — the two disagree by up to **17.89 ppb** of CH₄.
 On a ~1950 ppb background that is small; against the enhancements these
 canisters exist to attribute it is not, and it is entirely an artefact of
 which fraction of two edge samples counts.
+
+#### 11.4.1 A tie in width, and the reading counted twice
+
+"The wider-supported member" has no answer for two instruments with equal
+cells, and the code as first written broke the tie by argument order. That is
+harmless while equal-width cells coincide, since each cell is then its own
+partner. It is not harmless when they are **out of phase and one member is
+sparse**: every sparse reading then straddles two cells of the denser clock,
+half-covers each, and appears in both pairs.
+
+**On real data.** The 2024-07-18 mobile-lab drive has exactly that shape.
+NOy-LIF writes `Time_Mid` and the Picarro writes `Time_Start`, both on the same
+whole-second grid of 19,501 rows, so TSARA's cells for the two sit half a
+second apart; NOy has a finite value in 19,498 rows and CO₂ in 8,448, a value
+in every second row 69 % of the time and otherwise every third. Ingested with
+TSARA and paired with the argument-order rule:
+
+| call | clock | pairs | distinct CO₂ readings behind them |
+|---|---|---|---|
+| `pair_species(streams, "noy", "co2")` | LIF | 16,893 | 8,447 |
+| `pair_species(streams, "co2", "noy")` | Picarro | 8,447 | 8,447 |
+
+O₃ (9,751 finite values in the same 19,501 rows) against LIF did the same:
+19,498 pairs in one order and 9,750 in the other.
+
+**Why it matters, measured rather than argued.** For an ordinary least-squares
+slope the two runs are algebraically identical: a reading that appears twice,
+once beside each of two neighbouring values of the other species, pulls on
+the line exactly as one appearance beside their mean does. What the copies
+duplicate is the reading's *error*, which a fit counting the pairs as
+independent then counts twice. The size of that cannot be read off the
+algebra, so it was measured: the same two clocks at the same sparseness, a
+smooth 600 s sinusoid for truth so that the two instruments see identical air
+to well within noise, a true NOy/CO₂ slope of 8, and the noise redrawn 300
+times per row. The naive least-squares standard error is compared with how
+much the slope actually scatters across draws:
+
+| σ on CO₂ (ppm) | σ on NOy (ppb) | naive SE ÷ real scatter, sparser member's clock | the same, denser member's clock |
+|---|---|---|---|
+| 0 | 1.0 | 0.96 | 1.00 |
+| 0.15 | 1.0 | 1.02 | **0.82** |
+| 0.30 | 0.5 | 1.03 | **0.74** |
+
+The slope agrees to every printed digit on both clocks. On the sparser
+member's cells the naive standard error describes the real scatter; on the
+denser member's cells it is a fifth to a quarter too narrow as soon as the
+duplicated species carries error of its own, bounded by 1/√2 when all of the
+error sits there. Nothing in `coverage` or `n_source` shows it.
+
+**How often the shape occurs.** Counted across all 1582 permitted files (the
+1122 ICARTT files and the 460 parquet files outside the quarantine
+directories): each file's cell width is its median positive sampling interval,
+its label is inferred from the ICARTT independent variable's name (a name
+saying nothing, and every parquet file, is `unknown` and therefore centred), its
+phase is the modal cell start modulo that width to within 2 % of it, and files
+are grouped into instruments by archive tree and date. Of the 3909 same-day
+pairs of instruments with equal widths, **312 are half a cell apart at 1 s**
+— 210 on the NOAA drives, 80 in SLC-SOS, 22 on the TwinOtter — and **all 2844
+pairs in the 60 s stationary suite are in phase**, so that suite never meets
+the case. No two 2026 instruments share an exact width.
+
+**The rule.** On a tie in width, the member with fewer finite values sets the
+clock. Each of its readings is then exactly one pair, and the denser member is
+averaged across it, centred on the same interval. Counted over the span where
+*both* records run, because a sparse analyzer logging all day beside a dense
+one switched on for ten minutes has more readings in total and fewer in the
+air they share; counted over the whole records rather than an event's
+`interval`, so that one pair of instruments keeps one clock from event to
+event. If the counts also tie, the first instrument by name decides. On the
+drive above, both argument orders now give the Picarro clock and 8,447 pairs.
+
+**What the rule does not settle, stated rather than rounded.** Two *dense*
+instruments of equal width half a cell apart duplicate nothing on either
+clock, but every reading of the binned member now contributes half of itself
+to each of two *neighbouring* pairs, so adjacent pairs share an error. The
+same experiment with no sparseness at all (every CO₂ row filled, 3599 pairs
+on either clock):
+
+| σ on CO₂ (ppm) | σ on NOy (ppb) | naive SE ÷ real scatter, CO₂ clock | the same, NOy clock |
+|---|---|---|---|
+| 0 | 1.0 | **0.70** | 0.99 |
+| 0.15 | 1.0 | 0.86 | 0.81 |
+| 0.30 | 0.5 | 0.99 | **0.72** |
+
+Both tables are the executed output of `examples/notebooks/04_alignment_walkthrough.ipynb`
+§9 (seeds 0–299), so they re-run from the repository.
+
+No choice of clock is honest in general: whichever member is averaged carries
+the shared error, and the standard error is too narrow by up to 1/√2 when that
+member's error dominates. This is not rare. On the same 2024-07-18 drive the
+iodide-CIMS species (finite in 92–97 % of rows) and the PTR-MS species (94–95 %)
+are dense, start-labelled and half a cell from the mid-labelled LIF. The
+tie rule still gives them a deterministic clock (the member with fewer finite
+values, which there is the CIMS or PTR stream), and the reading count below
+cannot flag them, because sharing a reading between two pairs is a
+*correlation* between pairs rather than a shortfall of readings. Accounting for
+it belongs to the regression, which can see the covariance the shared overlap
+weights imply; it is recorded as an open question for Phase 7.
+
+The same sharing moves a fitted slope, not only its error, when the signal
+itself has structure at the scale of a cell. On a synthetic campaign of two
+noise-free 60 s instruments half a cell apart, with plumes about as wide as
+the cells and a true ratio of 0.25, a least-squares fit of tracer on CH₄ gives
+**0.285** on the tracer's clock and **0.169** on the CH₄'s, while the
+mass-weighted ratio is 0.251 on both. Which member gets smoothed decides which
+way the slope is biased. The 60 s stationary suite is in phase throughout, so
+the archive does not meet this at 60 s; at 1 s it would need plumes one or two
+samples wide, which the drive records do contain (§9.5).
+
+**The duplication a clock cannot remove.** A sparse member narrower than the
+clock can still straddle its boundaries: a 15 s canister fill across a minute
+boundary of a 60 s mean is one reading in two pairs whichever rule chooses
+the clock. In a synthetic campaign of 327 fills against 60 s means, 84 fills
+landed in two pairs, 20.5 % of the pairs. On real data the case is presently
+empty: all 261 iWAS fills of the 2024 drive days, paired against the
+mobile lab's own 60 s ground Picarro (each with its file's stop column naming
+exact cells), yield **one** pair, because the ground record has no value while
+the lab is driving. It is therefore recorded rather than prevented. Each
+paired species carries `tsara_pairing_readings`, the number of distinct finite
+readings behind the surviving pairs (a species already on the clock has one
+per pair by construction), `PairedSpecies` exposes the same counts, and a
+warning names the species when either count falls below the number of pairs.
+That count, not the pair count, is a ceiling on a regression's N — a ceiling
+and not an estimate, since readings shared between neighbouring pairs, as in
+the dense case above, reduce the independent information without reducing the
+count.
 
 ### 11.5 Circular statistics for angular variables
 
@@ -2935,14 +3082,25 @@ Recorded because this is the third phase in which it has happened. The
 canister figures above were first written as "14.7 s fills every 441 s",
 measured from **one** drive day and quoted as though they described the
 instrument. Re-run at the phase boundary across all ten 2024 drive days and
-261 fills, the medians are **14.9 s and 530 s** — so "thirty times slower by
-rate" was really thirty-five.
+261 fills, the medians are **14.9 s and 530 s**, and the text was corrected
+from "thirty times slower by rate" to "thirty-five".
 
-The conclusion survives untouched, which is exactly why the error was
+Both of those were wrong, and the correction repeated the error. Each divided
+the canister's cadence by the canister's *own* fill width (441 ÷ 14.7 = 30,
+530 ÷ 14.9 = 36), which is a duty cycle, not a comparison with anything. The
+claim is about a 60 s mean, against which the canister is about **seven** times
+slower by rate on that one day (441 ÷ 60) and about **nine** across all ten
+(530 ÷ 60). Found in the Phase-4 walkthrough (§11.4.1 came from the same
+stage) and corrected wherever it was quoted.
+
+The conclusion survives untouched, which is exactly why both errors were
 invisible: rate and support still disagree, and the canister is still narrower
-by support than a 60 s mean while being far slower by rate. What was wrong was
-the *provenance*. A number quoted without saying what it was measured over
-cannot be checked by anyone, including its author a week later.
+by support than a 60 s mean while being far slower by rate. What was wrong the
+first time was the *provenance*. A number quoted without saying what it was
+measured over cannot be checked by anyone, including its author a week later.
+What was wrong the second time is the complement: re-measuring the inputs does
+not re-check the arithmetic that consumes them, so a stated ratio should show
+its numerator and denominator.
 
 Every archive-derived number in §11 has now been re-run and states its sample.
 The day-specific checks say which day; the instrument-level claims say how many

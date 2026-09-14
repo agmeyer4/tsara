@@ -6,7 +6,8 @@ Pairing is not its own operation. It is
 :func:`~tsara.align.binning.bin_streams_onto_cells` with three decisions
 layered on top:
 
-1. **which cells** -- those of the wider-supported of the two streams;
+1. **which cells** -- those of the wider-supported of the two streams, or on
+   a tie, of the one with fewer measured values;
 2. **which stretch** -- optionally restricted to an event or window;
 3. **which rows survive** -- a pair needs a real measurement of *both*
    species, so a cell missing either is dropped.
@@ -24,14 +25,36 @@ Before Phase 3.5 the rule in ``docs/METHODS.md`` §1.3 said "the slower
 instrument", and rate and support can disagree. Measured on the 2024 drives,
 the iWAS canisters sample every 530 s but each sample integrates for only
 14.9 s -- medians over all 261 fills of the ten 2024 drive days. Against a 60 s
-stationary mean the canister is thirty-five times slower by rate and four times
-*narrower* by support. Pairing on the canister's clock
-would evaluate a 60 s mean over 15 s, which is exactly what the interval model
-forbids; pairing on the mean's clock is admissible, and the coverage of 0.25
-is what says how much to trust it.
+stationary mean the canister is about nine times slower by rate (530 s against
+60 s) and four times *narrower* by support (14.9 s against 60 s). Pairing on
+the canister's clock would evaluate a 60 s mean over 15 s, which is exactly
+what the interval model forbids; pairing on the mean's clock is admissible,
+and the coverage of 0.25 is what says how much to trust it.
 
 So the direction is always the same: a value may be averaged onto a wider
 support, never split onto a narrower one.
+
+When the widths tie
+--------------------
+Width cannot decide between two 1 s instruments, and in a 1 s drive suite
+that is the ordinary case. It matters when the two sets of cells are out of
+phase -- one file labelling each second by its start and another by its
+middle is enough -- because every cell of one then straddles two of the
+other. If the straddling instrument is also the sparser one, each of its
+readings lands in two pairs.
+
+Measured on the 2024-07-18 drive, NOy-LIF (``Time_Mid``) against the Picarro
+(``Time_Start``, a CO2 value in every second or third row of a 1 s file):
+on the LIF clock 8,447 CO2 readings became 16,893 pairs, on the Picarro's
+8,447. The slope is the same either way, but the reading's error is counted
+twice, and a naive standard error comes out up to 1/sqrt(2) too narrow
+(§11.4.1). This module used to break the tie by argument order, so which of
+the two you got depended on which species you named first.
+
+So a tie goes to the member with **fewer measured values where the two
+records overlap**: each of its readings is then one pair, and the denser
+member is averaged across it. Where even that ties, the instrument names
+decide, so the answer never depends on argument order.
 
 Why a pair-specific clock exists at all
 ----------------------------------------
@@ -46,11 +69,25 @@ same code.
 
 What N means afterwards
 ------------------------
-Every returned pair contains at least one real measurement of each species, so
-the regression sample size is the number of real pairs. That is the whole
-reason gases are binned rather than interpolated: interpolated points pose as
-independent samples and silently inflate the degrees of freedom of every fit
-downstream (§1.2).
+Every returned pair contains at least one real measurement of each species.
+That is the whole reason gases are binned rather than interpolated:
+interpolated points pose as independent samples and silently inflate the
+degrees of freedom of every fit downstream (§1.2).
+
+It does not follow that every pair is *independent*. A sparse member whose
+cells straddle the clock's boundaries puts one reading into two pairs, which
+choosing the clock well avoids on a tie but cannot always avoid -- a 15 s
+canister fill across a minute boundary of a 60 s mean is the standing
+example. So the product records, per species, how many distinct readings
+stand behind its pairs, and warns when that is fewer than the pairs
+themselves. That count, not the number of pairs, is a ceiling on a fit's N.
+
+A ceiling, not an estimate. Two *dense* instruments half a cell apart
+duplicate no reading on either clock, yet each reading of the averaged member
+is shared between two neighbouring pairs, and a naive standard error is then
+too narrow by up to 1/sqrt(2) whichever clock is chosen (§11.4.1). No count of
+readings can see a correlation between pairs; the regression, which can see
+the overlap weights, is where that has to be accounted for.
 """
 
 from __future__ import annotations
@@ -63,6 +100,7 @@ import numpy as np
 import pandas as pd
 
 from tsara.align.binning import (
+    BINNED_ATTR,
     TsaraAlignError,
     bin_streams_onto_cells,
     median_width_s,
@@ -70,7 +108,7 @@ from tsara.align.binning import (
     stream_cells,
 )
 from tsara.core.naming import TIME_COORD, coverage_name
-from tsara.core.support import CellBounds
+from tsara.core.support import CellBounds, overlap_pairs
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Mapping
@@ -89,6 +127,8 @@ PAIRING_REASON_ATTR = "tsara_pairing_clock_reason"
 PAIRING_COVERAGE_ATTR = "tsara_pairing_min_coverage"
 PAIRING_DROPPED_ATTR = "tsara_pairing_cells_dropped"
 PAIRING_CANDIDATE_ATTR = "tsara_pairing_cells_considered"
+#: Per-variable: distinct readings of that species behind the surviving pairs.
+PAIRING_READINGS_ATTR = "tsara_pairing_readings"
 
 
 @dataclass(frozen=True)
@@ -106,9 +146,17 @@ class PairedSpecies:
     y_name, x_name : str
         Names of the two species as they appear in the dataset.
     clock : str
-        Instrument whose cells were used, i.e. the wider-supported one.
+        Instrument whose cells were used: the wider-supported one, or on a
+        tie the one with fewer measured values.
     n_pairs : int
-        How many pairs survived. The N of any fit that follows.
+        How many pairs survived.
+    y_readings, x_readings : int
+        How many distinct readings of each species stand behind those pairs.
+        Fewer readings than pairs means some reading appears in more than one
+        pair, so the smaller of these and ``n_pairs`` is a ceiling on the
+        number of independent points a fit really has -- a ceiling only,
+        since readings shared between neighbouring pairs lower the
+        independent information without lowering the count (§11.4.1).
     """
 
     dataset: xr.Dataset
@@ -116,6 +164,8 @@ class PairedSpecies:
     x_name: str
     clock: str
     n_pairs: int
+    y_readings: int
+    x_readings: int
 
     def __len__(self) -> int:
         """Return the number of surviving pairs."""
@@ -136,6 +186,92 @@ def _restrict(cells: CellBounds, interval: tuple[pd.Timestamp, pd.Timestamp]) ->
         )
     keep = np.flatnonzero((cells.stop_ns > start) & (cells.start_ns < stop))
     return CellBounds(start_ns=cells.start_ns[keep], stop_ns=cells.stop_ns[keep])
+
+
+def _measured_where_records_overlap(
+    members: tuple[tuple[xr.Dataset, str, CellBounds], tuple[xr.Dataset, str, CellBounds]],
+) -> tuple[int, int]:
+    """Return how many finite values each member has where both records run.
+
+    Counted over the *shared* span rather than each whole record, because the
+    question is which member is sparser in the air the two actually have in
+    common. A sparse analyzer logging all day beside a dense one switched on
+    for ten minutes has more readings in total and fewer where it matters.
+    Over the whole record rather than an event's ``interval``, so that one
+    pair of instruments keeps one clock from event to event.
+    """
+    span_start = max(int(cells.start_ns.min()) for _, _, cells in members)
+    span_stop = min(int(cells.stop_ns.max()) for _, _, cells in members)
+    counts = []
+    for stream, variable, cells in members:
+        inside = (cells.stop_ns > span_start) & (cells.start_ns < span_stop)
+        finite = np.isfinite(np.asarray(stream[variable].values, dtype=np.float64))
+        counts.append(int(np.count_nonzero(inside & finite)))
+    return counts[0], counts[1]
+
+
+def _choose_clock(
+    y: tuple[str, str, CellBounds],
+    x: tuple[str, str, CellBounds],
+    streams: Mapping[str, xr.Dataset],
+) -> tuple[str, str]:
+    """Return the instrument whose cells a pair sits on, and why.
+
+    In order: a shared instrument is its own clock; otherwise the wider cells;
+    on a tie in width, the member with fewer measured values where the
+    records overlap; on a tie in that too, the first instrument by name. No
+    step looks at which species was named first, so swapping the arguments
+    can never change which air is compared.
+    """
+    (y_instrument, y_variable, y_cells), (x_instrument, x_variable, x_cells) = y, x
+    if y_instrument == x_instrument:
+        return y_instrument, "both species share one instrument"
+    y_width, x_width = median_width_s(y_cells), median_width_s(x_cells)
+    if y_width != x_width:
+        wider, narrower = (y_width, x_width) if y_width > x_width else (x_width, y_width)
+        clock = y_instrument if y_width > x_width else x_instrument
+        return clock, f"wider cells ({wider:.6g} s vs {narrower:.6g} s)"
+    y_count, x_count = _measured_where_records_overlap(
+        (
+            (streams[y_instrument], y_variable, y_cells),
+            (streams[x_instrument], x_variable, x_cells),
+        )
+    )
+    if y_count != x_count:
+        clock = y_instrument if y_count < x_count else x_instrument
+        fewer, more = sorted((y_count, x_count))
+        return clock, (
+            f"equal cells ({y_width:.6g} s); fewer measured values where the records "
+            f"overlap ({fewer} vs {more})"
+        )
+    return min(y_instrument, x_instrument), (
+        f"equal cells ({y_width:.6g} s) and equal measured values ({y_count}); "
+        "first instrument by name"
+    )
+
+
+def _readings_behind(
+    joined: xr.Dataset,
+    column: str,
+    stream: xr.Dataset,
+    variable: str,
+    source: CellBounds,
+    pairs: CellBounds,
+) -> int:
+    """Return how many distinct readings of one species the pairs draw on.
+
+    A member already on the clock contributes exactly one reading per pair by
+    construction. A binned member contributes every finite source cell that
+    overlaps a surviving pair by a positive amount -- the same membership rule
+    the binner used to form the value, so the count describes the number that
+    was actually reported.
+    """
+    if joined[column].attrs.get(BINNED_ATTR) == 0:
+        return len(pairs)
+    links = overlap_pairs(source, pairs)
+    values = np.asarray(stream[variable].values, dtype=np.float64)
+    used = links.source_index[(links.overlap_ns > 0) & np.isfinite(values[links.source_index])]
+    return int(np.unique(used).size)
 
 
 def pair_species(
@@ -189,16 +325,10 @@ def pair_species(
 
     y_cells = stream_cells(streams[y_instrument], y_instrument)
     x_cells = stream_cells(streams[x_instrument], x_instrument)
-    y_width, x_width = median_width_s(y_cells), median_width_s(x_cells)
-    if y_instrument == x_instrument:
-        clock, target = y_instrument, y_cells
-        reason = "both species share one instrument"
-    elif y_width >= x_width:
-        clock, target = y_instrument, y_cells
-        reason = f"wider cells ({y_width:.6g} s vs {x_width:.6g} s)"
-    else:
-        clock, target = x_instrument, x_cells
-        reason = f"wider cells ({x_width:.6g} s vs {y_width:.6g} s)"
+    clock, reason = _choose_clock(
+        (y_instrument, y_variable, y_cells), (x_instrument, x_variable, x_cells), streams
+    )
+    target = y_cells if clock == y_instrument else x_cells
 
     if interval is not None:
         target = _restrict(target, interval)
@@ -234,6 +364,26 @@ def pair_species(
             f"every candidate cell was masked or below min_coverage={min_coverage}."
         )
     dataset = joined.isel({TIME_COORD: surviving})
+    kept = CellBounds(start_ns=target.start_ns[surviving], stop_ns=target.stop_ns[surviving])
+    y_readings = _readings_behind(dataset, y_name, streams[y_instrument], y_variable, y_cells, kept)
+    x_readings = _readings_behind(dataset, x_name, streams[x_instrument], x_variable, x_cells, kept)
+    dataset[y_name].attrs[PAIRING_READINGS_ATTR] = y_readings
+    dataset[x_name].attrs[PAIRING_READINGS_ATTR] = x_readings
+    if min(y_readings, x_readings) < surviving.size:
+        sparse_name, sparse_count = (
+            (y_name, y_readings) if y_readings <= x_readings else (x_name, x_readings)
+        )
+        logger.warning(
+            "%d pairs of %s vs %s rest on only %d distinct readings of %s, so some "
+            "readings appear in more than one pair. A fit that treats the pairs as "
+            "independent will count those readings' errors more than once and "
+            "understate its uncertainty (METHODS §11.4.1).",
+            surviving.size,
+            y_name,
+            x_name,
+            sparse_count,
+            sparse_name,
+        )
     dataset.attrs.update(
         {
             "tsara_stage": "paired",
@@ -259,4 +409,6 @@ def pair_species(
         x_name=x_name,
         clock=clock,
         n_pairs=int(surviving.size),
+        y_readings=y_readings,
+        x_readings=x_readings,
     )

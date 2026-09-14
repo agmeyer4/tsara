@@ -122,10 +122,10 @@ def test_the_clock_does_not_depend_on_argument_order(two_rates: dict[str, xr.Dat
 def test_width_beats_rate_the_way_a_canister_does() -> None:
     """The measured archive case that made 'slower' the wrong word.
 
-    An iWAS canister fills for ~15 s every ~441 s. Against a 60 s stationary
-    mean it is thirty times slower by rate and four times narrower by support.
-    Pairing on the canister's clock would evaluate a 60 s mean over 15 s,
-    which the interval model forbids.
+    An iWAS canister fills for ~15 s every ~530 s. Against a 60 s stationary
+    mean it is about nine times slower by rate and four times narrower by
+    support. Pairing on the canister's clock would evaluate a 60 s mean over
+    15 s, which the interval model forbids.
     """
     canister = make_stream(0.0, 15.0, 1, {"benzene": np.array([1.0])})
     # one 15 s cell, then nothing for the rest of the hour
@@ -134,6 +134,176 @@ def test_width_beats_rate_the_way_a_canister_does() -> None:
     assert paired.clock == "picarro"
     assert paired.n_pairs == 1
     assert paired.dataset["coverage_benzene"].values[0] == pytest.approx(0.25)
+
+
+def half_phase_pair(
+    *, n: int = 40, sparse_every: int = 2, dense_offset_s: float = 0.5
+) -> dict[str, xr.Dataset]:
+    """Two 1 s instruments half a cell apart, the 2024-07-18 drive in miniature.
+
+    ``lif`` fills every row on cells centred on the second. ``picarro`` has a
+    row every second on cells starting on the second, but a *value* in only
+    every ``sparse_every``-th row -- the others are NaN, as in a merged file.
+    Named so that alphabetical order alone would choose the wrong clock.
+    """
+    co2 = np.full(n, np.nan)
+    co2[::sparse_every] = 420.0 + np.arange(n)[::sparse_every]
+    picarro = make_stream(0.0, 1.0, n, {"co2": co2})
+    lif = make_stream(dense_offset_s, 1.0, n, {"noy": 2.0 + np.arange(n) * 0.1})
+    return {"picarro": picarro, "lif": lif}
+
+
+def test_a_tie_in_width_goes_to_the_sparser_member_in_either_order() -> None:
+    """METHODS §11.4.1: on the denser clock every sparse reading became two pairs.
+
+    Both instruments have 1 s cells, so width cannot decide. The sparse one
+    must be the clock whichever species is named first, so that each of its
+    readings is one pair; on the other clock every reading straddles two
+    cells and is counted twice.
+    """
+    streams = half_phase_pair()
+    for y, x in (("noy", "co2"), ("co2", "noy")):
+        paired = pair_species(streams, y, x)
+        assert paired.clock == "picarro"
+        assert paired.n_pairs == 20
+        assert paired.dataset["co2"].attrs["tsara_pairing_readings"] == 20
+        reason = paired.dataset.attrs["tsara_pairing_clock_reason"]
+        assert "fewer measured values where the records overlap (20 vs 40)" in reason
+
+
+def test_sparseness_is_counted_where_the_two_records_overlap() -> None:
+    """A long sparse record beside a short dense one is still the sparse one.
+
+    Over their whole records the sparse analyzer has more readings (100 of 200
+    rows) than the dense instrument (30), and counting that way would put the
+    dense one on the clock -- where, inside the thirty seconds they share,
+    every sparse reading straddles two of its cells.
+    """
+    co2 = np.full(200, np.nan)
+    co2[::2] = 420.0
+    streams = {
+        "picarro": make_stream(0.0, 1.0, 200, {"co2": co2}),
+        "lif": make_stream(50.5, 1.0, 30, {"noy": np.linspace(2.0, 5.0, 30)}),
+    }
+    paired = pair_species(streams, "noy", "co2")
+    assert paired.clock == "picarro"
+    assert paired.dataset["co2"].attrs["tsara_pairing_readings"] == paired.n_pairs
+
+
+def test_a_full_tie_goes_to_the_first_instrument_by_name_in_either_order() -> None:
+    """Equal widths and equal counts leave nothing physical to choose by.
+
+    The choice is arbitrary, and it is recorded as arbitrary; what it must not
+    be is dependent on argument order.
+    """
+    streams = half_phase_pair(sparse_every=1)
+    clocks = {pair_species(streams, y, x).clock for y, x in (("noy", "co2"), ("co2", "noy"))}
+    assert clocks == {"lif"}
+    reason = pair_species(streams, "co2", "noy").dataset.attrs["tsara_pairing_clock_reason"]
+    assert "first instrument by name" in reason
+
+
+# ---------------------------------------------------------------------------
+# How many readings stand behind the pairs
+# ---------------------------------------------------------------------------
+
+
+def test_each_species_records_the_readings_behind_its_pairs(
+    two_rates: dict[str, xr.Dataset],
+) -> None:
+    """Ten 1 s samples onto two 4 s cells: eight samples are used, two cells.
+
+    Samples 8 and 9 overlap no surviving cell, and sample 8's cell merely
+    touches the second one at 8 s, which is an edge rather than an overlap.
+    """
+    paired = pair_species(two_rates, "ch4", "co2")
+    assert (paired.y_readings, paired.x_readings) == (8, 2)
+    assert paired.dataset["ch4"].attrs["tsara_pairing_readings"] == 8
+    assert paired.dataset["co2"].attrs["tsara_pairing_readings"] == 2
+
+
+def test_a_masked_sample_is_not_a_reading() -> None:
+    fast = make_stream(0.0, 1.0, 4, {"ch4": np.array([1.0, np.nan, 3.0, 4.0])})
+    slow = make_stream(0.0, 4.0, 1, {"co2": np.array([10.0])})
+    paired = pair_species({"fast": fast, "slow": slow}, "ch4", "co2")
+    assert paired.y_readings == 3
+
+
+def test_a_cell_bracketed_but_not_overlapped_is_not_a_reading() -> None:
+    """Nested source cells make the overlap search return a zero-weight pair.
+
+    A 10 s cell holding a 1 s cell (a file whose per-row bounds nest one
+    sample inside another, which `stream_cells` deliberately accepts) raises
+    the running maximum of cell stops, so the candidate window for the 6-12 s
+    target still brackets the 1-2 s cell. It overlaps by nothing, and the
+    binner gives it no weight; counting it as a reading would describe a pair
+    the value was not formed from. The 0-6 s target is masked so that the
+    short cell has no legitimate pair to be counted through instead.
+    """
+    start = np.array([0, 1], dtype=np.int64) * SECOND
+    stop = np.array([10, 2], dtype=np.int64) * SECOND
+    nested = xr.Dataset(
+        {"benzene": ("time", np.array([1.0, 5.0]), {"units": "ppb"})},
+        coords={
+            "time": (start + (stop - start) // 2).astype("datetime64[ns]"),
+            "time_bnds": (("time", "nv"), np.stack([start, stop], axis=1).astype("datetime64[ns]")),
+        },
+    )
+    nested["time"].attrs["bounds"] = "time_bnds"
+    wide = make_stream(0.0, 6.0, 2, {"ch4": np.array([np.nan, 2000.0])})
+    paired = pair_species({"iwas": nested, "picarro": wide}, "benzene", "ch4")
+    assert paired.clock == "picarro"
+    assert paired.n_pairs == 1
+    assert paired.y_readings == 1
+
+
+def test_species_sharing_an_instrument_have_one_reading_per_pair() -> None:
+    stream = make_stream(0.0, 1.0, 6, {"ch4": np.arange(6.0), "c2h6": np.arange(6.0)})
+    paired = pair_species({"em27": stream}, "ch4", "c2h6")
+    assert paired.y_readings == paired.x_readings == paired.n_pairs == 6
+
+
+def test_a_fill_straddling_two_cells_is_one_reading_and_is_warned_about(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The duplication the tie-break cannot remove, made visible instead.
+
+    Three 60 s cells. One 15 s fill sits wholly inside the first; a second
+    runs from 112.5 s to 127.5 s, across the boundary at 120 s, so it is the
+    only partner of both the second and third cells. Three pairs, two
+    readings -- and a fit counting three independent points would count that
+    second fill's error twice.
+    """
+    minute = make_stream(0.0, 60.0, 3, {"ch4": np.array([2000.0, 2010.0, 2020.0])})
+    fills = xr.Dataset(
+        {"benzene": ("time", np.array([1.0, 2.0]), {"units": "ppb"})},
+        coords={
+            "time": np.array([27_500, 120_000], dtype=np.int64)
+            .astype("datetime64[ms]")
+            .astype("datetime64[ns]"),
+            "time_bnds": (
+                ("time", "nv"),
+                (np.array([[20.0, 35.0], [112.5, 127.5]]) * SECOND)
+                .astype(np.int64)
+                .astype("datetime64[ns]"),
+            ),
+        },
+    )
+    fills["time"].attrs["bounds"] = "time_bnds"
+    with caplog.at_level("WARNING", logger="tsara.align.pairing"):
+        paired = pair_species({"iwas": fills, "picarro": minute}, "benzene", "ch4")
+    assert paired.clock == "picarro"
+    assert paired.n_pairs == 3
+    assert (paired.y_readings, paired.x_readings) == (2, 3)
+    assert "rest on only 2 distinct readings of benzene" in caplog.text
+
+
+def test_no_warning_when_every_reading_is_one_pair(
+    caplog: pytest.LogCaptureFixture, two_rates: dict[str, xr.Dataset]
+) -> None:
+    with caplog.at_level("WARNING", logger="tsara.align.pairing"):
+        pair_species(two_rates, "ch4", "co2")
+    assert "distinct readings" not in caplog.text
 
 
 # ---------------------------------------------------------------------------
