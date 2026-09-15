@@ -131,6 +131,45 @@ def test_reference_species_must_be_declared_gas(
         load_config(path)
 
 
+def _two_methane_analyzers(manifest: dict[str, Any]) -> dict[str, Any]:
+    """The picarro's methane renamed, plus a second analyzer, both field ch4."""
+    both = copy.deepcopy(manifest)
+    picarro = both["instruments"]["picarro"]["variables"]
+    picarro["ch4_picarro"] = {**picarro.pop("ch4"), "field": "ch4"}
+    both["instruments"]["lgr"] = {
+        "loader": {
+            "format": "csv",
+            "path_template": "lgr/*.csv",
+            "time": {"column": "t", "format": "unix"},
+        },
+        "variables": {"ch4_lgr": {"column": "CH4", "units": "ppb", "field": "ch4"}},
+    }
+    return both
+
+
+def test_reference_species_is_checked_against_fields(
+    write_yaml: WriteYaml, stationary_manifest_dict: dict[str, Any], analysis_dict: dict[str, Any]
+) -> None:
+    """No variable is called 'ch4', and 'ch4' is still the gas both measure."""
+    manifest = _two_methane_analyzers(stationary_manifest_dict)
+    path = write_yaml({"manifest": manifest, "analysis": analysis_dict}, "run.yaml")
+    config = load_config(path)
+    assert config.analysis.regression.reference_species == "ch4"
+    assert config.manifest.gas_species == ("ch4", "co2")
+
+
+def test_reference_species_is_not_a_variable_name_that_declares_another_field(
+    write_yaml: WriteYaml, stationary_manifest_dict: dict[str, Any], analysis_dict: dict[str, Any]
+) -> None:
+    """A denominator names a gas; 'ch4_lgr' is one analyzer's record of it."""
+    manifest = _two_methane_analyzers(stationary_manifest_dict)
+    analysis = copy.deepcopy(analysis_dict)
+    analysis["regression"]["reference_species"] = "ch4_lgr"
+    path = write_yaml({"manifest": manifest, "analysis": analysis}, "run.yaml")
+    with pytest.raises(TsaraConfigError, match="not the field of any role='gas' variable"):
+        load_config(path)
+
+
 # ---------------------------------------------------------------------------
 # Path resolution
 # ---------------------------------------------------------------------------

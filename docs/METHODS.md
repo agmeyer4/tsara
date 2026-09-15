@@ -147,6 +147,46 @@ circular standard deviation rather than the Yamartino (1984) single-pass
 approximation, which is bounded where the exact form correctly is not.
 Specified in full, with the measurements behind each choice, in **§11.5**.
 
+### 1.6 A variable's name, and the quantity it measures
+
+A variable is identified by its **instrument and its name together**. A name
+must be unique within its instrument, because that is the one place it is used
+as a key, and may repeat across instruments: two methane analyzers can both
+call their record `ch4`. What a variable *measures* is a separate declaration,
+`field` (manifest `VariableConfig.field`), which defaults to the name and so is
+written only when the name is not the quantity. Every stream variable records
+it as the attribute `field`, declared or defaulted, so a reader never needs the
+rule; the joins copy a variable's attributes onto its column, so a joined
+product keeps it too (§11.2). The generator writes it as well (§9.7).
+
+**Why names stopped doing both jobs.** Until Phase 4.5 the manifest refused a
+name declared by two instruments. Its stated reason was a merged synchronized
+dataset in which the two would collide, and that dataset was abandoned for
+per-instrument streams on 2026-07-09 (§1.1), so the rule had outlived its
+reason. What it still did was make a campaign put the instrument into the name
+of the quantity — the real-data notebook's manifests carry `ch4_pico` beside
+`ch4_ultra` and `benzene_ptr` beside `benzene_iwas` — after which nothing in a
+product said that the two measure one gas. The joins had already stopped
+depending on the rule: a bare name held by two streams is refused as ambiguous
+rather than resolved to the first, and colliding columns are suffixed with
+their instrument, with `tsara_source_instrument` recording the source either
+way (§11.2).
+
+**What identity is for.** A physical question needs the quantity, not the
+spelling. `Manifest.gas_species` lists each gas field once, however many
+instruments measure it, and `RegressionConfig.reference_species` is checked
+against that list, because a ratio's denominator is a gas rather than one
+analyzer's column. When two instruments measure the reference gas, which record
+a regression uses is the regression stage's decision, not made here.
+
+**Deliberately not checked:** that variables sharing a field agree on role,
+units or circularity. Each looks like a natural rule and none has a consumer
+yet, and two would refuse legitimate manifests: role also marks which variable
+binds the platform's coordinates, so one quantity can carry `gps_alt` on the GPS
+and `aux` on a barometric sensor, and units are free text, in which `ppb` and
+`ppbv` name one unit. A rule belongs to the first stage that compares variables
+by field.
+
 ---
 
 ## 2. Measurement uncertainty model
@@ -1571,7 +1611,9 @@ variable-name convention (`sigma_rand_<name>`, `sigma_sys_<name>`) therefore
 lives in one module both producers build from, rather than in two matching
 string literals — a coupling that would break silently, since a rename would
 not fail anything until a later stage found no sigma and fell back to an
-empirical estimate, which is a *plausible* answer rather than an error.
+empirical estimate, which is a *plausible* answer rather than an error. The
+same holds for the `field` attribute (§1.6): both producers write it on every
+variable they declare, and the round-trip harness checks that they agree.
 
 **Cells.** Assembly is also where the boundaries resolved in orchestration
 stop being table columns and become the CF representation: a `time_bnds`
@@ -2486,7 +2528,8 @@ interpolated (§1.2).
 stream carries it. When two do — a campaign comparing two analyzers — both are
 suffixed with their instrument rather than one silently winning. The spelling
 therefore depends on the selection, which is why every column also records its
-source instrument.
+source instrument, and keeps the `field` its stream declared: `ch4_picarro` and
+`ch4_aeris` both still say `field: ch4` (§1.6).
 
 #### 11.2.1 The operation is symmetric in the code and must not be in use
 

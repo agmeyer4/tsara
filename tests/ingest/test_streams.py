@@ -109,6 +109,17 @@ def test_units_attr_describes_the_stored_numbers() -> None:
     assert stream["ch4"].attrs["units"] == "ppm"
 
 
+def test_every_variable_records_the_field_it_measures() -> None:
+    """Declared or defaulted, the attribute is written, so no reader needs the rule."""
+    instrument = _instrument(
+        ch4={"column": "CH4_dry", "role": "gas", "units": "ppm"},
+        ch4_backup={"column": "CH4_b", "role": "gas", "units": "ppm", "field": "ch4"},
+    )
+    stream = _build(_frame(CH4_b=np.linspace(1.9, 1.93, 4)), instrument)
+    assert stream["ch4"].attrs["field"] == "ch4"
+    assert stream["ch4_backup"].attrs["field"] == "ch4"
+
+
 def test_role_and_circular_are_recorded() -> None:
     instrument = _instrument(
         wdir={"column": "WD", "role": "met", "units": "degrees", "circular": True}

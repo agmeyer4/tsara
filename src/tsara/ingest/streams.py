@@ -14,7 +14,8 @@ to be substitutable for real data everywhere. Concretely a stream is an
 :class:`xarray.Dataset` with:
 
 * a ``time`` dimension carrying tz-naive UTC nanosecond timestamps;
-* one variable per canonical name, in canonical units, QA/QC masked;
+* one variable per canonical name, in canonical units, QA/QC masked, each
+  recording in a ``field`` attribute the physical quantity it measures;
 * ``sigma_rand_<name>`` / ``sigma_sys_<name>`` companions wherever the
   manifest let ingestion compute them, named via :mod:`tsara.core.naming` so
   the two producers cannot drift apart;
@@ -160,6 +161,7 @@ def build_stream(
             frame,
             canonical,
             variable,
+            field=instrument.field_of(canonical),
             instrument_name=name,
             sources=sources,
             lod_by_column=lod_by_column,
@@ -244,12 +246,18 @@ def _add_variable(
     canonical: str,
     variable: VariableConfig,
     *,
+    field: str,
     instrument_name: str,
     sources: Sequence[Path],
     lod_by_column: Mapping[str, int] = MappingProxyType({}),
     cell_width_ns: Any = None,
 ) -> None:
-    """Convert, mask and resolve one variable, adding it and its sigmas."""
+    """Convert, mask and resolve one variable, adding it and its sigmas.
+
+    ``field`` arrives resolved (:meth:`InstrumentConfig.field_of`) rather than
+    read off ``variable``, which cannot know its own name and so cannot apply
+    the default.
+    """
     if variable.column not in frame.columns:
         raise TsaraIngestError(
             f"Variable '{canonical}' of instrument '{instrument_name}' reads "
@@ -290,6 +298,11 @@ def _add_variable(
     attrs: dict[str, Any] = {
         "units": units,
         "role": variable.role,
+        # What is measured, as opposed to what this stream calls it. Written
+        # even when it equals the name, so a reader never has to know the
+        # default: every variable says, and a joined product keeps it, since
+        # the joins copy a variable's attributes onto its column (METHODS §1.6).
+        "field": field,
         # netCDF has no boolean type, so this is stored as 0/1 — the same
         # convention the synthetic generator uses.
         "circular": int(variable.circular),

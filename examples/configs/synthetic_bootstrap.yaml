@@ -104,7 +104,7 @@ instruments:
           scale: 1.0
         uncertainty:
           random:
-            absolute: 0.7        # ~ the real Picarro's 2 s precision
+            absolute: 1.0        # illustrative; declare your own instrument's precision
         quantization: 0.1
 
       co2:

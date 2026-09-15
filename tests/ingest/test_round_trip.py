@@ -168,6 +168,31 @@ def test_units_and_roles_survive(tmp_path: Path) -> None:
     assert ingested["met"]["wind_dir"].attrs["circular"] == 1
 
 
+def _assert_both_producers_record_the_same_fields(generated: Any, ingested: Any) -> None:
+    """Every ingested variable's field is the one its generated original names.
+
+    Walked from the ingested side, because ingestion writes the attribute on
+    every variable its manifest declares, so that side lists exactly the
+    measurements; walked from the generated side, a variable the generator
+    forgot to label would simply be skipped. Counted, because a walk that
+    found no field would pass.
+    """
+    checked = 0
+    for name, stream in ingested.streams.items():
+        for variable in stream.data_vars:
+            if "field" in stream[variable].attrs:
+                original = generated.streams[name][variable].attrs.get("field")
+                assert original == stream[variable].attrs["field"], (name, variable)
+                checked += 1
+    assert checked > 0
+
+
+def test_both_producers_record_the_same_fields(tmp_path: Path) -> None:
+    """Substitutability for the identity attribute (METHODS §1.6, §9.7)."""
+    generated, ingested = _round_trip(tmp_path)
+    _assert_both_producers_record_the_same_fields(generated, ingested)
+
+
 # ---------------------------------------------------------------------------
 # The uncertainty budget, which is the part with a right answer
 # ---------------------------------------------------------------------------
@@ -277,6 +302,7 @@ def test_mobile_campaign_round_trips_with_a_gps_instrument(tmp_path: Path) -> No
 
     assert "gps" in ingested.streams
     assert ingested["gps"]["latitude"].attrs["role"] == "gps_lat"
+    _assert_both_producers_record_the_same_fields(generated, ingested)
     # The gas streams get no coordinates: attaching a track to their clocks
     # is interpolation, which belongs to Phase 4.
     assert "latitude" not in ingested["analyzer"].coords

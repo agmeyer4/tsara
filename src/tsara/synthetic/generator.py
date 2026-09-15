@@ -548,6 +548,10 @@ def _render_instrument(
         attrs: dict[str, object] = {
             "units": species.units,
             "role": species.role,
+            # The quantity measured. A generated species is still named after
+            # it, so this is the name; written anyway, because ingestion writes
+            # it on every variable and the two producers' streams must match.
+            "field": species_name,
             "circular": int(species.circular),
         }
         attrs.update(applied.scalars)
@@ -842,12 +846,12 @@ def _build_gps_stream(
             LATITUDE_COORD: (
                 TIME_COORD,
                 latitude,
-                {"units": "degrees_north", "role": "gps_lat"},
+                {"units": "degrees_north", "role": "gps_lat", "field": LATITUDE_COORD},
             ),
             LONGITUDE_COORD: (
                 TIME_COORD,
                 longitude,
-                {"units": "degrees_east", "role": "gps_lon"},
+                {"units": "degrees_east", "role": "gps_lon", "field": LONGITUDE_COORD},
             ),
         },
         coords={TIME_COORD: times},

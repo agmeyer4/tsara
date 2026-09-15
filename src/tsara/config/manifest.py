@@ -11,6 +11,12 @@ Design decisions embedded in this schema
 * **Species are data, not code.** Gas species appear only as keys in a
   ``variables:`` mapping. Adding a 40th VOC to a campaign is a YAML edit;
   no TSARA source file ever names a specific gas.
+* **A name belongs to its instrument; what it measures is ``field``.** A
+  variable is identified by its instrument and its name together, so two
+  analyzers may both call their methane ``ch4``. The physical quantity is a
+  separate declaration that defaults to the name, which is what lets a later
+  stage find every methane record without reading meaning into spellings
+  (METHODS.md §1.6).
 * **``extra="forbid"`` everywhere.** A typo like ``quantles:`` in a science
   config silently changing results is the worst failure mode a config-driven
   package can have. Every model rejects unknown keys loudly instead.
@@ -310,11 +316,25 @@ class VariableConfig(_StrictModel):
     """One variable measured by an instrument.
 
     The *canonical name* of the variable is the key under which this config
-    appears in ``InstrumentConfig.variables`` — e.g. ``ch4:``. This model
-    describes how to find it in the raw file and how to treat it.
+    appears in ``InstrumentConfig.variables`` — e.g. ``ch4:``. A name has to
+    be unique only within its instrument, because that is where it is used as
+    a key: one instrument's stream. What the variable measures is ``field``,
+    and a missing ``field`` means the name already says it
+    (:meth:`InstrumentConfig.field_of`). This model describes how to find the
+    variable in the raw file and how to treat it.
     """
 
     column: str = Field(description="Column/variable name as it appears in the raw file.")
+    field: str | None = Field(
+        default=None,
+        description=(
+            "The physical quantity this variable measures, spelled the same by "
+            "every instrument that measures it: two methane analyzers both "
+            "declare 'ch4', whatever their variables are called. Omit it when "
+            "the variable's name already is the quantity, which is the usual "
+            "case. Written onto the stream variable as the attribute 'field'."
+        ),
+    )
     role: VariableRole = Field(default="gas", description="Downstream handling category.")
     units: str = Field(description="Native units in the raw file, e.g. 'ppb'.")
     convert: UnitConversion | None = Field(
@@ -339,6 +359,24 @@ class VariableConfig(_StrictModel):
         default=(), description="Masking rules applied in order at ingestion."
     )
     description: str = Field(default="", description="Free-text note for humans.")
+
+    @field_validator("field")
+    @classmethod
+    def _field_is_an_identifier(cls, value: str | None) -> str | None:
+        """Spell a field by the same rule as a variable name.
+
+        Its default *is* the variable's name, so fields and names are one
+        vocabulary: an undeclared field is a name, and a declared one must be
+        able to stand where a name would. One spelling rule for both keeps
+        that true, and refuses ``CH4 (dry)`` here, where the message can point
+        at the line, rather than wherever the first comparison fails.
+        """
+        if value is not None and not value.isidentifier():
+            raise ValueError(
+                f"field '{value}' must be a valid identifier (letters, digits, "
+                "underscores; not starting with a digit), like a variable name."
+            )
+        return value
 
     @model_validator(mode="after")
     def _circular_only_for_met(self) -> VariableConfig:
@@ -937,9 +975,9 @@ class InstrumentConfig(_StrictModel):
     variables: dict[str, VariableConfig] = Field(
         min_length=1,
         description=(
-            "Mapping of canonical variable name -> config. Keys become names "
-            "in the synchronized dataset (and, for role='gas', entries along "
-            "the species dimension)."
+            "Mapping of canonical variable name -> config. Keys become the "
+            "variable names in this instrument's stream, so they are unique "
+            "within the instrument; another instrument may use the same name."
         ),
     )
     metadata: dict[str, str] = Field(
@@ -1055,6 +1093,33 @@ class InstrumentConfig(_StrictModel):
             )
         return self
 
+    def field_of(self, name: str) -> str:
+        """Return the physical quantity variable ``name`` measures.
+
+        Its declared ``field``, or else its own name. The default is resolved
+        here, in one place, rather than written into the config at validation:
+        the manifest keeps saying what its author wrote (a saved one shows
+        ``field: null`` where nothing was declared), and every reader of a
+        field asks this method instead of repeating the rule.
+
+        Parameters
+        ----------
+        name : str
+            A key of :attr:`variables`.
+
+        Returns
+        -------
+        str
+            The variable's field.
+
+        Raises
+        ------
+        KeyError
+            If this instrument declares no variable ``name``.
+        """
+        declared = self.variables[name].field
+        return name if declared is None else declared
+
 
 # ---------------------------------------------------------------------------
 # Platforms (tagged union on 'kind')
@@ -1168,37 +1233,31 @@ class Manifest(_StrictModel):
                 )
         return self
 
-    @model_validator(mode="after")
-    def _no_duplicate_canonical_names_across_instruments(self) -> Manifest:
-        """Canonical variable names must be unique campaign-wide.
-
-        Two instruments both producing 'ch4' would collide in the merged
-        synchronized dataset. If a campaign genuinely has redundant
-        measurements, the manifest must name them distinctly (e.g.
-        'ch4_picarro', 'ch4_lgr') — an explicit scientific choice.
-        """
-        owner: dict[str, str] = {}
-        for inst_name, inst in self.instruments.items():
-            for var_name in inst.variables:
-                if var_name in owner:
-                    raise ValueError(
-                        f"Canonical variable '{var_name}' is declared by both "
-                        f"'{owner[var_name]}' and '{inst_name}'; canonical names "
-                        "must be unique across the whole manifest."
-                    )
-                owner[var_name] = inst_name
-        return self
+    # No rule that variable names be unique across instruments. There was one
+    # until Phase 4.5, justified by a merged synchronized dataset in which two
+    # instruments' 'ch4' would collide; that dataset was abandoned for
+    # per-instrument streams on 2026-07-09, and the joins that replaced it
+    # already refuse a bare name two streams share and suffix colliding
+    # columns with their instrument. What the rule still did was force the
+    # instrument into the name of the quantity, after which nothing said the
+    # two analyzers measure one gas. `field` says that now (METHODS.md §1.6).
 
     @property
     def gas_species(self) -> tuple[str, ...]:
-        """Canonical names of all role='gas' variables, across instruments.
+        """The gases this campaign measures: each role='gas' field once.
 
-        This tuple is what ultimately becomes the ``species`` dimension of
-        the synchronized dataset — computed, never hardcoded.
+        Fields rather than variable names, because the question is physical.
+        A campaign with two methane analyzers measures one gas, however its
+        variables are spelled, so ``ch4`` appears once. Order is first
+        appearance in the manifest, so the tuple is stable for a given file.
+        Computed, never hardcoded.
         """
+        # dict.fromkeys de-duplicates while keeping first-appearance order.
         return tuple(
-            var_name
-            for inst in self.instruments.values()
-            for var_name, var in inst.variables.items()
-            if var.role == "gas"
+            dict.fromkeys(
+                instrument.field_of(name)
+                for instrument in self.instruments.values()
+                for name, variable in instrument.variables.items()
+                if variable.role == "gas"
+            )
         )

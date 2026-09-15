@@ -1171,10 +1171,11 @@ class SyntheticConfig(_StrictModel):
     def _species_unique_across_instruments(self) -> SyntheticConfig:
         """Canonical species names must be unique campaign-wide.
 
-        Same rule (and same reason) as ``Manifest``: two instruments both
-        producing 'ch4' would collide when the streams are combined, and a
-        source naming 'ch4' would be ambiguous about which instrument it
-        enhances.
+        No longer the manifest's rule, which Phase 4.5 dropped because streams
+        are never merged (METHODS.md §1.6). It stays here for the generator's
+        own reason: a species is both a variable name and the thing a source
+        enhances, so two instruments' 'ch4' would leave a source naming 'ch4'
+        ambiguous about which one it enhances.
         """
         owner: dict[str, str] = {}
         for inst_name, inst in self.instruments.items():

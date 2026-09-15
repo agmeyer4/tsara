@@ -434,9 +434,11 @@ class RegressionConfig(_StrictModel):
     reference_species: str = Field(
         min_length=1,
         description=(
-            "Canonical name of the denominator species (e.g. 'ch4' or 'co2'). "
-            "Must be a role='gas' variable in the manifest; cross-checked when "
-            "manifest and analysis configs are combined."
+            "The denominator species (e.g. 'ch4' or 'co2'), as a field: the "
+            "physical quantity a manifest variable declares it measures, which "
+            "is the variable's name unless it declares `field`. Must be the "
+            "field of a role='gas' variable; cross-checked when manifest and "
+            "analysis configs are combined."
         ),
     )
     methods: tuple[Literal["ols", "york", "odr"], ...] = Field(

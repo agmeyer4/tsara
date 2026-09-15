@@ -112,7 +112,7 @@ instruments:
 
   # --- Processed stage stored as parquet ------------------------------------
   aeris:
-    description: Ethane analyzer, instrument-aligned stage stored as parquet.
+    description: Methane/ethane analyzer, instrument-aligned stage stored as parquet.
     # A property of the INSTRUMENT, not of its files: how its clock relates to
     # true air-at-inlet time. Added to every timestamp and to both cell
     # boundaries, so cells move without changing width. Here the logger ran
@@ -159,6 +159,20 @@ instruments:
           # -- a spread has no origin (METHODS.md 2.2).
           random: {mode: reported, column: C2H6_1SIGMA}
           systematic: {mode: declared, relative: 0.03}
+      # The gas the picarro measures too. Names only need to be unique WITHIN
+      # an instrument, so this could simply be called `ch4` as well; a joined
+      # product would then suffix the two columns with their instruments
+      # (`ch4_picarro`, `ch4_aeris`) -- but only when both are selected, so a
+      # column's spelling would depend on what it was joined with. A name of
+      # its own keeps the spelling fixed, and `field` records that it is still
+      # methane: the quantity a later stage asks for when it wants every methane
+      # record in the campaign. `field` defaults to the variable's name, which
+      # is why the picarro's `ch4` does not need one (METHODS.md 1.6).
+      ch4_aeris:
+        column: CH4_ppb
+        field: ch4
+        role: gas
+        units: ppb
 
   # --- ICARTT tree with several revisions per day ---------------------------
   voc_pfp:

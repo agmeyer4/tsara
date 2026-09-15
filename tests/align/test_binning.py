@@ -307,6 +307,24 @@ def test_one_species_measured_twice_keeps_both_columns() -> None:
     assert joined["ch4_aeris"].attrs["tsara_source_instrument"] == "aeris"
 
 
+def test_a_suffixed_column_still_says_what_it_measures() -> None:
+    """The instrument goes into the spelling; the quantity stays in `field`.
+
+    Checked on both paths, one stream already on the target cells and one
+    averaged onto them, because they assemble a column in different branches.
+    """
+    methane: dict[str, object] = {"units": "ppb", "field": "ch4"}
+    streams = {
+        "aeris": make_stream(0.0, 1.0, 20, {"ch4": np.full(20, 1900.0)}, attrs={"ch4": methane}),
+        "picarro": make_stream(0.0, 5.0, 4, {"ch4": np.full(4, 1910.0)}, attrs={"ch4": methane}),
+    }
+    joined = bin_streams_onto_cells(streams, cells(0.0, 5.0, 4))
+    assert joined["ch4_aeris"].attrs["tsara_binned"] == 1
+    assert joined["ch4_picarro"].attrs["tsara_binned"] == 0
+    assert joined["ch4_aeris"].attrs["field"] == "ch4"
+    assert joined["ch4_picarro"].attrs["field"] == "ch4"
+
+
 def test_a_name_only_one_stream_claims_is_left_alone() -> None:
     streams = {
         "aeris": make_stream(0.0, 1.0, 20, {"ch4": np.full(20, 1900.0)}),
