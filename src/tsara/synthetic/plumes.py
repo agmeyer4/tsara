@@ -342,6 +342,33 @@ class RealizedEvent:
 
         return self.species_center(species) + pd.Timedelta(seconds=self.kernel.peak_offset_s)
 
+    def species_window(self, species: str) -> tuple[pd.Timestamp, pd.Timestamp]:
+        """Return the interval outside which this event adds nothing to ``species``.
+
+        The kernel's finite support around the lag-adjusted center. One method
+        rather than the same two lines in every place that needs the window --
+        the atmosphere, which evaluates the event, and the generator, which
+        records the window in the answer key -- so that the window a row
+        reports is the window that was evaluated.
+
+        Parameters
+        ----------
+        species : str
+            Canonical species name.
+
+        Returns
+        -------
+        tuple of pandas.Timestamp
+            ``(start, end)``; the kernel is exactly zero outside it.
+        """
+        import pandas as pd
+
+        center = self.species_center(species)
+        return (
+            center - pd.Timedelta(seconds=self.kernel.support_before_s),
+            center + pd.Timedelta(seconds=self.kernel.support_after_s),
+        )
+
 
 def _draw_amplitude(spec: AmplitudeSpec, rng: np.random.Generator) -> float:
     """Draw one peak amplitude from the configured distribution.
@@ -422,7 +449,8 @@ def schedule_events(config: SyntheticConfig, rng: np.random.Generator) -> list[R
     Parameters
     ----------
     config : SyntheticConfig
-        The full run configuration.
+        The full run configuration; its sources are read from
+        ``config.atmosphere``.
     rng : numpy.random.Generator
         Source of randomness, threaded through the whole build for
         reproducibility.
@@ -448,7 +476,7 @@ def schedule_events(config: SyntheticConfig, rng: np.random.Generator) -> list[R
 
     events: list[RealizedEvent] = []
 
-    for source_name, source in config.sources.items():
+    for source_name, source in config.atmosphere.sources.items():
         kernel = build_kernel(source.shape)
         expected = source.rate_per_hour * span_hours
         n_events = int(rng.poisson(expected))
@@ -628,6 +656,7 @@ GROUND_TRUTH_COLUMNS: tuple[str, ...] = (
     "parent_event_id",
     "source_name",
     "species",
+    "field",
     "instrument",
     "reference_species",
     "start_time",
@@ -644,12 +673,14 @@ GROUND_TRUTH_COLUMNS: tuple[str, ...] = (
 
 @dataclass(frozen=True, eq=False)
 class GroundTruthEvent:
-    """One (event, species) row of the answer key.
+    """One (event, measured variable) row of the answer key.
 
-    One physical event contributes one row per participating species, mirroring
-    how the Phase 6 catalog will store per-species enhancements. Both a
-    continuous and a sampled amplitude are recorded because they answer
-    different questions: ``true_amplitude`` is what the *source* did, while
+    One physical event contributes one row per variable that measures a
+    species it emits, mirroring how the Phase 6 catalog will store per-species
+    enhancements: two instruments measuring methane each get a row, because
+    each saw the event through its own clock and cells. Both a continuous and
+    a sampled amplitude are recorded because they answer different questions:
+    ``true_amplitude`` is what the *source* did, while
     ``sampled_peak_amplitude`` is the largest value the instrument could
     possibly have seen given its sampling rate. A detector cannot be faulted
     for missing the difference between them.
@@ -663,9 +694,13 @@ class GroundTruthEvent:
     source_name : str
         Source that spawned the event.
     species : str
-        Canonical species name this row describes.
+        Name of the variable this row describes, in its instrument's stream.
+        The field's own name unless the measurement renamed it.
+    field : str
+        The atmosphere field that variable measures, which is what
+        ``reference_species`` and the ratio are stated in.
     instrument : str
-        Instrument that measures this species.
+        Instrument whose variable this row describes.
     reference_species : str
         Denominator species of ``true_ratio_to_reference``.
     start_time, peak_time, end_time : pandas.Timestamp
@@ -688,6 +723,7 @@ class GroundTruthEvent:
     parent_event_id: str | None
     source_name: str
     species: str
+    field: str
     instrument: str
     reference_species: str
     start_time: pd.Timestamp
@@ -795,6 +831,7 @@ class GroundTruth:
                 "parent_event_id",
                 "source_name",
                 "species",
+                "field",
                 "instrument",
                 "reference_species",
             ):
@@ -842,6 +879,7 @@ class GroundTruth:
                 ),
                 source_name=str(row["source_name"]),
                 species=str(row["species"]),
+                field=str(row["field"]),
                 instrument=str(row["instrument"]),
                 reference_species=str(row["reference_species"]),
                 start_time=pd.Timestamp(row["start_time"]),

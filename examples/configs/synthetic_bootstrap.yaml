@@ -54,8 +54,11 @@
 #   * lag1_autocorr describes the SUBSTRATE, not instrument noise, and its
 #     implied tau is ill-conditioned as rho1 -> 1 (METHODS.md §8.4). Do not
 #     feed either into an N_eff calculation.
-#   * sample_period_s should be within ~2x of the instrument rate below, or
-#     the replayed noise colour is stretched (the generator warns).
+#   * sample_period_s is the spacing the fluctuations are replayed at, in the
+#     atmosphere, whatever the instruments' rates: the real record's noise
+#     colour survives by construction. An instrument faster than the profile
+#     sees the fluctuations linear between the profile's samples -- no
+#     structure finer than the real record had.
 # ============================================================================
 
 name: synthetic_bootstrap_example
@@ -74,67 +77,74 @@ platform:
   longitude: -110.0234
   altitude_m: 1580.0
 
+atmosphere:
+
+  fields:
+
+    ch4:
+      units: ppb
+      background:
+        kind: bootstrap
+        # Must match a key in the `profiles` mapping passed to generate().
+        profile: picarro_ch4
+        # Blocks are mean-centred, so only WITHIN-block (high-frequency)
+        # structure survives resampling. Slow structure is supplied here
+        # instead. Omit `base` entirely to sit on the profile's own median
+        # level as a flat offset.
+        base:
+          kind: parametric
+          offset: 1950.0
+          diurnal_amplitude: 25.0
+          drift_per_day: 0.5
+        # Amplify the real fluctuations without changing their correlation
+        # structure — useful for asking "at what noise level does my
+        # detector start to fail?" 1.0 replays them as measured.
+        scale: 1.0
+
+    co2:
+      units: ppm
+      # Left parametric on purpose: the two kinds are interchangeable per
+      # field, so one atmosphere can mix them.
+      background:
+        kind: parametric
+        offset: 418.0
+        diurnal_amplitude: 6.0
+
+  sources:
+
+    well_pad:
+      rate_per_hour: 4.0
+      reference_species: ch4
+      shape:
+        kind: emg
+        sigma: 15s
+        tau: 30s
+      amplitude:
+        kind: lognormal
+        median: 90.0
+        sigma_log: 0.6
+      ratios:
+        co2:
+          mean: 0.004
+          relative_spread: 0.30
+
 instruments:
 
   picarro:
-    # Match the real instrument's rate: blocks are replayed sample-for-sample,
-    # so a profile built at 2 s replayed onto a 0.2 s grid would reproduce the
-    # right shape at ten times the real duration.
+    # Any rate works: the bootstrapped fluctuations live in the atmosphere at
+    # the profile's own sampling period, and this instrument only samples it.
     native_rate: 2s
-    species:
+    measures:
 
       ch4:
-        units: ppb
-        background:
-          kind: bootstrap
-          # Must match a key in the `profiles` mapping passed to generate().
-          profile: picarro_ch4
-          # Blocks are mean-centred, so only WITHIN-block (high-frequency)
-          # structure survives resampling. Slow structure is supplied here
-          # instead. Omit `base` entirely to sit on the profile's own median
-          # level as a flat offset.
-          base:
-            kind: parametric
-            offset: 1950.0
-            diurnal_amplitude: 25.0
-            drift_per_day: 0.5
-          # Amplify the real fluctuations without changing their correlation
-          # structure — useful for asking "at what noise level does my
-          # detector start to fail?" 1.0 replays them as measured.
-          scale: 1.0
         uncertainty:
           random:
             absolute: 1.0        # illustrative; declare your own instrument's precision
         quantization: 0.1
 
       co2:
-        units: ppm
-        # Left parametric on purpose: the two kinds are interchangeable per
-        # species, so one instrument can mix them.
-        background:
-          kind: parametric
-          offset: 418.0
-          diurnal_amplitude: 6.0
         uncertainty:
           random:
             absolute: 0.05
           systematic:
             relative: 0.001
-
-sources:
-
-  well_pad:
-    rate_per_hour: 4.0
-    reference_species: ch4
-    shape:
-      kind: emg
-      sigma: 15s
-      tau: 30s
-    amplitude:
-      kind: lognormal
-      median: 90.0
-      sigma_log: 0.6
-    ratios:
-      co2:
-        mean: 0.004
-        relative_spread: 0.30

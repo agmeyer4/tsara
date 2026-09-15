@@ -187,16 +187,16 @@ def export_raw(
     path : str or pathlib.Path
         Directory to write into. Created if absent.
     raw_units : Mapping of str to RawUnits, optional
-        Species to write in non-canonical units, keyed by canonical species
-        name. The file receives ``(canonical - offset) / scale`` and the
-        manifest declares the conversion that undoes it, so ingestion must
-        recover the generator's truth. See the module docstring for why this
-        materially strengthens the round trip, and why an offset of zero
-        weakens it.
+        Variables to write in non-canonical units, keyed by variable name and
+        applied on every instrument that writes a variable of that name. The
+        file receives ``(canonical - offset) / scale`` and the manifest
+        declares the conversion that undoes it, so ingestion must recover the
+        generator's truth. See the module docstring for why this materially
+        strengthens the round trip, and why an offset of zero weakens it.
     qaqc_bounds : Mapping of str to tuple, optional
-        ``(min, max)`` range rules to declare per species, in **canonical**
-        units. Present so the round trip can check that QA/QC bounds are
-        applied after unit conversion rather than before
+        ``(min, max)`` range rules to declare per variable name, in
+        **canonical** units. Present so the round trip can check that QA/QC
+        bounds are applied after unit conversion rather than before
         (``docs/METHODS.md`` §9.4); either bound may be ``None``.
     support_declaration : {'declared', 'reported', 'none'}, optional
         How much the exported archive says about its own cells. The three
@@ -262,8 +262,8 @@ def export_raw(
     ------
     TsaraSyntheticError
         If ``path`` exists and is not a directory, if ``raw_units`` or
-        ``qaqc_bounds`` names a species the dataset does not contain, if
-        ``time_shift`` names an unknown instrument, or if a species collides
+        ``qaqc_bounds`` names a variable no instrument writes, if
+        ``time_shift`` names an unknown instrument, or if a variable collides
         with a boundary column name this exporter needs to write.
     """
     root = Path(path)
@@ -289,8 +289,10 @@ def export_raw(
     raw_dir = root / EXPORT_RAW_DIR
     raw_dir.mkdir(parents=True, exist_ok=True)
 
-    sigma_columns = _reported_sigma_columns(dataset.config)
     for name in dataset.streams:
+        # Per instrument, because a variable name is unique only within one:
+        # two instruments may both write `ch4` and publish different sigmas.
+        sigma_columns = _reported_sigma_columns(dataset.config, name)
         for suffix, chunk, n_zero in _chunks(
             dataset.observable(name), strides.get(name), degenerate.get(name, 0)
         ):
@@ -331,24 +333,31 @@ def export_raw(
     return manifest_path
 
 
+def _variable_names(config: SyntheticConfig) -> set[str]:
+    """Return every variable name any configured instrument writes."""
+    return {
+        instrument.variable_name(field)
+        for instrument in config.instruments.values()
+        for field in instrument.measures
+    }
+
+
 def _check_species_exist(
     config: SyntheticConfig,
     scales: Mapping[str, RawUnits],
     bounds: Mapping[str, tuple[float | None, float | None]],
 ) -> None:
-    """Refuse a request naming a species the campaign does not have.
+    """Refuse a request naming a variable the campaign does not write.
 
-    A misspelled species would otherwise be accepted in silence and simply
-    do nothing, which in a *test harness* is the worst possible outcome: the
+    A misspelled name would otherwise be accepted in silence and simply do
+    nothing, which in a *test harness* is the worst possible outcome: the
     round trip would go on passing while checking less than it claims to.
     """
-    known = {
-        species for instrument in config.instruments.values() for species in instrument.species
-    }
+    known = _variable_names(config)
     unknown = sorted((set(scales) | set(bounds)) - known)
     if unknown:
         raise TsaraSyntheticError(
-            f"Cannot export species {unknown}: campaign '{config.name}' declares {sorted(known)}."
+            f"Cannot export variables {unknown}: campaign '{config.name}' writes {sorted(known)}."
         )
 
 
@@ -405,26 +414,19 @@ def _check_instruments_exist(dataset: SyntheticDataset, requested: Mapping[str, 
 
 
 def _check_boundary_columns_are_free(dataset: SyntheticDataset) -> None:
-    """Refuse to write boundary columns over a species of the same name.
+    """Refuse to write boundary columns over a variable of the same name.
 
-    Species names are validated as identifiers, so ``time_start`` is a legal
+    Variable names are validated as identifiers, so ``time_start`` is a legal
     one. Writing the cell boundary into it would overwrite a measurement with
     a timestamp, and the round trip would then compare the wrong column
     against the answer key.
     """
-    taken = sorted(
-        {
-            species
-            for instrument in dataset.config.instruments.values()
-            for species in instrument.species
-        }
-        & {START_COLUMN, STOP_COLUMN}
-    )
+    taken = sorted(_variable_names(dataset.config) & {START_COLUMN, STOP_COLUMN})
     if taken:
         raise TsaraSyntheticError(
-            f"Cannot export per-row cell boundaries: species {taken} would be "
+            f"Cannot export per-row cell boundaries: variables {taken} would be "
             f"overwritten by the columns '{START_COLUMN}'/'{STOP_COLUMN}'. "
-            "Rename the species, or export with support_declaration='declared'."
+            "Rename them, or export with support_declaration='declared'."
         )
 
 
@@ -504,10 +506,10 @@ def _write_csv(
     # applying `raw * scale + offset` lands back on the generator's truth.
     # A reported-sigma column is scaled but NOT offset, mirroring
     # `convert_spread`: an offset shifts a measurement, never its spread.
-    for species, raw in scales.items():
-        if species in frame.columns:
-            frame[species] = (frame[species] - raw.offset) / raw.scale
-        sigma_column = sigma_columns.get(species)
+    for variable, raw in scales.items():
+        if variable in frame.columns:
+            frame[variable] = (frame[variable] - raw.offset) / raw.scale
+        sigma_column = sigma_columns.get(variable)
         if sigma_column is not None and sigma_column in frame.columns:
             frame[sigma_column] = frame[sigma_column] / raw.scale
 
@@ -539,23 +541,26 @@ def _write_csv(
     frame.to_csv(target, index=False)
 
 
-def _reported_sigma_columns(config: SyntheticConfig) -> dict[str, str]:
-    """Map each species to the sigma column it publishes, where it has one.
+def _reported_sigma_columns(config: SyntheticConfig, stream: str) -> dict[str, str]:
+    """Map each variable of one stream to the sigma column it publishes, if any.
 
     Read from the config rather than from the generated stream, because
     ``report_as`` is a *configuration* fact: the generator writes the column
     under that name but records nothing in the variable's attrs, so asking
-    the dataset would silently answer "no column" for every species.
+    the dataset would silently answer "no column" for every variable. The
+    GPS stream is manufactured by the platform and publishes none.
     """
     columns: dict[str, str] = {}
-    for instrument in config.instruments.values():
-        for name, species in instrument.species.items():
-            uncertainty = species.uncertainty
-            if uncertainty is None:
-                continue
-            for component in (uncertainty.random, uncertainty.systematic):
-                if component is not None and component.report_as is not None:
-                    columns[name] = component.report_as
+    instrument = config.instruments.get(stream)
+    if instrument is None:
+        return columns
+    for field, measurement in instrument.measures.items():
+        uncertainty = measurement.uncertainty
+        if uncertainty is None:
+            continue
+        for component in (uncertainty.random, uncertainty.systematic):
+            if component is not None and component.report_as is not None:
+                columns[instrument.variable_name(field)] = component.report_as
     return columns
 
 
@@ -597,17 +602,24 @@ def _build_manifest(
     instruments: dict[str, Any] = {}
     for name, instrument in config.instruments.items():
         variables: dict[str, Any] = {}
-        for species_name, species in instrument.species.items():
+        for field_name, measurement in instrument.measures.items():
+            field = config.atmosphere.fields[field_name]
+            variable_name = instrument.variable_name(field_name)
             variable: dict[str, Any] = {
-                # Columns are written under their canonical names, so column
+                # Columns are written under their variable names, so column
                 # renaming is not exercised here; it is covered by the
                 # ingest unit tests.
-                "column": species_name,
-                "role": species.role,
-                "units": species.units,
-                "circular": species.circular,
+                "column": variable_name,
+                "role": field.role,
+                "units": field.units,
+                "circular": field.circular,
             }
-            raw = scales.get(species_name)
+            if variable_name != field_name:
+                # Declared only where the name does not already say it, which
+                # is the shape a real manifest has: most variables are named
+                # for what they measure and never write `field` at all.
+                variable["field"] = field_name
+            raw = scales.get(variable_name)
             if raw is not None:
                 # `units` names what is IN THE FILE, and `convert` takes it
                 # to canonical -- the same shape a real manifest has, and
@@ -615,11 +627,11 @@ def _build_manifest(
                 variable["units"] = raw.from_unit
                 variable["convert"] = {
                     "from_unit": raw.from_unit,
-                    "to_unit": species.units,
+                    "to_unit": field.units,
                     "scale": raw.scale,
                     "offset": raw.offset,
                 }
-            limits = bounds.get(species_name)
+            limits = bounds.get(variable_name)
             if limits is not None:
                 # Declared in CANONICAL units deliberately: QA/QC runs after
                 # conversion (METHODS §9.4), so a bound that only holds on
@@ -630,14 +642,16 @@ def _build_manifest(
                 if limits[1] is not None:
                     rule["max"] = limits[1]
                 variable["qaqc"] = [rule]
-            if species.uncertainty is not None:
+            if measurement.uncertainty is not None:
                 # The seam Phase 2 built for exactly this: the generator's
                 # true budget expressed as the manifest declaration that
                 # should reproduce it.
-                variable["uncertainty"] = species.uncertainty.to_manifest_uncertainty().model_dump(
-                    mode="json", exclude_none=True
+                variable["uncertainty"] = (
+                    measurement.uncertainty.to_manifest_uncertainty().model_dump(
+                        mode="json", exclude_none=True
+                    )
                 )
-            variables[species_name] = variable
+            variables[variable_name] = variable
         loader: dict[str, Any] = {
             "format": "csv",
             "path_template": f"{name}_*.csv" if name in split_instruments else f"{name}.csv",

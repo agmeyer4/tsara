@@ -10,6 +10,16 @@ analysis pipeline will later have to rediscover.
 
 Design decisions embedded in this schema
 -----------------------------------------
+* **One atmosphere, sampled by every instrument.** The air is described once,
+  in :class:`AtmosphereSpec`: its fields (methane, wind direction, ...), each
+  with a background, and the sources whose plumes pass through it. An
+  instrument does not own a species; it *measures* fields of that atmosphere
+  (:class:`MeasurementSpec`), adding only what belongs to the instrument --
+  its clock, its cells, its noise, its reporting resolution. Two analyzers
+  measuring methane therefore see the same methane, down to the same random
+  wander, which is what two real analyzers on one inlet see. Until Phase 4.5
+  each instrument rendered its own copy of a species' background, so two
+  copies of one stochastic background disagreed by as much as they varied.
 * **Same conventions as the manifest schema.** ``StrictModel`` (``extra=
   "forbid"``, frozen), ``kind``/``mode``-discriminated unions for
   polymorphism, tuples for sweepable/ordered collections, duration strings
@@ -61,7 +71,6 @@ from tsara.config.manifest import (
     ReportedUncertainty,
     SupportSpec,
     UncertaintySpec,
-    VariableRole,
 )
 from tsara.core.naming import SupportMethod
 
@@ -90,10 +99,13 @@ class ParametricBackground(_StrictModel):
     * ``diurnal_amplitude`` — the boundary-layer breathing cycle that makes
       background estimation non-trivial: a rolling low quantile must track a
       *moving* background, not a constant one.
-    * ``drift_per_day`` — slow instrument or seasonal drift.
+    * ``drift_per_day`` — slow seasonal drift, measured from the campaign
+      start, so every instrument sees the same drift at the same instant.
     * ``random_walk_std`` — non-stationary low-frequency wander with no
       analytic form, the hardest case for a baseline estimator because it is
-      unpredictable yet genuinely background (not enhancement).
+      unpredictable yet genuinely background (not enhancement). Realized once
+      for the whole atmosphere (:class:`AtmosphereSpec`), so every instrument
+      measuring the field sees the same wander.
     """
 
     kind: Literal["parametric"] = "parametric"
@@ -115,8 +127,9 @@ class ParametricBackground(_StrictModel):
         ge=0,
         description=(
             "Standard deviation the random-walk term accumulates over one day. "
-            "Increments are scaled as sqrt(dt/1day) so the wander magnitude is "
-            "independent of the instrument's sampling rate."
+            "Realized on the atmosphere's truth_resolution nodes with increments "
+            "scaled as sqrt(dt/1day), so its magnitude does not depend on that "
+            "spacing or on any instrument's sampling rate."
         ),
     )
 
@@ -136,6 +149,14 @@ class BootstrapBackground(_StrictModel):
     mount. Blocks preserve whatever short-range autocorrelation, skew, and
     instrument quirks the real record has — structure that no parametric
     noise model reproduces.
+
+    The fluctuations are replayed at the **profile's own sampling period**,
+    not at any instrument's rate, and are linear between those samples. A
+    profile built from a 2 s record therefore keeps its real correlation
+    timescale whether a 0.5 s or a 60 s instrument measures the field. The
+    generator used to replay blocks sample-for-sample on each instrument's
+    clock and warn when the rates differed, which put a correct noise colour
+    one configuration mistake away.
 
     Two deliberate limitations, documented rather than hidden (METHODS.md
     §8.3):
@@ -290,7 +311,7 @@ class TrueComponent(_StrictModel):
 
 
 class TrueUncertainty(_StrictModel):
-    """The complete, *known* error budget injected into one synthetic species.
+    """The complete, *known* error budget one instrument adds to one field.
 
     Ground truth for the whole uncertainty system: the analysis pipeline's
     job is to recover these numbers (or to correctly report that it cannot),
@@ -300,8 +321,11 @@ class TrueUncertainty(_StrictModel):
     The component semantics match METHODS.md §2.1 exactly — ``random`` is
     drawn independently per point (optionally AR(1)-correlated via
     ``decorrelation_timescale``) and averages down; ``systematic`` is drawn
-    **once per species per run** and applied to every point, so it does not
-    average down no matter how much data is aggregated.
+    **once per measurement per run** and applied to every point, so it does
+    not average down no matter how much data is aggregated. A budget belongs
+    to a measurement rather than to the field, because error is the
+    instrument's: two analyzers measuring one gas have one truth and two
+    calibrations.
     """
 
     random: TrueComponent | None = Field(
@@ -389,34 +413,81 @@ class TrueUncertainty(_StrictModel):
 
 
 # ---------------------------------------------------------------------------
-# Species and instruments
+# Fields of the atmosphere, and how an instrument measures one
 # ---------------------------------------------------------------------------
 
+#: What a field of the synthetic atmosphere can be. The manifest's role
+#: vocabulary, less its three GPS roles: a position is not a property of the
+#: air, and a mobile platform manufactures its own track.
+FieldRole = Literal["gas", "met", "aux"]
 
-class SpeciesSpec(_StrictModel):
-    """One measured variable on a synthetic instrument.
 
-    The variable's canonical name is its key in ``InstrumentSpec.species``.
-    ``role`` is reused verbatim from the manifest schema so synthetic streams
-    carry the same role vocabulary real ones will: only ``role="gas"``
-    variables receive plumes, which is what makes a ``met`` wind-direction
-    variable expressible here (needed to exercise circular statistics in
-    Phase 4) without inventing a parallel concept.
+class FieldSpec(_StrictModel):
+    """One physical quantity of the synthetic atmosphere.
+
+    The field's name is its key in :attr:`AtmosphereSpec.fields`, e.g.
+    ``ch4``, and it is the identity every instrument measuring the quantity
+    shares: streams record it as their variables' ``field`` attribute, the
+    same attribute ingestion writes from a manifest (METHODS.md §1.6).
+
+    Everything here describes the air rather than an instrument. That is the
+    test for what belongs: the background methane level is the same whoever
+    measures it, and so is whether wind direction is an angle. How noisy a
+    reading is, or how finely a logger rounds it, is not, and lives on
+    :class:`MeasurementSpec` instead.
     """
 
-    background: BackgroundConfig = Field(description="How the plume-free signal is built.")
-    role: VariableRole = Field(
+    role: FieldRole = Field(
         default="gas",
         description=(
-            "Downstream handling category, same vocabulary as the manifest. "
-            "Only role='gas' variables participate in plume events."
+            "Downstream handling category, from the manifest's vocabulary. "
+            "Only role='gas' fields carry plumes."
         ),
     )
     units: str = Field(default="", description="Units label, carried into the stream attrs.")
+    circular: bool = Field(
+        default=False,
+        description=(
+            "True for angular quantities (wind direction): measured values are "
+            "wrapped into [0, 360) after noise is added."
+        ),
+    )
+    background: BackgroundConfig = Field(description="How the plume-free signal is built.")
+
+    @model_validator(mode="after")
+    def _circular_only_for_met(self) -> FieldSpec:
+        """Mirror the manifest's rule: circular is meaningful only for met."""
+        if self.circular and self.role != "met":
+            raise ValueError(
+                f"circular=true is only valid for role='met' fields (got role='{self.role}')."
+            )
+        return self
+
+
+class MeasurementSpec(_StrictModel):
+    """How one instrument measures one field of the atmosphere.
+
+    Its key in :attr:`InstrumentSpec.measures` names the field measured. What
+    it adds is what belongs to the instrument: the name its stream gives the
+    variable, the error it injects and the resolution it reports at. An
+    empty mapping (``ch4: {}``) measures the field perfectly, under its own
+    name, which is the controlled case for isolating an algorithm's error
+    from measurement error.
+    """
+
+    name: str | None = Field(
+        default=None,
+        description=(
+            "Variable name in this instrument's stream. None (the default) uses "
+            "the field's name. Set it to give a second instrument's record of a "
+            "field its own spelling, e.g. 'ch4_aeris'; the variable still "
+            "records the field it measures."
+        ),
+    )
     uncertainty: TrueUncertainty | None = Field(
         default=None,
         description=(
-            "The known error budget injected into this species. None means a "
+            "The known error budget this instrument adds. None means a "
             "noise-free variable (useful for isolating algorithm error from "
             "measurement error in a test)."
         ),
@@ -431,22 +502,19 @@ class SpeciesSpec(_StrictModel):
             "when more than half a window shares one value (METHODS.md §2.5)."
         ),
     )
-    circular: bool = Field(
-        default=False,
-        description=(
-            "True for angular quantities (wind direction): values are wrapped "
-            "into [0, 360) after generation."
-        ),
-    )
 
-    @model_validator(mode="after")
-    def _circular_only_for_met(self) -> SpeciesSpec:
-        """Mirror the manifest's rule: circular is meaningful only for met."""
-        if self.circular and self.role != "met":
-            raise ValueError(
-                f"circular=true is only valid for role='met' variables (got role='{self.role}')."
-            )
-        return self
+    @field_validator("name")
+    @classmethod
+    def _name_is_usable(cls, value: str | None) -> str | None:
+        """Require an identifier: a variable name becomes an xarray key and a column."""
+        if value is not None:
+            _validate_stream_name(value, field="MeasurementSpec.name")
+        return value
+
+
+# ---------------------------------------------------------------------------
+# Instruments: clocks, cells, and what they measure
+# ---------------------------------------------------------------------------
 
 
 class DropoutSpec(_StrictModel):
@@ -569,20 +637,25 @@ class TrueSupport(_StrictModel):
 
 
 class InstrumentSpec(_StrictModel):
-    """One synthetic instrument: a clock, and the species sharing it.
+    """One synthetic instrument: a clock, and the fields it measures on it.
 
-    Species on one instrument share a time axis (METHODS.md §1.1), so the
-    native rate lives here rather than on the species. Multiple instruments
+    Variables on one instrument share a time axis (METHODS.md §1.1), so the
+    native rate lives here rather than on a measurement. Multiple instruments
     with different ``native_rate`` values is how this generator produces the
     multi-rate streams the whole "synchronize late" architecture exists to
-    handle.
+    handle; two of them measuring the same field is how it produces the
+    two-analyzer comparison real campaigns run.
     """
 
     native_rate: str = Field(
         description="Nominal sampling interval, e.g. '1s' for 1 Hz, '0.1s' for 10 Hz."
     )
-    species: dict[str, SpeciesSpec] = Field(
-        min_length=1, description="Mapping of canonical variable name -> spec."
+    measures: dict[str, MeasurementSpec] = Field(
+        min_length=1,
+        description=(
+            "Mapping of atmosphere field name -> how this instrument measures "
+            "it. Each field at most once per instrument."
+        ),
     )
     timestamp_jitter: str | None = Field(
         default=None,
@@ -616,15 +689,44 @@ class InstrumentSpec(_StrictModel):
             _validate_duration(value, field="InstrumentSpec.timestamp_jitter")
         return value
 
-    @field_validator("species")
+    @field_validator("measures")
     @classmethod
-    def _canonical_names_are_identifiers(
-        cls, value: dict[str, SpeciesSpec]
-    ) -> dict[str, SpeciesSpec]:
-        """Require identifiers, as the manifest does: names become xarray variables."""
+    def _field_names_are_identifiers(
+        cls, value: dict[str, MeasurementSpec]
+    ) -> dict[str, MeasurementSpec]:
+        """Require identifiers: a field's name is its variable's default name."""
         for name in value:
-            _validate_stream_name(name, field=f"InstrumentSpec.species['{name}']")
+            _validate_stream_name(name, field=f"InstrumentSpec.measures['{name}']")
         return value
+
+    @model_validator(mode="after")
+    def _variable_names_are_unique_and_unreserved(self) -> InstrumentSpec:
+        """Two measurements may not write one variable, or the answer key's.
+
+        Names are unique within an instrument because that is where they are
+        keys; across instruments they may repeat, as in the manifest
+        (METHODS.md §1.6). A declared name can collide where field names
+        cannot -- ``ch4: {name: x}`` beside ``x: {}`` -- and the second would
+        silently overwrite the first. The ``truth_`` prefix is reserved for
+        the same reason it is refused for reported columns below: those
+        variables are the record every later phase is scored against.
+        """
+        writer: dict[str, str] = {}
+        for field in self.measures:
+            name = self.variable_name(field)
+            if name.startswith(TRUTH_PREFIX):
+                raise ValueError(
+                    f"Field '{field}' would be written as '{name}', but the "
+                    f"'{TRUTH_PREFIX}' prefix is reserved for generator-emitted "
+                    "ground-truth variables."
+                )
+            if name in writer:
+                raise ValueError(
+                    f"Fields '{writer[name]}' and '{field}' would both be written "
+                    f"as variable '{name}'; names must be unique within an instrument."
+                )
+            writer[name] = field
+        return self
 
     @model_validator(mode="after")
     def _jitter_below_half_rate(self) -> InstrumentSpec:
@@ -677,7 +779,7 @@ class InstrumentSpec(_StrictModel):
 
     @model_validator(mode="after")
     def _reported_columns_are_unique(self) -> InstrumentSpec:
-        """Reject a 'report_as' column colliding with a species or another column.
+        """Reject a 'report_as' column colliding with a variable or another column.
 
         Reported-sigma variables share the instrument's namespace, so a
         collision would silently overwrite one variable with another. The
@@ -685,35 +787,62 @@ class InstrumentSpec(_StrictModel):
         the answer key, and a reported column shadowing one would corrupt the
         very record later phases are scored against.
         """
+        names = {self.variable_name(field) for field in self.measures}
         seen: dict[str, str] = {}
-        for name, spec in self.species.items():
-            if spec.uncertainty is None:
+        for field, measurement in self.measures.items():
+            if measurement.uncertainty is None:
                 continue
             for label, component in (
-                ("random", spec.uncertainty.random),
-                ("systematic", spec.uncertainty.systematic),
+                ("random", measurement.uncertainty.random),
+                ("systematic", measurement.uncertainty.systematic),
             ):
                 if component is None or component.report_as is None:
                     continue
                 column = component.report_as
                 if column.startswith(TRUTH_PREFIX):
                     raise ValueError(
-                        f"Species '{name}' reports its {label} sigma as '{column}', "
+                        f"Field '{field}' reports its {label} sigma as '{column}', "
                         f"but the '{TRUTH_PREFIX}' prefix is reserved for "
                         "generator-emitted ground-truth variables."
                     )
-                if column in self.species:
+                if column in names:
                     raise ValueError(
-                        f"Species '{name}' reports its {label} sigma as '{column}', "
-                        "which collides with a declared species name."
+                        f"Field '{field}' reports its {label} sigma as '{column}', "
+                        "which collides with a variable name on this instrument."
                     )
                 if column in seen:
                     raise ValueError(
                         f"Reported-sigma column '{column}' is claimed by both "
-                        f"{seen[column]} and {name}.{label}."
+                        f"{seen[column]} and {field}.{label}."
                     )
-                seen[column] = f"{name}.{label}"
+                seen[column] = f"{field}.{label}"
         return self
+
+    def variable_name(self, field: str) -> str:
+        """Return the name this instrument's stream gives ``field``.
+
+        The measurement's declared ``name``, or else the field's own name.
+        Resolved here, in one place, for the same reason as the manifest's
+        :meth:`~tsara.config.manifest.InstrumentConfig.field_of`: the config
+        keeps saying what its author wrote, and no reader repeats the rule.
+
+        Parameters
+        ----------
+        field : str
+            A key of :attr:`measures`.
+
+        Returns
+        -------
+        str
+            The stream variable name.
+
+        Raises
+        ------
+        KeyError
+            If this instrument does not measure ``field``.
+        """
+        declared = self.measures[field].name
+        return field if declared is None else declared
 
 
 # ---------------------------------------------------------------------------
@@ -920,7 +1049,9 @@ class NestedSpec(_StrictModel):
 class SourceSpec(_StrictModel):
     """One family of correlated, multi-species plume events.
 
-    The source's name is its key in ``SyntheticConfig.sources``. Events arrive
+    The source's name is its key in :attr:`AtmosphereSpec.sources`, and its
+    species are gas fields of that atmosphere: a plume is part of the air, so
+    every instrument measuring a species sees the same event. Events arrive
     as a homogeneous Poisson process at ``rate_per_hour``; each event draws a
     reference-species amplitude from ``amplitude``, then every other
     participating species gets ``amplitude x ratio`` with its ratio drawn
@@ -940,8 +1071,8 @@ class SourceSpec(_StrictModel):
     reference_species: str = Field(
         min_length=1,
         description=(
-            "Canonical name of the species whose amplitude is drawn directly; "
-            "every ratio in 'ratios' is relative to this species."
+            "Gas field whose amplitude is drawn directly; every ratio in "
+            "'ratios' is relative to this species."
         ),
     )
     amplitude: AmplitudeSpec = Field(
@@ -995,9 +1126,9 @@ class SourceSpec(_StrictModel):
         case — a sharp thermogenic blip (with ethane) encountered inside a
         broad landfill plume (without) — and forbidding it would make the
         package's own motivating example inexpressible. Those names are
-        instead validated against the declared gas species campaign-wide by
-        ``SyntheticConfig._sources_reference_declared_gas_species``, which is
-        the check that actually catches typos.
+        instead validated against the atmosphere's gas fields by
+        ``AtmosphereSpec._sources_emit_declared_gas_fields``, which is the
+        check that actually catches typos.
         """
         if self.reference_species in self.ratios:
             raise ValueError(
@@ -1026,6 +1157,101 @@ class SourceSpec(_StrictModel):
                 f"'{self.reference_species}'; its ratio to itself is 1 by definition."
             )
         return self
+
+
+# ---------------------------------------------------------------------------
+# The atmosphere
+# ---------------------------------------------------------------------------
+
+
+class AtmosphereSpec(_StrictModel):
+    """The air every instrument samples: its fields, and the plumes crossing it.
+
+    Realized once per run, by
+    :func:`~tsara.synthetic.atmosphere.realize_atmosphere`, into an
+    :class:`~tsara.synthetic.atmosphere.Atmosphere` that answers "what is the
+    true value of this field at this time?" for any time at all. An instrument
+    is then only a clock, cells and error applied to that answer, and two
+    instruments measuring one field are sampling one truth.
+
+    ``truth_resolution`` exists because a random-walk background has no
+    analytic form: it has to be drawn somewhere. It is drawn once, at nodes
+    this far apart across the campaign, and is linear between them, which
+    keeps the truth deterministic and queryable at any instant rather than
+    only at the samples some instrument happened to take. A bootstrapped
+    background brings its own node spacing, the sampling period of the real
+    record it was profiled from.
+    """
+
+    truth_resolution: str = Field(
+        default="1s",
+        description=(
+            "Node spacing for stochastic background terms (random walks), which "
+            "are linear between nodes. The default is finer than any "
+            "background variation worth modelling and cheap: a day at 1 s is "
+            "86,401 nodes per wandering field."
+        ),
+    )
+    fields: dict[str, FieldSpec] = Field(
+        min_length=1,
+        description="Mapping of field name (e.g. 'ch4', 'wind_dir') -> spec.",
+    )
+    sources: dict[str, SourceSpec] = Field(
+        default_factory=dict,
+        description=(
+            "Mapping of source name -> spec. Empty produces a plume-free "
+            "atmosphere, which is the right control case for measuring an "
+            "algorithm's false-positive rate."
+        ),
+    )
+
+    @field_validator("truth_resolution")
+    @classmethod
+    def _valid_resolution(cls, value: str) -> str:
+        _validate_duration(value, field="AtmosphereSpec.truth_resolution")
+        return value
+
+    @field_validator("fields")
+    @classmethod
+    def _field_names_are_identifiers(cls, value: dict[str, FieldSpec]) -> dict[str, FieldSpec]:
+        """Require identifiers: a field's name is its measurements' default variable name."""
+        for name in value:
+            _validate_stream_name(name, field=f"AtmosphereSpec.fields['{name}']")
+        return value
+
+    @model_validator(mode="after")
+    def _sources_emit_declared_gas_fields(self) -> AtmosphereSpec:
+        """Every species a source emits must be a gas field of this atmosphere.
+
+        Fails fast on the two config errors that would otherwise produce a
+        silently plume-free field: a typo'd species name, and pointing a
+        source at a met/aux field that never carries plumes.
+        """
+        for source_name, source in self.sources.items():
+            emitted = {source.reference_species} | set(source.ratios)
+            # A nested child may introduce species of its own (see
+            # SourceSpec._references_are_consistent), so its ratios are folded
+            # in here: this is the single place every species name a source
+            # can possibly emit is checked against the atmosphere.
+            if source.nested is not None and source.nested.ratios is not None:
+                emitted |= set(source.nested.ratios)
+            for species in sorted(emitted):
+                if species not in self.fields:
+                    raise ValueError(
+                        f"Source '{source_name}' emits undeclared species '{species}'; "
+                        f"the atmosphere's fields are {sorted(self.fields)}."
+                    )
+                if self.fields[species].role != "gas":
+                    raise ValueError(
+                        f"Source '{source_name}' emits '{species}', which is not a "
+                        "role='gas' field; only gases carry plumes."
+                    )
+        return self
+
+    @property
+    def gas_fields(self) -> tuple[str, ...]:
+        """Names of every role='gas' field, in declaration order."""
+        return tuple(name for name, spec in self.fields.items() if spec.role == "gas")
 
 
 # ---------------------------------------------------------------------------
@@ -1113,6 +1339,12 @@ PlatformSpec = Annotated[StationarySite | MobileTrack, Field(discriminator="kind
 class SyntheticConfig(_StrictModel):
     """Complete specification of one synthetic dataset.
 
+    Read top to bottom it describes a campaign: *when* (``start``,
+    ``duration``), *where* (``platform``), *what the air is* (``atmosphere``:
+    fields, backgrounds, sources) and *who measures it* (``instruments``).
+    Nothing an instrument declares changes the air, and nothing the atmosphere
+    declares depends on an instrument.
+
     Fully YAML-round-trippable by construction (no embedded arrays), so the
     exact configuration that produced a dataset is saved inside its bundle
     and a run is reproducible from the bundle alone given the same
@@ -1133,16 +1365,11 @@ class SyntheticConfig(_StrictModel):
         ),
     )
     platform: PlatformSpec = Field(description="Stationary site or mobile track.")
+    atmosphere: AtmosphereSpec = Field(
+        description="The air being measured: its fields and the sources crossing it."
+    )
     instruments: dict[str, InstrumentSpec] = Field(
         min_length=1, description="Mapping of instrument name -> spec."
-    )
-    sources: dict[str, SourceSpec] = Field(
-        default_factory=dict,
-        description=(
-            "Mapping of source name -> spec. Empty produces a plume-free "
-            "dataset, which is the right control case for measuring an "
-            "algorithm's false-positive rate."
-        ),
     )
 
     @field_validator("duration")
@@ -1168,62 +1395,22 @@ class SyntheticConfig(_StrictModel):
         return value
 
     @model_validator(mode="after")
-    def _species_unique_across_instruments(self) -> SyntheticConfig:
-        """Canonical species names must be unique campaign-wide.
+    def _instruments_measure_declared_fields(self) -> SyntheticConfig:
+        """Refuse a measurement of a field the atmosphere does not have.
 
-        No longer the manifest's rule, which Phase 4.5 dropped because streams
-        are never merged (METHODS.md §1.6). It stays here for the generator's
-        own reason: a species is both a variable name and the thing a source
-        enhances, so two instruments' 'ch4' would leave a source naming 'ch4'
-        ambiguous about which one it enhances.
+        The typo guard for ``measures``: without it a misspelled field would
+        fail deep inside generation, or, worse, a check written against the
+        instrument's own keys would accept it and produce a variable of
+        nothing.
         """
-        owner: dict[str, str] = {}
-        for inst_name, inst in self.instruments.items():
-            for species in inst.species:
-                if species in owner:
-                    raise ValueError(
-                        f"Species '{species}' is declared by both '{owner[species]}' "
-                        f"and '{inst_name}'; names must be unique across instruments."
-                    )
-                owner[species] = inst_name
-        return self
-
-    @model_validator(mode="after")
-    def _sources_reference_declared_gas_species(self) -> SyntheticConfig:
-        """Every species a source emits must exist and be a gas.
-
-        Fails fast on the two config errors that would otherwise produce a
-        silently plume-free dataset: a typo'd species name, and pointing a
-        source at a met/aux variable that the generator will never enhance.
-        """
-        gas_species = {
-            name
-            for inst in self.instruments.values()
-            for name, spec in inst.species.items()
-            if spec.role == "gas"
-        }
-        all_species = {name for inst in self.instruments.values() for name in inst.species}
-
-        for source_name, source in self.sources.items():
-            emitted = {source.reference_species} | set(source.ratios)
-            # A nested child may introduce species of its own (see
-            # SourceSpec._references_are_consistent), so its ratios are folded
-            # in here: this is the single place every species name a source
-            # can possibly emit is checked against what the instruments
-            # actually declare.
-            if source.nested is not None and source.nested.ratios is not None:
-                emitted |= set(source.nested.ratios)
-            for species in sorted(emitted):
-                if species not in all_species:
-                    raise ValueError(
-                        f"Source '{source_name}' emits undeclared species '{species}'; "
-                        f"declared species are {sorted(all_species)}."
-                    )
-                if species not in gas_species:
-                    raise ValueError(
-                        f"Source '{source_name}' emits '{species}', which is not a "
-                        "role='gas' variable; only gases receive plumes."
-                    )
+        for instrument_name, instrument in self.instruments.items():
+            unknown = sorted(set(instrument.measures) - set(self.atmosphere.fields))
+            if unknown:
+                raise ValueError(
+                    f"Instrument '{instrument_name}' measures undeclared field(s) "
+                    f"{unknown}; the atmosphere's fields are "
+                    f"{sorted(self.atmosphere.fields)}."
+                )
         return self
 
     @model_validator(mode="after")
@@ -1243,36 +1430,3 @@ class SyntheticConfig(_StrictModel):
                 "separately and needs its own name."
             )
         return self
-
-    @property
-    def gas_species(self) -> tuple[str, ...]:
-        """Canonical names of all role='gas' species, across instruments."""
-        return tuple(
-            name
-            for inst in self.instruments.values()
-            for name, spec in inst.species.items()
-            if spec.role == "gas"
-        )
-
-    def instrument_of(self, species: str) -> str:
-        """Return the instrument name that owns ``species``.
-
-        Parameters
-        ----------
-        species : str
-            Canonical species name.
-
-        Returns
-        -------
-        str
-            Owning instrument name.
-
-        Raises
-        ------
-        KeyError
-            If no instrument declares that species.
-        """
-        for inst_name, inst in self.instruments.items():
-            if species in inst.species:
-                return inst_name
-        raise KeyError(f"No instrument declares species '{species}'.")

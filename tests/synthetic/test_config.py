@@ -14,14 +14,16 @@ from tsara.config.base import validate_signed_timedelta
 from tsara.config.manifest import DeclaredUncertainty, ReportedUncertainty, SupportSpec
 from tsara.synthetic.config import (
     TRUTH_PREFIX,
+    AtmosphereSpec,
     BootstrapBackground,
+    FieldSpec,
     InstrumentSpec,
     LognormalAmplitude,
+    MeasurementSpec,
     MobileTrack,
     ParametricBackground,
     RatioSpec,
     SourceSpec,
-    SpeciesSpec,
     SyntheticConfig,
     TrueComponent,
     TrueSupport,
@@ -77,7 +79,7 @@ def test_whitespace_only_profile_key_rejected_through_a_full_config(
 ) -> None:
     # Same rule, reached by nesting: field validators fire wherever the model
     # appears, which is the reason for moving the check down to the field.
-    synthetic_dict["instruments"]["analyzer"]["species"]["ch4"]["background"] = {
+    synthetic_dict["atmosphere"]["fields"]["ch4"]["background"] = {
         "kind": "bootstrap",
         "profile": "   ",
     }
@@ -138,33 +140,49 @@ def test_to_manifest_uncertainty_omits_absent_component() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Species and instruments
+# Fields and measurements
 # ---------------------------------------------------------------------------
 
 
 def test_circular_requires_met_role() -> None:
     with pytest.raises(ValidationError, match="circular=true"):
-        SpeciesSpec(
+        FieldSpec(
             background=ParametricBackground(kind="parametric", offset=1.0),
             role="gas",
             circular=True,
         )
 
 
-def test_quantization_must_be_positive() -> None:
-    with pytest.raises(ValidationError):
-        SpeciesSpec(
-            background=ParametricBackground(kind="parametric", offset=1.0), quantization=0.0
+def test_a_field_cannot_take_a_gps_role() -> None:
+    """Position belongs to the platform, which manufactures its own track."""
+    with pytest.raises(ValidationError, match="role"):
+        FieldSpec.model_validate(
+            {"background": {"kind": "parametric", "offset": 40.0}, "role": "gps_lat"}
         )
 
 
+def test_quantization_must_be_positive() -> None:
+    with pytest.raises(ValidationError):
+        MeasurementSpec(quantization=0.0)
+
+
+def test_an_empty_measurement_is_a_perfect_one_under_the_field_name() -> None:
+    measurement = MeasurementSpec()
+    assert (measurement.name, measurement.uncertainty, measurement.quantization) == (
+        None,
+        None,
+        None,
+    )
+
+
+@pytest.mark.parametrize("name", ["ch4-dry", "2ch4", "ch4 aeris"])
+def test_a_measurement_name_must_be_usable(name: str) -> None:
+    with pytest.raises(ValidationError, match="valid identifier"):
+        MeasurementSpec(name=name)
+
+
 def _instrument(**overrides: Any) -> dict[str, Any]:
-    base: dict[str, Any] = {
-        "native_rate": "1s",
-        "species": {
-            "ch4": {"background": {"kind": "parametric", "offset": 1900.0}, "units": "ppb"}
-        },
-    }
+    base: dict[str, Any] = {"native_rate": "1s", "measures": {"ch4": {}}}
     base.update(overrides)
     return base
 
@@ -179,11 +197,14 @@ def test_instrument_rejects_bad_jitter() -> None:
         InstrumentSpec.model_validate(_instrument(timestamp_jitter="soonish"))
 
 
-def test_instrument_rejects_non_identifier_species() -> None:
-    spec = _instrument()
-    spec["species"] = {"2ch4": spec["species"]["ch4"]}
+def test_instrument_rejects_a_non_identifier_field() -> None:
     with pytest.raises(ValidationError, match="valid identifier"):
-        InstrumentSpec.model_validate(spec)
+        InstrumentSpec.model_validate(_instrument(measures={"2ch4": {}}))
+
+
+def test_an_instrument_must_measure_something() -> None:
+    with pytest.raises(ValidationError, match="measures"):
+        InstrumentSpec.model_validate(_instrument(measures={}))
 
 
 def test_jitter_must_be_under_half_the_native_rate() -> None:
@@ -196,16 +217,55 @@ def test_jitter_under_half_rate_is_accepted() -> None:
     assert instrument.timestamp_jitter == "0.4s"
 
 
-def test_reported_column_may_not_shadow_a_species() -> None:
+def test_a_variable_is_named_for_its_field_unless_renamed() -> None:
+    instrument = InstrumentSpec.model_validate(
+        _instrument(measures={"ch4": {}, "c2h6": {"name": "ethane_aeris"}})
+    )
+    assert instrument.variable_name("ch4") == "ch4"
+    assert instrument.variable_name("c2h6") == "ethane_aeris"
+
+
+def test_variable_name_of_an_unmeasured_field_raises() -> None:
+    instrument = InstrumentSpec.model_validate(_instrument())
+    with pytest.raises(KeyError):
+        instrument.variable_name("co2")
+
+
+def test_two_fields_may_not_be_written_as_one_variable() -> None:
+    """A declared name can collide where field names cannot."""
+    with pytest.raises(ValidationError, match="would both be written as variable 'c2h6'"):
+        InstrumentSpec.model_validate(_instrument(measures={"ch4": {"name": "c2h6"}, "c2h6": {}}))
+
+
+def test_a_variable_may_not_claim_the_truth_prefix() -> None:
+    """The answer key's namespace is reserved for variables as for reported columns."""
+    with pytest.raises(ValidationError, match="is reserved"):
+        InstrumentSpec.model_validate(
+            _instrument(measures={"ch4": {"name": f"{TRUTH_PREFIX}background_ch4"}})
+        )
+
+
+def test_reported_column_may_not_shadow_a_variable() -> None:
     spec = _instrument()
-    spec["species"]["ch4"]["uncertainty"] = {"random": {"absolute": 1.0, "report_as": "ch4"}}
-    with pytest.raises(ValidationError, match="collides with a declared species"):
+    spec["measures"]["ch4"]["uncertainty"] = {"random": {"absolute": 1.0, "report_as": "ch4"}}
+    with pytest.raises(ValidationError, match="collides with a variable name"):
+        InstrumentSpec.model_validate(spec)
+
+
+def test_reported_column_may_not_shadow_a_renamed_variable() -> None:
+    """The namespace is the variables' names, not their fields'."""
+    spec = _instrument()
+    spec["measures"]["ch4"] = {
+        "name": "methane",
+        "uncertainty": {"random": {"absolute": 1.0, "report_as": "methane"}},
+    }
+    with pytest.raises(ValidationError, match="collides with a variable name"):
         InstrumentSpec.model_validate(spec)
 
 
 def test_reported_columns_must_be_unique() -> None:
     spec = _instrument()
-    spec["species"]["ch4"]["uncertainty"] = {
+    spec["measures"]["ch4"]["uncertainty"] = {
         "random": {"absolute": 1.0, "report_as": "err"},
         "systematic": {"absolute": 1.0, "report_as": "err"},
     }
@@ -221,7 +281,7 @@ def test_reported_column_may_not_claim_the_truth_prefix() -> None:
     record every later phase is scored against.
     """
     spec = _instrument()
-    spec["species"]["ch4"]["uncertainty"] = {
+    spec["measures"]["ch4"]["uncertainty"] = {
         "random": {"absolute": 1.0, "report_as": f"{TRUTH_PREFIX}background_ch4"}
     }
     with pytest.raises(ValidationError, match="is reserved"):
@@ -230,7 +290,7 @@ def test_reported_column_may_not_claim_the_truth_prefix() -> None:
 
 def test_instrument_without_uncertainty_passes_column_check() -> None:
     instrument = InstrumentSpec.model_validate(_instrument())
-    assert instrument.species["ch4"].uncertainty is None
+    assert instrument.measures["ch4"].uncertainty is None
 
 
 def test_dropout_duration_must_parse() -> None:
@@ -377,7 +437,7 @@ def test_nested_species_must_still_be_a_declared_gas(synthetic_dict: dict[str, A
     longer caught by SourceSpec; the campaign-wide declared-gas check is what
     catches it instead.
     """
-    synthetic_dict["sources"] = {
+    synthetic_dict["atmosphere"]["sources"] = {
         "vent": {
             "rate_per_hour": 2.0,
             "shape": {"kind": "gaussian", "sigma": "20s"},
@@ -439,29 +499,79 @@ def test_duration_must_parse(synthetic_dict: dict[str, Any]) -> None:
         SyntheticConfig.model_validate(synthetic_dict)
 
 
-def test_species_must_be_unique_across_instruments(synthetic_dict: dict[str, Any]) -> None:
+def test_two_instruments_may_measure_one_field(synthetic_dict: dict[str, Any]) -> None:
+    """The point of an atmosphere: one methane, measured twice, under one name each.
+
+    Refused until Phase 4.5, when a species belonged to its instrument and two
+    of them would have been two different gases with the same name.
+    """
     synthetic_dict["instruments"]["other"] = copy.deepcopy(
         synthetic_dict["instruments"]["analyzer"]
     )
-    with pytest.raises(ValidationError, match="declared by both"):
+    config = SyntheticConfig.model_validate(synthetic_dict)
+    assert {name: list(spec.measures) for name, spec in config.instruments.items()} == {
+        "analyzer": ["ch4"],
+        "other": ["ch4"],
+    }
+
+
+def test_an_instrument_cannot_measure_an_undeclared_field(
+    synthetic_dict: dict[str, Any],
+) -> None:
+    synthetic_dict["instruments"]["analyzer"]["measures"]["co2"] = {}
+    with pytest.raises(ValidationError, match=r"measures undeclared field\(s\) \['co2'\]"):
         SyntheticConfig.model_validate(synthetic_dict)
+
+
+def test_an_unmeasured_field_is_allowed(synthetic_dict: dict[str, Any]) -> None:
+    """The air may hold more than anyone measures; its truth is still queryable."""
+    synthetic_dict["atmosphere"]["fields"]["co2"] = {
+        "units": "ppm",
+        "background": {"kind": "parametric", "offset": 420.0},
+    }
+    config = SyntheticConfig.model_validate(synthetic_dict)
+    assert set(config.atmosphere.fields) == {"ch4", "co2"}
+
+
+def test_the_atmosphere_needs_a_field(synthetic_dict: dict[str, Any]) -> None:
+    synthetic_dict["atmosphere"]["fields"] = {}
+    with pytest.raises(ValidationError, match="fields"):
+        SyntheticConfig.model_validate(synthetic_dict)
+
+
+def test_field_names_must_be_usable(synthetic_dict: dict[str, Any]) -> None:
+    synthetic_dict["atmosphere"]["fields"] = {
+        "ch4 dry": synthetic_dict["atmosphere"]["fields"]["ch4"]
+    }
+    with pytest.raises(ValidationError, match="valid identifier"):
+        SyntheticConfig.model_validate(synthetic_dict)
+
+
+def test_truth_resolution_must_parse() -> None:
+    with pytest.raises(ValidationError, match="truth_resolution"):
+        AtmosphereSpec.model_validate(
+            {
+                "truth_resolution": "fine",
+                "fields": {"ch4": {"background": {"kind": "parametric", "offset": 1.0}}},
+            }
+        )
 
 
 def test_source_cannot_emit_undeclared_species(
     synthetic_dict: dict[str, Any], source_dict: dict[str, Any]
 ) -> None:
-    synthetic_dict["sources"] = {"pad": source_dict}
+    synthetic_dict["atmosphere"]["sources"] = {"pad": source_dict}
     with pytest.raises(ValidationError, match="undeclared species 'c2h6'"):
         SyntheticConfig.model_validate(synthetic_dict)
 
 
 def test_source_cannot_emit_a_non_gas_species(synthetic_dict: dict[str, Any]) -> None:
-    synthetic_dict["instruments"]["analyzer"]["species"]["temperature"] = {
+    synthetic_dict["atmosphere"]["fields"]["temperature"] = {
         "background": {"kind": "parametric", "offset": 290.0},
         "role": "aux",
         "units": "K",
     }
-    synthetic_dict["sources"] = {
+    synthetic_dict["atmosphere"]["sources"] = {
         "pad": {
             "rate_per_hour": 1.0,
             "shape": {"kind": "gaussian", "sigma": "10s"},
@@ -469,7 +579,7 @@ def test_source_cannot_emit_a_non_gas_species(synthetic_dict: dict[str, Any]) ->
             "amplitude": {"kind": "uniform", "low": 1.0, "high": 2.0},
         }
     }
-    with pytest.raises(ValidationError, match="not a role='gas' variable"):
+    with pytest.raises(ValidationError, match="not a role='gas' field"):
         SyntheticConfig.model_validate(synthetic_dict)
 
 
@@ -531,17 +641,18 @@ def test_mobile_with_free_gps_name_is_accepted(synthetic_dict: dict[str, Any]) -
     assert isinstance(config.platform, MobileTrack)
 
 
-def test_gas_species_property(noise_free_config: SyntheticConfig) -> None:
-    assert set(noise_free_config.gas_species) == {"ch4", "c2h6"}
+def test_gas_fields_are_listed_in_declaration_order(noise_free_config: SyntheticConfig) -> None:
+    assert noise_free_config.atmosphere.gas_fields == ("ch4", "c2h6")
 
 
-def test_instrument_of_finds_owner(noise_free_config: SyntheticConfig) -> None:
-    assert noise_free_config.instrument_of("ch4") == "analyzer"
-
-
-def test_instrument_of_raises_for_unknown_species(noise_free_config: SyntheticConfig) -> None:
-    with pytest.raises(KeyError, match="No instrument declares"):
-        noise_free_config.instrument_of("n2o")
+def test_gas_fields_leave_out_met_and_aux(synthetic_dict: dict[str, Any]) -> None:
+    synthetic_dict["atmosphere"]["fields"]["wind_dir"] = {
+        "role": "met",
+        "circular": True,
+        "background": {"kind": "parametric", "offset": 180.0},
+    }
+    config = SyntheticConfig.model_validate(synthetic_dict)
+    assert config.atmosphere.gas_fields == ("ch4",)
 
 
 def test_config_is_frozen_and_rejects_extra_keys(synthetic_dict: dict[str, Any]) -> None:

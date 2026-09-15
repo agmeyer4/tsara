@@ -57,14 +57,20 @@ SPEC: dict[str, Any] = {
     "start": "2026-01-01T00:00:00Z",
     "duration": "20min",
     "platform": {"kind": "stationary", "latitude": 40.77, "longitude": -111.85},
+    "atmosphere": {
+        "fields": {
+            "ch4": {
+                "background": {"kind": "parametric", "offset": BACKGROUND_PPB},
+                "role": "gas",
+                "units": "ppb",
+            }
+        },
+    },
     "instruments": {
         "analyzer": {
             "native_rate": "1s",
-            "species": {
+            "measures": {
                 "ch4": {
-                    "background": {"kind": "parametric", "offset": BACKGROUND_PPB},
-                    "role": "gas",
-                    "units": "ppb",
                     "uncertainty": {
                         "random": {"absolute": RANDOM_PPB},
                         "systematic": {"relative": SYSTEMATIC_FRACTION},
@@ -73,7 +79,6 @@ SPEC: dict[str, Any] = {
             },
         }
     },
-    "sources": {},
 }
 
 

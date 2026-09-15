@@ -66,38 +66,42 @@ def _config(**overrides: Any) -> SyntheticConfig:
         "start": "2026-01-01T00:00:00Z",
         "duration": "20min",
         "platform": {"kind": "stationary", "latitude": 40.77, "longitude": -111.85},
+        "atmosphere": {
+            "fields": {
+                "ch4": {
+                    "background": {"kind": "parametric", "offset": 1900.0},
+                    "role": "gas",
+                    "units": "ppb",
+                },
+                "c2h6": {
+                    "background": {"kind": "parametric", "offset": 2.0},
+                    "role": "gas",
+                    "units": "ppb",
+                },
+                "wind_dir": {
+                    "background": {"kind": "parametric", "offset": 180.0},
+                    "role": "met",
+                    "units": "degrees",
+                    "circular": True,
+                },
+            },
+        },
         "instruments": {
             "analyzer": {
                 "native_rate": "2s",
-                "species": {
+                "measures": {
                     "ch4": {
-                        "background": {"kind": "parametric", "offset": 1900.0},
-                        "role": "gas",
-                        "units": "ppb",
                         "uncertainty": {
                             "random": {"absolute": 0.7},
                             "systematic": {"relative": 0.005},
                         },
                     },
                     "c2h6": {
-                        "background": {"kind": "parametric", "offset": 2.0},
-                        "role": "gas",
-                        "units": "ppb",
                         "uncertainty": {"random": {"absolute": 0.05, "report_as": "c2h6_err"}},
                     },
                 },
             },
-            "met": {
-                "native_rate": "10s",
-                "species": {
-                    "wind_dir": {
-                        "background": {"kind": "parametric", "offset": 180.0},
-                        "role": "met",
-                        "units": "degrees",
-                        "circular": True,
-                    }
-                },
-            },
+            "met": {"native_rate": "10s", "measures": {"wind_dir": {}}},
         },
     }
     spec.update(overrides)
@@ -190,6 +194,38 @@ def _assert_both_producers_record_the_same_fields(generated: Any, ingested: Any)
 def test_both_producers_record_the_same_fields(tmp_path: Path) -> None:
     """Substitutability for the identity attribute (METHODS §1.6, §9.7)."""
     generated, ingested = _round_trip(tmp_path)
+    _assert_both_producers_record_the_same_fields(generated, ingested)
+
+
+def test_two_instruments_measuring_one_field_round_trip_with_its_identity(
+    tmp_path: Path,
+) -> None:
+    """The generator's `measures` and the manifest's `field` are one idea.
+
+    A second analyzer measures the same methane under its own name. The
+    exported manifest must declare `field: ch4` for exactly that variable and
+    leave the default to speak for the other, and ingestion must hand both
+    streams back naming one field, with the values the generator wrote.
+    """
+    spec = _config().model_dump(mode="json")
+    spec["instruments"]["aeris"] = {
+        "native_rate": "1s",
+        "measures": {"ch4": {"name": "ch4_aeris", "uncertainty": {"random": {"absolute": 2.0}}}},
+    }
+    generated, ingested = _round_trip(tmp_path, SyntheticConfig.model_validate(spec))
+
+    manifest = load_manifest(tmp_path / "export" / EXPORT_MANIFEST)
+    assert manifest.instruments["aeris"].variables["ch4_aeris"].field == "ch4"
+    assert manifest.instruments["analyzer"].variables["ch4"].field is None
+    assert manifest.gas_species == ("ch4", "c2h6")
+
+    assert ingested["aeris"]["ch4_aeris"].attrs["field"] == "ch4"
+    assert ingested["analyzer"]["ch4"].attrs["field"] == "ch4"
+    np.testing.assert_allclose(
+        ingested["aeris"]["ch4_aeris"].values,
+        generated.streams["aeris"]["ch4_aeris"].values,
+        rtol=RTOL,
+    )
     _assert_both_producers_record_the_same_fields(generated, ingested)
 
 
@@ -337,7 +373,7 @@ def test_quantized_species_round_trip(tmp_path: Path) -> None:
     """
     config = _config()
     spec = config.model_dump(mode="json")
-    spec["instruments"]["analyzer"]["species"]["ch4"]["quantization"] = 0.1
+    spec["instruments"]["analyzer"]["measures"]["ch4"]["quantization"] = 0.1
     generated, ingested = _round_trip(tmp_path, SyntheticConfig.model_validate(spec))
 
     np.testing.assert_allclose(
@@ -554,19 +590,14 @@ def _cell_config(**support: Any) -> SyntheticConfig:
             "duration": "20min",
             "seed": 4,
             "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
-            "instruments": {
-                "slow": {
-                    "native_rate": "60s",
-                    "support": support,
-                    "species": {
-                        "ch4": {
-                            "units": "ppb",
-                            "background": {"kind": "parametric", "offset": 1900.0},
-                        }
-                    },
+            "atmosphere": {
+                "fields": {
+                    "ch4": {"units": "ppb", "background": {"kind": "parametric", "offset": 1900.0}}
                 }
             },
-            "sources": {},
+            "instruments": {
+                "slow": {"native_rate": "60s", "support": support, "measures": {"ch4": {}}}
+            },
         }
     )
 
@@ -686,9 +717,10 @@ def test_shifting_an_unknown_instrument_is_refused(tmp_path: Path) -> None:
         export_raw(generate(_cell_config()), tmp_path / "a", time_shift={"nope": "1s"})
 
 
-def test_a_species_colliding_with_a_boundary_column_is_refused(tmp_path: Path) -> None:
-    """`time_stop` is a legal species name, and writing a cell boundary over a
-    measurement would leave the round trip comparing the wrong column."""
+def test_a_variable_colliding_with_a_boundary_column_is_refused(tmp_path: Path) -> None:
+    """`time_stop` is a legal variable name, and writing a cell boundary over a
+    measurement would leave the round trip comparing the wrong column. Reached
+    here through a renamed measurement, the route a field name cannot take."""
     config = SyntheticConfig.model_validate(
         {
             "name": "clash",
@@ -696,18 +728,14 @@ def test_a_species_colliding_with_a_boundary_column_is_refused(tmp_path: Path) -
             "duration": "5min",
             "seed": 1,
             "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
-            "instruments": {
-                "slow": {
-                    "native_rate": "60s",
-                    "species": {
-                        STOP_COLUMN: {
-                            "units": "ppb",
-                            "background": {"kind": "parametric", "offset": 1.0},
-                        }
-                    },
+            "atmosphere": {
+                "fields": {
+                    "ch4": {"units": "ppb", "background": {"kind": "parametric", "offset": 1.0}}
                 }
             },
-            "sources": {},
+            "instruments": {
+                "slow": {"native_rate": "60s", "measures": {"ch4": {"name": STOP_COLUMN}}}
+            },
         }
     )
     with pytest.raises(TsaraSyntheticError, match="would be overwritten"):

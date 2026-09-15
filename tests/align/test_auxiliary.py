@@ -470,20 +470,22 @@ def test_the_track_join_survives_real_ingestion(tmp_path: Path) -> None:
             "pattern": "random_walk",
             "heading_volatility": 0.2,
         },
+        "atmosphere": {
+            "fields": {
+                "ch4": {
+                    "background": {"kind": "parametric", "offset": 1950.0},
+                    "role": "gas",
+                    "units": "ppb",
+                }
+            },
+        },
         "instruments": {
             "analyzer": {
                 "native_rate": "1s",
                 "support": {"method": "mean", "label": "start"},
-                "species": {
-                    "ch4": {
-                        "background": {"kind": "parametric", "offset": 1950.0},
-                        "role": "gas",
-                        "units": "ppb",
-                    }
-                },
+                "measures": {"ch4": {}},
             }
         },
-        "sources": {},
     }
     generated = generate(SyntheticConfig.model_validate(spec))
     streams = ingest_campaign(load_manifest(export_raw(generated, tmp_path / "raw")))

@@ -39,13 +39,15 @@ from tsara.core.propagation import PROPAGATION_FORMS, PropagationForm
 from tsara.core.support import CellBounds
 from tsara.synthetic import generate
 from tsara.synthetic.config import (
+    AtmosphereSpec,
+    FieldSpec,
     GaussianShape,
     InstrumentSpec,
     LognormalAmplitude,
+    MeasurementSpec,
     ParametricBackground,
     RatioSpec,
     SourceSpec,
-    SpeciesSpec,
     StationarySite,
     SyntheticConfig,
     TrueComponent,
@@ -85,37 +87,36 @@ def two_clock_campaign(*, noisy: bool) -> SyntheticConfig:
         duration="2h",
         seed=4242,
         platform=StationarySite(kind="stationary", latitude=40.0, longitude=-111.0),
+        atmosphere=AtmosphereSpec(
+            fields={
+                "ch4": FieldSpec(
+                    background=ParametricBackground(kind="parametric", offset=1900.0), units="ppb"
+                ),
+                "tracer": FieldSpec(
+                    background=ParametricBackground(kind="parametric", offset=0.0), units="ppb"
+                ),
+            },
+            sources={
+                "pad": SourceSpec(
+                    rate_per_hour=30.0,
+                    shape=GaussianShape(kind="gaussian", sigma="90s"),
+                    reference_species="ch4",
+                    amplitude=LognormalAmplitude(kind="lognormal", median=200.0, sigma_log=0.3),
+                    ratios={"tracer": RatioSpec(mean=TRUE_RATIO)},
+                )
+            },
+        ),
         instruments={
             "fast": InstrumentSpec(
                 native_rate="1s",
                 support=TrueSupport(method="mean"),
-                species={
-                    "ch4": SpeciesSpec(
-                        background=ParametricBackground(kind="parametric", offset=1900.0),
-                        units="ppb",
-                        uncertainty=uncertainty,
-                    )
-                },
+                measures={"ch4": MeasurementSpec(uncertainty=uncertainty)},
             ),
             "slow": InstrumentSpec(
                 native_rate="60s",
                 support=TrueSupport(method="mean"),
-                species={
-                    "tracer": SpeciesSpec(
-                        background=ParametricBackground(kind="parametric", offset=0.0),
-                        units="ppb",
-                    )
-                },
+                measures={"tracer": MeasurementSpec()},
             ),
-        },
-        sources={
-            "pad": SourceSpec(
-                rate_per_hour=30.0,
-                shape=GaussianShape(kind="gaussian", sigma="90s"),
-                reference_species="ch4",
-                amplitude=LognormalAmplitude(kind="lognormal", median=200.0, sigma_log=0.3),
-                ratios={"tracer": RatioSpec(mean=TRUE_RATIO)},
-            )
         },
     )
 
@@ -307,13 +308,18 @@ def error_study_config(tau: str | None) -> SyntheticConfig:
         duration="6h",
         seed=20260909,
         platform=StationarySite(kind="stationary", latitude=40.0, longitude=-111.0),
+        atmosphere=AtmosphereSpec(
+            fields={
+                "ch4": FieldSpec(
+                    background=ParametricBackground(kind="parametric", offset=1900.0), units="ppb"
+                )
+            }
+        ),
         instruments={
             "analyzer": InstrumentSpec(
                 native_rate="1s",
-                species={
-                    "ch4": SpeciesSpec(
-                        background=ParametricBackground(kind="parametric", offset=1900.0),
-                        units="ppb",
+                measures={
+                    "ch4": MeasurementSpec(
                         uncertainty=TrueUncertainty(
                             random=TrueComponent(absolute=5.0, report_as="ch4_err"),
                             decorrelation_timescale=tau,
@@ -322,7 +328,6 @@ def error_study_config(tau: str | None) -> SyntheticConfig:
                 },
             )
         },
-        sources={},
     )
 
 

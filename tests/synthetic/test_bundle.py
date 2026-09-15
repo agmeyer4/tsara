@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
+import yaml
 
 from tsara.core.bundle import BUNDLE_STAGE_KEY
 from tsara.core.naming import (
@@ -30,6 +33,9 @@ from tsara.synthetic.bundle import (
 )
 from tsara.synthetic.config import SyntheticConfig
 from tsara.synthetic.generator import SyntheticDataset, generate
+from tsara.synthetic.profiling import RealDataProfile
+
+WithSources = Callable[[SyntheticConfig, dict[str, Any]], SyntheticConfig]
 
 # ---------------------------------------------------------------------------
 # Round trip
@@ -103,17 +109,12 @@ def test_round_trip_of_a_mobile_multi_stream_bundle(tmp_path: Path) -> None:
                 "start_latitude": 40.0,
                 "start_longitude": -111.0,
             },
-            "instruments": {
-                "analyzer": {
-                    "native_rate": "1s",
-                    "species": {
-                        "ch4": {
-                            "background": {"kind": "parametric", "offset": 1900.0},
-                            "units": "ppb",
-                        }
-                    },
+            "atmosphere": {
+                "fields": {
+                    "ch4": {"background": {"kind": "parametric", "offset": 1900.0}, "units": "ppb"}
                 }
             },
+            "instruments": {"analyzer": {"native_rate": "1s", "measures": {"ch4": {}}}},
         }
     )
     original = generate(config)
@@ -125,9 +126,11 @@ def test_round_trip_of_a_mobile_multi_stream_bundle(tmp_path: Path) -> None:
     )
 
 
-def test_empty_catalog_round_trips(noise_free_config: SyntheticConfig, tmp_path: Path) -> None:
+def test_empty_catalog_round_trips(
+    noise_free_config: SyntheticConfig, with_sources: WithSources, tmp_path: Path
+) -> None:
     """The plume-free control case must persist like any other."""
-    control = noise_free_config.model_copy(update={"sources": {}})
+    control = with_sources(noise_free_config, {})
     restored = SyntheticDataset.load(generate(control).save(tmp_path / "run"))
     assert len(restored.ground_truth) == 0
 
@@ -183,6 +186,131 @@ def test_manifest_records_bundle_contents(noisy_config: SyntheticConfig, tmp_pat
 def test_save_accepts_a_string_path(noisy_config: SyntheticConfig, tmp_path: Path) -> None:
     bundle = save_bundle(generate(noisy_config), str(tmp_path / "run"))
     assert bundle.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# The atmosphere, rebuilt from the saved config (Phase 4.5)
+# ---------------------------------------------------------------------------
+
+
+def _wandering(profile: str | None = None) -> SyntheticConfig:
+    """A campaign whose truth has a random walk, so a rebuild is not trivially flat."""
+    background: dict[str, Any] = {
+        "kind": "parametric",
+        "offset": 1900.0,
+        "diurnal_amplitude": 20.0,
+        "random_walk_std": 30.0,
+    }
+    if profile is not None:
+        background = {"kind": "bootstrap", "profile": profile, "base": background}
+    return SyntheticConfig.model_validate(
+        {
+            "name": "wandering",
+            "start": "2026-01-01T00:00:00Z",
+            "duration": "30min",
+            "seed": 17,
+            "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
+            "atmosphere": {
+                "fields": {"ch4": {"units": "ppb", "background": background}},
+                "sources": {
+                    "pad": {
+                        "rate_per_hour": 20.0,
+                        "reference_species": "ch4",
+                        "shape": {"kind": "gaussian", "sigma": "20s"},
+                        "amplitude": {"kind": "uniform", "low": 50.0, "high": 150.0},
+                    }
+                },
+            },
+            "instruments": {
+                "analyzer": {
+                    "native_rate": "1s",
+                    "timestamp_jitter": "0.2s",
+                    "measures": {"ch4": {"uncertainty": {"random": {"absolute": 2.0}}}},
+                }
+            },
+        }
+    )
+
+
+def test_a_loaded_bundle_rebuilds_the_atmosphere_exactly(tmp_path: Path) -> None:
+    """The generator draws the air first, so its seed alone reproduces it."""
+    original = generate(_wandering())
+    restored = SyntheticDataset.load(original.save(tmp_path / "run"))
+    assert original.atmosphere is not None
+    assert restored.atmosphere is not None
+    # At instants no instrument sampled, stochastic term and plumes included.
+    instants = np.arange("2026-01-01T00:00:00", "2026-01-01T00:30:00", 7, dtype="datetime64[s]")
+    assert np.array_equal(
+        restored.atmosphere.value("ch4", instants), original.atmosphere.value("ch4", instants)
+    )
+    assert [e.event_id for e in restored.atmosphere.events] == [
+        e.event_id for e in original.atmosphere.events
+    ]
+
+
+def test_a_bootstrap_bundle_loads_without_its_profile_but_without_an_atmosphere(
+    white_noise_profile: RealDataProfile, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The streams and answer key are complete; only the rebuild needs real data."""
+    config = _wandering(profile="white")
+    bundle = generate(config, profiles={"white": white_noise_profile}).save(tmp_path / "run")
+    with caplog.at_level(logging.INFO, logger="tsara.synthetic.bundle"):
+        restored = load_bundle(bundle)
+    assert restored.atmosphere is None
+    assert "profile(s) ['white'] were not supplied" in caplog.text
+    assert len(restored.ground_truth) > 0
+
+
+def test_a_bootstrap_bundle_rebuilds_its_atmosphere_given_the_profile(
+    white_noise_profile: RealDataProfile, tmp_path: Path
+) -> None:
+    config = _wandering(profile="white")
+    original = generate(config, profiles={"white": white_noise_profile})
+    restored = SyntheticDataset.load(
+        original.save(tmp_path / "run"), profiles={"white": white_noise_profile}
+    )
+    assert original.atmosphere is not None
+    assert restored.atmosphere is not None
+    instants = original.streams["analyzer"]["time"].values
+    assert np.array_equal(
+        restored.atmosphere.background("ch4", instants),
+        original.atmosphere.background("ch4", instants),
+    )
+
+
+def test_a_bundle_from_before_the_atmosphere_is_refused_by_name(
+    noisy_config: SyntheticConfig, tmp_path: Path
+) -> None:
+    """No converter, deliberately; the message says what happened and what to do."""
+    bundle = generate(noisy_config).save(tmp_path / "run")
+    payload = yaml.safe_load((bundle / BUNDLE_CONFIG).read_text())
+    fields = payload.pop("atmosphere")["fields"]
+    payload["sources"] = {}
+    for instrument in payload["instruments"].values():
+        instrument["species"] = {name: fields[name] for name in instrument.pop("measures")}
+    (bundle / BUNDLE_CONFIG).write_text(yaml.safe_dump(payload))
+    with pytest.raises(TsaraBundleError, match="written before the synthetic atmosphere existed"):
+        load_bundle(bundle)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"name": "not-a-mapping-of-instruments", "instruments": ["analyzer"]},
+        {"name": "instruments-without-species", "instruments": {"analyzer": {"native_rate": "1s"}}},
+        ["not", "a", "mapping"],
+    ],
+)
+def test_an_invalid_config_is_left_to_validation(
+    noisy_config: SyntheticConfig, tmp_path: Path, payload: object
+) -> None:
+    """Only the old schema's unmistakable shape gets the old-schema message."""
+    from pydantic import ValidationError
+
+    bundle = generate(noisy_config).save(tmp_path / "run")
+    (bundle / BUNDLE_CONFIG).write_text(yaml.safe_dump(payload))
+    with pytest.raises(ValidationError):
+        load_bundle(bundle)
 
 
 # ---------------------------------------------------------------------------

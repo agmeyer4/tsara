@@ -10,6 +10,12 @@
 # Every number here is GROUND TRUTH: the generator records exactly what it
 # injected, and later pipeline stages are scored against that record. See
 # docs/METHODS.md §8.
+#
+# The file reads in the order a campaign happens: when and where, then WHAT
+# THE AIR IS (the atmosphere: its fields, their backgrounds, and the sources
+# whose plumes cross it), then WHO MEASURES IT (instruments, each sampling
+# that one atmosphere through its own clock and adding its own error).
+#     dataset.atmosphere.value("ch4", times)    # the true methane, any time
 # ============================================================================
 
 name: synthetic_mobile_example
@@ -41,7 +47,122 @@ platform:
   pattern: circuit
   radius_m: 1500.0
 
+# --- The atmosphere --------------------------------------------------------
+# Realized ONCE per run, before any instrument exists. Every instrument that
+# measures a field samples the same truth, random wander included.
+atmosphere:
+  # Node spacing for random-walk backgrounds, which are drawn once on these
+  # nodes and are linear between them.
+  truth_resolution: 1s
+
+  fields:
+    ch4:
+      units: ppb
+      background:
+        kind: parametric
+        offset: 1950.0
+        diurnal_amplitude: 25.0     # boundary-layer breathing
+        diurnal_phase_hours: 4.0
+        random_walk_std: 8.0        # unpredictable slow wander
+
+    c2h6:
+      units: ppb
+      background:
+        kind: parametric
+        offset: 1.2
+
+    co2:
+      units: ppm
+      background:
+        kind: parametric
+        offset: 418.0
+        diurnal_amplitude: 6.0
+        drift_per_day: 0.4          # measured from the campaign start
+
+    # Meteorology, including a circular variable for Phase 4 circular stats.
+    wind_dir:
+      role: met
+      circular: true
+      units: degrees
+      background:
+        kind: parametric
+        offset: 210.0
+        random_walk_std: 900.0
+
+    wind_speed:
+      role: aux
+      units: m s-1
+      background:
+        kind: parametric
+        offset: 4.0
+        random_walk_std: 3.0
+
+  # A source is a PHYSICAL event emitting several species together at a known
+  # ratio. Its plumes are part of the air, so the same leak appears
+  # consistently on every instrument measuring those species.
+  sources:
+
+    # Thermogenic: high ethane-to-methane, the classic oil-and-gas signature.
+    well_pad:
+      rate_per_hour: 5.0
+      reference_species: ch4
+      shape:
+        # Exponentially-modified Gaussian: sharp rise, long tail. The
+        # physically motivated shape, and the one that makes baseline
+        # placement genuinely hard.
+        kind: emg
+        sigma: 12s
+        tau: 25s
+      amplitude:
+        # Right-skewed: many modest encounters, a few large ones.
+        kind: lognormal
+        median: 120.0
+        sigma_log: 0.7
+      ratios:
+        c2h6:
+          mean: 0.062              # true delta-C2H6 / delta-CH4
+          relative_spread: 0.18    # event-to-event variability; 0 = fixed ratio
+        co2:
+          mean: 0.004
+          relative_spread: 0.30
+      # A short sharp blip riding on the broad plume, with its OWN chemistry --
+      # a distinct source encountered inside the parent (METHODS.md §8.1).
+      nested:
+        probability: 0.25
+        shape:
+          kind: gaussian
+          sigma: 3s
+        amplitude_factor: 0.45
+        ratios:
+          c2h6:
+            mean: 0.005            # nearly ethane-free => biogenic-like child
+            relative_spread: 0.20
+
+    # Combustion: CO2-dominated, essentially no ethane, and the co-emitted
+    # species arrive slightly later (separate stacks) -- the misalignment the
+    # Phase 8 smoothing stage exists to repair.
+    compressor:
+      rate_per_hour: 2.0
+      reference_species: co2
+      shape:
+        kind: gaussian
+        sigma: 30s
+      amplitude:
+        kind: uniform
+        low: 3.0
+        high: 25.0
+      ratios:
+        ch4:
+          mean: 8.0
+          relative_spread: 0.25
+      inter_species_lag:
+        ch4: 20s                   # negative values are legal: arrives earlier
+
 # --- Instruments -----------------------------------------------------------
+# Each instrument lists the fields it `measures`. What it adds is its own: a
+# clock, cells, noise, and reporting resolution. A variable is named after its
+# field unless the measurement says `name: ...`; either way its stream records
+# the field it measures (METHODS.md §1.6).
 instruments:
 
   # A fast analyzer with a full two-component error budget.
@@ -52,15 +173,8 @@ instruments:
     dropouts:
       rate_per_day: 12.0
       duration: 90s
-    species:
+    measures:
       ch4:
-        units: ppb
-        background:
-          kind: parametric
-          offset: 1950.0
-          diurnal_amplitude: 25.0     # boundary-layer breathing
-          diurnal_phase_hours: 4.0
-          random_walk_std: 8.0        # unpredictable slow wander
         uncertainty:
           random:
             absolute: 1.5
@@ -76,109 +190,32 @@ instruments:
         quantization: 0.1
 
       c2h6:
-        units: ppb
-        background:
-          kind: parametric
-          offset: 1.2
         uncertainty:
           random:
             absolute: 0.08
 
-  # A slower analyzer on an independent clock.
+  # A slower analyzer on an independent clock, measuring the SAME methane the
+  # aeris measures -- same background, same plumes -- with its own error.
   picarro:
     native_rate: 2s
-    species:
+    measures:
       co2:
-        units: ppm
-        background:
-          kind: parametric
-          offset: 418.0
-          diurnal_amplitude: 6.0
-          drift_per_day: 0.4
         uncertainty:
           random:
             absolute: 0.05
           systematic:
             relative: 0.001
+      ch4:
+        uncertainty:
+          random:
+            absolute: 0.6
+          systematic:
+            relative: 0.002
 
-  # Meteorology, including a circular variable for Phase 4 circular stats.
+  # Meteorology, measured without error so circular statistics can be
+  # checked against the truth exactly.
   met:
     native_rate: 10s
-    species:
-      wind_dir:
-        role: met
-        circular: true
-        units: degrees
-        background:
-          kind: parametric
-          offset: 210.0
-          random_walk_std: 900.0
-      wind_speed:
-        role: aux
-        units: m s-1
-        background:
-          kind: parametric
-          offset: 4.0
-          random_walk_std: 3.0
-
-# --- Sources ---------------------------------------------------------------
-# A source is a PHYSICAL event emitting several species together at a known
-# ratio. Events are drawn once and shared across instruments, so the same
-# leak appears consistently on every clock.
-sources:
-
-  # Thermogenic: high ethane-to-methane, the classic oil-and-gas signature.
-  well_pad:
-    rate_per_hour: 5.0
-    reference_species: ch4
-    shape:
-      # Exponentially-modified Gaussian: sharp rise, long tail. The
-      # physically motivated shape, and the one that makes baseline
-      # placement genuinely hard.
-      kind: emg
-      sigma: 12s
-      tau: 25s
-    amplitude:
-      # Right-skewed: many modest encounters, a few large ones.
-      kind: lognormal
-      median: 120.0
-      sigma_log: 0.7
-    ratios:
-      c2h6:
-        mean: 0.062              # true delta-C2H6 / delta-CH4
-        relative_spread: 0.18    # event-to-event variability; 0 = fixed ratio
-      co2:
-        mean: 0.004
-        relative_spread: 0.30
-    # A short sharp blip riding on the broad plume, with its OWN chemistry --
-    # a distinct source encountered inside the parent (METHODS.md §8.1).
-    nested:
-      probability: 0.25
-      shape:
-        kind: gaussian
-        sigma: 3s
-      amplitude_factor: 0.45
-      ratios:
-        c2h6:
-          mean: 0.005            # nearly ethane-free => biogenic-like child
-          relative_spread: 0.20
-
-  # Combustion: CO2-dominated, essentially no ethane, and the co-emitted
-  # species arrive slightly later (separate stacks) -- the misalignment the
-  # Phase 8 smoothing stage exists to repair.
-  compressor:
-    rate_per_hour: 2.0
-    reference_species: co2
-    shape:
-      kind: gaussian
-      sigma: 30s
-    amplitude:
-      kind: uniform
-      low: 3.0
-      high: 25.0
-    ratios:
-      ch4:
-        mean: 8.0
-        relative_spread: 0.25
-    inter_species_lag:
-      ch4: 20s                   # negative values are legal: arrives earlier
+    measures:
+      wind_dir: {}
+      wind_speed: {}

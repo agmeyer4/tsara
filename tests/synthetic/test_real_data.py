@@ -27,7 +27,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tsara.synthetic.background import render_background
+from tsara.synthetic.background import realize_background
 from tsara.synthetic.config import BootstrapBackground
 from tsara.synthetic.profiling import profile_series
 
@@ -109,12 +109,16 @@ def test_real_profile_drives_a_bootstrap_background(real_series: pd.Series) -> N
     """The full path: real data in, synthetic background out."""
     profile = profile_series(real_series, name="real", block_length=256)
     times = pd.date_range("2026-01-01", periods=5000, freq="1s")
-    values = render_background(
+    start_ns = int(times[0].value)
+    background = realize_background(
         BootstrapBackground(kind="bootstrap", profile="real"),
-        times,
-        np.random.default_rng(0),
+        start_ns=start_ns,
+        end_ns=int(times[-1].value),
+        truth_resolution_ns=1_000_000_000,
+        rng=np.random.default_rng(0),
         profiles={"real": profile},
     )
+    values = background.at(times.to_numpy().astype(np.int64) / 1e9)
     assert values.shape == (5000,)
     assert np.all(np.isfinite(values))
 
