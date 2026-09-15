@@ -376,6 +376,7 @@ def n_effective(
         raise TsaraPropagationError(
             f"Unknown propagation form {form!r}; registered forms are {list(PROPAGATION_FORMS)}."
         )
+    # rho: how alike two consecutive errors are, exp(-spacing / tau).
     rho = lag1_correlation(spacing_s, tau_s)
     counts = np.atleast_1d(np.asarray(n, dtype=np.float64))
     counts = np.clip(counts, 1.0, None)
@@ -385,6 +386,8 @@ def n_effective(
         # the size of its error is worth being able to reproduce.
         effective = counts * (1.0 - rho) / (1.0 + rho)
         return np.asarray(np.clip(effective, 1.0, counts), dtype=np.float64)
+    # ar1_neff: evaluate Var(mean) / sigma^2 exactly for N equally spaced readings.
+    # N_eff is its reciprocal, because Var(mean) = sigma^2 / N_eff by definition.
     out = np.empty_like(counts)
     for value in np.unique(counts):
         ratio = _variance_ratio_equal_weight(int(round(float(value))), rho)
@@ -479,6 +482,7 @@ def propagate_random(
     approximation otherwise. ``'ar1_double_sum'`` makes no such substitution
     and is the way to check what it costs.
     """
+    # Validate: a negative sigma is a sign error, never a small uncertainty.
     sigma = _as_1d(sigmas, name="sigmas")
     if np.any(sigma[np.isfinite(sigma)] < 0):
         raise TsaraPropagationError(
@@ -498,9 +502,13 @@ def propagate_random(
     w = normalized[finite]
     w = w / w.sum()
 
+    # With weights summing to one, the variance of the mean of independent errors
+    # is sum(w^2 sigma^2) (METHODS §3.2).
     independent_variance = float(np.sum(w * w * sigma * sigma))
+    # How many equally weighted readings these weights are worth (Kish).
     n_kish = kish_sample_size(w)
     if tau_s is None:
+        # No timescale declared: the readings are independent by declaration.
         return PropagatedSigma(
             sigma=float(np.sqrt(independent_variance)),
             form=INDEPENDENT_FORM,
@@ -513,6 +521,7 @@ def propagate_random(
         )
 
     if form == "ar1_double_sum":
+        # The reference form: every pair of readings correlated by the time between them.
         if times_s is None:
             raise TsaraPropagationError(
                 "'ar1_double_sum' needs times_s: it correlates each pair by the time "
@@ -532,6 +541,8 @@ def propagate_random(
             sigma=float(np.sqrt(variance)), form=form, n_effective=float(implied)
         )
 
+    # The effective-sample-size forms: shrink the Kish count for correlation,
+    # then inflate the independent variance by how much was lost.
     spacing = _mean_spacing(times_s, count=int(finite.sum()), mask=finite)
     effective = float(n_effective(n_kish, spacing, tau_s, form=form)[0])
     inflation = n_kish / effective if effective > 0 else float("nan")
@@ -635,6 +646,8 @@ def propagate_systematic(
     finite = np.isfinite(sigma) & (normalized > 0)
     if not finite.any():
         return PropagatedSigma(sigma=float("nan"), form="systematic", n_effective=0.0)
+    # Renormalize over the readings that hold a sigma, then take the weighted mean
+    # of the sigmas: fully correlated errors do not average down (METHODS §3.3).
     w = normalized[finite]
     w = w / w.sum()
     return PropagatedSigma(
@@ -709,10 +722,11 @@ def sigma_at_support(
             f"target {target_width_s} s."
         )
     if quoted_width_s == target_width_s:
-        return values, "unchanged"
+        return values, "unchanged"  # already quoted at the width wanted
     if tau_s is None:
-        return values, "unscaled"
+        return values, "unscaled"  # moving it needs a timescale; refuse rather than guess
     if target_width_s > quoted_width_s:
+        # Wider target: the value there is the mean of `count` quoted-width values.
         count = max(int(round(target_width_s / quoted_width_s)), 1)
         effective = float(n_effective(count, quoted_width_s, tau_s, form=form)[0])
         return np.asarray(values / np.sqrt(effective), dtype=np.float64), form
@@ -777,6 +791,7 @@ def _binned_totals(
         raise TsaraPropagationError("Weights must be non-negative.")
     if np.any(sigma[np.isfinite(sigma)] < 0):
         raise TsaraPropagationError("Uncertainties must be non-negative.")
+    # A pair with no sigma, or no weight, is excluded from every total alike.
     keep = np.isfinite(sigma) & (w > 0)
     w = np.where(keep, w, 0.0)
     sigma = np.where(keep, sigma, 0.0)
@@ -788,10 +803,10 @@ def _binned_totals(
         return np.asarray(np.bincount(index, weights=values, minlength=n_target), dtype=np.float64)
 
     return (
-        total_of(w),
-        total_of(w * w),
-        total_of(w * sigma),
-        total_of(w * w * sigma * sigma),
+        total_of(w),  # sum w            (normalizer)
+        total_of(w * w),  # sum w^2          (for the Kish sample size)
+        total_of(w * sigma),  # sum w sigma      (systematic numerator)
+        total_of(w * w * sigma * sigma),  # sum w^2 sigma^2  (random numerator)
     )
 
 
@@ -865,9 +880,11 @@ def propagate_random_binned(
     total, total_sq, _, weighted_var = _binned_totals(sigmas, weights, target_index, n_target)
     sigma = np.full(n_target, np.nan, dtype=np.float64)
     effective = np.zeros(n_target, dtype=np.float64)
-    filled = total > 0
+    filled = total > 0  # cells with at least one contributing sigma
     if not filled.any():
         return BinnedSigma(sigma=sigma, form=INDEPENDENT_FORM, n_effective=effective)
+    # Per cell: sum(w^2 sigma^2) / (sum w)^2, the independent-error variance of the
+    # overlap-weighted mean, and the Kish count (sum w)^2 / sum w^2.
     independent_variance = weighted_var[filled] / (total[filled] ** 2)
     kish = total[filled] ** 2 / total_sq[filled]
     effective[filled] = kish
@@ -885,6 +902,8 @@ def propagate_random_binned(
             "Correcting for correlation needs to know how far apart the samples "
             "are; supply the source stream's cadence, or pass tau_s=None."
         )
+    # Correlated errors: fewer independent readings than the Kish count, so the
+    # independent variance is inflated by kish / N_eff.
     corrected = n_effective(kish, spacing_s, tau_s, form=form)
     effective[filled] = corrected
     sigma[filled] = np.sqrt(independent_variance * kish / corrected)
@@ -970,6 +989,7 @@ def propagate_systematic_binned(
     sigma = np.full(n_target, np.nan, dtype=np.float64)
     effective = np.zeros(n_target, dtype=np.float64)
     filled = total > 0
+    # Per cell: sum(w sigma) / sum w, the weighted mean of the sigmas, with no 1/sqrt(N).
     sigma[filled] = weighted_sigma[filled] / total[filled]
     effective[filled] = total[filled] ** 2 / total_sq[filled]
     return BinnedSigma(sigma=sigma, form="systematic", n_effective=effective)

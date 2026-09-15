@@ -144,6 +144,7 @@ def resolve_variable(
         If the reference names nothing, or names something ambiguously.
     """
     if isinstance(reference, tuple):
+        # Explicit (instrument, variable): nothing to search for, only to check.
         instrument, variable = reference
         if instrument not in streams:
             raise TsaraAlignError(
@@ -155,6 +156,7 @@ def resolve_variable(
                 f"{sorted(map(str, streams[instrument].data_vars))}."
             )
         return instrument, variable
+    # A bare name: find every stream that carries it, then insist on exactly one.
     holders = [name for name, stream in streams.items() if reference in stream.data_vars]
     if not holders:
         raise TsaraAlignError(
@@ -190,15 +192,18 @@ def stream_cells(stream: xr.Dataset, instrument: str) -> CellBounds:
     TsaraAlignError
         If the stream has no bounds or no rows.
     """
+    # Bounds are normally a coordinate; a stream may also carry them as a data variable.
     if TIME_BOUNDS_VAR not in stream.coords and TIME_BOUNDS_VAR not in stream.data_vars:
         raise TsaraAlignError(
             f"Stream '{instrument}' carries no '{TIME_BOUNDS_VAR}', so there is no "
             "interval to bin over. Streams gain cells at ingestion (METHODS §10); "
             "a bundle written before format 2 must be reloaded to acquire them."
         )
+    # (time, 2) datetime64 edges -> int64 nanoseconds, the unit every overlap is measured in.
     bounds = np.asarray(stream[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]").astype(np.int64)
     if bounds.size == 0:
         raise TsaraAlignError(f"Stream '{instrument}' has no cells to bin from.")
+    # Copies, so the CellBounds owns contiguous arrays rather than views into the dataset.
     return CellBounds(start_ns=bounds[:, 0].copy(), stop_ns=bounds[:, 1].copy())
 
 
@@ -216,6 +221,7 @@ def cadence_s(cells: CellBounds) -> float:
     and for a file that nests one sample inside another.
     """
     if len(cells) >= 2:
+        # Start-to-start steps; zero steps (two cells starting together) say nothing about spacing.
         deltas = np.diff(cells.start_ns)
         positive = deltas[deltas > 0]
         if positive.size:
@@ -266,7 +272,10 @@ def select_variables(
     it as well rather than trying to average a set of boundaries.
     """
     if variables is not None:
+        # An explicit selection: resolve each reference, refusing ambiguity.
         return [resolve_variable(streams, reference) for reference in variables]
+    # The default: every value column in every stream, in stream order, skipping
+    # the companions (sigmas, counts, coverage, angular quality) and the bounds.
     return [
         (instrument, str(name))
         for instrument, stream in streams.items()
@@ -285,9 +294,11 @@ def _output_names(selection: Sequence[tuple[str, str]]) -> dict[tuple[str, str],
     The spelling therefore depends on the *selection*, which is why every
     column also records its source instrument in an attribute.
     """
+    # First pass: which instruments claim each canonical name.
     claimed: dict[str, list[str]] = {}
     for instrument, variable in selection:
         claimed.setdefault(variable, []).append(instrument)
+    # Second pass: suffix a name with its instrument only where two claim it.
     names: dict[tuple[str, str], str] = {}
     for instrument, variable in selection:
         if len(claimed[variable]) > 1:
@@ -312,11 +323,15 @@ def _sigma_on_cells(
     happens — or is refused and says so.
     """
     if sigma_variable not in stream.data_vars:
+        # This component was never declared or reported for the variable.
         return None
     values = np.asarray(stream[sigma_variable].values, dtype=np.float64)
     quoted = stream[variable].attrs.get("uncertainty_at_width")
     if quoted is None:
+        # No quoted interval: the sigma already describes the stream's own cells.
         return values, "unchanged"
+    # A figure quoted at another interval: moving it needs a decorrelation
+    # timescale, and `sigma_at_support` refuses (returns "unscaled") without one.
     tau = stream[variable].attrs.get("decorrelation_timescale")
     tau_s = float(pd.Timedelta(tau).total_seconds()) if tau is not None else None
     moved, provenance = sigma_at_support(
@@ -382,23 +397,32 @@ def measure_replication(source: CellBounds, target: CellBounds) -> tuple[bool, f
         source cell's total covered time in seconds, half of which is the
         widest target cell that would *not* replicate it.
     """
+    # Long form: one entry per overlapping (source cell, target cell) pair.
     pairs = overlap_pairs(source, target)
+    # The width of the target cell in each pair.
     target_width = target.width_ns[pairs.target_index]
     # A zero-width target cell overlaps nothing by a positive amount and would
     # otherwise make a degenerate grid look infinitely replicated.
     touching = (pairs.overlap_ns > 0) & (target_width > 0)
     if not touching.any():
         return False, 0.0, 0.0
+    # Which source cell each touching pair belongs to.
     owner = pairs.source_index[touching]
     # Integer nanoseconds summed in float64 are exact below 2**53 ns, about
     # 104 days of overlap for a single source cell, so the comparison with
     # twice a width is exact for any cell this operation will meet.
+    # Total time each source cell shares with the target cells.
     covered = np.bincount(owner, weights=pairs.overlap_ns[touching], minlength=len(source))
+    # The widest target cell each source cell touches.
     widest = np.zeros(len(source), dtype=np.int64)
     np.maximum.at(widest, owner, target_width[touching])
+    # Source cells that touch at least one target cell.
     used = widest > 0
+    # "How many target cells' worth of time" each source cell covers; the worst
+    # one is reported, so the refusal can name a width that would work.
     multiples = covered[used] / widest[used]
     worst = int(np.argmax(multiples))
+    # The rule itself: two cells' worth or more is replication.
     replicated = bool(np.any(covered[used] >= 2.0 * widest[used]))
     return replicated, float(multiples[worst]), float(covered[used][worst]) / NS_PER_S
 
@@ -425,6 +449,7 @@ def touched_readings(source: CellBounds, target: CellBounds) -> np.ndarray:
     """
     links = overlap_pairs(source, target)
     touched = np.zeros(len(source), dtype=bool)
+    # A pair touching only at a boundary (overlap 0) does not count, as in binning.
     touched[links.source_index[links.overlap_ns > 0]] = True
     return touched
 
@@ -457,6 +482,7 @@ def readings_behind(
     int
         Distinct finite readings behind the target cells.
     """
+    # A reading counts when it both overlaps a target cell and holds a value.
     finite = np.isfinite(np.asarray(stream[variable].values, dtype=np.float64))
     return int(np.count_nonzero(touched_readings(source, target) & finite))
 
@@ -498,6 +524,7 @@ def _same_cells(source: CellBounds, target: CellBounds) -> bool:
     mathematically and not in floating point, and several gases retrieved
     from one spectrum is the commonest case there is.
     """
+    # Same length first, so the element-wise comparison is only made when it can succeed.
     return len(source) == len(target) and bool(
         np.array_equal(source.start_ns, target.start_ns)
         and np.array_equal(source.stop_ns, target.stop_ns)
@@ -547,6 +574,7 @@ def bin_streams_onto_cells(
         If no streams are given, a variable cannot be resolved, or a stream
         has no cells.
     """
+    # 1. Validate what was asked for, and resolve it to (instrument, variable) pairs.
     if not streams:
         raise TsaraAlignError("No streams to bin.")
     if len(target) == 0:
@@ -559,12 +587,18 @@ def bin_streams_onto_cells(
             "which travel with the values they describe rather than being binned "
             "on their own."
         )
+    # 2. Decide each output column's name (suffixed only on a collision).
     names = _output_names(selection)
+    # 3. Refuse the direction that would replicate readings (METHODS §11.2.1).
     # Once per instrument rather than once per variable: the question is about
     # cells, and a spectral stream can carry a thousand columns on one clock.
     for instrument in dict.fromkeys(name for name, _ in selection):
         _refuse_upsampling(stream_cells(streams[instrument], instrument), target, instrument)
+    # 4. Put each variable on the target cells: its value, its companions
+    # (count, coverage, sigmas or angular quality), and its attributes.
     data_vars: dict[str, tuple[str, np.ndarray, dict[str, object]]] = {}
+    # Per column: the cell method a passed-through variable declared, or a
+    # sentinel saying this call averaged it. Needed to fix cell_methods below.
     native: dict[str, str | None] = {}
     for instrument, variable in selection:
         column = names[instrument, variable]
@@ -579,6 +613,7 @@ def bin_streams_onto_cells(
         data_vars.update({name: (TIME_COORD, *rest) for name, rest in columns.items()})
         native[column] = declared_method
 
+    # 5. Assemble the product: one row per target cell, `time` at each midpoint.
     dataset = xr.Dataset(
         data_vars=data_vars,
         coords={TIME_COORD: np.asarray(target.midpoint_ns, dtype="datetime64[ns]")},
@@ -588,6 +623,8 @@ def bin_streams_onto_cells(
             PROPAGATION_FORM_ATTR: propagation_form,
         },
     )
+    # 6. Describe the cells (CF `time_bnds`), then correct the blanket
+    # `time: mean` that attaching them stamps on every column.
     attach_time_bounds(dataset, target, "mean")
     _correct_cell_methods(dataset, names.values(), native)
     # Pinned here rather than by whoever eventually writes the file: a joined
@@ -620,11 +657,14 @@ def _correct_cell_methods(
     for column in columns:
         declared = native.get(column, "__binned__")
         if declared != "__binned__":
+            # Passed through: restore what the stream itself declared, or nothing.
             if declared is None:
                 dataset[column].attrs.pop(CELL_METHODS_ATTR, None)
             else:
                 dataset[column].attrs[CELL_METHODS_ATTR] = declared
+        # A contributing count is a sum over the cell.
         dataset[n_source_name(column)].attrs[CELL_METHODS_ATTR] = f"{TIME_COORD}: sum"
+        # Properties of the cell, not statistics of the data in it: no method.
         for name in (
             coverage_name(column),
             f"{column}{RESULTANT_LENGTH_SUFFIX}",
@@ -649,6 +689,7 @@ def _one_variable(
     target support, and if so what cell method its own stream declared — the
     only thing the caller cannot re-derive from the columns themselves.
     """
+    # The variable's own cells, which its values describe.
     source = stream_cells(stream, instrument)
     if stream[variable].dims != (TIME_COORD,):
         # Named rather than broadcast against: without this the cell
@@ -663,9 +704,13 @@ def _one_variable(
             "anything else describes the cells rather than varying over them."
         )
     values = np.asarray(stream[variable].values, dtype=np.float64)
+    # Everything the source declared travels with the column, plus where it came from.
     attrs: dict[str, object] = dict(stream[variable].attrs)
     attrs[SOURCE_INSTRUMENT_ATTR] = instrument
+    # `circular` may arrive as a bool, an int or a string (after a netCDF round
+    # trip), so it is read by its spelling rather than by truthiness.
     circular = str(attrs.get("circular", 0)) not in ("0", "False", "None", "")
+    # Already on the target cells? Then pass through rather than average onto itself.
     already_here = _same_cells(source, target)
     attrs[BINNED_ATTR] = int(not already_here)
 
@@ -698,6 +743,8 @@ def _one_variable(
                 _dispersion_attrs(column, str(attrs.get("units", "degrees"))),
             )
             return columns, stream[variable].attrs.get(CELL_METHODS_ATTR)
+        # A reading on its own cell needs no propagation: each sigma is used as
+        # it stands, moved only if it was quoted at another interval.
         for component, sigma_name in (("random", sigma_rand_name), ("systematic", sigma_sys_name)):
             resolved = _sigma_on_cells(
                 stream, variable, sigma_name(variable), median_width_s(source), propagation_form
@@ -711,6 +758,7 @@ def _one_variable(
             )
         return columns, stream[variable].attrs.get(CELL_METHODS_ATTR)
 
+    # Not on the target cells: average it, as a direction or as a number.
     if circular:
         return _bin_circular(stream, variable, column, source, target, attrs), "__binned__"
     return _bin_scalar(
@@ -733,6 +781,7 @@ def _bin_circular(
     how well determined the direction is, and the exact circular standard
     deviation derived from it (§11.5).
     """
+    # Same overlap search as a scalar, different arithmetic on the pairs.
     result = bin_circular_onto_cells(
         source, np.asarray(stream[variable].values, dtype=np.float64), target
     )
@@ -786,20 +835,31 @@ def _bin_scalar(
     propagation_form: PropagationForm,
 ) -> dict[str, tuple[np.ndarray, dict[str, object]]]:
     """Overlap-weighted mean of one scalar variable, with its uncertainty."""
+    # Long form: one entry per overlapping (source cell, target cell) pair,
+    # with the overlap in nanoseconds. Everything below aggregates these pairs.
     pairs = overlap_pairs(source, target)
     n_target = len(target)
+    # The source value in each pair.
     paired = values[pairs.source_index]
+    # A pair contributes when its reading holds a value and the overlap is positive.
     contributes = np.isfinite(paired) & (pairs.overlap_ns > 0)
+    # Its weight is the overlap; a pair that does not contribute weighs nothing.
     weight = np.where(contributes, pairs.overlap_ns, 0.0).astype(np.float64)
+    # Per target cell: the total contributing overlap (the denominator) ...
     weight_sum = np.bincount(pairs.target_index, weights=weight, minlength=n_target)
+    # ... and the overlap-weighted sum of values (the numerator). A masked value
+    # is zeroed before multiplying, because 0 * nan is nan, not 0.
     value_sum = np.bincount(
         pairs.target_index,
         weights=weight * np.where(contributes, paired, 0.0),
         minlength=n_target,
     )
+    # The weighted mean where anything contributed; nan everywhere else, never
+    # a value borrowed from a neighbour.
     binned = np.full(n_target, np.nan, dtype=np.float64)
     filled = weight_sum > 0
     binned[filled] = value_sum[filled] / weight_sum[filled]
+    # n_source: how many source cells contributed to each target cell.
     counts = np.bincount(
         pairs.target_index, weights=contributes.astype(np.float64), minlength=n_target
     ).astype(np.int64)
@@ -809,6 +869,7 @@ def _bin_scalar(
     # the effect is documented as benign: the value is a weighted MEAN, so the
     # weights normalize). Clipping would hide a real property of the source
     # record behind a tidier number.
+    # coverage: the contributing overlap as a fraction of the target cell's width.
     width = target.width_ns.astype(np.float64)
     coverage = np.zeros(n_target, dtype=np.float64)
     wide = width > 0
@@ -819,8 +880,14 @@ def _bin_scalar(
         n_source_name(column): (counts, _count_attrs(column, native=False)),
         coverage_name(column): (coverage, _coverage_attrs(column, native=False)),
     }
+    # Uncertainty, propagated through exactly the weights that formed the value
+    # (docs/METHODS.md §3). The declared timescale, if any, says how correlated
+    # the random errors of neighbouring readings are; without one they are
+    # independent, which is what declaring a component random means.
     tau = stream[variable].attrs.get("decorrelation_timescale")
     tau_s = float(pd.Timedelta(tau).total_seconds()) if tau is not None else None
+    # How far apart readings are (for the correlated-error forms), and how wide
+    # each is (for moving a sigma quoted at another interval onto the cells).
     spacing = cadence_s(source)
     cell_width = median_width_s(source)
     for component, sigma_name in (("random", sigma_rand_name), ("systematic", sigma_sys_name)):
@@ -830,8 +897,10 @@ def _bin_scalar(
         if resolved is None:
             continue
         sigma_values, provenance = resolved
+        # Each pair's sigma, aligned with `weight` and `pairs.target_index`.
         long_form = sigma_values[pairs.source_index]
         if component == "random":
+            # sqrt(sum w^2 sigma^2) / sum w, inflated for correlation when tau is declared.
             result = propagate_random_binned(
                 long_form,
                 weight,
@@ -846,6 +915,7 @@ def _bin_scalar(
                 form=propagation_form,
             )
         else:
+            # sum w sigma / sum w: shared errors do not average down.
             result = propagate_systematic_binned(long_form, weight, pairs.target_index, n_target)
         columns[sigma_name(column)] = (
             result.sigma,

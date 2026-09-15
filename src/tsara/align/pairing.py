@@ -180,11 +180,15 @@ def _restrict(cells: CellBounds, interval: tuple[pd.Timestamp, pd.Timestamp]) ->
     edge, and dropping the two partly-covered end cells would quietly shorten
     every event by up to one cell on each side.
     """
+    # The window's edges in integer nanoseconds, the unit cells are stored in.
     start, stop = (int(pd.Timestamp(edge).value) for edge in interval)
     if stop <= start:
         raise TsaraAlignError(
             f"Pairing interval must have positive duration; got {interval[0]} to {interval[1]}."
         )
+    # A cell overlaps [start, stop) by a positive amount exactly when it ends
+    # after the window starts and starts before the window ends. Whole cells are
+    # kept, never clipped: a clipped cell would describe a different interval.
     keep = np.flatnonzero((cells.stop_ns > start) & (cells.start_ns < stop))
     return CellBounds(start_ns=cells.start_ns[keep], stop_ns=cells.stop_ns[keep])
 
@@ -201,10 +205,12 @@ def _measured_where_records_overlap(
     Over the whole record rather than an event's ``interval``, so that one
     pair of instruments keeps one clock from event to event.
     """
+    # The span both records cover: the later of the two starts to the earlier end.
     span_start = max(int(cells.start_ns.min()) for _, _, cells in members)
     span_stop = min(int(cells.stop_ns.max()) for _, _, cells in members)
     counts = []
     for stream, variable, cells in members:
+        # Cells inside the shared span that hold a value.
         inside = (cells.stop_ns > span_start) & (cells.start_ns < span_stop)
         finite = np.isfinite(np.asarray(stream[variable].values, dtype=np.float64))
         counts.append(int(np.count_nonzero(inside & finite)))
@@ -225,13 +231,17 @@ def _choose_clock(
     can never change which air is compared.
     """
     (y_instrument, y_variable, y_cells), (x_instrument, x_variable, x_cells) = y, x
+    # Rule 1: two gases from one instrument already share cells.
     if y_instrument == x_instrument:
         return y_instrument, "both species share one instrument"
+    # Rule 2: the wider cells, so nothing is split onto a finer support.
     y_width, x_width = median_width_s(y_cells), median_width_s(x_cells)
     if y_width != x_width:
         wider, narrower = (y_width, x_width) if y_width > x_width else (x_width, y_width)
         clock = y_instrument if y_width > x_width else x_instrument
         return clock, f"wider cells ({wider:.6g} s vs {narrower:.6g} s)"
+    # Rule 3, a tie in width: the member with fewer values where the records
+    # overlap, so each of its readings becomes exactly one pair.
     y_count, x_count = _measured_where_records_overlap(
         (
             (streams[y_instrument], y_variable, y_cells),
@@ -245,6 +255,7 @@ def _choose_clock(
             f"equal cells ({y_width:.6g} s); fewer measured values where the records "
             f"overlap ({fewer} vs {more})"
         )
+    # Rule 4, a tie in that too: alphabetical, so argument order never decides.
     return min(y_instrument, x_instrument), (
         f"equal cells ({y_width:.6g} s) and equal measured values ({y_count}); "
         "first instrument by name"
@@ -268,7 +279,9 @@ def _readings_behind(
     was actually reported.
     """
     if joined[column].attrs.get(BINNED_ATTR) == 0:
+        # On the clock itself: one reading per surviving pair, by construction.
         return len(pairs)
+    # Averaged onto the clock: count the distinct readings the pairs overlap.
     return readings_behind(stream, variable, source, pairs)
 
 
@@ -311,6 +324,7 @@ def pair_species(
         If a species cannot be resolved, a stream has no cells, the interval
         selects nothing, or no cell holds a real measurement of both species.
     """
+    # Resolve both references, refusing a species paired with itself.
     if not streams:
         raise TsaraAlignError("No streams to pair.")
     y_instrument, y_variable = resolve_variable(streams, y)
@@ -321,6 +335,7 @@ def pair_species(
             "a species to itself is 1 by construction."
         )
 
+    # Decision 1, which cells: the clock rule, and the target it selects.
     y_cells = stream_cells(streams[y_instrument], y_instrument)
     x_cells = stream_cells(streams[x_instrument], x_instrument)
     clock, reason = _choose_clock(
@@ -328,6 +343,7 @@ def pair_species(
     )
     target = y_cells if clock == y_instrument else x_cells
 
+    # Decision 2, which stretch: optionally only the clock cells overlapping a window.
     if interval is not None:
         target = _restrict(target, interval)
         if len(target) == 0:
@@ -336,6 +352,7 @@ def pair_species(
             )
     n_considered = len(target)
 
+    # The one operation: both species onto the chosen cells.
     joined = bin_streams_onto_cells(
         streams,
         target,
@@ -349,6 +366,8 @@ def pair_species(
     y_name = f"{y_variable}_{y_instrument}" if collides else y_variable
     x_name = f"{x_variable}_{x_instrument}" if collides else x_variable
 
+    # Decision 3, which rows survive: both species measured, and each cell
+    # covered at least `min_coverage` by each species' contributing data.
     surviving = np.flatnonzero(
         np.isfinite(joined[y_name].values)
         & np.isfinite(joined[x_name].values)
@@ -362,6 +381,8 @@ def pair_species(
             f"every candidate cell was masked or below min_coverage={min_coverage}."
         )
     dataset = joined.isel({TIME_COORD: surviving})
+    # Count the readings behind the surviving pairs, per species, and warn when
+    # fewer readings than pairs means some reading sits in more than one pair.
     kept = CellBounds(start_ns=target.start_ns[surviving], stop_ns=target.stop_ns[surviving])
     y_readings = _readings_behind(dataset, y_name, streams[y_instrument], y_variable, y_cells, kept)
     x_readings = _readings_behind(dataset, x_name, streams[x_instrument], x_variable, x_cells, kept)
@@ -382,6 +403,7 @@ def pair_species(
             sparse_count,
             sparse_name,
         )
+    # Record every decision made, so the product explains itself.
     dataset.attrs.update(
         {
             "tsara_stage": "paired",

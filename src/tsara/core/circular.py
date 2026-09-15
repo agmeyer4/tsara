@@ -318,6 +318,7 @@ def circular_mean(
                 "Weights must be non-negative; a negative weight would point one "
                 "sample's direction backwards."
             )
+    # Each reading as a unit vector (sin, cos), summed with its weight.
     sin_sum, cos_sum, total = _weighted_components(angles, w)
     if total <= 0:
         return CircularMean(
@@ -327,6 +328,7 @@ def circular_mean(
             n_source=0,
         )
     n_source = int(np.count_nonzero(np.isfinite(angles) & (w > 0)))
+    # The average vector, and its length R (clipped: rounding can push it past 1).
     sin_mean, cos_mean = sin_sum / total, cos_sum / total
     resultant = float(min(np.hypot(sin_mean, cos_mean), 1.0))
     if resultant <= n_source * RESULTANT_EPSILON:
@@ -339,6 +341,8 @@ def circular_mean(
             dispersion_deg=float("inf"),
             n_source=n_source,
         )
+    # The mean direction is the angle of the average vector: atan2(east, north)
+    # gives a compass bearing, wrapped onto [0, 360).
     return CircularMean(
         mean_deg=float(wrap_degrees(np.degrees(np.arctan2(sin_mean, cos_mean)))),
         resultant_length=resultant,
@@ -412,6 +416,8 @@ def bin_circular_onto_cells(
     # zero weight alone would not keep a masked sample out of the sum.
     radians = np.radians(np.where(finite, paired, 0.0))
 
+    # Per target cell: overlap-weighted sums of the unit vectors' components, and
+    # of the weights, exactly as a scalar mean sums values and weights.
     sin_sum = np.bincount(pairs.target_index, weights=weight * np.sin(radians), minlength=n_target)
     cos_sum = np.bincount(pairs.target_index, weights=weight * np.cos(radians), minlength=n_target)
     weight_sum = np.bincount(pairs.target_index, weights=weight, minlength=n_target)
@@ -422,6 +428,7 @@ def bin_circular_onto_cells(
         pairs.target_index, weights=(pairs.overlap_ns > 0).astype(np.float64), minlength=n_target
     ).astype(np.int64)
 
+    # The average vector per contributing cell, and its length R.
     contributing = weight_sum > 0
     sin_mean = sin_sum[contributing] / weight_sum[contributing]
     cos_mean = cos_sum[contributing] / weight_sum[contributing]

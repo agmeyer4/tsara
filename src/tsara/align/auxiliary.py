@@ -190,6 +190,7 @@ def _interpolate(
     circular: bool,
 ) -> InterpolatedField:
     """Evaluate a field at ``target_ns``, refusing to bridge long gaps."""
+    # Interpolate between samples that hold a value; a masked sample is not a fix.
     finite = np.isfinite(values)
     source_ns, values = source_ns[finite], values[finite]
     if source_ns.size == 0:
@@ -200,6 +201,7 @@ def _interpolate(
             n_gap_masked=0,
             n_outside=int(target_ns.size),
         )
+    # np.interp and the bracketing search below both need samples in time order.
     order = np.argsort(source_ns, kind="stable")
     source_ns, values = source_ns[order], values[order]
 
@@ -212,23 +214,30 @@ def _interpolate(
     target_s = (target_ns - reference).astype(np.float64) / 1e9
 
     if circular:
+        # A direction is interpolated as a unit vector, so 350 -> 10 passes through
+        # north rather than through south.
         radians = np.radians(values)
         sin_part = np.interp(target_s, source_s, np.sin(radians))
         cos_part = np.interp(target_s, source_s, np.cos(radians))
         interpolated = wrap_degrees(np.degrees(np.arctan2(sin_part, cos_part)))
     else:
+        # Straight-line interpolation between the two samples around each target.
         interpolated = np.interp(target_s, source_s, values)
 
     # Where each target sits among the sources. `right` is the first sample at
     # or after it, so `right - 1` is the last one before.
     right = np.searchsorted(source_ns, target_ns, side="left")
+    # A target landing exactly on a sample was measured, not interpolated.
     exact = (right < source_ns.size) & (
         source_ns[np.minimum(right, source_ns.size - 1)] == target_ns
     )
+    # Before the first sample or after the last: never extrapolated.
     outside = ((target_ns < source_ns[0]) | (target_ns > source_ns[-1])) & ~exact
+    # The gap between the two samples bracketing each target ...
     left = np.clip(right - 1, 0, source_ns.size - 1)
     right_clipped = np.clip(right, 0, source_ns.size - 1)
     gap_ns = (source_ns[right_clipped] - source_ns[left]).astype(np.float64)
+    # ... refused when strictly longer than the guard (a gap equal to it is bridged).
     too_far = (gap_ns / 1e9 > max_gap_s) & ~exact & ~outside
 
     result = np.asarray(interpolated, dtype=np.float64)
@@ -288,11 +297,14 @@ def interpolate_onto_cells(
     """
     instrument, name = resolve_variable(streams, variable)
     stream = streams[instrument]
+    # Guard 1, what: a gas, or anything without a role, is refused here.
     _check_role(stream, name, instrument)
     max_gap_s = _as_seconds(max_interp_gap)
     source = stream_cells(stream, instrument)
     circular = str(stream[name].attrs.get("circular", 0)) not in ("0", "False", "None", "")
     values = np.asarray(stream[name].values, dtype=np.float64)
+    # Guard 2, how far, applied inside: each source sample stands at its cell
+    # midpoint, and the field is wanted at each target cell's midpoint.
     result = _interpolate(
         source.midpoint_ns,
         values,
@@ -386,8 +398,10 @@ def attach_positions(
         If the stream names a GPS instrument the campaign does not contain,
         or the track crosses the antimeridian.
     """
+    # Already positioned (a stationary site, or joined before): nothing to do.
     if LATITUDE_COORD in stream.coords:
         return stream
+    # Ingestion recorded which instrument carries the track, and which of its variables.
     gps_name = stream.attrs.get("platform_gps_instrument")
     if gps_name is None:
         logger.debug("Stream has no mobile-platform binding, so there is no track to attach.")
@@ -407,9 +421,10 @@ def attach_positions(
     ]
     for coord, source_name in wanted:
         if source_name is None:
-            continue
+            continue  # e.g. a platform that declared no altitude
         if coord == LONGITUDE_COORD:
             _refuse_antimeridian(streams[gps_name], str(source_name), gps_name)
+        # Each coordinate through the one guarded interpolation, onto this stream's cells.
         result = interpolate_onto_cells(
             streams, (gps_name, str(source_name)), target, max_interp_gap=max_interp_gap
         )

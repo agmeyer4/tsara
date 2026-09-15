@@ -143,6 +143,8 @@ def grid_cells(
     over overlapping periods produce cells that line up, which is what lets
     their outputs be compared at all.
     """
+    # The same selection the binner will use, so the period is checked against
+    # exactly the variables that will be gridded.
     selection = select_variables(streams, variables)
     if not selection:
         raise TsaraAlignError("No variables selected, so there is nothing to build a grid for.")
@@ -152,6 +154,7 @@ def grid_cells(
         instrument: stream_cells(streams[instrument], instrument) for instrument in instruments
     }
 
+    # The window: an explicit start and end, or the selected data's own extent.
     earliest = min(int(bounds.start_ns.min()) for bounds in cells.values())
     latest = max(int(bounds.stop_ns.max()) for bounds in cells.values())
     if config.start is not None:
@@ -172,9 +175,11 @@ def grid_cells(
             f"{pd.Timestamp(start_ns)} and ends at {pd.Timestamp(stop_ns)}."
         )
     _warn_if_out_of_phase(cells, start_ns, period_ns)
+    # Abutting cells of exactly one period, enough to reach the end of the window.
     n_cells = int(np.ceil((stop_ns - start_ns) / period_ns))
     edges = start_ns + np.arange(n_cells + 1, dtype=np.int64) * period_ns
     target = CellBounds(start_ns=edges[:-1], stop_ns=edges[1:])
+    # The period rule, measured against these actual cells before anything is binned.
     _refuse_a_period_too_fine(cells, target, str(config.freq))
     return target
 
@@ -190,6 +195,7 @@ def _refuse_a_period_too_fine(
     inside the requested window, so a wide instrument whose data all falls
     outside it constrains nothing.
     """
+    # Test every selected instrument; name the one whose reading covers the most time.
     worst: tuple[float, float, str] | None = None
     for instrument, bounds in cells.items():
         replicated, multiple, covered_s = measure_replication(bounds, target)
@@ -229,8 +235,10 @@ def _warn_if_out_of_phase(cells: Mapping[str, CellBounds], start_ns: int, period
     """
     for instrument, bounds in cells.items():
         widths = bounds.width_ns
+        # Only a stream whose cells are exactly one grid period wide can be in or out of phase.
         if not np.all(widths == period_ns):
             continue
+        # How far each cell starts past a grid boundary; zero everywhere means in phase.
         offsets = (bounds.start_ns - start_ns) % period_ns
         if np.any(offsets != 0):
             logger.warning(
@@ -283,8 +291,10 @@ def build_output_grid(
         grid cells' worth of time, or the selection or window is empty.
     """
     selection = select_variables(streams, variables)
+    # Which cells (refusing a period too fine), then the one operation onto them.
     target = grid_cells(streams, config, variables)
     gridded = bin_streams_onto_cells(streams, target, selection, propagation_form=propagation_form)
+    # Provenance: what was gridded, at what period, against which widest cell.
     instruments = sorted({instrument for instrument, _ in selection})
     cells = {name: stream_cells(streams[name], name) for name in instruments}
     widest = max(float(bounds.width_ns.max()) for bounds in cells.values()) / 1e9
@@ -323,11 +333,13 @@ def _record_readings(
     repeat the same sentence fifty times.
     """
     names = _output_names(selection)
+    # Per instrument: which of its readings overlap any grid cell.
     touched = {name: touched_readings(bounds, target) for name, bounds in cells.items()}
     shared: list[tuple[str, int, int]] = []
     for instrument, variable in selection:
         column = names[instrument, variable]
         finite = np.isfinite(np.asarray(streams[instrument][variable].values, dtype=np.float64))
+        # Distinct readings behind the column, against rows that hold a value.
         readings = int(np.count_nonzero(touched[instrument] & finite))
         occupied = int(np.count_nonzero(gridded[n_source_name(column)].values > 0))
         gridded[column].attrs[GRID_READINGS_ATTR] = readings
