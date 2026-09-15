@@ -221,7 +221,11 @@ without being run, and none needs any real data:
 - [`04_alignment_walkthrough.ipynb`](examples/notebooks/04_alignment_walkthrough.ipynb)
   — combining measurements without inventing any: overlap-weighted binning,
   uncertainty checked against Monte Carlo, pairing and its clock, circular
-  statistics, the one interpolation and its cost, and the campaign grid.
+  statistics, the one interpolation and its cost, and the campaign grid. Built
+  to be changed: every section is self-contained, opens with a parameters cell,
+  prints ✔ checks comparing TSARA with a calculation written independently from
+  the definition, and ends with "Try it" changes whose outcomes were run. A
+  closing scoreboard collects every check.
 
 One companion runs on the real campaign archive instead, and is therefore
 committed **without** outputs:
@@ -229,7 +233,9 @@ committed **without** outputs:
 - [`04b_alignment_real_data.ipynb`](examples/notebooks/04b_alignment_real_data.ipynb)
   — notebook 04's operations on the 2024 mobile-lab drives and the 2026 van,
   ending in a ledger that re-measures every archive number `docs/METHODS.md` §11
-  quotes. Set `TSARA_ARCHIVE` to the directory holding the archive's `2024/` and
+  quotes. The drive day and each section's settings are parameters; the ✔ checks
+  hold on any day, and a ledger number is compared only at the settings METHODS
+  measured under. Set `TSARA_ARCHIVE` to the directory holding the archive's `2024/` and
   `2026/` trees before starting Jupyter; without it the first cell stops and
   says so.
 
