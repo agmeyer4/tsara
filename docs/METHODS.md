@@ -3492,11 +3492,30 @@ else in the suite would say so.
 | per-cell ratio, median relative error | 8 × 10⁻⁶ |
 | worst per-cell error, fully covered | 3 × 10⁻⁴, on the smallest enhancement |
 
-The per-cell residual is the generator's, not the aligner's: it is the
-midpoint-rule quadrature the slow instrument uses to average truth over its
-own 60 s cells, sixty times coarser than the fast instrument's. It appears as
-a *relative* error only where the enhancement is a couple of ppb, which is the
-signature of a fixed absolute error rather than a ratio bias.
+The per-cell residual is not the aligner's arithmetic, and it has two sources.
+It appears as a *relative* error only where the enhancement is a couple of ppb,
+which is the signature of a fixed absolute error rather than a ratio bias.
+
+**Corrected 2026-09-15.** This paragraph used to attribute the whole residual
+to the generator's midpoint-rule quadrature for the slow instrument's 60 s
+cells. Varying one thing at a time on the acceptance campaign (median per-cell
+error / worst cell, fully covered pairs above 1 ppb):
+
+| fast instrument's 1 s cells | slow subsamples 64 | 256 | 1024 | 4096 |
+|---|---|---|---|---|
+| centred on whole seconds (as tested) | 8.1 × 10⁻⁶ / 3.1 × 10⁻⁴ | 6.9 × 10⁻⁶ / 1.6 × 10⁻⁴ | 6.8 × 10⁻⁶ / 1.3 × 10⁻⁴ | 6.7 × 10⁻⁶ / 1.4 × 10⁻⁴ |
+| starting on whole seconds | 2.0 × 10⁻⁶ / 1.8 × 10⁻⁴ | 1.5 × 10⁻⁷ / 2.7 × 10⁻⁵ | 2.2 × 10⁻⁸ / 6.1 × 10⁻⁶ | 4.1 × 10⁻⁹ / 1.8 × 10⁻⁶ |
+
+The quadrature is real: it is what converges as 1/n² in the second row. But in
+the tested configuration most of the median residual is a floor that more
+quadrature does not remove. The fast instrument's 1 s *mean* cells are centred
+on whole seconds, so one straddles every minute boundary, and the join gives
+half of that second's mean to each minute. That is exact only if the air was
+uniform within the second, and a 1 s mean carries no information about its own
+interior. It is a property of interval data, not a defect of the join: **the
+finest detail any join can respect is the source's own cell.** For plumes a few
+seconds wide the same term fails the acceptance thresholds outright, and no
+quadrature setting rescues it (notebook 04 §14 shows both).
 
 **Coverage was scored against the same truth.** Exactly one cell of 120 is
 partly covered — the fast instrument's record begins inside the slow
