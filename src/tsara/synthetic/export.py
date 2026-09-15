@@ -310,7 +310,6 @@ def export_raw(
 
     manifest = _build_manifest(
         dataset.config,
-        raw_dir,
         scales,
         bounds,
         support_declaration,
@@ -590,7 +589,6 @@ def _support_block(
 
 def _build_manifest(
     config: SyntheticConfig,
-    raw_dir: Path,
     scales: Mapping[str, RawUnits],
     bounds: Mapping[str, tuple[float | None, float | None]],
     support_declaration: SupportDeclaration,
@@ -724,7 +722,13 @@ def _build_manifest(
         {
             "name": config.name,
             "description": f"Manifest for synthetic dataset '{config.name}'.",
-            "base_path": str(raw_dir),
+            # Relative to the manifest, which is how the loader resolves it:
+            # the archive and its manifest travel together, and a relative
+            # export path is not joined onto itself. Writing the path the
+            # caller passed broke exactly that case -- export to "demo" and
+            # the loader looked in demo/demo/raw -- and no test exported to a
+            # relative path, so the README's quickstart never ran as written.
+            "base_path": EXPORT_RAW_DIR,
             "platform": platform,
             "instruments": instruments,
         }

@@ -709,17 +709,23 @@ instrument in its own right, and this section specifies it to the same
 standard as the estimators above.
 
 Implementation: `tsara.synthetic` (config, profiling, background, plumes,
-noise, platform, generator, bundle, timebase).
+atmosphere, noise, platform, generator, bundle, export).
 
 ### 8.1 What is manufactured, and what is recorded
 
-One `SyntheticConfig` yields per-instrument `xarray.Dataset` streams on their
-own native, irregular clocks (§1.1) plus a `GroundTruth` catalog. Each stream
-carries the observable variable, the exact `truth_background_*` /
-`truth_enhancement_*` decomposition, the true `truth_sigma_rand_*` /
-`truth_sigma_sys_*` budget, and any instrument-*reported* sigma column under
-its configured raw-file name. Everything prefixed `truth_` is the answer key
-and is excluded from the pipeline-visible view (`SyntheticDataset.observable`).
+One `SyntheticConfig` describes a campaign in two halves: the **atmosphere**
+(its fields, each field's background, and the sources whose plumes cross it)
+and the **instruments** that measure it (each a clock, cells, and its own
+error). It yields per-instrument `xarray.Dataset` streams on their own native,
+irregular clocks (§1.1), a `GroundTruth` catalog, and the realized
+`Atmosphere` itself (§8.1.1). Each stream carries, under each measurement's
+variable name, the observable, the exact `truth_background_*` /
+`truth_enhancement_*` decomposition over that instrument's cells, the true
+`truth_sigma_rand_*` / `truth_sigma_sys_*` budget, and any instrument-*reported*
+sigma column under its configured raw-file name. Every observable records the
+field it measures in its `field` attribute (§1.6). Everything prefixed
+`truth_` is the answer key and is excluded from the pipeline-visible view
+(`SyntheticDataset.observable`).
 
 The catalog is deliberately schema-compatible with a subset of the future
 Phase-6 `PlumeCatalog`, so scoring detection is a column-wise diff rather than
@@ -727,7 +733,11 @@ a translation layer. It records both `true_amplitude` (the continuous peak the
 source produced) and `sampled_peak_amplitude` (the largest value the
 instrument's clock could have seen, NaN if the event fell entirely inside a
 gap). These answer different questions, and a detector cannot be faulted for
-the difference between them.
+the difference between them. It has one row per (event, measured variable):
+two instruments measuring methane each get a row, because each saw the event
+through its own cells. `species` is the variable's name in its stream and
+`field` the quantity it measures, which is what `reference_species` and
+`true_ratio_to_reference` are stated in.
 
 **Events are drawn before any instrument is rendered.** A plume is one
 physical release: the same leak must appear on the 1 Hz and the 10 Hz analyzer
@@ -762,13 +772,77 @@ ratio; leaving `nested.ratios` unset inherits the parent's chemistry entirely,
 describing finer temporal structure within one source rather than a second
 source. The reference species may not appear in either ratio mapping — its
 ratio to itself is 1 by definition, and a declared entry would double-count it.
-Names are validated campaign-wide against the declared `role="gas"` species
-rather than against the parent's list, which is what still catches typos.
+Names are validated against the atmosphere's `role="gas"` fields rather than
+against the parent's list, which is what still catches typos.
 
 Scientifically this is the case that matters most for v1: a regression that
 lumps child and parent samples together measures neither source's ratio.
 Phase 6 records the parent–child link in the catalog; the area mathematics that
 would separate their masses is deferred (§7).
+
+#### 8.1.1 One atmosphere, sampled by every instrument
+
+Until Phase 4.5 each instrument rendered its own copy of each species. That
+had three consequences, all measured against the generator at commit `46f8751`
+(extracted read-only and run beside the current one on the same campaigns):
+
+| | Before | After |
+|---|---|---|
+| Two identical 1 s analyzers on a methane with a 20 ppb/day random walk and a 30 ppb diurnal cycle, 6 h: RMS disagreement, median of 20 seeds | 7.95 ppb (max 16.5), on a record whose own std is 10.3 ppb | 0 exactly |
+| A point and a `mean` 60 s instrument under 60 ppb/day of drift: largest disagreement | 0.021 ppb | 2 × 10⁻¹³ ppb |
+| A bootstrap profile with a 19 s e-folding time, seen by a 0.5 s instrument | 4.5 s | 17.5 s |
+
+The first is the defect that mattered: two analyzers on one inlet were
+measuring two atmospheres, because every random-walk background was an
+independent draw per instrument. The second came from measuring drift from the
+first instant each instrument happened to render — for a centred `mean`
+instrument, half a cell before a point instrument's first sample. The third
+came from replaying bootstrap blocks sample for sample on each instrument's
+clock, which compressed the real record's timescale by the ratio of the rates
+and was guarded only by a warning.
+
+The redesign describes the air once and realizes it once
+(`tsara.synthetic.atmosphere.realize_atmosphere`). A realized `Atmosphere`
+answers what is true at any time: `value(field, times)`,
+`background(field, times)`, `enhancement(field, times)`, and
+`mean_over(field, cells, subsamples)` for any cells. An instrument is then
+only a clock, its cells, and its own error applied to that answer, and the
+generator computes every instrument's noise-free signal through the same code
+`mean_over` uses. Two identities therefore hold to the last bit, and are tested
+as such: a noise-free `point` instrument equals `value` at its timestamps (the
+cell midpoints, whatever the label, jitter included), and a noise-free `mean`
+instrument equals `mean_over` its cells at its subsample count. The midpoint
+rule behind `mean_over` converges as the inverse square of the subsample count:
+against the closed form for a Gaussian over a 20 s cell, quadrupling the count
+cut the error 16.5× and then 16.0×.
+
+**Draw order.** The run's single random generator is consumed as events, then
+each field's background, then the platform, then each instrument's clock and
+each measurement's noise. The atmosphere a seed produces therefore does not
+depend on who measures it (tested against a crowded mobile configuration of
+the same air), and a saved bundle rebuilds it from its config alone (§8.7). A
+background with no stochastic term draws nothing, so every configuration
+without a random walk, a bootstrap or drift produces **byte-identical** output
+through the redesign: eleven configurations fingerprinted before any code
+changed — the shipped example without wander or drift, a mean-support variant,
+the shared test fixture and the eight notebook-04 recipes — hash identically
+afterwards, streams and catalog alike. Generating the shipped example took
+0.139 s before and 0.141 s after.
+
+**Configuration.** `atmosphere.fields` maps a field name to its `role`
+(`gas`, `met` or `aux`; position belongs to the platform, so the manifest's
+GPS roles are not offered), `units`, `circular` and `background`;
+`atmosphere.sources` are unchanged apart from where they live; and each
+instrument lists the fields it `measures`, adding an optional variable `name`,
+its `uncertainty` and its `quantization`. Variable names are unique within an
+instrument and may repeat across instruments, matching the manifest (§1.6).
+The export writes `field` into a manifest only where a variable's name differs
+from its field, which is the shape real manifests have.
+
+**Kept per instrument, deliberately.** `true_baseline_at_peak` is still the
+background averaged over that instrument's cells and interpolated at the peak,
+as `sampled_peak_amplitude` is the peak as those cells saw it; the atmosphere's
+own background at the peak instant is one query away.
 
 ### 8.2 Plume shapes
 
@@ -819,18 +893,33 @@ the change that would lift it, should either phase need the case.
 
 ### 8.3 Backgrounds
 
+A field's background is **realized once** per run and then evaluated at
+whatever times are asked (`tsara.synthetic.background.realize_background`).
+
 **Parametric**: `offset` + diurnal + linear drift + random walk, deliberately
-separable so a test can switch on one term at a time. The diurnal term is
-phased off the Unix epoch (midnight-aligned) rather than each stream's start,
-so two instruments in one run breathe in phase as they physically must.
-Random-walk increments scale as $\sqrt{\Delta t}$ so the configured
-one-day wander magnitude is independent of sampling rate.
+separable so a test can switch on one term at a time. The analytic terms are
+evaluated exactly at any instant. The diurnal term is phased off the Unix epoch
+(midnight-aligned), and drift is measured from the **campaign start**, so every
+instrument sees the same value at the same instant. A random walk has no
+formula to evaluate, so it is drawn once on nodes `atmosphere.truth_resolution`
+apart (default 1 s) and is linear between them, which keeps the truth a
+deterministic function of time. Increments scale as $\sqrt{\Delta t}$, so the
+configured one-day wander magnitude does not depend on the node spacing: a
+finer truth clock resolves the same wander more finely rather than wandering
+further. The walk is zero at the campaign start and holds its edge values
+beyond the campaign, which instrument cells can reach by a fraction of an
+interval; holding them keeps the atmosphere independent of the instruments.
 
 **Bootstrap** (real-data-driven): fluctuations are resampled in contiguous
 *blocks* from a `RealDataProfile` (§8.4). Block resampling rather than
 point-wise is the whole point — drawing points independently would destroy the
 residual's autocorrelation and hand back white noise, defeating the purpose of
-using real data.
+using real data. The resampled fluctuations are placed at the **profile's own
+sampling period** and are linear between its samples, so the real record's
+correlation timescale is the field's, whatever rate an instrument samples it at
+(§8.1.1: 17.5 s seen for a 19 s profile at 0.5 s, where replaying blocks on
+the instrument's clock gave 4.5 s). An instrument faster than the profile sees
+no structure finer than the real record had.
 
 Two documented limitations:
 
@@ -850,7 +939,7 @@ Two documented limitations:
   median-based, so `diff_mad` shifts by well under 1 %; overlap-blending would
   smooth exactly the high-frequency structure the bootstrap exists to
   preserve. When reading a generated record, an isolated sharp step every
-  `block_length` samples is a stitching artifact, not injected signal.
+  `block_length` profile samples is a stitching artifact, not injected signal.
 - Because the source records are plume-dense, real plume energy leaks through
   the profiling baseline into the residual. This is treated as a **feature**:
   it is precisely the adversarial "is `diff_mad` really plume-immune on my
@@ -938,7 +1027,7 @@ The components differ in **how they are drawn**, which is the entire point:
   recursion rather than approximating ρ from a median interval — silently
   assuming regularity is exactly the class of hidden assumption this package
   refuses to make.
-- **systematic** — two standard normals drawn **once per species per run**,
+- **systematic** — two standard normals drawn **once per measurement per run**,
   applied as $e^{\mathrm{sys}}_i = a\,g_{\mathrm{abs}} + r\,x_i\,g_{\mathrm{rel}}$.
   This is rank-1: correlation exactly 1 between every pair of points, i.e.
   §3.3's fully-correlated case. Averaging a million samples does not reduce it
@@ -1022,9 +1111,10 @@ The consequence is that tz-aware and tz-naive configs produce byte-identical
 streams *and* byte-identical catalogs, and every persisted file carries the
 same time representation it had in memory.
 
-**Names are filenames.** Species *and* instrument names must be valid Python
-identifiers (`config.base.validate_stream_name`). For species the reason is
-that names become `xarray` variables; for instruments it is stronger — they
+**Names are filenames.** Field, variable *and* instrument names must be valid
+Python identifiers (`config.base.validate_stream_name`). For fields and
+variables the reason is that names become `xarray` variables; for instruments
+it is stronger — they
 become `streams/<name>.nc` inside a bundle, so a name carrying a path
 separator would send the write into a directory that was never created and
 fail only at save time, after a full generate, with a backend error naming
@@ -1051,6 +1141,16 @@ config, so a bundle reproduces itself), `ground_truth.parquet` (catalog-shaped,
 so ground truth and detections are directly comparable on disk), and
 `streams/<instrument>.nc`. Streams self-describe as synthetic in their attrs —
 a synthetic file mistaken for a measurement is a scientific hazard.
+
+**The atmosphere is rebuilt, not stored.** Because it is the generator's first
+draws (§8.1.1), `load_bundle` replays `realize_atmosphere` on a fresh generator
+seeded from the saved config and gets it back exactly. A bootstrap background's
+real-data profile is never saved (§8.4), so such a campaign needs its profiles
+passed to the loader (`load_bundle(path, profiles=...)`); without them it loads
+with its streams and answer key and no atmosphere, and says so. A bundle whose
+config predates the atmosphere — instruments owning `species`, `sources` at the
+top level — is refused with a message saying to regenerate it. There is
+deliberately no converter.
 
 The module-level entry points are `save_bundle` / `load_bundle`, deliberately
 *not* `save_synthetic` / `load_synthetic`: the latter name already belongs to
@@ -1718,6 +1818,15 @@ UncertaintySpec` seam the generator was built with — so that synthetic data
 travels the road real data does: written to files, crawled, parsed,
 converted, masked, reassembled. The generator's answer key then supplies
 expectations that ingestion had no part in writing.
+
+The exported manifest names its files relative to itself (`base_path: raw`),
+so an archive and its manifest travel together. Until Phase 4.5 it recorded
+the path the exporter was called with, and since the loader resolves a
+relative `base_path` against the manifest's own directory, exporting to a
+relative path looked for its files one directory too deep — the README's
+quickstart failed at ingestion as written. No test exported to a relative
+path, so the two conventions never met; one now does, and moves the archive
+before reading it.
 
 **How strong is it? Measured, by mutation.** Five realistic bugs were
 injected into `tsara.ingest` and the round-trip file was run alone against

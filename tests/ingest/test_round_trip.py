@@ -130,6 +130,31 @@ def test_export_writes_a_loadable_manifest(tmp_path: Path) -> None:
     assert load_manifest(manifest_path).name == "round_trip"
 
 
+def test_an_archive_exported_to_a_relative_path_ingests_from_anywhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The README's quickstart, which exports to "demo_campaign".
+
+    The manifest wrote the path it was given as `base_path`, and the loader
+    resolves a relative `base_path` against the manifest's own directory, so
+    a relative export looked for its files in demo_campaign/demo_campaign/raw.
+    Every other test exports to an absolute temporary path, which is why the
+    two conventions never met. The archive is also moved after writing: a
+    manifest naming its files relative to itself travels with them.
+    """
+    monkeypatch.chdir(tmp_path)
+    generated = generate(_config())
+    manifest_path = export_raw(generated, "demo_campaign")
+    assert yaml.safe_load(manifest_path.read_text(encoding="utf-8"))["base_path"] == "raw"
+
+    moved = tmp_path / "elsewhere" / "campaign"
+    moved.parent.mkdir()
+    (tmp_path / "demo_campaign").rename(moved)
+    monkeypatch.chdir(moved.parent)
+    ingested = ingest_campaign(load_manifest(moved / EXPORT_MANIFEST))
+    assert set(ingested.streams) == set(generated.streams)
+
+
 def test_every_instrument_survives_the_trip(tmp_path: Path) -> None:
     generated, ingested = _round_trip(tmp_path)
     assert set(ingested.streams) == set(generated.streams)

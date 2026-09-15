@@ -1284,7 +1284,7 @@ class MobileTrack(_StrictModel):
     repeatedly and therefore produces genuinely clusterable revisits for the
     Phase 8 source-complex stage).
 
-    Known limitation (METHODS.md §8.5): plume *timing* is not derived from
+    Known limitation (METHODS.md §8.6): plume *timing* is not derived from
     the track geometry — there is no dispersion model placing sources in
     space and computing when the vehicle drives through them. Event
     coordinates in the ground truth are the platform position at each event's

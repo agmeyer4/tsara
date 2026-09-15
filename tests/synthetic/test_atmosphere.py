@@ -342,7 +342,7 @@ def test_mean_over_converges_to_the_closed_form_dilution() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _one_event_atmosphere(center_ns: int) -> Any:
+def _one_event_atmosphere(center_ns: int, sigma: str = "3s") -> Any:
     """An atmosphere holding exactly one Gaussian event, built by hand.
 
     Hand-built because both cases below need an event at a chosen instant,
@@ -358,7 +358,7 @@ def _one_event_atmosphere(center_ns: int) -> Any:
         event_id="pad_00000",
         source_name="pad",
         center_time=center,
-        kernel=build_kernel(GaussianShape(kind="gaussian", sigma="3s")),
+        kernel=build_kernel(GaussianShape(kind="gaussian", sigma=sigma)),
         reference_species="ch4",
         amplitudes={"ch4": 100.0},
         ratios={"ch4": 1.0},
@@ -431,3 +431,80 @@ def test_an_instant_rounding_puts_inside_the_support_is_evaluated_at_any_query()
     at_the_instant = atmosphere.enhancement("ch4", np.array([instant], dtype="datetime64[ns]"))
     assert at_the_cell[0] > 0.0, "the case must reach the kernel's edge, or this proves nothing"
     assert np.array_equal(at_the_instant, at_the_cell)
+
+
+# ---------------------------------------------------------------------------
+# Evidence a single example cannot give (Phase 4.5 stage 3)
+# ---------------------------------------------------------------------------
+
+
+def test_the_cell_mean_converges_as_the_inverse_square_of_the_subsamples() -> None:
+    """The midpoint rule's order, checked against the closed form.
+
+    A 20 s cell from 25 s to 5 s before a Gaussian's centre (sigma 10 s), well
+    inside the kernel's truncated support so the integrand is smooth there.
+    Its true mean is 100 sigma sqrt(pi/2) [erf(b/sigma sqrt 2) - erf(a/sigma
+    sqrt 2)] / (b - a). Quadrupling the subsamples must cut the error by
+    sixteen: measured 16.5 and 16.0.
+    """
+    from scipy.special import erf
+
+    center_ns = int(pd.Timestamp("2026-06-15T12:00:00").value)
+    atmosphere = _one_event_atmosphere(center_ns, sigma="10s")
+    a, b, sigma = -25.0, -5.0, 10.0
+    cells = CellBounds(
+        start_ns=np.array([center_ns + int(a * SECOND)]),
+        stop_ns=np.array([center_ns + int(b * SECOND)]),
+    )
+    root2 = np.sqrt(2.0) * sigma
+    exact = 100.0 * sigma * np.sqrt(np.pi / 2.0) * (erf(b / root2) - erf(a / root2)) / (b - a)
+    errors = [abs(atmosphere.mean_over("ch4", cells, n)[0] - exact) for n in (4, 16, 64)]
+    assert errors[0] / errors[1] == pytest.approx(16.0, rel=0.1)
+    assert errors[1] / errors[2] == pytest.approx(16.0, rel=0.1)
+
+
+def test_a_fast_instrument_sees_a_bootstrap_profile_at_its_real_timescale() -> None:
+    """Replayed at the profile's cadence, not the instrument's.
+
+    An AR(1) substrate sampled every 2 s with rho 0.9 has an e-folding time of
+    19 s. The generator before Phase 4.5 replayed it sample for sample on a
+    0.5 s instrument, and that instrument saw 4.5 s -- the real timescale
+    squeezed fourfold. Measured through the new generator it sees 17.5 s.
+    """
+    from tsara.synthetic.profiling import RealDataProfile
+
+    rng = np.random.default_rng(0)
+    blocks = np.zeros((60, 512))
+    for row in range(60):
+        series = np.zeros(512)
+        for i in range(1, 512):
+            series[i] = 0.9 * series[i - 1] + rng.normal()
+        blocks[row] = series - series.mean()
+    profile = RealDataProfile(
+        name="red",
+        residual_blocks=blocks,
+        residual_sigma=float(blocks.std()),
+        noise_sigma=1.0,
+        lag1_autocorr=0.9,
+        decorrelation_timescale_s=-2.0 / np.log(0.9),
+        background_median=0.0,
+        background_iqr=1.0,
+        sample_period_s=2.0,
+        n_source_points=blocks.size,
+    )
+    spec = _wandering_spec(fast={"native_rate": "0.5s", "measures": {"ch4": {}}})
+    spec["duration"] = "6h"
+    spec["atmosphere"]["fields"]["ch4"]["background"] = {"kind": "bootstrap", "profile": "red"}
+    spec["atmosphere"]["sources"] = {}
+    values = (
+        generate(SyntheticConfig.model_validate(spec), profiles={"red": profile})
+        .streams["fast"]["ch4"]
+        .values
+    )
+    values = values - values.mean()
+    denominator = float(np.dot(values, values))
+    lag = 1
+    while np.dot(values[:-lag], values[lag:]) / denominator > np.exp(-1.0):
+        lag += 1
+    e_folding_s = lag * 0.5
+    assert 14.0 <= e_folding_s <= 24.0, e_folding_s
