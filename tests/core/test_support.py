@@ -20,7 +20,7 @@ from tsara.core.naming import (
     BOUNDS_ATTR,
     BOUNDS_DIM,
     CELL_METHODS_ATTR,
-    SUPPORT_LABEL_SOURCE_ATTR,
+    SUPPORT_LABEL_PROVENANCE_ATTR,
     SUPPORT_WIDENED_ATTR,
     SUPPORT_WIDTH_ATTR,
     TIME_BOUNDS_VAR,
@@ -277,66 +277,66 @@ def test_floor_width_refuses_a_nonpositive_minimum() -> None:
 
 
 def test_binning_averages_a_fast_stream_onto_a_slow_cell() -> None:
-    source = CellBounds.from_label(_times(0, SECOND, 60), SECOND, "start")
+    readings = CellBounds.from_label(_times(0, SECOND, 60), SECOND, "start")
     values = np.arange(60, dtype=np.float64)
     target = CellBounds.from_label(np.array([0], dtype=np.int64), 60 * SECOND, "start")
-    out = bin_onto_cells(source, values, target)
+    out = bin_onto_cells(readings, values, target)
     assert out.values[0] == pytest.approx(values.mean())
-    assert out.n_source[0] == 60
+    assert out.n_readings[0] == 60
     assert out.coverage[0] == pytest.approx(1.0)
 
 
 def test_binning_weights_a_straddling_cell_by_its_overlap() -> None:
-    """A source cell half inside the target counts half as much."""
-    source = CellBounds(
+    """A reading half inside the target counts half as much."""
+    readings = CellBounds(
         start_ns=np.array([0, 10], dtype=np.int64),
         stop_ns=np.array([10, 30], dtype=np.int64),
     )
     target = CellBounds(
         start_ns=np.array([0], dtype=np.int64), stop_ns=np.array([20], dtype=np.int64)
     )
-    out = bin_onto_cells(source, np.array([0.0, 10.0]), target)
+    out = bin_onto_cells(readings, np.array([0.0, 10.0]), target)
     # 10 ns of value 0 and 10 ns of value 10.
     assert out.values[0] == pytest.approx(5.0)
     assert out.coverage[0] == pytest.approx(1.0)
 
 
-def test_a_target_cell_with_no_source_data_stays_nan() -> None:
+def test_a_target_cell_with_no_readings_stays_nan() -> None:
     """Never interpolated: a hole is a hole (METHODS 1.2)."""
-    source = CellBounds.from_label(_times(0, SECOND, 5), SECOND, "start")
+    readings = CellBounds.from_label(_times(0, SECOND, 5), SECOND, "start")
     target = CellBounds.from_label(np.array([1000 * SECOND], dtype=np.int64), SECOND, "start")
-    out = bin_onto_cells(source, np.ones(5), target)
+    out = bin_onto_cells(readings, np.ones(5), target)
     assert np.isnan(out.values[0])
-    assert out.n_source[0] == 0
+    assert out.n_readings[0] == 0
     assert out.coverage[0] == 0.0
 
 
-def test_masked_source_samples_reduce_coverage_rather_than_passing_as_data() -> None:
-    source = CellBounds.from_label(_times(0, SECOND, 10), SECOND, "start")
+def test_masked_readings_reduce_coverage_rather_than_passing_as_data() -> None:
+    readings = CellBounds.from_label(_times(0, SECOND, 10), SECOND, "start")
     values = np.arange(10, dtype=np.float64)
     values[:5] = np.nan
     target = CellBounds.from_label(np.array([0], dtype=np.int64), 10 * SECOND, "start")
-    out = bin_onto_cells(source, values, target)
+    out = bin_onto_cells(readings, values, target)
     assert out.values[0] == pytest.approx(np.nanmean(values))
-    assert out.n_source[0] == 5
+    assert out.n_readings[0] == 5
     assert out.coverage[0] == pytest.approx(0.5)
 
 
-def test_binning_handles_source_cells_whose_stops_are_unsorted() -> None:
+def test_binning_handles_reading_cells_whose_stops_are_unsorted() -> None:
     """Jittered fixed-width cells can overlap, so raw stops are not sorted."""
-    source = CellBounds(
+    readings = CellBounds(
         start_ns=np.array([0, 5, 12], dtype=np.int64),
         stop_ns=np.array([40, 15, 22], dtype=np.int64),
     )
     target = CellBounds(
         start_ns=np.array([10], dtype=np.int64), stop_ns=np.array([20], dtype=np.int64)
     )
-    out = bin_onto_cells(source, np.array([1.0, 1.0, 1.0]), target)
-    assert out.n_source[0] == 3
+    out = bin_onto_cells(readings, np.array([1.0, 1.0, 1.0]), target)
+    assert out.n_readings[0] == 3
 
 
-def test_binning_refuses_unsorted_source_cells() -> None:
-    source = CellBounds(
+def test_binning_refuses_unsorted_reading_cells() -> None:
+    readings = CellBounds(
         start_ns=np.array([100, 0], dtype=np.int64),
         stop_ns=np.array([110, 10], dtype=np.int64),
     )
@@ -344,54 +344,54 @@ def test_binning_refuses_unsorted_source_cells() -> None:
         start_ns=np.array([0], dtype=np.int64), stop_ns=np.array([200], dtype=np.int64)
     )
     with pytest.raises(TsaraSupportError, match="sorted by start time"):
-        bin_onto_cells(source, np.array([1.0, 2.0]), target)
+        bin_onto_cells(readings, np.array([1.0, 2.0]), target)
 
 
 def test_binning_refuses_a_value_count_that_does_not_match() -> None:
-    source = CellBounds.from_label(_times(0, SECOND, 3), SECOND, "start")
+    readings = CellBounds.from_label(_times(0, SECOND, 3), SECOND, "start")
     target = CellBounds.from_label(np.array([0], dtype=np.int64), SECOND, "start")
     with pytest.raises(TsaraSupportError, match="one to one"):
-        bin_onto_cells(source, np.ones(2), target)
+        bin_onto_cells(readings, np.ones(2), target)
 
 
 def test_binning_with_no_target_cells_returns_empty_arrays() -> None:
-    source = CellBounds.from_label(_times(0, SECOND, 3), SECOND, "start")
+    readings = CellBounds.from_label(_times(0, SECOND, 3), SECOND, "start")
     empty = CellBounds(start_ns=np.array([], dtype=np.int64), stop_ns=np.array([], dtype=np.int64))
-    out = bin_onto_cells(source, np.ones(3), empty)
+    out = bin_onto_cells(readings, np.ones(3), empty)
     assert out.values.size == 0
 
 
-def test_binning_with_no_source_cells_returns_all_nan() -> None:
+def test_binning_with_no_reading_cells_returns_all_nan() -> None:
     empty = CellBounds(start_ns=np.array([], dtype=np.int64), stop_ns=np.array([], dtype=np.int64))
     target = CellBounds.from_label(_times(0, SECOND, 3), SECOND, "start")
     out = bin_onto_cells(empty, np.array([], dtype=np.float64), target)
     assert np.all(np.isnan(out.values))
-    assert list(out.n_source) == [0, 0, 0]
+    assert list(out.n_readings) == [0, 0, 0]
 
 
 def test_a_zero_width_target_cell_reports_zero_coverage_without_dividing_by_zero() -> None:
-    source = CellBounds.from_label(_times(0, SECOND, 5), SECOND, "start")
+    readings = CellBounds.from_label(_times(0, SECOND, 5), SECOND, "start")
     target = CellBounds(
         start_ns=np.array([2 * SECOND], dtype=np.int64),
         stop_ns=np.array([2 * SECOND], dtype=np.int64),
     )
-    out = bin_onto_cells(source, np.ones(5), target)
+    out = bin_onto_cells(readings, np.ones(5), target)
     assert out.coverage[0] == 0.0
     assert np.isnan(out.values[0])
 
 
 def test_binning_a_canister_against_one_hertz_data() -> None:
     """The motivating case: a ~15 s fill against a 1 Hz partner."""
-    source = CellBounds.from_label(_times(0, SECOND, 120), SECOND, "start")
+    readings = CellBounds.from_label(_times(0, SECOND, 120), SECOND, "start")
     values = np.zeros(120)
     values[30:45] = 10.0
     canister = CellBounds(
         start_ns=np.array([30 * SECOND], dtype=np.int64),
         stop_ns=np.array([45 * SECOND], dtype=np.int64),
     )
-    out = bin_onto_cells(source, values, canister)
+    out = bin_onto_cells(readings, values, canister)
     assert out.values[0] == pytest.approx(10.0)
-    assert out.n_source[0] == 15
+    assert out.n_readings[0] == 15
 
 
 # ---------------------------------------------------------------------------
@@ -697,12 +697,12 @@ def test_support_attrs_omit_a_width_that_does_not_exist() -> None:
         label="start",
         width_ns=None,
         coverage=0.5,
-        label_source="reported",
-        width_source="reported",
-        method_source="declared",
+        label_provenance="reported",
+        width_provenance="reported",
+        method_provenance="declared",
     )
     assert SUPPORT_WIDTH_ATTR not in attrs
-    assert attrs[SUPPORT_LABEL_SOURCE_ATTR] == "reported"
+    assert attrs[SUPPORT_LABEL_PROVENANCE_ATTR] == "reported"
 
 
 def test_support_attrs_record_the_nominal_width_in_seconds() -> None:
@@ -710,9 +710,9 @@ def test_support_attrs_record_the_nominal_width_in_seconds() -> None:
         label="mid",
         width_ns=60 * SECOND,
         coverage=1.0,
-        label_source="declared",
-        width_source="inferred",
-        method_source="assumed",
+        label_provenance="declared",
+        width_provenance="inferred",
+        method_provenance="assumed",
     )
     assert attrs[SUPPORT_WIDTH_ATTR] == pytest.approx(60.0)
 
@@ -773,19 +773,19 @@ def test_floor_width_accepts_a_per_row_minimum() -> None:
 def test_binning_separates_no_data_from_rejected_data() -> None:
     """Both leave a NaN, and a later stage diagnosing a dropped pair needs to
     tell a gap apart from a QA/QC decision."""
-    source = CellBounds.from_label(_times(0, SECOND, 10), SECOND, "start")
+    readings = CellBounds.from_label(_times(0, SECOND, 10), SECOND, "start")
     values = np.full(10, np.nan)
     covered = CellBounds.from_label(np.array([0], dtype=np.int64), 10 * SECOND, "start")
     empty = CellBounds.from_label(np.array([1000 * SECOND], dtype=np.int64), SECOND, "start")
 
-    masked = bin_onto_cells(source, values, covered)
+    masked = bin_onto_cells(readings, values, covered)
     assert np.isnan(masked.values[0])
-    assert masked.n_source[0] == 0, "nothing contributed"
+    assert masked.n_readings[0] == 0, "nothing contributed"
     assert masked.n_overlapping[0] == 10, "but ten cells were there and rejected"
 
-    absent = bin_onto_cells(source, np.ones(10), empty)
+    absent = bin_onto_cells(readings, np.ones(10), empty)
     assert np.isnan(absent.values[0])
-    assert absent.n_source[0] == 0
+    assert absent.n_readings[0] == 0
     assert absent.n_overlapping[0] == 0, "genuinely nothing there"
 
 
@@ -794,17 +794,17 @@ def test_support_attrs_record_a_repair_only_when_one_happened() -> None:
         label="start",
         width_ns=SECOND,
         coverage=1.0,
-        label_source="reported",
-        width_source="reported",
-        method_source="declared",
+        label_provenance="reported",
+        width_provenance="reported",
+        method_provenance="declared",
     )
     repaired = support_attrs(
         label="start",
         width_ns=SECOND,
         coverage=1.0,
-        label_source="reported",
-        width_source="reported",
-        method_source="declared",
+        label_provenance="reported",
+        width_provenance="reported",
+        method_provenance="declared",
         n_widened=644,
     )
     assert SUPPORT_WIDENED_ATTR not in plain
@@ -822,7 +822,7 @@ def test_support_attrs_record_a_repair_only_when_one_happened() -> None:
 
 
 def test_overlap_pairs_finds_every_overlap_and_no_others() -> None:
-    source = CellBounds(
+    readings = CellBounds(
         start_ns=_times(0, SECOND, 5),
         stop_ns=_times(0, SECOND, 5) + SECOND,
     )
@@ -830,16 +830,16 @@ def test_overlap_pairs_finds_every_overlap_and_no_others() -> None:
         start_ns=np.array([2 * SECOND], dtype=np.int64),
         stop_ns=np.array([4 * SECOND], dtype=np.int64),
     )
-    pairs = overlap_pairs(source, target)
+    pairs = overlap_pairs(readings, target)
     contributing = pairs.overlap_ns > 0
-    assert sorted(pairs.source_index[contributing].tolist()) == [2, 3]
+    assert sorted(pairs.reading_index[contributing].tolist()) == [2, 3]
     assert pairs.overlap_ns[contributing].tolist() == [SECOND, SECOND]
     assert pairs.n_target == 1
 
 
 def test_overlap_pairs_measures_a_partial_overlap_exactly() -> None:
-    """A source cell straddling the target boundary contributes its share."""
-    source = CellBounds(
+    """A reading straddling the target boundary contributes its share."""
+    readings = CellBounds(
         start_ns=np.array([0], dtype=np.int64),
         stop_ns=np.array([10 * SECOND], dtype=np.int64),
     )
@@ -847,17 +847,17 @@ def test_overlap_pairs_measures_a_partial_overlap_exactly() -> None:
         start_ns=np.array([7 * SECOND], dtype=np.int64),
         stop_ns=np.array([20 * SECOND], dtype=np.int64),
     )
-    pairs = overlap_pairs(source, target)
+    pairs = overlap_pairs(readings, target)
     assert pairs.overlap_ns.tolist() == [3 * SECOND]
 
 
 def test_overlap_pairs_is_empty_when_the_records_do_not_meet() -> None:
-    source = CellBounds(start_ns=_times(0, SECOND, 3), stop_ns=_times(0, SECOND, 3) + SECOND)
+    readings = CellBounds(start_ns=_times(0, SECOND, 3), stop_ns=_times(0, SECOND, 3) + SECOND)
     target = CellBounds(
         start_ns=np.array([100 * SECOND], dtype=np.int64),
         stop_ns=np.array([101 * SECOND], dtype=np.int64),
     )
-    pairs = overlap_pairs(source, target)
+    pairs = overlap_pairs(readings, target)
     assert pairs.overlap_ns.size == 0
     assert pairs.n_target == 1
 
@@ -870,8 +870,8 @@ def test_overlap_pairs_handles_empty_inputs() -> None:
     assert overlap_pairs(filled, empty).n_target == 0
 
 
-def test_overlap_pairs_requires_sorted_source_cells() -> None:
-    source = CellBounds(
+def test_overlap_pairs_requires_sorted_reading_cells() -> None:
+    readings = CellBounds(
         start_ns=np.array([5 * SECOND, 0], dtype=np.int64),
         stop_ns=np.array([6 * SECOND, SECOND], dtype=np.int64),
     )
@@ -879,10 +879,10 @@ def test_overlap_pairs_requires_sorted_source_cells() -> None:
         start_ns=np.array([0], dtype=np.int64), stop_ns=np.array([SECOND], dtype=np.int64)
     )
     with pytest.raises(TsaraSupportError, match="sorted by start time"):
-        overlap_pairs(source, target)
+        overlap_pairs(readings, target)
 
 
-def test_overlap_pairs_tolerates_slightly_overlapping_source_cells() -> None:
+def test_overlap_pairs_tolerates_slightly_overlapping_reading_cells() -> None:
     """Fixed-width cells centred on jittered stamps overlap each other.
 
     Their stops are then not sorted even though their starts are, which is why
@@ -890,13 +890,13 @@ def test_overlap_pairs_tolerates_slightly_overlapping_source_cells() -> None:
     limit in METHODS §10; here it is pinned as behaviour.
     """
     start = np.array([0, 900_000_000, 2 * SECOND], dtype=np.int64)
-    source = CellBounds(start_ns=start, stop_ns=start + SECOND)
+    readings = CellBounds(start_ns=start, stop_ns=start + SECOND)
     target = CellBounds(
         start_ns=np.array([0], dtype=np.int64),
         stop_ns=np.array([3 * SECOND], dtype=np.int64),
     )
-    pairs = overlap_pairs(source, target)
-    assert sorted(pairs.source_index.tolist()) == [0, 1, 2]
+    pairs = overlap_pairs(readings, target)
+    assert sorted(pairs.reading_index.tolist()) == [0, 1, 2]
     assert int(pairs.overlap_ns.sum()) == 3 * SECOND
 
 
@@ -909,15 +909,15 @@ def test_the_two_binners_weight_by_the_same_overlaps() -> None:
     """
     from tsara.core.circular import bin_circular_onto_cells
 
-    source = CellBounds(_times(0, SECOND, 30), _times(0, SECOND, 30) + SECOND)
+    readings = CellBounds(_times(0, SECOND, 30), _times(0, SECOND, 30) + SECOND)
     target = CellBounds(
         start_ns=np.array([2 * SECOND, 11 * SECOND], dtype=np.int64),
         stop_ns=np.array([9 * SECOND, 40 * SECOND], dtype=np.int64),
     )
     values = np.arange(30.0)
     values[5] = np.nan
-    scalar = bin_onto_cells(source, values, target)
-    angular = bin_circular_onto_cells(source, values, target)
-    assert scalar.n_source.tolist() == angular.n_source.tolist()
+    scalar = bin_onto_cells(readings, values, target)
+    angular = bin_circular_onto_cells(readings, values, target)
+    assert scalar.n_readings.tolist() == angular.n_readings.tolist()
     assert scalar.n_overlapping.tolist() == angular.n_overlapping.tolist()
     assert scalar.coverage == pytest.approx(angular.coverage)

@@ -267,13 +267,13 @@ def _readings_behind(
     column: str,
     stream: xr.Dataset,
     variable: str,
-    source: CellBounds,
+    readings: CellBounds,
     pairs: CellBounds,
 ) -> int:
     """Return how many distinct readings of one species the pairs draw on.
 
     A member already on the clock contributes exactly one reading per pair by
-    construction. A binned member contributes every finite source cell that
+    construction. A binned member contributes every finite reading that
     overlaps a surviving pair by a positive amount -- the same membership rule
     the binner used to form the value, so the count describes the number that
     was actually reported.
@@ -282,7 +282,7 @@ def _readings_behind(
         # On the clock itself: one reading per surviving pair, by construction.
         return len(pairs)
     # Averaged onto the clock: count the distinct readings the pairs overlap.
-    return readings_behind(stream, variable, source, pairs)
+    return readings_behind(stream, variable, readings, pairs)
 
 
 def pair_species(

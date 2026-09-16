@@ -183,7 +183,7 @@ def white_noise_profile() -> RealDataProfile:
         background_median=1900.0,
         background_iqr=4.0,
         sample_period_s=1.0,
-        n_source_points=5120,
+        n_record_points=5120,
     )
 
 

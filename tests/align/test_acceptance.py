@@ -231,7 +231,7 @@ def test_coverage_predicts_which_paired_values_are_wrong() -> None:
     assert np.corrcoef(1.0 - coverage, error)[0, 1] > 0.99
 
 
-def test_a_grid_in_phase_with_its_source_reproduces_the_paired_answer() -> None:
+def test_a_grid_in_phase_with_its_stream_reproduces_the_paired_answer() -> None:
     """Two products, one answer -- when the cells actually line up.
 
     A grid is a different set of target cells, not a different operation, so
@@ -243,28 +243,28 @@ def test_a_grid_in_phase_with_its_source_reproduces_the_paired_answer() -> None:
     grid = build_output_grid(dataset.streams, config, ["ch4", "tracer"])
     x = grid["ch4"].values - 1900.0
     usable = (grid["coverage_ch4"].values >= 1.0 - 1e-12) & np.isfinite(x) & (x > 1.0)
-    assert np.all(grid["n_source_tracer"].values[2:-2] == 1)
+    assert np.all(grid["n_readings_tracer"].values[2:-2] == 1)
     assert grid["tracer"].values[usable].sum() / x[usable].sum() == pytest.approx(
         TRUE_RATIO, rel=1e-6
     )
 
 
-def test_a_grid_out_of_phase_with_its_source_blends_two_cells_and_says_so() -> None:
+def test_a_grid_out_of_phase_with_its_stream_blends_two_cells_and_says_so() -> None:
     """A legitimate but easily-missed smoothing, with its own diagnostic.
 
     The slow instrument's cells are centred on its timestamps, so they sit
     half a cell off an epoch-anchored grid of the same period. Every grid
-    value is then a weighted mean of two adjacent source cells -- honest, but
+    value is then a weighted mean of two adjacent readings -- honest, but
     smoothed, and a ratio across two columns treated differently that way
     carries a small bias. Measured here: 0.249940526 against a truth of 0.25,
     where the in-phase grid gives 0.250000034.
 
-    Nothing is silently wrong: `n_source` reports the blend, and the grid
+    Nothing is silently wrong: `n_readings` reports the blend, and the grid
     warns when it detects the phase mismatch.
     """
     dataset = generate(two_clock_campaign(noisy=False))
     grid = build_output_grid(dataset.streams, OutputGridConfig(freq="60s"), ["ch4", "tracer"])
-    assert np.all(grid["n_source_tracer"].values[2:-2] == 2)
+    assert np.all(grid["n_readings_tracer"].values[2:-2] == 2)
     x = grid["ch4"].values - 1900.0
     usable = (grid["coverage_ch4"].values >= 1.0 - 1e-12) & np.isfinite(x) & (x > 1.0)
     blended = grid["tracer"].values[usable].sum() / x[usable].sum()
@@ -283,8 +283,8 @@ def test_pairing_never_invents_a_pair_the_generator_did_not_produce() -> None:
     """Every surviving pair holds at least one real measurement of each species."""
     dataset = generate(two_clock_campaign(noisy=True))
     paired = pair_species(dataset.streams, "tracer", "ch4")
-    assert np.all(paired.dataset["n_source_ch4"].values > 0)
-    assert np.all(paired.dataset["n_source_tracer"].values > 0)
+    assert np.all(paired.dataset["n_readings_ch4"].values > 0)
+    assert np.all(paired.dataset["n_readings_tracer"].values > 0)
     assert np.isfinite(paired.dataset["ch4"].values).all()
     assert np.isfinite(paired.dataset["tracer"].values).all()
 
@@ -345,7 +345,7 @@ def binned_error(
     # The generator publishes a per-point sigma; name it the way ingestion
     # would so the binner picks it up as the random component.
     stream[sigma_rand_name("ch4")] = stream["ch4_err"]
-    stream["ch4"].attrs["uncertainty_source_random"] = "reported"
+    stream["ch4"].attrs["uncertainty_provenance_random"] = "reported"
     if tau is not None:
         stream["ch4"].attrs["decorrelation_timescale"] = tau
     truth = stream["truth_background_ch4"] + stream["truth_enhancement_ch4"]
@@ -363,7 +363,7 @@ def binned_error(
     return (
         float(np.std(residual[good], ddof=1)),
         float(np.nanmean(joined[sigma_rand_name("ch4")].values)),
-        float(np.nanmean(joined["n_source_ch4"].values)),
+        float(np.nanmean(joined["n_readings_ch4"].values)),
     )
 
 

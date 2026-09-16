@@ -141,7 +141,7 @@ class _Ingested:
     #: Resolved here rather than in stream assembly because the per-file
     #: boundaries this is derived from only exist before concatenation.
     support: ResolvedSupport
-    sources: list[Path] = field(default_factory=list)
+    files: list[Path] = field(default_factory=list)
     #: What the files said about themselves, reconciled across all of them.
     #: See :func:`_merge_file_attrs`.
     file_attrs: dict[str, object] = field(default_factory=dict)
@@ -248,7 +248,7 @@ def ingest_campaign(
             name=name,
             platform=manifest.platform,
             campaign=manifest.name,
-            sources=ingested.sources,
+            files=ingested.files,
             file_attrs=ingested.file_attrs,
             support=ingested.support,
             time_shift=instrument.time_shift,
@@ -257,7 +257,7 @@ def ingest_campaign(
             "Instrument '%s': %d samples from %d file(s).",
             name,
             len(ingested.frame),
-            len(ingested.sources),
+            len(ingested.files),
         )
 
     return StreamCollection(streams=streams, manifest=manifest)
@@ -282,7 +282,7 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
     logger.debug("Instrument '%s': %d file(s) matched.", name, len(matches))
 
     frames: list[pd.DataFrame] = []
-    sources: list[Path] = []
+    files: list[Path] = []
     file_attrs: list[Mapping[str, object]] = []
     # Cadence is measured per FILE, and that is load-bearing rather than
     # incidental: one instrument's files can legitimately disagree about it.
@@ -304,7 +304,7 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
             logger.error("Skipping '%s' for instrument '%s': %s", match.path, name, exc)
             continue
         frames.append(table.frame)
-        sources.append(match.path)
+        files.append(match.path)
         cadences.append(nominal_cadence_ns(epoch_ns(pd.DatetimeIndex(table.frame.index))))
         hint = table.attrs.get(LABEL_HINT_KEY)
         hints.append(str(hint) if hint is not None else None)
@@ -336,7 +336,7 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
         instrument.loader.support,
         widths_ns=_per_row_widths(frames, cadences),
         label_hint=_agreed_hint(hints),
-        path=sources[0] if len(sources) == 1 else Path(f"<{len(sources)} files>"),
+        path=files[0] if len(files) == 1 else Path(f"<{len(files)} files>"),
     )
     # Correct the clock and centre the axis before ordering, not after:
     # centring can reorder rows when widths vary per file, so the sort has to
@@ -347,7 +347,7 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
     n_within = _n_within_file(combined.index, [len(frame) for frame in frames])
     return _Ingested(
         frame=_order(combined, name, n_within=n_within),
-        sources=sources,
+        files=files,
         file_attrs=_merge_file_attrs(file_attrs),
         support=support,
     )

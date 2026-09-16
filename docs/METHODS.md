@@ -19,6 +19,21 @@ Sections marked **[stub — Phase N]** are placeholders that will be written
 when that phase is built. Nothing in a stub section is decided beyond what the
 stub says.
 
+**Vocabulary.** A few words carry one meaning each throughout the package, its
+attributes and this document, because each was once used for several:
+
+| Word | Means | Never means |
+|---|---|---|
+| **source** | an *emission* source: something emitting gases at a ratio (`SourceSpec`, a Source Complex) | the input of a join, where a number came from, or a file |
+| **reading** | one value an instrument wrote, with the cell of time it describes; the input side of any join (`n_readings_<name>`, `reading_index`) | a row of a product TSARA built — except that when a product is joined again, its rows are the inputs and `n_readings_<name>` counts them. Whether that re-join is honest is an open question (§11.2.2) |
+| **target cell** / **row** | a cell a join puts values onto, and the line of a product that describes it | |
+| **pair** | a row where both species of a regression have a value (§1.3) | |
+| **provenance** | where a number or a fact came from: `declared`, `reported`, `inferred`, `assumed`, `empirical` … (`uncertainty_provenance`, `tsara_support_label_provenance`) | |
+| **field** | the physical quantity a variable measures (§1.6) | |
+
+Bundles written before these names were settled are read and respelled on load
+(§10.2).
+
 ---
 
 ## 1. Data model and alignment
@@ -100,7 +115,7 @@ when they come from instruments with different rates:
    *assumed* to be the slow instrument's sampling period centred on its
    timestamp; now it is read from the stream's own boundaries, so a canister
    that integrated for 14.1 s is paired over exactly 14.1 s (§10).
-3. Cells with `n_source_<name> = 0` for either species are dropped — a pair is never
+3. Cells with `n_readings_<name> = 0` for either species are dropped — a pair is never
    fabricated. Cells with *some* data are kept, with their coverage recorded;
    `PairingConfig.min_coverage` (default 0.0, i.e. drop nothing) is the one
    knob that acts on it, because how much of a cell must be measured is a
@@ -126,12 +141,12 @@ A single uniform master grid — the familiar `(time × species)` cube — is
 constructed **only** for the continuous rolling state and the PMF export
 matrix, which inherently require one. Construction is binning-only, by
 overlap-weighted mean and no other statistic (§11.7), with per-cell
-propagated uncertainties and `n_source_<name>` counts carried alongside values. Grid cells carry CF boundaries like any
+propagated uncertainties and `n_readings_<name>` counts carried alongside values. Grid cells carry CF boundaries like any
 other stream, and `cell_methods = "time: mean (interval: <native>)"` records
 the resolution of the data that went into them (§10.2). Validation refuses a
 period so fine that one selected reading would cover **two grid cells' worth of
 time**, the post-Phase-3.5 form of "≥ the slowest stream's native period"
-(§11.7; §1.3 makes the same correction for pairing); cells with no native samples are NaN with `n_source_<name> = 0`, never
+(§11.7; §1.3 makes the same correction for pairing); cells with no native samples are NaN with `n_readings_<name> = 0`, never
 interpolated. Config: `OutputGridConfig`
 (`tsara.config.analysis`) — deliberately not named "the grid" or paired with
 the aux-interpolation guard, since neither streams nor cross-species pairing
@@ -169,7 +184,7 @@ of the quantity — the real-data notebook's manifests carry `ch4_pico` beside
 product said that the two measure one gas. The joins had already stopped
 depending on the rule: a bare name held by two streams is refused as ambiguous
 rather than resolved to the first, and colliding columns are suffixed with
-their instrument, with `tsara_source_instrument` recording the source either
+their instrument, with `tsara_instrument` recording the instrument either
 way (§11.2).
 
 **What identity is for.** A physical question needs the quantity, not the
@@ -252,15 +267,15 @@ definition of noise.
 
 ### 2.4 Provenance
 
-Every product carries an `uncertainty_source` label per species:
+Every product carries an `uncertainty_provenance` label per species:
 `declared | reported | empirical`. A reader of any TSARA output can always
 determine what pedigree of uncertainty produced each interval.
 
 Provenance is recorded **per component**, in
-`uncertainty_source_random` and `uncertainty_source_systematic`, because real
+`uncertainty_provenance_random` and `uncertainty_provenance_systematic`, because real
 manifests mix modes freely (the shipped example pairs a *reported* random
 component with a *declared* systematic one). The species-level
-`uncertainty_source` is then `mixed` when the two components disagree, and the
+`uncertainty_provenance` is then `mixed` when the two components disagree, and the
 sigma companions carry `uncertainty_component` saying which one they are. Two further component values are needed to keep §2.3
 honest, and they are not interchangeable:
 
@@ -453,7 +468,7 @@ The same thirty samples carry *more* information when spread across the cell,
 because the two blocks have had time to decorrelate from each other. The cheap
 form does not know that and overstates σ by about a fifth. The error is in the
 conservative direction and is bounded by how badly a cell's samples clump,
-which `n_source` and `coverage` already report — and `ar1_double_sum` is
+which `n_readings` and `coverage` already report — and `ar1_double_sum` is
 selectable wherever a form is selectable, which is what makes the reference
 form useful rather than decorative.
 
@@ -623,7 +638,7 @@ not a sole objective. **[estimator details — Phase 7]**
   declared or reported $\sigma^{\mathrm{rand}}$ when available, else the
   empirical estimator named by `DetectionConfig.noise_estimator` (default
   `diff_mad`, §2.5); detection has no private definition of noise, and the
-  §2.5 quantization floor applies to whichever source is used. Also decided:
+  §2.5 quantization floor applies to whichever estimate is used. Also decided:
   **quantile-offset correction** — because the baseline
   is a low quantile q, even pure noise has a positive median enhancement of
   $-z_q\,\sigma$ (≈ 1.64σ at q = 0.05, Gaussian), so thresholds are applied
@@ -940,7 +955,7 @@ Two documented limitations:
   smooth exactly the high-frequency structure the bootstrap exists to
   preserve. When reading a generated record, an isolated sharp step every
   `block_length` profile samples is a stitching artifact, not injected signal.
-- Because the source records are plume-dense, real plume energy leaks through
+- Because the profiled records are plume-dense, real plume energy leaks through
   the profiling baseline into the residual. This is treated as a **feature**:
   it is precisely the adversarial "is `diff_mad` really plume-immune on my
   instrument?" test case (§2.5). But it means the substrate is not a pure
@@ -1511,7 +1526,7 @@ copies hold one in every row.
 TSARA cannot tell the two apart. Both are numeric columns under a name the
 manifest chooses, and nothing in the file marks one as invented. A manifest
 that names an `_i` column with `role: gas` therefore feeds TSARA exactly the
-interpolated gas it exists never to produce (§1.2): every `n_source` and
+interpolated gas it exists never to produce (§1.2): every `n_readings` and
 coverage downstream then reports full support the instrument never had, and
 the pseudo-replication the binning design prevents arrives through the front
 door. **Name the measured column.** An interpolated copy may be useful as
@@ -2018,12 +2033,35 @@ measure a cadence, and it said so rather than inventing a number (§10.5).
 Both loaders ran the migration on every stream regardless of version, so an
 instrument whose files hold one row each — no measurable cadence per file, but
 three timestamps a minute apart once concatenated — came back from its own
-bundle with 60 s cells and `tsara_support_width_source` moved from `assumed`
+bundle with 60 s cells and `tsara_support_width_provenance` moved from `assumed`
 to `inferred`. A stream was promoted up the provenance ladder by nothing but a
 trip through disk, and the log line announced it had been "written before cell
 boundaries existed" about a bundle written moments earlier at version 2. The
 migration is now gated on the format version, which is the only thing that
 distinguishes the two absences.
+
+**Format version 3 renamed attributes and changed nothing else.** The word
+"source" had come to mean four things — an emitter, the input of a join, where
+a number came from, and a file — and now means only the first (see the
+vocabulary table at the top). A version-1 or version-2 stream is respelled on
+load by `tsara.core.bundle.rename_retired_attrs`, which logs the streams it
+touched and refuses a stream carrying both spellings of one attribute, since no
+TSARA version writes both:
+
+| Written by format 1–2 | Read as |
+|---|---|
+| `uncertainty_source` | `uncertainty_provenance` |
+| `uncertainty_source_random` | `uncertainty_provenance_random` |
+| `uncertainty_source_systematic` | `uncertainty_provenance_systematic` |
+| `tsara_support_label_source` | `tsara_support_label_provenance` |
+| `tsara_support_width_source` | `tsara_support_width_provenance` |
+| `tsara_support_method_source` | `tsara_support_method_provenance` |
+| `n_source_files` | `n_files` |
+| `icartt_data_source` | `icartt_instrument_description` |
+
+Nothing is inferred, so nothing moves on the provenance ladder. The grid
+product's `n_source_<name>` columns became `n_readings_<name>` before any grid
+was released, so no migration exists for them.
 
 ### 10.3 `point` versus `mean` is a claim about arithmetic
 
@@ -2067,8 +2105,8 @@ answer is labelled.
 | `inferred` | TSARA read it from the file (column names, measured cadence) |
 | `assumed` | Nothing said; a default applied and labelled |
 
-Recorded **per field** — `tsara_support_label_source`,
-`tsara_support_width_source` and `tsara_support_method_source` — because the
+Recorded **per field** — `tsara_support_label_provenance`,
+`tsara_support_width_provenance` and `tsara_support_method_provenance` — because the
 three are established independently. A stationary analyzer whose file carries
 a stop column and whose manifest declares `method: mean` is honestly reported
 / reported / declared, and one label per stream could not say that. Beside
@@ -2610,10 +2648,10 @@ to this function with a chosen set of columns.
 
 * its uncertainty components, propagated through the *same* overlap weights
   that formed the value, random and systematic separately (§3);
-* `n_source_<name>` and `coverage_<name>` — how many source cells contributed
+* `n_readings_<name>` and `coverage_<name>` — how many readings contributed
   and how much of the target cell they covered, the two numbers that separate
   a well-determined value from a number that merely exists;
-* everything the source declared about itself, plus `tsara_source_instrument`
+* everything the input stream declared about itself, plus `tsara_instrument`
   saying where it came from and `tsara_binned` saying whether this stage
   averaged it at all.
 
@@ -2624,7 +2662,7 @@ already *are* the target passes through untouched — tested on the cells, not
 on the instrument name, because averaging a cell onto itself is the identity
 mathematically and not in floating point. Its *values* are untouched; its
 companion columns are not a shortcut, and are exactly what the general path
-would produce for one source cell covering its target — a count and coverage
+would produce for one reading covering its target — a count and coverage
 of 1 where a value is present and 0 where it is masked, and for a direction a
 resultant length of 1 and a dispersion of 0 (§11.5). Before the Phase-4
 walkthrough the pass-through stamped a count and coverage of 1 on masked rows
@@ -2636,8 +2674,8 @@ interpolated (§1.2).
 **Column names.** A canonical name is kept as it is when only one selected
 stream carries it. When two do — a campaign comparing two analyzers — both are
 suffixed with their instrument rather than one silently winning. The spelling
-therefore depends on the selection, which is why every column also records its
-source instrument, and keeps the `field` its stream declared: `ch4_picarro` and
+therefore depends on the selection, which is why every column also records the
+instrument it came from, and keeps the `field` its stream declared: `ch4_picarro` and
 `ch4_aeris` both still say `field: ch4` (§1.6).
 
 #### 11.2.1 The operation is symmetric in the code and must not be in use
@@ -2656,8 +2694,8 @@ Both products of this phase already prevent it by choosing their target:
 runs this same test against its cells before binning (§11.7). The primitive
 they share refuses it too, and has to, because it is public and is the
 documented route to a receptor-model matrix over a caller's own target cells.
-Neither `coverage` nor `n_source` would have flagged it: a replicated row
-reports coverage 1.0 and one contributing source cell, which is also what a
+Neither `coverage` nor `n_readings` would have flagged it: a replicated row
+reports coverage 1.0 and one contributing reading, which is also what a
 legitimately sparse canister measurement reports.
 
 **The test is measured on the overlaps, not on a comparison of widths**, and
@@ -2671,7 +2709,7 @@ another over a difference that replicates nothing.
 cells adds up to at least twice the width of the widest target cell it
 touches** (`tsara.align.binning.measure_replication`).
 
-| source cells | target cells | two cells' worth? | outcome |
+| reading cells | target cells | two cells' worth? | outcome |
 |---|---|---|---|
 | 60 s | 1 s | sixty | refused |
 | 2 s, any phase | 1 s | two | refused |
@@ -2680,7 +2718,7 @@ touches** (`tsara.align.binning.measure_replication`).
 | 10 s, half a period out of phase | 10 s | no | allowed; lossy for another reason (§11.9.1) |
 
 **It replaced a rule with a phase hole.** Until the Phase-4 walkthrough the
-test counted target cells lying *wholly* inside one source cell and refused at
+test counted target cells lying *wholly* inside one reading and refused at
 two. It agreed with the table on every row but one: a perfectly regular 2 s
 record offset from a 1 s grid by 0.3 s or 0.5 s wholly contains only one 1 s
 cell, so it passed, and each of its readings fed two or three rows — while the
@@ -2704,7 +2742,7 @@ guard by `tsara.align.auxiliary` (§11.6), which refuses a variable declaring
 #### 11.2.2 A companion column is not a variable
 
 Four families of column exist only to qualify the column they are named after:
-the two uncertainty components, `n_source_*`, `coverage_*`, and the resultant
+the two uncertainty components, `n_readings_*`, `coverage_*`, and the resultant
 length and dispersion an angular variable carries instead of a sigma. The
 default selection excludes all four, through one predicate
 (`tsara.core.naming.is_companion_name`) rather than a list per caller.
@@ -2776,7 +2814,7 @@ from a mean of sigmas by exactly √N_eff (§10.2).
 cells centred on jittered timestamps overlap each other, so their overlaps
 with one target cell can sum past its width — documented as benign in §10.2,
 since the value is a weighted *mean* and the weights normalize. Clipping would
-hide a real property of the source record behind a tidier number.
+hide a real property of the input record behind a tidier number.
 
 **What the product carries.** A paired series is an ordinary self-describing
 `xarray.Dataset` with CF cells, not a bundle entry: it is a per-call
@@ -2796,7 +2834,7 @@ and per variable:
 
 | attribute | meaning |
 |---|---|
-| `tsara_source_instrument` | which stream this species came from |
+| `tsara_instrument` | which stream this species came from |
 | `tsara_binned` | 1 if averaged onto the clock, 0 if already on it |
 | `tsara_sigma_at_support` | how a declared σ was moved onto its own cells, or `unscaled` |
 | `tsara_pairing_readings` | distinct readings of this species behind the surviving pairs (§11.4.1) |
@@ -2817,7 +2855,7 @@ instead of finite values, whole records counted instead of the shared span,
 the name tie reversed, a zero-overlap or masked cell counted as a reading, a
 binned member credited one reading per pair, the warning firing on equality,
 the denser member preferred), and all nine caught. The first run caught eight;
-the miss was the zero-overlap filter, which is reachable only when one source
+the miss was the zero-overlap filter, which is reachable only when one reading's
 cell nests inside another and the overlap search brackets a cell that does not
 overlap, and a fixture of exactly that shape now pins it.
 
@@ -2894,7 +2932,7 @@ The slope agrees to every printed digit on both clocks. On the sparser
 member's cells the naive standard error describes the real scatter; on the
 denser member's cells it is a fifth to a quarter too narrow as soon as the
 duplicated species carries error of its own, bounded by 1/√2 when all of the
-error sits there. Nothing in `coverage` or `n_source` shows it.
+error sits there. Nothing in `coverage` or `n_readings` shows it.
 
 **How often the shape occurs.** Counted across all 1582 permitted files (the
 1122 ICARTT files and the 460 parquet files outside the quarantine
@@ -3038,7 +3076,7 @@ For uniformly random directions the mean *R* tracks 1/√*N*. At the 60 readings
 of a minute of 1 Hz wind the bias is a degree; at the ten of a 10 s analyzer
 cell or the fifteen of a canister fill it is not negligible, and a cell with
 two readings says almost nothing. TSARA does not correct for it: a
-bias-corrected *R* assumes a distribution, and `n_source_<name>` travels with
+bias-corrected *R* assumes a distribution, and `n_readings_<name>` travels with
 every binned direction so the reader can see what the *R* rests on. The same
 is true of a cell with one contributing reading, whose *R* is 1 by
 construction — agreement of that reading with itself, not a steady wind.
@@ -3137,7 +3175,7 @@ separately, because "there was no position here" and "the position here was
 too uncertain to state" are different facts about a cell.
 
 One case is deliberately exempt from the gap guard: a target landing **exactly
-on** a source sample. That value was measured, not interpolated, so refusing it
+on** a sample of the input stream. That value was measured, not interpolated, so refusing it
 would discard real data.
 
 **A record sparser than its guard says so.** The exemption has a consequence
@@ -3150,7 +3188,7 @@ files in the 2024 archive (D06–D12) record a fix every 50 s, and at the defaul
 guard they position **0.0 %** of 1 s gas cells whose midpoints fall between
 seconds. Until the Phase-4 walkthrough the only record was an INFO log line,
 which a notebook does not show. `interpolate_onto_cells` now logs a **warning**
-when any target was refused *and* the source's median interval between finite
+when any target was refused *and* the input stream's median interval between finite
 samples exceeds the guard, naming the interval, the guard and the counts. The
 median rather than the mean, so that an ordinary 1 s record with one long
 outage — refused and counted, correctly — does not trip it; and strictly
@@ -3261,7 +3299,7 @@ for.
 | `tsara_interpolated_from` | the stream and variable the values came from |
 | `tsara_max_interp_gap` | the guard that was applied |
 | `tsara_interp_gap_masked` | targets refused because the gap was too long |
-| `tsara_interp_outside_record` | targets beyond either end of the source |
+| `tsara_interp_outside_record` | targets beyond either end of the input record |
 
 **How it is checked** (§11.1): both refusals are asserted directly, since a
 refusal that quietly stops refusing is invisible; a straight line interpolates
@@ -3282,7 +3320,7 @@ for the reason given above, but it is the only test on the path production
 takes — the binding ingestion writes, the labels it reads, the midpoints it
 recovers. Six defects were injected: three into the warning (equal spacing
 warned, mean instead of median, no warning) were caught by the warning tests;
-of three into the join, a target or source cell's start used in place of its
+of three into the join, a target cell's or reading's start used in place of its
 midpoint was caught by the hand-built fixtures and the round trip alike, and
 ingestion binding latitude to the longitude column was caught **only** by the
 round trip.
@@ -3359,7 +3397,7 @@ The same run's 60 s matrix shows what the qualifying columns are for. MetNav
 wind and temperature come back 99.7 % filled at a median of 60 contributing
 readings per minute and the LIF 100 % at 61; the Picarro's CO₂ and CH₄ 99.4 %
 filled at a median of **26**, because the analyzer reports every 2–3 s and
-`n_source` says so; the PTR benzene 97.2 %; and the two canister species 11.3 %
+`n_readings` says so; the PTR benzene 97.2 %; and the two canister species 11.3 %
 with a median of **zero**. A sparse instrument on a campaign grid is mostly
 absent, which is honest, and is exactly why a two-species ratio uses a pair
 clock (§11.4) rather than this product.
@@ -3438,7 +3476,7 @@ outputs compared at all.
 | attribute | meaning |
 |---|---|
 | `tsara_grid_freq` | the period, as requested |
-| `tsara_grid_widest_source_cell_s` | the widest single selected cell, in seconds |
+| `tsara_grid_widest_reading_cell_s` | the widest single selected cell, in seconds |
 | `tsara_grid_variables` | which variables were selected, instrument-qualified |
 
 and per variable, `tsara_grid_readings`: the distinct finite readings behind
@@ -3644,7 +3682,7 @@ else in the suite would say so.
 | per-cell ratio, median relative error | 8 × 10⁻⁶ |
 | worst per-cell error, fully covered | 3 × 10⁻⁴, on the smallest enhancement |
 
-The per-cell residual is not the aligner's arithmetic, and it has two sources.
+The per-cell residual is not the aligner's arithmetic, and it has two causes.
 It appears as a *relative* error only where the enhancement is a couple of ppb,
 which is the signature of a fixed absolute error rather than a ratio bias.
 
@@ -3665,7 +3703,7 @@ on whole seconds, so one straddles every minute boundary, and the join gives
 half of that second's mean to each minute. That is exact only if the air was
 uniform within the second, and a 1 s mean carries no information about its own
 interior. It is a property of interval data, not a defect of the join: **the
-finest detail any join can respect is the source's own cell.** For plumes a few
+finest detail any join can respect is the input's own cell.** For plumes a few
 seconds wide the same term fails the acceptance thresholds outright, and no
 quadrature setting rescues it (notebook 04 §14 shows both).
 
@@ -3714,17 +3752,17 @@ the start of each minute and ingested:
 An undeclared label is a ratio error of a tenth, cell by cell — the §10
 headline restated as this phase's acceptance criterion.
 
-#### 11.9.1 A grid out of phase with its source blends two cells
+#### 11.9.1 A grid out of phase with its input stream blends two cells
 
 Found by running the same check through the grid. The slow instrument's cells
 are centred on its timestamps, so they sit half a cell off an epoch-anchored
 grid of the *same* period. Every grid value is then a weighted mean of two
-adjacent source cells — an honest average, but a smoothed one — and the
+adjacent readings — an honest average, but a smoothed one — and the
 recovered ratio moves from **0.250000034** to **0.249940526**. Aligning the
 grid's start to that instrument's own cell boundaries restores it exactly.
 
-Nothing is silently wrong: `n_source` reports 2 instead of 1, and `grid_cells`
-warns when it detects a source whose cells match the period but not its phase.
+Nothing is silently wrong: `n_readings` reports 2 instead of 1, and `grid_cells`
+warns when it detects an input stream whose cells match the period but not its phase.
 It is a warning rather than a refusal because blending is sometimes
 unavoidable, and which instrument a grid should be in phase with is the user's
 choice, not TSARA's.

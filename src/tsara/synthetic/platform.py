@@ -64,7 +64,7 @@ def build_track(
     times : pandas.DatetimeIndex
         GPS sample times.
     rng : numpy.random.Generator
-        Source of randomness (used by ``random_walk`` only).
+        Random number generator (used by ``random_walk`` only).
 
     Returns
     -------
@@ -157,7 +157,7 @@ def _random_walk_offsets(
     elapsed_s : numpy.ndarray
         Seconds since the track start.
     rng : numpy.random.Generator
-        Source of randomness.
+        Random number generator.
 
     Returns
     -------

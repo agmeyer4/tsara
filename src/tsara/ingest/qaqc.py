@@ -128,7 +128,7 @@ def apply_qaqc(
     variable : str
         Canonical variable name, for messages.
     path : pathlib.Path
-        Source file, for messages.
+        File being read, for messages.
 
     Returns
     -------

@@ -378,7 +378,7 @@ def _draw_amplitude(spec: AmplitudeSpec, rng: np.random.Generator) -> float:
     spec : AmplitudeSpec
         Lognormal or uniform amplitude configuration.
     rng : numpy.random.Generator
-        Source of randomness.
+        Random number generator.
 
     Returns
     -------
@@ -405,7 +405,7 @@ def _draw_ratio(spec: RatioSpec, rng: np.random.Generator) -> float:
     spec : RatioSpec
         Ratio distribution.
     rng : numpy.random.Generator
-        Source of randomness.
+        Random number generator.
 
     Returns
     -------
@@ -452,7 +452,7 @@ def schedule_events(config: SyntheticConfig, rng: np.random.Generator) -> list[R
         The full run configuration; its sources are read from
         ``config.atmosphere``.
     rng : numpy.random.Generator
-        Source of randomness, threaded through the whole build for
+        Random number generator, threaded through the whole build for
         reproducibility.
 
     Returns
@@ -534,7 +534,7 @@ def _realize_event(
     center : pandas.Timestamp
         Shape center.
     rng : numpy.random.Generator
-        Source of randomness.
+        Random number generator.
 
     Returns
     -------
@@ -594,7 +594,7 @@ def _realize_child(
     source : SourceSpec
         Parent's source configuration; ``source.nested`` must not be None.
     rng : numpy.random.Generator
-        Source of randomness.
+        Random number generator.
 
     Returns
     -------

@@ -490,7 +490,7 @@ def test_a_fast_instrument_sees_a_bootstrap_profile_at_its_real_timescale() -> N
         background_median=0.0,
         background_iqr=1.0,
         sample_period_s=2.0,
-        n_source_points=blocks.size,
+        n_record_points=blocks.size,
     )
     spec = _wandering_spec(fast={"native_rate": "0.5s", "measures": {"ch4": {}}})
     spec["duration"] = "6h"

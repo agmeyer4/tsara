@@ -23,9 +23,9 @@ from tsara.core.naming import (
     CELL_METHODS_ATTR,
     SUPPORT_COVERAGE_ATTR,
     SUPPORT_LABEL_ATTR,
-    SUPPORT_LABEL_SOURCE_ATTR,
-    SUPPORT_METHOD_SOURCE_ATTR,
-    SUPPORT_WIDTH_SOURCE_ATTR,
+    SUPPORT_LABEL_PROVENANCE_ATTR,
+    SUPPORT_METHOD_PROVENANCE_ATTR,
+    SUPPORT_WIDTH_PROVENANCE_ATTR,
     TIME_BOUNDS_VAR,
     TIME_COORD,
 )
@@ -864,9 +864,9 @@ def test_a_cell_wider_than_the_clock_is_refused() -> None:
 
 def test_the_generator_declares_all_three_support_facts() -> None:
     stream = generate(_flat_config(method="mean")).streams["slow"]
-    assert stream.attrs[SUPPORT_LABEL_SOURCE_ATTR] == "declared"
-    assert stream.attrs[SUPPORT_WIDTH_SOURCE_ATTR] == "declared"
-    assert stream.attrs[SUPPORT_METHOD_SOURCE_ATTR] == "declared"
+    assert stream.attrs[SUPPORT_LABEL_PROVENANCE_ATTR] == "declared"
+    assert stream.attrs[SUPPORT_WIDTH_PROVENANCE_ATTR] == "declared"
+    assert stream.attrs[SUPPORT_METHOD_PROVENANCE_ATTR] == "declared"
 
 
 # --- does `mean` actually average? -----------------------------------------

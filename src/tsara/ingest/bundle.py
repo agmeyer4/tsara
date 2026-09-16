@@ -42,9 +42,11 @@ from tsara.core.bundle import (
     BUNDLE_STAGE_KEY,
     BUNDLE_STREAMS_DIR,
     BUNDLE_VERSION_WITH_CELLS,
+    BUNDLE_VERSION_WITH_READINGS_AND_PROVENANCE,
     SUPPORTED_BUNDLE_VERSIONS,
     TsaraBundleError,
     pin_time_encoding,
+    rename_retired_attrs,
 )
 from tsara.core.support import check_bounds_intact, ensure_time_bounds
 from tsara.ingest.campaign import StreamCollection
@@ -185,6 +187,13 @@ def load_streams(path: str | Path) -> StreamCollection:
     # from `assumed` to `inferred` and stamp a nominal width onto a stream
     # whose whole point is that it has none. See `BUNDLE_VERSION_WITH_CELLS`.
     predates_cells = int(descriptor["bundle_format_version"]) < BUNDLE_VERSION_WITH_CELLS
+    # Older bundles spell some attributes the way TSARA used to; see
+    # `RETIRED_ATTR_NAMES`. Respelled before the cells migration so it sees
+    # current names only.
+    predates_vocabulary = (
+        int(descriptor["bundle_format_version"]) < BUNDLE_VERSION_WITH_READINGS_AND_PROVENANCE
+    )
+    respelled: list[str] = []
 
     streams: dict[str, xr.Dataset] = {}
     migrated: list[str] = []
@@ -199,9 +208,19 @@ def load_streams(path: str | Path) -> StreamCollection:
         # underneath it fails far from here.
         with xr.open_dataset(target, engine="netcdf4", decode_coords="all") as stream:
             streams[name] = stream.load()
+        if predates_vocabulary and rename_retired_attrs(streams[name]):
+            respelled.append(name)
         if predates_cells and ensure_time_bounds(streams[name]):
             migrated.append(name)
 
+    if respelled:
+        logger.info(
+            "Renamed attributes to the current vocabulary in %d stream(s) from a "
+            "format-%d bundle: %s.",
+            len(respelled),
+            int(descriptor["bundle_format_version"]),
+            ", ".join(respelled),
+        )
     if migrated:
         logger.info(
             "Attached assumed cells (cadence width, centred) to %d stream(s) "

@@ -55,7 +55,7 @@ def build_time_index(frame: pd.DataFrame, spec: TimeParsing, path: Path) -> pd.D
     spec : TimeParsing
         Manifest description of where time lives and how it is written.
     path : pathlib.Path
-        Source file, for error messages.
+        File being read, for error messages.
 
     Returns
     -------
@@ -169,7 +169,7 @@ def to_utc_naive_ns(times: pd.DatetimeIndex, timezone: str, path: Path) -> pd.Da
     Resolution is pinned to nanoseconds at the end because netCDF stores ns:
     an index left at µs or s would change dtype across a save/load round trip
     and break later exact comparisons against event boundaries. pandas is a
-    live source of such indexes — ``to_datetime(unit="s")`` returns
+    live producer of such indexes — ``to_datetime(unit="s")`` returns
     ``datetime64[s]`` — so the pin is load-bearing, not defensive.
 
     Parameters
@@ -179,7 +179,7 @@ def to_utc_naive_ns(times: pd.DatetimeIndex, timezone: str, path: Path) -> pd.Da
     timezone : str
         IANA zone to attach to naive timestamps.
     path : pathlib.Path
-        Source file, for error messages.
+        File being read, for error messages.
 
     Returns
     -------

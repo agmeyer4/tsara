@@ -165,7 +165,7 @@ class BootstrapBackground(_StrictModel):
       structure survives; between-block low-frequency structure is discarded
       to avoid step discontinuities at the seams where blocks are stitched.
       Slow structure is therefore supplied by ``base`` instead.
-    * Because the source record is plume-dense, some real plume energy leaks
+    * Because the profiled record is plume-dense, some real plume energy leaks
       through the profiling baseline into the residual. This is treated as a
       *feature* — it is precisely the adversarial "is `diff_mad` really
       plume-immune on my instrument?" test case — but it means the substrate

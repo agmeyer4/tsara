@@ -15,9 +15,9 @@ import yaml
 from tsara.core.bundle import BUNDLE_STAGE_KEY
 from tsara.core.naming import (
     BOUNDS_ATTR,
-    SUPPORT_LABEL_SOURCE_ATTR,
-    SUPPORT_METHOD_SOURCE_ATTR,
-    SUPPORT_WIDTH_SOURCE_ATTR,
+    SUPPORT_LABEL_PROVENANCE_ATTR,
+    SUPPORT_METHOD_PROVENANCE_ATTR,
+    SUPPORT_WIDTH_PROVENANCE_ATTR,
     TIME_BOUNDS_VAR,
     TIME_COORD,
 )
@@ -36,6 +36,7 @@ from tsara.synthetic.generator import SyntheticDataset, generate
 from tsara.synthetic.profiling import RealDataProfile
 
 WithSources = Callable[[SyntheticConfig, dict[str, Any]], SyntheticConfig]
+RespellBundle = Callable[[Path], int]
 
 # ---------------------------------------------------------------------------
 # Round trip
@@ -453,9 +454,27 @@ def test_a_version_1_bundle_is_migrated_rather_than_refused(
         midpoints = bounds[:, 0] + (bounds[:, 1] - bounds[:, 0]) // 2
         assert np.array_equal(midpoints, stamps), name
         # And every field of the support says where it came from.
-        assert stream.attrs[SUPPORT_LABEL_SOURCE_ATTR] == "assumed", name
-        assert stream.attrs[SUPPORT_WIDTH_SOURCE_ATTR] == "inferred", name
-        assert stream.attrs[SUPPORT_METHOD_SOURCE_ATTR] == "assumed", name
+        assert stream.attrs[SUPPORT_LABEL_PROVENANCE_ATTR] == "assumed", name
+        assert stream.attrs[SUPPORT_WIDTH_PROVENANCE_ATTR] == "inferred", name
+        assert stream.attrs[SUPPORT_METHOD_PROVENANCE_ATTR] == "assumed", name
+
+
+def test_a_format_2_bundle_is_respelled_on_load(
+    noisy_config: SyntheticConfig,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    respell_as_format_2: RespellBundle,
+) -> None:
+    """Format 3 only renamed attributes, so an older bundle reads back identical."""
+    bundle = generate(noisy_config).save(tmp_path / "run")
+    expected = load_bundle(bundle)
+    assert respell_as_format_2(bundle) > 0
+
+    with caplog.at_level(logging.INFO, logger="tsara.synthetic.bundle"):
+        reloaded = load_bundle(bundle)
+    assert "current vocabulary" in caplog.text
+    for name, stream in expected.streams.items():
+        assert reloaded.streams[name].identical(stream), name
 
 
 def test_a_version_2_bundle_without_cells_is_not_completed(

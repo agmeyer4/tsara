@@ -122,7 +122,7 @@ def test_real_profile_drives_a_bootstrap_background(real_series: pd.Series) -> N
     assert values.shape == (5000,)
     assert np.all(np.isfinite(values))
 
-    # The substrate carries real fluctuation, bounded above by the source
+    # The substrate carries real fluctuation, bounded above by the profiled
     # record's own robust spread. It is legitimately *smaller*: blocks are
     # mean-centred, which by construction discards between-block
     # low-frequency structure (see METHODS.md §8.3). On a record with strong

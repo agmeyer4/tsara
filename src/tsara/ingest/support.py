@@ -64,7 +64,7 @@ if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt
 
     from tsara.config.manifest import SupportSpec
-    from tsara.core.naming import SupportLabel, SupportMethod, SupportSource
+    from tsara.core.naming import SupportLabel, SupportMethod, SupportProvenance
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ class ResolvedSupport:
     width_ns : int or None
         Nominal cell width in nanoseconds, or None when widths vary per row
         and no single nominal value applies.
-    label_source, width_source, method_source : str
+    label_provenance, width_provenance, method_provenance : str
         Where each of the three came from.
     n_widened : int
         How many cells the file declared with no duration at all, and which
@@ -116,9 +116,9 @@ class ResolvedSupport:
     label: SupportLabel
     method: SupportMethod
     width_ns: int | None
-    label_source: SupportSource
-    width_source: SupportSource
-    method_source: SupportSource
+    label_provenance: SupportProvenance
+    width_provenance: SupportProvenance
+    method_provenance: SupportProvenance
     n_widened: int = 0
 
 
@@ -381,7 +381,7 @@ def resolve_support(
         The conclusion and its provenance.
     """
     method: SupportMethod = support.method if support.method is not None else "point"
-    method_source: SupportSource = "declared" if support.method is not None else "assumed"
+    method_provenance: SupportProvenance = "declared" if support.method is not None else "assumed"
 
     index_ns = epoch_ns(pd.DatetimeIndex(frame.index))
     reported = RAW_TIME_STOP_COLUMN in frame.columns and RAW_TIME_START_COLUMN in frame.columns
@@ -406,28 +406,28 @@ def resolve_support(
             # whose fills vary has no single number to report and saying so
             # is more useful than reporting a mean nobody can use.
             width_ns=int(distinct[0]) if distinct.size == 1 else None,
-            label_source="reported",
-            width_source="reported",
-            method_source=method_source,
+            label_provenance="reported",
+            width_provenance="reported",
+            method_provenance=method_provenance,
             n_widened=n_widened,
         )
 
     label: SupportLabel = "unknown"
-    label_source: SupportSource = "assumed"
+    label_provenance: SupportProvenance = "assumed"
     if support.label is not None:
-        label, label_source = support.label, "declared"
+        label, label_provenance = support.label, "declared"
     elif label_hint is not None:
-        label, label_source = label_hint, "inferred"
+        label, label_provenance = label_hint, "inferred"
 
     if support.width != "cadence":
         declared_width = int(pd.Timedelta(support.width).value)
         _warn_if_cells_would_overlap(declared_width, widths_ns, path=path)
         widths = np.full(len(frame), declared_width, dtype=np.int64)
-        width_source: SupportSource = "declared"
+        width_provenance: SupportProvenance = "declared"
         nominal: int | None = declared_width
     elif widths_ns is not None:
         widths = np.asarray(widths_ns, dtype=np.int64)
-        width_source = "inferred"
+        width_provenance = "inferred"
         found = np.unique(widths)
         nominal = int(found[0]) if found.size == 1 else None
     else:
@@ -444,9 +444,9 @@ def resolve_support(
             label=label,
             method=method,
             width_ns=None,
-            label_source=label_source,
-            width_source="assumed",
-            method_source=method_source,
+            label_provenance=label_provenance,
+            width_provenance="assumed",
+            method_provenance=method_provenance,
         )
 
     bounds = CellBounds.from_label(index_ns, widths, label)
@@ -457,9 +457,9 @@ def resolve_support(
         label=label,
         method=method,
         width_ns=nominal,
-        label_source=label_source,
-        width_source=width_source,
-        method_source=method_source,
+        label_provenance=label_provenance,
+        width_provenance=width_provenance,
+        method_provenance=method_provenance,
     )
 
 

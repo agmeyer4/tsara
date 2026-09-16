@@ -296,7 +296,7 @@ def test_reported_uncertainty_is_read_from_its_column(tmp_path: Path) -> None:
     """An instrument that publishes its own per-point sigma (the EM27 case)."""
     generated, ingested = _round_trip(tmp_path)
 
-    assert ingested["analyzer"]["c2h6"].attrs["uncertainty_source_random"] == "reported"
+    assert ingested["analyzer"]["c2h6"].attrs["uncertainty_provenance_random"] == "reported"
     np.testing.assert_allclose(
         ingested["analyzer"][sigma_rand_name("c2h6")].values,
         generated.streams["analyzer"]["truth_sigma_rand_c2h6"].values,
@@ -308,19 +308,19 @@ def test_provenance_labels_match_what_was_declared(tmp_path: Path) -> None:
     _, ingested = _round_trip(tmp_path)
 
     ch4 = ingested["analyzer"]["ch4"].attrs
-    assert ch4["uncertainty_source_random"] == "declared"
-    assert ch4["uncertainty_source_systematic"] == "declared"
+    assert ch4["uncertainty_provenance_random"] == "declared"
+    assert ch4["uncertainty_provenance_systematic"] == "declared"
 
     # c2h6 declares only a random component, so its systematic is a
     # deliberate zero rather than unknown.
     c2h6 = ingested["analyzer"]["c2h6"].attrs
-    assert c2h6["uncertainty_source_systematic"] == "zero"
+    assert c2h6["uncertainty_provenance_systematic"] == "zero"
 
     # wind_dir declares no budget at all: random falls back to the empirical
     # estimator and systematic is genuinely unknown.
     wind = ingested["met"]["wind_dir"].attrs
-    assert wind["uncertainty_source"] == "empirical"
-    assert wind["uncertainty_source_systematic"] == "unknown"
+    assert wind["uncertainty_provenance"] == "empirical"
+    assert wind["uncertainty_provenance_systematic"] == "unknown"
     assert sigma_rand_name("wind_dir") not in ingested["met"].data_vars
 
 
@@ -384,7 +384,7 @@ def test_full_loop_through_a_bundle(tmp_path: Path) -> None:
     truth = generated.streams["analyzer"]
     np.testing.assert_allclose(reloaded["analyzer"]["ch4"].values, truth["ch4"].values, rtol=RTOL)
     np.testing.assert_array_equal(reloaded["analyzer"]["time"].values, truth["time"].values)
-    assert reloaded["analyzer"]["ch4"].attrs["uncertainty_source"] == "declared"
+    assert reloaded["analyzer"]["ch4"].attrs["uncertainty_provenance"] == "declared"
 
 
 def test_quantized_species_round_trip(tmp_path: Path) -> None:
@@ -826,7 +826,7 @@ def test_a_declared_label_is_read_back_exactly(tmp_path: Path) -> None:
     )
     assert stream["ch4"].attrs["cell_methods"] == "time: mean"
     assert stream.attrs["tsara_support_label"] == "start"
-    assert stream.attrs["tsara_support_label_source"] == "declared"
+    assert stream.attrs["tsara_support_label_provenance"] == "declared"
 
 
 def test_a_file_that_states_its_cells_is_read_back_exactly(tmp_path: Path) -> None:
@@ -838,8 +838,8 @@ def test_a_file_that_states_its_cells_is_read_back_exactly(tmp_path: Path) -> No
         np.asarray(stream[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]"),
         np.asarray(dataset.streams["slow"][TIME_BOUNDS_VAR].values, dtype="datetime64[ns]"),
     )
-    assert stream.attrs["tsara_support_label_source"] == "reported"
-    assert stream.attrs["tsara_support_width_source"] == "reported"
+    assert stream.attrs["tsara_support_label_provenance"] == "reported"
+    assert stream.attrs["tsara_support_width_provenance"] == "reported"
 
 
 def test_an_archive_that_says_nothing_is_read_back_wrong_and_says_so(
@@ -861,8 +861,8 @@ def test_an_archive_that_says_nothing_is_read_back_wrong_and_says_so(
     read_back = np.asarray(stream[TIME_COORD].values, dtype="datetime64[ns]")
     offset = (generated - read_back) / np.timedelta64(1, "s")
     assert np.all(offset == 30.0), "half a cell, exactly the label being unknown"
-    assert stream.attrs["tsara_support_label_source"] == "assumed"
-    assert stream.attrs["tsara_support_method_source"] == "assumed"
+    assert stream.attrs["tsara_support_label_provenance"] == "assumed"
+    assert stream.attrs["tsara_support_method_provenance"] == "assumed"
     assert stream["ch4"].attrs["cell_methods"] == "time: point"
     # The width is still right, because it is measured from the file's own
     # cadence rather than guessed. This is the ONLY path that exercises that

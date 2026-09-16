@@ -7,7 +7,7 @@ flat constant) would make Phase 5's rolling-quantile baseline look far better
 than it is, so the parametric model deliberately offers non-stationary terms
 with no closed-form inverse.
 
-Two interchangeable sources, per the
+Two interchangeable kinds of background, per the
 :class:`~tsara.synthetic.config.BackgroundConfig` union:
 
 * **parametric** — analytic terms with exactly known truth, plus an optional
@@ -209,7 +209,7 @@ def realize_background(
     truth_resolution_ns : int
         Node spacing for a random walk.
     rng : numpy.random.Generator
-        Source of randomness for the stochastic terms. A background with none
+        Random number generator for the stochastic terms. A background with none
         draws nothing, which is what lets a configuration without one keep
         every later draw -- and so every noise realization -- where it was.
     profiles : mapping of str to RealDataProfile, optional
@@ -409,7 +409,7 @@ def _stitch_blocks(
     n_samples : int
         Required output length.
     rng : numpy.random.Generator
-        Source of block indices.
+        Random number generator for block indices.
 
     Returns
     -------

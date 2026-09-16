@@ -10,7 +10,7 @@ Design decisions embedded in this schema
 -----------------------------------------
 * **Species are data, not code.** Gas species appear only as keys in a
   ``variables:`` mapping. Adding a 40th VOC to a campaign is a YAML edit;
-  no TSARA source file ever names a specific gas.
+  no TSARA code file ever names a specific gas.
 * **A name belongs to its instrument; what it measures is ``field``.** A
   variable is identified by its instrument and its name together, so two
   analyzers may both call their methane ``ch4``. The physical quantity is a
@@ -269,7 +269,7 @@ class UncertaintySpec(_StrictModel):
     any other combination. Omitting a component means "not modeled here":
     an omitted ``systematic`` is treated as zero; an omitted ``random``
     falls back to the empirical ``diff_mad`` estimator (METHODS.md §2.5) at
-    runtime, with `uncertainty_source` provenance recorded either way.
+    runtime, with the `uncertainty_provenance` label recorded either way.
     """
 
     random: ComponentUncertainty | None = Field(

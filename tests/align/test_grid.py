@@ -242,7 +242,7 @@ def test_the_grid_holds_every_selected_variable_with_its_qualifiers(
     grid = build_output_grid(campaign, OutputGridConfig(freq="60s"))
     for name in ("ch4", "co2", "benzene"):
         assert name in grid.data_vars
-        assert f"n_source_{name}" in grid.data_vars
+        assert f"n_readings_{name}" in grid.data_vars
         assert f"coverage_{name}" in grid.data_vars
     assert grid.sizes["time"] == 10
     assert grid["ch4"].values[0] == pytest.approx(np.arange(60.0).mean())
@@ -254,7 +254,7 @@ def test_the_grid_records_what_it_was_built_from(campaign: dict[str, xr.Dataset]
     grid = build_output_grid(campaign, OutputGridConfig(freq="60s"), ["ch4", "benzene"])
     assert grid.attrs["tsara_stage"] == "gridded"
     assert grid.attrs["tsara_grid_freq"] == "60s"
-    assert grid.attrs["tsara_grid_widest_source_cell_s"] == pytest.approx(60.0)
+    assert grid.attrs["tsara_grid_widest_reading_cell_s"] == pytest.approx(60.0)
     assert grid.attrs["tsara_grid_variables"] == "aeris.ch4, canister.benzene"
     assert "co2" not in grid.data_vars
 
@@ -283,7 +283,7 @@ def test_the_widest_cell_attribute_is_the_widest_single_cell() -> None:
         CellBounds(start_ns=starts, stop_ns=starts + widths), {"benzene": np.ones(3)}
     )
     grid = build_output_grid({"iwas": canister}, OutputGridConfig(freq="60s"))
-    assert grid.attrs["tsara_grid_widest_source_cell_s"] == pytest.approx(17.0)
+    assert grid.attrs["tsara_grid_widest_reading_cell_s"] == pytest.approx(17.0)
 
 
 def test_a_fill_straddling_two_rows_is_counted_once_and_warned_about(
@@ -300,7 +300,7 @@ def test_a_fill_straddling_two_rows_is_counted_once_and_warned_about(
     fast = make_stream(cells(0.0, 1.0, 180), {"ch4": np.arange(180.0)})
     with caplog.at_level("WARNING", logger="tsara.align.grid"):
         grid = build_output_grid({"fast": fast, "iwas": canister}, OutputGridConfig(freq="60s"))
-    assert int((grid["n_source_benzene"].values > 0).sum()) == 3
+    assert int((grid["n_readings_benzene"].values > 0).sum()) == 3
     assert grid["benzene"].attrs["tsara_grid_readings"] == 2
     assert "1 grid column(s) hold values in more rows than they have readings" in caplog.text
     assert "Worst: 'benzene', 3 rows from 2 readings" in caplog.text
@@ -336,7 +336,7 @@ def test_a_cell_with_no_data_stays_empty(campaign: dict[str, xr.Dataset]) -> Non
     grid = build_output_grid({"a": gappy, "b": campaign["canister"]}, OutputGridConfig(freq="60s"))
     assert np.isfinite(grid["ch4"].values[0])
     assert np.isnan(grid["ch4"].values[1:]).all()
-    assert grid["n_source_ch4"].values[1:].tolist() == [0] * 9
+    assert grid["n_readings_ch4"].values[1:].tolist() == [0] * 9
 
 
 def test_the_canister_column_is_mostly_empty_on_a_fine_grid() -> None:

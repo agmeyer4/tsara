@@ -502,9 +502,9 @@ def test_systematic_propagation_reports_its_form() -> None:
 
 
 def test_same_width_returns_the_sigma_untouched() -> None:
-    value, source = sigma_at_support(0.5, quoted_width_s=60.0, target_width_s=60.0)
+    value, form = sigma_at_support(0.5, quoted_width_s=60.0, target_width_s=60.0)
     assert value == pytest.approx(0.5)
-    assert source == "unchanged"
+    assert form == "unchanged"
 
 
 def test_no_timescale_leaves_the_sigma_alone_and_says_so() -> None:
@@ -514,9 +514,9 @@ def test_no_timescale_leaves_the_sigma_alone_and_says_so() -> None:
     but confidently wrong, so the honest answer is the unscaled number plus a
     label saying it was not scaled.
     """
-    value, source = sigma_at_support(0.5, quoted_width_s=1.0, target_width_s=60.0)
+    value, form = sigma_at_support(0.5, quoted_width_s=1.0, target_width_s=60.0)
     assert value == pytest.approx(0.5)
-    assert source == "unscaled"
+    assert form == "unscaled"
 
 
 def test_widening_shrinks_the_sigma_by_less_than_root_n() -> None:
@@ -526,9 +526,9 @@ def test_widening_shrinks_the_sigma_by_less_than_root_n() -> None:
     about 2.2 independent samples, not 60 -- so the sigma falls by 1.48, not
     by 7.75.
     """
-    value, source = sigma_at_support(0.5, quoted_width_s=1.0, target_width_s=60.0, tau_s=20.0)
+    value, form = sigma_at_support(0.5, quoted_width_s=1.0, target_width_s=60.0, tau_s=20.0)
     naive = 0.5 / np.sqrt(60)
-    assert source == "ar1_neff"
+    assert form == "ar1_neff"
     assert value == pytest.approx(0.3375, abs=1e-4)
     assert value > naive * 2
 
@@ -548,10 +548,10 @@ def test_sigma_at_support_accepts_an_array() -> None:
 
 
 def test_sigma_at_support_honours_the_asymptotic_form() -> None:
-    value, source = sigma_at_support(
+    value, form = sigma_at_support(
         1.0, quoted_width_s=1.0, target_width_s=200.0, tau_s=100.0, form="ar1_asymptotic"
     )
-    assert source == "ar1_asymptotic"
+    assert form == "ar1_asymptotic"
     assert value == pytest.approx(1.0)
 
 

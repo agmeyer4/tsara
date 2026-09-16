@@ -313,7 +313,7 @@ def test_bootstrap_replays_at_the_profile_period_whatever_the_query_spacing() ->
         background_median=0.0,
         background_iqr=1.0,
         sample_period_s=2.0,
-        n_source_points=15360,
+        n_record_points=15360,
     )
     background = _realize(
         BootstrapBackground(kind="bootstrap", profile="red"), profiles={"red": profile}

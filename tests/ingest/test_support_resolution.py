@@ -139,8 +139,8 @@ def test_a_file_that_states_its_cells_answers_the_label_itself(offset: str, expe
         frame, SupportSpec(), widths_ns=None, label_hint=None, path=Path("f")
     )
     assert resolved.label == expected
-    assert resolved.label_source == "reported"
-    assert resolved.width_source == "reported"
+    assert resolved.label_provenance == "reported"
+    assert resolved.width_provenance == "reported"
     assert resolved.width_ns == 60 * SECOND
 
 
@@ -162,7 +162,7 @@ def test_varying_widths_have_no_nominal_value_to_report() -> None:
         frame, SupportSpec(), widths_ns=None, label_hint=None, path=Path("f")
     )
     assert resolved.width_ns is None
-    assert resolved.width_source == "reported"
+    assert resolved.width_provenance == "reported"
 
 
 def test_a_declared_width_and_label_beat_a_measured_cadence() -> None:
@@ -175,9 +175,9 @@ def test_a_declared_width_and_label_beat_a_measured_cadence() -> None:
         label_hint="mid",
         path=Path("f"),
     )
-    assert (resolved.label, resolved.label_source) == ("start", "declared")
-    assert (resolved.width_ns, resolved.width_source) == (15 * SECOND, "declared")
-    assert (resolved.method, resolved.method_source) == ("mean", "declared")
+    assert (resolved.label, resolved.label_provenance) == ("start", "declared")
+    assert (resolved.width_ns, resolved.width_provenance) == (15 * SECOND, "declared")
+    assert (resolved.method, resolved.method_provenance) == ("mean", "declared")
     span = _epoch(out[RAW_TIME_STOP_COLUMN]) - _epoch(out[RAW_TIME_START_COLUMN])
     assert np.all(span == 15 * SECOND)
 
@@ -191,8 +191,8 @@ def test_a_readers_hint_is_used_but_marked_inferred() -> None:
         label_hint="start",
         path=Path("f"),
     )
-    assert (resolved.label, resolved.label_source) == ("start", "inferred")
-    assert (resolved.width_ns, resolved.width_source) == (60 * SECOND, "inferred")
+    assert (resolved.label, resolved.label_provenance) == ("start", "inferred")
+    assert (resolved.width_ns, resolved.width_provenance) == (60 * SECOND, "inferred")
     assert np.array_equal(_epoch(out[RAW_TIME_START_COLUMN]), _epoch(out.index))
 
 
@@ -206,8 +206,8 @@ def test_saying_nothing_yields_a_centred_cell_that_admits_it() -> None:
         label_hint=None,
         path=Path("f"),
     )
-    assert (resolved.label, resolved.label_source) == ("unknown", "assumed")
-    assert (resolved.method, resolved.method_source) == ("point", "assumed")
+    assert (resolved.label, resolved.label_provenance) == ("unknown", "assumed")
+    assert (resolved.method, resolved.method_provenance) == ("point", "assumed")
     midpoints = _epoch(out[RAW_TIME_START_COLUMN]) + 30 * SECOND
     assert np.array_equal(midpoints, _epoch(out.index))
 
@@ -233,7 +233,7 @@ def test_with_nothing_to_measure_no_cells_are_invented(
             frame, SupportSpec(), widths_ns=None, label_hint=None, path=Path("f")
         )
     assert RAW_TIME_START_COLUMN not in out.columns
-    assert resolved.width_ns is None and resolved.width_source == "assumed"
+    assert resolved.width_ns is None and resolved.width_provenance == "assumed"
     assert "too few samples" in caplog.text
 
 
@@ -339,7 +339,7 @@ def test_an_icartt_canister_reads_its_own_fill_times(tmp_path: Path) -> None:
     _, resolved = resolve_support(
         table.frame, loader.support, widths_ns=None, label_hint=None, path=path
     )
-    assert (resolved.label, resolved.label_source) == ("start", "reported")
+    assert (resolved.label, resolved.label_provenance) == ("start", "reported")
     assert resolved.width_ns is None, "fills vary, so there is no nominal width"
 
 
@@ -522,7 +522,7 @@ def test_files_agreeing_on_a_label_have_it_inferred(tmp_path: Path) -> None:
         }
     )
     ingested = _ingest_instrument(manifest, "voc", manifest.instruments["voc"])
-    assert (ingested.support.label, ingested.support.label_source) == ("start", "inferred")
+    assert (ingested.support.label, ingested.support.label_provenance) == ("start", "inferred")
 
 
 def test_files_disagreeing_on_a_label_fall_back_to_centred(tmp_path: Path) -> None:
@@ -548,7 +548,7 @@ def test_files_disagreeing_on_a_label_fall_back_to_centred(tmp_path: Path) -> No
         }
     )
     ingested = _ingest_instrument(manifest, "voc", manifest.instruments["voc"])
-    assert (ingested.support.label, ingested.support.label_source) == ("unknown", "assumed")
+    assert (ingested.support.label, ingested.support.label_provenance) == ("unknown", "assumed")
 
 
 def test_a_clock_correction_applies_even_without_cells() -> None:
@@ -616,7 +616,7 @@ def test_the_label_is_read_before_any_cell_is_repaired() -> None:
         path=Path("f"),
     )
     assert resolved.label == "start"
-    assert resolved.label_source == "reported"
+    assert resolved.label_provenance == "reported"
     assert resolved.n_widened == 5
 
 

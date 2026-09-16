@@ -165,7 +165,7 @@ def _index_from_file(frame: pd.DataFrame, path: Path) -> pd.DatetimeIndex:
     frame : pandas.DataFrame
         Contents of the parquet file.
     path : pathlib.Path
-        Source file, for error messages.
+        File being read, for error messages.
 
     Returns
     -------

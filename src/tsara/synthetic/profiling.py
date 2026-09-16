@@ -140,8 +140,8 @@ class RealDataProfile:
         Interquartile range of the fitted background, i.e. how much the
         background itself moves.
     sample_period_s : float
-        Median sampling interval of the source record, in seconds.
-    n_source_points : int
+        Median sampling interval of the profiled record, in seconds.
+    n_record_points : int
         Number of finite samples the profile was built from.
     """
 
@@ -154,7 +154,7 @@ class RealDataProfile:
     background_median: float
     background_iqr: float
     sample_period_s: float
-    n_source_points: int
+    n_record_points: int
 
     @property
     def n_blocks(self) -> int:
@@ -383,7 +383,7 @@ def profile_series(
         background_median=float(background_finite.median()),
         background_iqr=float(background_finite.quantile(0.75) - background_finite.quantile(0.25)),
         sample_period_s=sample_period_s,
-        n_source_points=int(finite.size),
+        n_record_points=int(finite.size),
     )
     logger.info("Profiled real data: %s", profile.summary())
     if residual_sigma > 3.0 * noise_sigma:

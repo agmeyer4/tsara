@@ -74,9 +74,11 @@ from tsara.core.bundle import (
     BUNDLE_STAGE_KEY,
     BUNDLE_STREAMS_DIR,
     BUNDLE_VERSION_WITH_CELLS,
+    BUNDLE_VERSION_WITH_READINGS_AND_PROVENANCE,
     SUPPORTED_BUNDLE_VERSIONS,
     TsaraBundleError,
     pin_time_encoding,
+    rename_retired_attrs,
 )
 from tsara.core.support import check_bounds_intact, ensure_time_bounds
 from tsara.synthetic.config import BootstrapBackground, SyntheticConfig
@@ -271,6 +273,11 @@ def load_bundle(
     # "the format could not record one" in version 1 and "nothing could be
     # known" from version 2 on, and only the first is safe to complete.
     predates_cells = int(found_version) < BUNDLE_VERSION_WITH_CELLS
+    # Older bundles spell some attributes the way TSARA used to; see
+    # `RETIRED_ATTR_NAMES`. Respelled before the cells migration so it sees
+    # current names only.
+    predates_vocabulary = int(found_version) < BUNDLE_VERSION_WITH_READINGS_AND_PROVENANCE
+    respelled: list[str] = []
 
     streams: dict[str, xr.Dataset] = {}
     migrated: list[str] = []
@@ -284,9 +291,19 @@ def load_bundle(
         # `time_bnds` returns as a coordinate, the shape it was saved in.
         with xr.open_dataset(stream_path, engine="netcdf4", decode_coords="all") as opened:
             streams[name] = opened.load()
+        if predates_vocabulary and rename_retired_attrs(streams[name]):
+            respelled.append(name)
         if predates_cells and ensure_time_bounds(streams[name]):
             migrated.append(name)
 
+    if respelled:
+        logger.info(
+            "Renamed attributes to the current vocabulary in %d stream(s) from a "
+            "format-%d bundle: %s.",
+            len(respelled),
+            int(found_version),
+            ", ".join(respelled),
+        )
     if migrated:
         # Said out loud rather than applied quietly: the reading is a weak one
         # and a user comparing results against a freshly generated bundle

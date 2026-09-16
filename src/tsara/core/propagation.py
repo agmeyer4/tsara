@@ -148,7 +148,7 @@ class PropagatedSigma:
     """One propagated uncertainty, with the name of the form that produced it.
 
     The name travels with the number for the same reason
-    :class:`~tsara.ingest.uncertainty.ResolvedUncertainty` carries a source
+    :class:`~tsara.ingest.uncertainty.ResolvedUncertainty` carries a provenance
     label: a sigma reduced by ``sqrt(N)`` and a sigma not reduced at all look
     identical once written to a file, and mean opposite things.
 
@@ -777,7 +777,7 @@ def _binned_totals(
 
     Shared by both components so that a masked sample is excluded from each
     of them identically. Everything is "long form": one entry per
-    (target cell, source cell) pair, aggregated with ``bincount``.
+    (target cell, reading) pair, aggregated with ``bincount``.
     """
     sigma = _as_1d(sigmas, name="sigmas")
     w = _as_1d(weights, name="weights")
@@ -833,7 +833,7 @@ def propagate_random_binned(
 
     One difference is deliberate. The scalar form derives the sample spacing
     from the timestamps it is given, per call. This one takes a single
-    ``spacing_s`` for the whole operation -- normally the source stream's
+    ``spacing_s`` for the whole operation -- normally the input stream's
     nominal cadence -- because a per-cell median would have to be computed
     group by group, which is the Python loop this function exists to avoid.
     The two agree exactly on evenly sampled data, and where a cell contains a
@@ -850,7 +850,7 @@ def propagate_random_binned(
     Parameters
     ----------
     sigmas, weights, target_index : array_like
-        Long form: one entry per (target cell, source cell) pair. ``nan``
+        Long form: one entry per (target cell, reading) pair. ``nan``
         sigmas and zero weights are excluded together.
     n_target : int
         Number of target cells, which sets the output length.
@@ -900,7 +900,7 @@ def propagate_random_binned(
         raise TsaraPropagationError(
             "A decorrelation timescale was declared but no spacing_s was given. "
             "Correcting for correlation needs to know how far apart the samples "
-            "are; supply the source stream's cadence, or pass tau_s=None."
+            "are; supply the input stream's cadence, or pass tau_s=None."
         )
     # Correlated errors: fewer independent readings than the Kish count, so the
     # independent variance is inflated by kish / N_eff.
@@ -974,7 +974,7 @@ def propagate_systematic_binned(
     Parameters
     ----------
     sigmas, weights, target_index : array_like
-        Long form, one entry per (target cell, source cell) pair.
+        Long form, one entry per (target cell, reading) pair.
     n_target : int
         Number of target cells.
 

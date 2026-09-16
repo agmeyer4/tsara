@@ -30,7 +30,7 @@ PACKAGES_WITH_EXPORTS = ["tsara", "tsara.ingest", "tsara.synthetic"]
 def _modules_declaring_all() -> list[str]:
     """Return every ``tsara`` module that declares ``__all__``, discovered.
 
-    Enumerated by walking the source tree rather than by listing names,
+    Enumerated by walking the package tree rather than by listing names,
     because a hand-maintained list only guards what someone remembered to
     add to it. Measured when this replaced a three-item list: 21 modules
     declare ``__all__`` and 3 were being checked, and two of the unchecked
@@ -64,7 +64,7 @@ MODULES_WITH_EXPORTS = _modules_declaring_all()
 
 
 def _tsara_imports(module_path: Path) -> list[str]:
-    """Return every ``tsara.*`` module name imported by one source file.
+    """Return every ``tsara.*`` module name imported by one module.
 
     Parsed with :mod:`ast` rather than by importing, so the check is static:
     it sees imports guarded by ``TYPE_CHECKING`` and imports nested inside
@@ -74,7 +74,7 @@ def _tsara_imports(module_path: Path) -> list[str]:
     Parameters
     ----------
     module_path : pathlib.Path
-        Python source file to scan.
+        Python file to scan.
 
     Returns
     -------
@@ -368,8 +368,8 @@ def test_every_attribute_a_product_carries_is_documented() -> None:
     place that promise is explained is METHODS.md.
 
     This has failed for real: both provenance families were documented by
-    halves -- the support section named the label and width sources but
-    abbreviated the method one to `_method_source`, and the uncertainty
+    halves -- the support section named the label and width attributes but
+    abbreviated the method one, and the uncertainty
     section named the species-level label while the per-component attributes
     that carry it went unmentioned.
     """
@@ -396,7 +396,7 @@ def test_the_document_names_no_attribute_that_nothing_writes() -> None:
     """The reverse of the check above, and the direction a rename breaks.
 
     `test_every_attribute_a_product_carries_is_documented` walks from the
-    source to the document, so it notices a *new* attribute with no
+    code to the document, so it notices a *new* attribute with no
     definition. It cannot notice the opposite: rename an attribute and its old
     name sits in the document forever, looking documented and describing
     nothing.

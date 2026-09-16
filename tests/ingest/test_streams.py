@@ -248,9 +248,9 @@ def test_undeclared_uncertainty_emits_no_sigma_but_labels_it() -> None:
     stream = _build(_frame(), _instrument())
 
     assert sigma_rand_name("ch4") not in stream.data_vars
-    assert stream["ch4"].attrs["uncertainty_source"] == "empirical"
-    assert stream["ch4"].attrs["uncertainty_source_random"] == "empirical"
-    assert stream["ch4"].attrs["uncertainty_source_systematic"] == "unknown"
+    assert stream["ch4"].attrs["uncertainty_provenance"] == "empirical"
+    assert stream["ch4"].attrs["uncertainty_provenance_random"] == "empirical"
+    assert stream["ch4"].attrs["uncertainty_provenance_systematic"] == "unknown"
 
 
 def test_omitted_systematic_is_labelled_zero_not_unknown() -> None:
@@ -262,7 +262,7 @@ def test_omitted_systematic_is_labelled_zero_not_unknown() -> None:
         }
     )
     stream = _build(_frame(), instrument)
-    assert stream["ch4"].attrs["uncertainty_source_systematic"] == "zero"
+    assert stream["ch4"].attrs["uncertainty_provenance_systematic"] == "zero"
 
 
 def test_mixed_modes_are_labelled_mixed() -> None:
@@ -277,7 +277,7 @@ def test_mixed_modes_are_labelled_mixed() -> None:
         }
     )
     stream = _build(_frame(CH4_SIG=np.full(4, 0.001)), instrument)
-    assert stream["ch4"].attrs["uncertainty_source"] == "mixed"
+    assert stream["ch4"].attrs["uncertainty_provenance"] == "mixed"
 
 
 def test_decorrelation_timescale_is_carried() -> None:
@@ -346,12 +346,12 @@ def test_mobile_altitude_variable_is_recorded_when_present() -> None:
 def test_stream_describes_itself() -> None:
     """A file found on disk must explain what produced it."""
     stream = _build(
-        _frame(), _instrument(), campaign="slv_2026", sources=[Path("a.dat"), Path("b.dat")]
+        _frame(), _instrument(), campaign="slv_2026", files=[Path("a.dat"), Path("b.dat")]
     )
     assert stream.attrs["tsara_stage"] == "ingest"
     assert stream.attrs["instrument"] == "picarro"
     assert stream.attrs["campaign"] == "slv_2026"
-    assert stream.attrs["n_source_files"] == 2
+    assert stream.attrs["n_files"] == 2
     assert stream.attrs["loader_format"] == "csv"
     assert stream.attrs["tsara_version"]
 
@@ -439,7 +439,7 @@ def test_variable_description_is_carried() -> None:
     assert _build(_frame(), instrument)["ch4"].attrs["description"] == "Dry-air methane"
 
 
-def test_single_source_file_is_named_in_messages(caplog: pytest.LogCaptureFixture) -> None:
+def test_single_input_file_is_named_in_messages(caplog: pytest.LogCaptureFixture) -> None:
     """With one contributing file, diagnostics name that file rather than a count."""
     import logging
 
@@ -447,11 +447,11 @@ def test_single_source_file_is_named_in_messages(caplog: pytest.LogCaptureFixtur
         ch4={"column": "CH4_dry", "units": "ppm", "qaqc": [{"kind": "range", "min": 99.0}]}
     )
     with caplog.at_level(logging.WARNING, logger="tsara.ingest.qaqc"):
-        _build(_frame(), instrument, sources=[Path("only.dat")])
+        _build(_frame(), instrument, files=[Path("only.dat")])
     assert "only.dat" in caplog.text
 
 
-def test_many_source_files_are_summarised_in_messages(
+def test_many_input_files_are_summarised_in_messages(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """After concatenation there is no single file to blame."""
@@ -461,13 +461,13 @@ def test_many_source_files_are_summarised_in_messages(
         ch4={"column": "CH4_dry", "units": "ppm", "qaqc": [{"kind": "range", "min": 99.0}]}
     )
     with caplog.at_level(logging.WARNING, logger="tsara.ingest.qaqc"):
-        _build(_frame(), instrument, sources=[Path("a.dat"), Path("b.dat")])
+        _build(_frame(), instrument, files=[Path("a.dat"), Path("b.dat")])
     assert "2 files starting a.dat" in caplog.text
 
 
-def test_no_sources_still_builds() -> None:
-    stream = _build(_frame(), _instrument(), sources=[])
-    assert stream.attrs["n_source_files"] == 0
+def test_no_files_still_builds() -> None:
+    stream = _build(_frame(), _instrument(), files=[])
+    assert stream.attrs["n_files"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -513,9 +513,9 @@ def _resolved(**overrides: Any) -> ResolvedSupport:
         "label": "start",
         "method": "mean",
         "width_ns": 2_000_000_000,
-        "label_source": "declared",
-        "width_source": "declared",
-        "method_source": "declared",
+        "label_provenance": "declared",
+        "width_provenance": "declared",
+        "method_provenance": "declared",
     }
     fields.update(overrides)
     return ResolvedSupport(**fields)
@@ -539,7 +539,7 @@ def test_a_stream_carries_its_cells_and_their_provenance() -> None:
     assert TIME_BOUNDS_VAR in stream.coords
     assert stream["ch4"].attrs[CELL_METHODS_ATTR] == "time: mean"
     assert stream.attrs[SUPPORT_LABEL_ATTR] == "start"
-    assert stream.attrs["tsara_support_label_source"] == "declared"
+    assert stream.attrs["tsara_support_label_provenance"] == "declared"
     assert stream.attrs[SUPPORT_COVERAGE_ATTR] == pytest.approx(1.0)
 
 
@@ -594,10 +594,10 @@ def test_a_stream_whose_cells_could_not_be_determined_still_builds() -> None:
         _instrument(),
         name="picarro",
         platform=StationaryPlatform(latitude=40.0, longitude=-111.0),
-        support=_resolved(width_ns=None, width_source="assumed"),
+        support=_resolved(width_ns=None, width_provenance="assumed"),
     )
     assert TIME_BOUNDS_VAR not in stream.coords
-    assert stream.attrs["tsara_support_width_source"] == "assumed"
+    assert stream.attrs["tsara_support_width_provenance"] == "assumed"
     assert np.isnan(stream.attrs[SUPPORT_COVERAGE_ATTR])
 
 

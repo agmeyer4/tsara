@@ -7,7 +7,7 @@ and a grid is a different stage's product arriving later. Editing another
 stage's record would make it say something its writer never said.
 
 What makes the file readable on its own is that it carries its own
-provenance: package version, stage, grid period, the widest source cell the
+provenance: package version, stage, grid period, the widest reading cell the
 period was validated against, the variables selected, and the propagation
 form used for correlated uncertainty. That is what CLAUDE.md §5 asks of every
 saved output, and it is why no second descriptor is needed.

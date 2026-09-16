@@ -92,7 +92,7 @@ def draw_random_error(
     times : pandas.DatetimeIndex
         Sample times, needed for the AR(1) correlation between samples.
     rng : numpy.random.Generator
-        Source of randomness.
+        Random number generator.
     decorrelation_timescale_s : float, optional
         AR(1) timescale in seconds. None gives white noise.
 
@@ -150,7 +150,7 @@ def _ar1_standardized(
     tau_s : float
         Decorrelation timescale, seconds.
     rng : numpy.random.Generator
-        Source of randomness.
+        Random number generator.
 
     Returns
     -------
@@ -217,7 +217,7 @@ def draw_systematic_error(
     component : TrueComponent
         Systematic component parameters.
     rng : numpy.random.Generator
-        Source of randomness.
+        Random number generator.
 
     Returns
     -------
@@ -298,7 +298,7 @@ def apply_uncertainty(
     times : pandas.DatetimeIndex
         Sample times (needed for AR(1) correlation).
     rng : numpy.random.Generator
-        Source of randomness.
+        Random number generator.
 
     Returns
     -------
