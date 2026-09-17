@@ -39,7 +39,7 @@ The pipeline defers any change of clock to the last possible moment:
 | QA/QC, unit conversion | native | unchanged; both are pointwise |
 | Rolling baseline, enhancement Δ | native (time-based windows) | windows are durations, so cells of any width fit |
 | Plume detection | native → events are time **intervals** | an event's bounds are the union of the cells above threshold; the smallest resolvable event is one cell |
-| Ratio regression | **pairing clock** (§1.3), per event/window | the slower stream's **cells**, with the faster stream averaged onto them by overlap |
+| Ratio regression | **pairing clock** (§1.3), per event/window | the **wider-supported** stream's cells, with its partner averaged onto them by overlap |
 | Continuous rolling state, PMF matrix | **output grid** (§1.4) | grid cells, overlap-weighted |
 
 Rationale: rolling quantiles and MAD thresholds are well-defined on irregular
@@ -80,25 +80,43 @@ timestamps is physically justified there — but never across gaps longer than
 To regress species *y* against species *x* within an event or rolling window,
 when they come from instruments with different rates:
 
-1. The **pairing clock** is the *slower* of the two instruments' own **cells**,
-   restricted to the event/window.
+1. The **pairing clock** is the **wider-supported** of the two instruments'
+   own **cells**, restricted to the event/window. Phase 3.5 sharpened this:
+   before cells existed the rule read "the slower instrument", and rate and
+   support can disagree. Measured on the 2024 drives, the iWAS canisters
+   sample every 530 s (median over all 261 fills of the ten 2024 drive days)
+   but each sample integrates for only 14.9 s, so against a 60 s stationary
+   mean the canister is about nine times slower by rate (530 s against 60 s)
+   and four times *narrower* by support (14.9 s against 60 s). Pairing on the
+   canister's clock would
+   split a 60 s mean onto 15 s, which the interval model forbids; pairing on
+   the mean's clock is admissible, and the coverage of 0.25 is what says how
+   much to trust it. When the two widths are equal, the member with fewer
+   measured values where the records overlap is the clock (§11.4.1).
 2. The faster stream is averaged onto those cells **weighted by overlap**
-   (`tsara.core.support.bin_onto_cells`), with uncertainty propagated per §3,
+   (`tsara.align.binning.bin_streams_onto_cells`), with uncertainty propagated per §3,
    the count of contributing samples recorded, and the fraction of each cell
    actually covered recorded alongside it. Before Phase 3.5 the cell was
    *assumed* to be the slow instrument's sampling period centred on its
    timestamp; now it is read from the stream's own boundaries, so a canister
    that integrated for 14.1 s is paired over exactly 14.1 s (§10).
-3. Cells with `n_native = 0` for either species are dropped — a pair is never
-   fabricated.
+3. Cells with `n_source_<name> = 0` for either species are dropped — a pair is never
+   fabricated. Cells with *some* data are kept, with their coverage recorded;
+   `PairingConfig.min_coverage` (default 0.0, i.e. drop nothing) is the one
+   knob that acts on it, because how much of a cell must be measured is a
+   question about the science and not about the arithmetic.
 
 Consequences: every regression point contains at least one real measurement
-of *each* species, and the regression sample size N equals the number of real
-pairs. This eliminates interpolation pseudo-replication (interpolated points
-posing as independent samples and silently inflating degrees of freedom).
+of *each* species. This eliminates interpolation pseudo-replication
+(interpolated points posing as independent samples and silently inflating
+degrees of freedom). It does not by itself make every pair independent: a
+sparse member whose cells straddle the clock's boundaries can put one reading
+into two pairs, so the product records how many distinct readings of each
+species stand behind its pairs, and that — not the pair count — is the ceiling
+on a regression's N (§11.4.1).
 
 Different species pairs may therefore be paired on different clocks (each pair
-uses its own slower member). Each ratio is an independent slope estimate with
+uses its own wider-supported member). Each ratio is an independent slope estimate with
 its own honest CI; no shared clock across pairs is required for the ratios to
 be comparable as estimates.
 
@@ -106,22 +124,28 @@ be comparable as estimates.
 
 A single uniform master grid — the familiar `(time × species)` cube — is
 constructed **only** for the continuous rolling state and the PMF export
-matrix, which inherently require one. Construction is binning-only
-(`bin_statistic`), with per-cell propagated uncertainties and `n_native`
-counts carried alongside values. Grid cells carry CF boundaries like any
+matrix, which inherently require one. Construction is binning-only, by
+overlap-weighted mean and no other statistic (§11.7), with per-cell
+propagated uncertainties and `n_source_<name>` counts carried alongside values. Grid cells carry CF boundaries like any
 other stream, and `cell_methods = "time: mean (interval: <native>)"` records
-the resolution of the data that went into them (§10.2). Validation requires the grid period to be
-≥ the slowest stream's native period; cells with no native samples are NaN
-with `n_native = 0`, never interpolated. Config: `OutputGridConfig`
+the resolution of the data that went into them (§10.2). Validation refuses a
+period so fine that one selected reading would cover **two grid cells' worth of
+time**, the post-Phase-3.5 form of "≥ the slowest stream's native period"
+(§11.7; §1.3 makes the same correction for pairing); cells with no native samples are NaN with `n_source_<name> = 0`, never
+interpolated. Config: `OutputGridConfig`
 (`tsara.config.analysis`) — deliberately not named "the grid" or paired with
 the aux-interpolation guard, since neither streams nor cross-species pairing
 (§1.3) use it; it exists solely for this output boundary.
 
-### 1.5 Circular statistics for angular variables **[stub — Phase 4]**
+### 1.5 Circular statistics for angular variables
 
-Wind direction and other angular quantities are averaged as unit vectors
-(never arithmetically). Dispersion via the Yamartino (1984) single-pass
-estimator or exact circular standard deviation — to be specified in Phase 4.
+Wind direction and other angular quantities are averaged as unit vectors, never
+arithmetically — on the real drive data the arithmetic mean is wrong by more
+than 45° in 26.7 % of 60 s cells. A binned direction carries the mean
+resultant length *R* alongside it, and the dispersion reported is the **exact**
+circular standard deviation rather than the Yamartino (1984) single-pass
+approximation, which is bounded where the exact form correctly is not.
+Specified in full, with the measurements behind each choice, in **§11.5**.
 
 ---
 
@@ -287,6 +311,14 @@ $$\sigma_{\bar{x}}^2 = \Big(\sum_i 1/\sigma_i^2\Big)^{-1}
 
 This is the familiar "quadrature, scaled by N" rule — valid **only** here.
 
+**The weights are the operation's, not the estimator's.** Inverse-variance
+weights are the minimum-variance choice for *estimating a constant*, and it is
+tempting to reach for them here. TSARA does not. The value being reported is an
+overlap-weighted time average, because that is what "this stream's mean over
+that interval" means (§1.3); an uncertainty computed with different weights
+would not describe the number it is attached to. `tsara.core.propagation`
+therefore takes the caller's weights and uses exactly those.
+
 ### 3.3 Fully correlated errors (ρ = 1) — the systematic component
 
 $$\mathrm{Var}(\bar{x}) = \sum_i\sum_j w_i w_j \sigma_i \sigma_j
@@ -302,35 +334,91 @@ not an ad-hoc convention.
 
 ### 3.4 Partial correlation — decorrelation timescale τ
 
-For a random component with declared decorrelation timescale τ, v1 models the
-error autocorrelation as AR(1)-like, $\rho(\Delta t) = e^{-|\Delta t|/\tau}$,
-and applies the standard effective-sample-size correction with lag-1
-correlation $\rho_1 = e^{-\Delta t/\tau}$:
+For a random component with a declared decorrelation timescale τ (§2.2), TSARA
+models the error autocorrelation as AR(1)-like,
+$\rho(\Delta t) = e^{-|\Delta t|/\tau}$, and reduces the sample count
+accordingly:
 
-$$N_{\mathrm{eff}} = N\,\frac{1-\rho_1}{1+\rho_1}, \qquad
-N_{\mathrm{eff}} \in [1, N],$$
+$$\sigma_{\bar{x}}^2 = \sigma^2 / N_{\mathrm{eff}}, \qquad
+N_{\mathrm{eff}} \in [1, N].$$
 
-so $\sigma_{\bar{x}}^2 \approx \sigma^2 / N_{\mathrm{eff}}$. The exact double
-sum (§3.1) remains available as a slower, assumption-free alternative; τ → 0
-recovers §3.2 and τ → ∞ is handled by declaring the component systematic
-instead. *(Exact N_eff form is an open flag — see CLAUDE.md §5.)*
+Where **no** τ is declared the samples are treated as independent (§3.2). That
+is a *declaration*, not an assumption TSARA invents: a component declared
+random is by definition uncorrelated point to point, and τ is the refinement
+that says "less so than that". Every propagated σ carries the name of the form
+that produced it, `independent` included, so the two cases are distinguishable
+in the product rather than only by the absence of a label.
 
-This form has **no implemented consumer yet, deliberately**. Its callers are
-the stages that combine values across a support: §4 binning a fast stream onto
-a slow cell, §5 rolling a window over cells, §7 weighting a fit, and moving a
-declared σ from the interval it was quoted at onto whichever support is wanted
-(§10.8, where $N$ is the number of quoted intervals per cell, and where the
-worked numbers show why the naive $\sqrt{N}$ shortcut is not merely imprecise
-but confidently wrong). Ingestion records what a manifest declares and leaves
-the arithmetic to them, so this form has exactly one implementation when it
-arrives rather than one per stage.
+**Implementation.** `tsara.core.propagation` — one module, because §1.3
+binning, §5 rolling and §4.3 fit weighting all need this answered identically,
+and because moving a declared σ onto a different support (§10.8) is the same
+arithmetic again. Ingestion deliberately performs none of it (§10.8, §9.6).
 
-### 3.5 Median binning
+**Registered forms.** All three assume the same AR(1) autocorrelation and
+differ only in how faithfully they evaluate the resulting double sum.
 
-When `bin_statistic: median` is selected, the standard error of the median is
-inflated relative to the mean by $\sqrt{\pi/2} \approx 1.253$ for Gaussian
-noise; the propagation applies this factor to the random component. (Median
-binning trades this efficiency loss for robustness to sub-grid spikes.)
+| name | cost | exact when |
+|---|---|---|
+| `ar1_neff` | O(N) | samples equally spaced with equal σ — **the default** |
+| `ar1_asymptotic` | O(1) | N is many correlation times |
+| `ar1_double_sum` | O(N²) | always, given AR(1) |
+
+`ar1_neff` evaluates the equal-weight, equally-spaced case of §3.1 exactly. There
+$\rho_{ij} = \rho_1^{|i-j|}$ collapses the $N^2$ terms onto $N$ distinct lags:
+
+$$\frac{\mathrm{Var}(\bar{x})}{\sigma^2} = \frac{1}{N^2}\Big(N + 2\sum_{k=1}^{N-1}(N-k)\,\rho_1^{\,k}\Big),
+\qquad N_{\mathrm{eff}} = \Big(\frac{\mathrm{Var}(\bar{x})}{\sigma^2}\Big)^{-1}.$$
+
+The sum is evaluated term by term rather than through its algebraic closed
+form, which is numerically hopeless as $\rho_1 \to 1$: at $\rho_1 = 0.999$ it
+subtracts two quantities of order $10^4$ that agree to four figures, through a
+denominator of $10^{-6}$. The terms decay geometrically, so the sum is
+truncated once $\rho_1^k$ stops moving a float64 accumulator. Unequal weights
+reach the same formula through their Kish sample size,
+$(\sum w)^2 / \sum w^2$, which is exact for equal weights and an
+approximation otherwise; `ar1_double_sum` is how to find out what that
+approximation costs on a given cell.
+
+`ar1_asymptotic` is the large-$N$ limit, $N_{\mathrm{eff}} = N(1-\rho_1)/(1+\rho_1)$.
+It is the form this document specified before the finite-$N$ version existed,
+and it is kept because reproducing its error is worth being able to do:
+
+| case | `ar1_asymptotic` | `ar1_neff` | σ overstated by |
+|---|---|---|---|
+| 1 Hz, N = 200, τ = 100 s | 1.00 | 1.76 | 33 % |
+| 1 Hz, N = 60, τ = 20 s | 1.50 | 2.19 | 21 % |
+| 1 Hz, N = 600, τ = 2 s | 146.9 | 147.4 | 0.2 % |
+
+So the choice matters exactly when a window holds only a few correlation
+times, which is the normal case for a plume. **This resolves the "AR(1)
+approximation vs. exact double sum" flag in CLAUDE.md §5 for the arithmetic**:
+the finite-$N$ form is exact for the case it is used on and costs no more than
+linear time, so there is no reason to prefer the asymptotic one. It does not
+resolve whether the AR(1) *model* describes real instrument error; that is
+measured against synthetic ground truth with known τ in §11.1 and §11.8.
+
+**What "exact when equally spaced" costs when they are not.** The default form
+summarises a cell by two numbers, how many samples it holds and how far apart
+they are, so it cannot see *where* in the cell they sit. A dropout that splits
+a cell into two clumps is where that matters, and the size of the difference
+was measured rather than left as a caveat. Thirty samples drawn from an AR(1)
+error with τ = 20 s, 20 000 realizations, arranged two ways:
+
+| thirty samples arranged as | observed σ of the mean | `ar1_neff` | `ar1_double_sum` |
+|---|---|---|---|
+| one consecutive run | 1.608 | 1.604 (0.997×) | 1.604 (0.997×) |
+| two blocks of 15, 30 s apart | 1.344 | 1.604 (**1.194×**) | 1.343 (0.999×) |
+
+The same thirty samples carry *more* information when spread across the cell,
+because the two blocks have had time to decorrelate from each other. The cheap
+form does not know that and overstates σ by about a fifth. The error is in the
+conservative direction and is bounded by how badly a cell's samples clump,
+which `n_source` and `coverage` already report — and `ar1_double_sum` is
+selectable wherever a form is selectable, which is what makes the reference
+form useful rather than decorative.
+
+Limits: τ → 0 recovers §3.2, and τ → ∞ is properly handled by declaring the
+component systematic (§3.3) rather than by an enormous τ.
 
 ---
 
@@ -1270,6 +1358,31 @@ ULP away under `fast`, which is why the round-trip tests compare with a
 relative tolerance rather than exact equality, and why one of them sets
 `exact` and asserts bitwise recovery.
 
+### 9.2.3 Interpolated copies beside measured columns
+
+Some merged archives publish a measurement twice: once as measured, with gaps
+where the instrument reported nothing, and once interpolated into every row.
+The 2024 NOAA mobile-lab drive files do this on a shared 1 s merge grid —
+`CO2_ppm` beside `CO2_i_ppm`, `CH4_ppb` beside `CH4_i_ppb`, `O3_ppb` beside
+`O3_ppb_i` — and on the 2024-07-18 drive the measured Picarro columns hold a
+value in 43 % of rows (every second or third) and O₃ in 50 %, while their `_i`
+copies hold one in every row.
+
+TSARA cannot tell the two apart. Both are numeric columns under a name the
+manifest chooses, and nothing in the file marks one as invented. A manifest
+that names an `_i` column with `role: gas` therefore feeds TSARA exactly the
+interpolated gas it exists never to produce (§1.2): every `n_source` and
+coverage downstream then reports full support the instrument never had, and
+the pseudo-replication the binning design prevents arrives through the front
+door. **Name the measured column.** An interpolated copy may be useful as
+`role: aux` for a quick look; it is never a gas.
+
+This is not hypothetical. It happened to this document: two Phase-4 real-data
+results (§11.4, §11.7) were first measured on the `_i` columns and reported
+full coverage that the measured record does not have, and were corrected in
+that phase's final audit. A density check is the quickest guard — count finite
+values *per column*, since a file's widest column can be an interpolated one.
+
 ### 9.3 ICARTT revision selection
 
 Archives hold several revisions of one day's data, and ingesting all of them
@@ -1326,6 +1439,7 @@ Fixed, and each step depends on the previous one:
 | Step | Why here |
 |---|---|
 | convert units | so everything downstream reads canonical numbers |
+| wrap a `circular` variable into [0, 360) | a direction's canonical value is on one turn |
 | apply QA/QC | bounds are written in the units the author thinks in |
 | resolve uncertainty | `absolute` is declared in canonical units (§2.2) |
 
@@ -1334,6 +1448,22 @@ example converts ppm→ppb and then bounds in ppb, so masking before
 conversion would compare ppb bounds against ppm numbers and reject the whole
 record. `flag` reads a separate instrument status column, which is never a
 converted quantity.
+
+**The wrap is a step of its own because a conversion can carry a direction
+across north.** The commonest conversion for a direction is an offset — a
+magnetic bearing to a true one, +10.3° at Salt Lake City — and the most
+natural QA/QC rule for a direction is `range: [0, 360]`. Without the wrap,
+352° becomes 362.3° and the range rule masks it, along with every other
+reading within 10.3° west of north: a whole sector of the wind rose deleted,
+silently, rather than a random fraction of the record. The permitted 2026
+archive carries magnetic and true directions side by side
+(`Wind Direction (Deg Mag)` beside `wind_dir_true` on the Wyoming van,
+`mag_dir_deg` and `mag_course_deg` on the LANL instruments), so the conversion
+is one a manifest will plausibly declare. Found in the Phase-4 walkthrough;
+before it, ingestion wrapped nothing, and a logger's `-5` or `365` also
+reached the stream unwrapped. The wrap is exact and changes no direction, so
+it is a consequence of the declaration rather than a model, and it applies
+only to variables declaring `circular: true`.
 
 Rules **mask rather than delete**. Rows are the instrument's clock, and a
 rolling window that closes over a removed sample computes a different answer
@@ -2218,7 +2348,9 @@ row, in the direction that overlaps its neighbour.
   cell on a 60 s cadence; TSARA honours what the file says rather than
   rounding it.
 - **Spatial support on mobile platforms.** A 15 s canister at 15 m/s covers
-  about 225 m. Cell position is the track at the cell midpoint; a
+  about 225 m. **Measured since, on the 32 iWAS fills of the 2024-07-18
+  drive against their own MetNav track: a median of 127 m and a maximum of
+  307 m.** Cell position is the track at the cell midpoint; a
   `path_length_m` attribute is a future addition for clustering.
 - **The declared-versus-empirical closure diagnostic** proposed during
   scoping — comparing a declared σ against `diff_mad` at the delivered support
@@ -2226,6 +2358,1224 @@ row, in the direction that overlaps its neighbour.
   configuration, and ingestion computing it would mean reading a config this
   stage has no business reading (§9.6). It belongs to the phase that owns the
   noise estimator.
+
+---
+
+## 11. Alignment and pairing (Phase 4)
+
+The stage that first *combines* values across time. Three operations live
+here, and they need different amounts of trust — the test being whether an
+operation needs a **model** or only a **declaration** (§10.8):
+
+| operation | needs | where |
+|---|---|---|
+| averaging a fast stream onto a slow stream's cells | only the cells, which are already declared | §1.3, §11.2 |
+| interpolating GPS and met onto another clock | a smoothness model, guarded by `max_interp_gap` | §1.2, §11.4 |
+| moving a σ from its quoted interval onto a cell | τ and an AR(1) model | §3.4, §10.8 |
+
+Nothing here detects events, computes a baseline or fits a slope; it hands
+those phases honest pairs.
+
+### 11.1 How each operation here is checked
+
+This phase is the first that **combines** measurements: earlier stages apply
+declared, exact, one-to-one maps (a unit conversion, a per-point σ from a
+declared budget, a timestamp moved to its cell midpoint), and each of those is
+recoverable from what the product records. Nothing here is. A binned value is
+a weighted mean no instrument reported, interpolation assumes smoothness, the
+τ correction assumes AR(1), and none of the three can be inverted back to the
+values that went in.
+
+That asymmetry sets the standard of proof. Five kinds of evidence are used,
+because they fail differently:
+
+| evidence | catches |
+|---|---|
+| a fixture small enough to check with a pencil | the code does something other than what the docstring says |
+| an independent reimplementation, written from the definition and slow | the vectorized spelling is wrong |
+| a closed form (an analytic plume integrated exactly) | the weighting scheme is subtly wrong |
+| **Monte Carlo** | the formula is the *wrong formula* |
+| mutation testing of the tests themselves | the tests would not have noticed |
+
+The fourth is the one that matters, and it is the one an algebraic test
+cannot supply: comparing algebra against algebra proves a formula was typed
+correctly, never that it was the right formula. For an uncertainty the
+experiment is direct — draw many realizations of an error with known
+structure, average each, and measure how much the averages actually scatter.
+
+Measured for §3, at 20 000 realizations (where the measurement itself is good
+to about 0.5 %):
+
+| case | observed scatter | predicted | disagreement |
+|---|---|---|---|
+| white noise, N = 60 | 0.2568 | 0.2582 (`independent`) | 0.6 % |
+| AR(1), τ = 20 s, N = 60 | 1.3536 | 1.3501 (`ar1_neff`) | **0.3 %** |
+| the same, other forms | 1.3536 | 1.6332 (`ar1_asymptotic`) | 17 % |
+| the same, naive √N | 1.3536 | 0.2582 | 424 % |
+| systematic, N = 100 | 0.02003 | 0.02000 (§3.3) | 0.2 % |
+
+So the finite-*N* form is not merely the tidier algebra: it is the one that
+matches what happens. The last two rows are the cost of the alternatives, and
+the naive √N row is why §10.8 refuses to apply it when no τ is declared.
+
+**The archive numbers re-run from the repository.** Real data has no answer
+key, so the real-data results in this section are evidence of a different kind:
+a loop reimplementation agreeing with TSARA on the files, and numbers that can
+be measured again. `examples/notebooks/04b_alignment_real_data.ipynb` does the
+second. It reads the permitted archive through manifests, runs this section's
+operations, and ends in a ledger setting 83 numbers from §9.2.3 and §11.4–§11.7.1
+beside the values printed here; at the close of the Phase-4 walkthrough all 83
+agreed. It is committed without outputs and needs `TSARA_ARCHIVE`. Not re-run
+there: the archive-wide census in §11.4.1, the Yamartino comparison in §11.5,
+the midpoint-against-mean table in §11.6, and the compression timings in §11.7.
+
+### 11.2 The joining operation
+
+Everything TSARA does with more than one clock is one operation: **every value
+is averaged onto target cells, weighted by how much of it falls inside each
+one**. The two products of this phase differ only in what the target is.
+
+| product | target cells | consumer |
+|---|---|---|
+| a species pair (§11.4) | the wider-supported member's own cells | §4 regression |
+| a campaign matrix (§11.7) | a uniform grid | receptor modelling, continuous state |
+
+They are not two designs. `tsara.align.binning.bin_streams_onto_cells` is the
+operation; `pair_species` is that function with two variables selected and
+incomplete rows dropped. Writing the pairwise form as its own implementation
+was a design inversion caught during the phase, and it would have left two
+implementations of one idea to drift apart.
+
+**Deliberately variable-agnostic.** The binner does not know what a species
+is. It takes whatever variables it is handed — raw concentrations now,
+baselines and enhancements once §5 computes them, met, anything a later stage
+invents — and puts them on the support asked for. TSARA is a loader and
+transformer for sweeping analysis choices, so the joining block must not need
+editing every time a new kind of variable appears upstream of it. There is
+deliberately **no "PMF matrix" object**: a receptor-model matrix is a *call*
+to this function with a chosen set of columns.
+
+**What travels with a variable**, automatically, so a caller cannot forget:
+
+* its uncertainty components, propagated through the *same* overlap weights
+  that formed the value, random and systematic separately (§3);
+* `n_source_<name>` and `coverage_<name>` — how many source cells contributed
+  and how much of the target cell they covered, the two numbers that separate
+  a well-determined value from a number that merely exists;
+* everything the source declared about itself, plus `tsara_source_instrument`
+  saying where it came from and `tsara_binned` saying whether this stage
+  averaged it at all.
+
+**Three behaviours are not left to callers.** A variable declaring
+`circular: 1` is vector-averaged, never arithmetically (§11.5), and carries a
+resultant length and dispersion instead of a sigma. A stream whose cells
+already *are* the target passes through untouched — tested on the cells, not
+on the instrument name, because averaging a cell onto itself is the identity
+mathematically and not in floating point. Its *values* are untouched; its
+companion columns are not a shortcut, and are exactly what the general path
+would produce for one source cell covering its target — a count and coverage
+of 1 where a value is present and 0 where it is masked, and for a direction a
+resultant length of 1 and a dispersion of 0 (§11.5). Before the Phase-4
+walkthrough the pass-through stamped a count and coverage of 1 on masked rows
+too, and gave a direction no quality columns, so a product's columns and their
+meaning depended on whether a stream happened to share the target's cells. And
+a target cell with no contributing data stays `nan`: gases are binned, never
+interpolated (§1.2).
+
+**Column names.** A canonical name is kept as it is when only one selected
+stream carries it. When two do — a campaign comparing two analyzers — both are
+suffixed with their instrument rather than one silently winning. The spelling
+therefore depends on the selection, which is why every column also records its
+source instrument.
+
+#### 11.2.1 The operation is symmetric in the code and must not be in use
+
+Averaging a fast stream onto slow cells discards resolution the slow
+instrument never had, which is honest. Evaluating a slow value on fast cells
+invents no value — every row holds a number the instrument really reported —
+but it invents **rows**, which is the interpolation rule (§1.2) restated for a
+step function. Sixty rows from one 60 s mean enter a least-squares fit as sixty
+independent measurements; the slope estimate survives and its standard error
+shrinks by √60 ≈ 7.7, which is exactly the pseudo-replication that pairing on
+the wider-supported clock exists to prevent (§1.3).
+
+Both products of this phase already prevent it by choosing their target:
+`pair_species` pairs on the wider-supported member, and `build_output_grid`
+runs this same test against its cells before binning (§11.7). The primitive
+they share refuses it too, and has to, because it is public and is the
+documented route to a receptor-model matrix over a caller's own target cells.
+Neither `coverage` nor `n_source` would have flagged it: a replicated row
+reports coverage 1.0 and one contributing source cell, which is also what a
+legitimately sparse canister measurement reports.
+
+**The test is measured on the overlaps, not on a comparison of widths**, and
+that choice is load-bearing. A width comparison needs a tolerance, because real
+instruments disagree about their own nominal rate — the median cell widths of
+the 2026 archive's three Aeris analyzers are 0.992 s, 0.993 s and 1.024 s
+against a nominal 1 s — and a strict median-width rule refuses binning one onto
+another over a difference that replicates nothing.
+
+**The rule: a reading is replicated when the time it shares with the target
+cells adds up to at least twice the width of the widest target cell it
+touches** (`tsara.align.binning.measure_replication`).
+
+| source cells | target cells | two cells' worth? | outcome |
+|---|---|---|---|
+| 60 s | 1 s | sixty | refused |
+| 2 s, any phase | 1 s | two | refused |
+| 1.9 s | 1 s | no | allowed; the sharing is counted (§11.7) |
+| 1.023 s | 1 s | no | allowed |
+| 10 s, half a period out of phase | 10 s | no | allowed; lossy for another reason (§11.9.1) |
+
+**It replaced a rule with a phase hole.** Until the Phase-4 walkthrough the
+test counted target cells lying *wholly* inside one source cell and refused at
+two. It agreed with the table on every row but one: a perfectly regular 2 s
+record offset from a 1 s grid by 0.3 s or 0.5 s wholly contains only one 1 s
+cell, so it passed, and each of its readings fed two or three rows — while the
+same record exactly in phase was refused. No stream in the permitted archive
+reached it (the 2 s Wyoming Picarro sits exactly on whole seconds, and every
+2026 lag correction is a whole number of seconds), but a fractional
+`time_shift` would have. Twice a width is twice a width whatever the phase, so
+the rule that replaced it has no such case, and it still needs no tolerance:
+the sums are integer nanoseconds.
+
+Below that line a reading can still feed two rows — a 1.9 s cell on a 1 s grid,
+a 15 s canister fill across a minute boundary — and that is not refused but
+counted, in `tsara_pairing_readings` (§11.4.1) and `tsara_grid_readings`
+(§11.7), each with a warning when rows outnumber the readings behind them.
+
+The escape route for the legitimate case is the one that already exists: a
+smooth non-gas field wanted on a finer clock is *interpolated* under a gap
+guard by `tsara.align.auxiliary` (§11.6), which refuses a variable declaring
+`role: gas`.
+
+#### 11.2.2 A companion column is not a variable
+
+Four families of column exist only to qualify the column they are named after:
+the two uncertainty components, `n_source_*`, `coverage_*`, and the resultant
+length and dispersion an angular variable carries instead of a sigma. The
+default selection excludes all four, through one predicate
+(`tsara.core.naming.is_companion_name`) rather than a list per caller.
+
+This is not tidiness. Three of the four families are produced *by this
+function*, so a joined product that is joined again — which is what §5 does
+with a baseline computed from one — would otherwise grow a
+`coverage_coverage_ch4` on every pass: a column with no parent, no meaning, and
+an arithmetic mean taken of a quantity whose own `cell_methods` says `sum`.
+Asking about the name is the only test available, exactly as for the sigma
+companions, since nothing else in a stream marks them and a stream may have
+come from the generator, from ingestion, or from a file reloaded from disk.
+
+Cell boundaries are excluded for a related reason: they describe the rows
+rather than varying over them. They are usually a coordinate and therefore
+invisible to a selection, but `stream_cells` deliberately accepts a stream that
+carries them as a data variable, so the selection accepts that shape too. Any
+variable that is not one value per cell is refused by name rather than reaching
+the weighting as a shape mismatch.
+
+### 11.3 Propagation
+
+Implemented in `tsara.core.propagation`, specified in §3. The two components
+never mix, the weights are the operation's rather than the estimator's (§3.2),
+and every propagated σ carries the name of the form that produced it.
+
+### 11.4 Pairing
+
+Implemented in `tsara.align.pairing`, specified in §1.3. Two species, one
+clock, real pairs only.
+
+**Which clock.** The cells of whichever stream has the **wider support**, and
+the other is averaged onto them by overlap. Never the reverse: a value may be
+averaged onto a wider support, never split onto a narrower one. §1.3 records
+why this stopped being "the slower instrument" — measured, the iWAS canisters
+are about nine times slower than a 60 s stationary mean by rate (530 s against
+60 s) and four times *narrower* by support (14.9 s against 60 s; medians over
+all 261 fills of the ten 2024 drive days).
+
+When the widths are equal, the clock is the member with **fewer measured
+values where the two records overlap**, and if those tie too, the first
+instrument by name (§11.4.1). No step looks at argument order, so which
+species is numerator never changes which air is compared.
+
+**Same-instrument species skip the binning entirely.** Several gases retrieved
+from one spectrum already share a clock, and that is the commonest pair there
+is. The fast path is not merely an optimization: averaging a cell onto itself
+is the identity mathematically and *not* in floating point, so the general
+path would perturb values that were never meant to change.
+
+**Uncertainty, in order.** A declared figure quoted at a different interval
+from the cells it sits on is first moved onto those cells (§10.8) — the
+arithmetic ingestion deliberately refuses to do, done here at the point of
+use, or refused again and labelled `unscaled` when no decorrelation timescale
+was declared. Only then is the binned member's uncertainty propagated through
+the *same* overlap weights that formed its value (§3), the two components
+separately.
+
+**Cell methods.** The binned species is a mean over its cell. The species
+already on the clock was not averaged by this stage at all and keeps its own
+stream's method, since stamping `time: mean` on a point sample would assert an
+averaging that never happened. Counts are `time: sum`, CF's own word for
+them. Coverage fractions and the sigma companions carry no cell method: a
+coverage is a property of the cell rather than a statistic of the data inside
+it, and a sigma describes the uncertainty *of* the cell's value, which differs
+from a mean of sigmas by exactly √N_eff (§10.2).
+
+**Coverage may slightly exceed 1**, and is left alone when it does. Fixed-width
+cells centred on jittered timestamps overlap each other, so their overlaps
+with one target cell can sum past its width — documented as benign in §10.2,
+since the value is a weighted *mean* and the weights normalize. Clipping would
+hide a real property of the source record behind a tidier number.
+
+**What the product carries.** A paired series is an ordinary self-describing
+`xarray.Dataset` with CF cells, not a bundle entry: it is a per-call
+intermediate that Phase 6 will request per event, and the phase's saved
+product is the output grid (§11.7). Its attributes:
+
+| attribute | meaning |
+|---|---|
+| `tsara_pairing_clock` | instrument whose cells the pairs sit on |
+| `tsara_pairing_clock_reason` | why that one: both median cell widths, and on a tie both measured-value counts |
+| `tsara_pairing_min_coverage` | the guard applied (`PairingConfig.min_coverage`) |
+| `tsara_pairing_cells_considered` | candidate cells before dropping |
+| `tsara_pairing_cells_dropped` | how many produced no usable pair |
+| `tsara_propagation_form` | registered form used for correlated random error (§3.4) |
+
+and per variable:
+
+| attribute | meaning |
+|---|---|
+| `tsara_source_instrument` | which stream this species came from |
+| `tsara_binned` | 1 if averaged onto the clock, 0 if already on it |
+| `tsara_sigma_at_support` | how a declared σ was moved onto its own cells, or `unscaled` |
+| `tsara_pairing_readings` | distinct readings of this species behind the surviving pairs (§11.4.1) |
+
+**How it is checked** (§11.1): a two-cell fixture whose paired values (1.5 and
+5.5) can be worked out on paper; an independent O(N·M) reimplementation
+written from the definition of §1.3, agreeing to 1e-12 on random cells with a
+masked sample; two closed forms — the mean of a linear ramp over a cell equals
+the ramp at the cell midpoint, and a species paired against a constant
+multiple of itself returns that multiple exactly, which is the property that
+would fail if the two members were averaged over different air; and invariants
+needing no ground truth — binning a stream onto matching cells returns it, and
+a cell with no partner data yields no pair rather than an interpolation. The
+tie rule and the reading counts of §11.4.1 are pinned by fixtures that each
+isolate one decision, and those tests were mutation-scored: nine plausible
+defects injected one at a time (argument order deciding a tie, rows counted
+instead of finite values, whole records counted instead of the shared span,
+the name tie reversed, a zero-overlap or masked cell counted as a reading, a
+binned member credited one reading per pair, the warning firing on equality,
+the denser member preferred), and all nine caught. The first run caught eight;
+the miss was the zero-overlap filter, which is reachable only when one source
+cell nests inside another and the overlap search brackets a cell that does not
+overlap, and a fixture of exactly that shape now pins it.
+
+**And on real data.** The 2024-07-18 mobile-lab drive carries both members of
+the canister case: on that day, 32 iWAS fills of median width 14.7 s at a
+441 s cadence (exact cells from `iWAS_Stop_UTC`), and the Picarro's measured
+`CH4_ppb`, a 1 s file with a value in every second or third row. Pairing
+benzene against CH₄ chooses the canister as the clock (14.7 s vs 1 s) and keeps
+all 32 fills, each drawing a median of **7** CH₄ readings covering a median
+**0.43** of its fill (0.395 at least) — the analyzer reports every 2–3 s, and
+the coverage says so. Recomputing every pair with a Python loop straight from
+§1.3 reproduces the paired values **exactly**: a maximum difference of
+0.000e+00 ppb over the 32 pairs.
+
+The same comparison shows what the overlap weighting is worth. Scoring
+instead against a plain unweighted mean of the readings whose *start* falls
+inside the fill window — the obvious shortcut, which gives a partial edge
+reading either full weight or none — the two disagree by up to **38.08 ppb** of
+CH₄. On a ~1950 ppb background that is small; against the enhancements these
+canisters exist to attribute it is not, and it is entirely an artefact of
+which fraction of an edge reading counts.
+
+**Corrected in the Phase-4 final audit.** This paragraph first reported
+coverage 1.000, a median of 16 samples and a 17.89 ppb disagreement. Those
+numbers are right for the file's `CH4_i_ppb` column, which is an *interpolated*
+copy of the measurement filled into every row — so the original measurement
+paired a canister against an interpolated gas, the one thing this section
+exists to prevent. The loop's exact agreement held on both columns. §9.2.3
+records the trap for anyone writing a manifest against these files.
+
+#### 11.4.1 A tie in width, and the reading counted twice
+
+"The wider-supported member" has no answer for two instruments with equal
+cells, and the code as first written broke the tie by argument order. That is
+harmless while equal-width cells coincide, since each cell is then its own
+partner. It is not harmless when they are **out of phase and one member is
+sparse**: every sparse reading then straddles two cells of the denser clock,
+half-covers each, and appears in both pairs.
+
+**On real data.** The 2024-07-18 mobile-lab drive has exactly that shape.
+NOy-LIF writes `Time_Mid` and the Picarro writes `Time_Start`, both on the same
+whole-second grid of 19,501 rows, so TSARA's cells for the two sit half a
+second apart; NOy has a finite value in 19,498 rows and CO₂ in 8,448, a value
+in every second row 69 % of the time and otherwise every third. Ingested with
+TSARA and paired with the argument-order rule:
+
+| call | clock | pairs | distinct CO₂ readings behind them |
+|---|---|---|---|
+| `pair_species(streams, "noy", "co2")` | LIF | 16,893 | 8,447 |
+| `pair_species(streams, "co2", "noy")` | Picarro | 8,447 | 8,447 |
+
+O₃ (9,751 finite values in the same 19,501 rows) against LIF did the same:
+19,498 pairs in one order and 9,750 in the other.
+
+**Why it matters, measured rather than argued.** For an ordinary least-squares
+slope the two runs are algebraically identical: a reading that appears twice,
+once beside each of two neighbouring values of the other species, pulls on
+the line exactly as one appearance beside their mean does. What the copies
+duplicate is the reading's *error*, which a fit counting the pairs as
+independent then counts twice. The size of that cannot be read off the
+algebra, so it was measured: the same two clocks at the same sparseness, a
+smooth 600 s sinusoid for truth so that the two instruments see identical air
+to well within noise, a true NOy/CO₂ slope of 8, and the noise redrawn 300
+times per row. The naive least-squares standard error is compared with how
+much the slope actually scatters across draws:
+
+| σ on CO₂ (ppm) | σ on NOy (ppb) | naive SE ÷ real scatter, sparser member's clock | the same, denser member's clock |
+|---|---|---|---|
+| 0 | 1.0 | 0.96 | 1.00 |
+| 0.15 | 1.0 | 1.02 | **0.82** |
+| 0.30 | 0.5 | 1.03 | **0.74** |
+
+The slope agrees to every printed digit on both clocks. On the sparser
+member's cells the naive standard error describes the real scatter; on the
+denser member's cells it is a fifth to a quarter too narrow as soon as the
+duplicated species carries error of its own, bounded by 1/√2 when all of the
+error sits there. Nothing in `coverage` or `n_source` shows it.
+
+**How often the shape occurs.** Counted across all 1582 permitted files (the
+1122 ICARTT files and the 460 parquet files outside the quarantine
+directories): each file's cell width is its median positive sampling interval,
+its label is inferred from the ICARTT independent variable's name (a name
+saying nothing, and every parquet file, is `unknown` and therefore centred), its
+phase is the modal cell start modulo that width to within 2 % of it, and files
+are grouped into instruments by archive tree and date. Of the 3909 same-day
+pairs of instruments with equal widths, **312 are half a cell apart at 1 s**
+— 210 on the NOAA drives, 80 in SLC-SOS, 22 on the TwinOtter — and **all 2844
+pairs in the 60 s stationary suite are in phase**, so that suite never meets
+the case. No two 2026 instruments share an exact width.
+
+**The rule.** On a tie in width, the member with fewer finite values sets the
+clock. Each of its readings is then exactly one pair, and the denser member is
+averaged across it, centred on the same interval. Counted over the span where
+*both* records run, because a sparse analyzer logging all day beside a dense
+one switched on for ten minutes has more readings in total and fewer in the
+air they share; counted over the whole records rather than an event's
+`interval`, so that one pair of instruments keeps one clock from event to
+event. If the counts also tie, the first instrument by name decides. On the
+drive above, both argument orders now give the Picarro clock and 8,447 pairs.
+
+**What the rule does not settle, stated rather than rounded.** Two *dense*
+instruments of equal width half a cell apart duplicate nothing on either
+clock, but every reading of the binned member now contributes half of itself
+to each of two *neighbouring* pairs, so adjacent pairs share an error. The
+same experiment with no sparseness at all (every CO₂ row filled, 3599 pairs
+on either clock):
+
+| σ on CO₂ (ppm) | σ on NOy (ppb) | naive SE ÷ real scatter, CO₂ clock | the same, NOy clock |
+|---|---|---|---|
+| 0 | 1.0 | **0.70** | 0.99 |
+| 0.15 | 1.0 | 0.86 | 0.81 |
+| 0.30 | 0.5 | 0.99 | **0.72** |
+
+Both tables are the executed output of `examples/notebooks/04_alignment_walkthrough.ipynb`
+§9 (seeds 0–299), so they re-run from the repository.
+
+No choice of clock is honest in general: whichever member is averaged carries
+the shared error, and the standard error is too narrow by up to 1/√2 when that
+member's error dominates. This is not rare. On the same 2024-07-18 drive the
+iodide-CIMS species (finite in 92–97 % of rows) and the PTR-MS species (94–95 %)
+are dense, start-labelled and half a cell from the mid-labelled LIF. The
+tie rule still gives them a deterministic clock (the member with fewer finite
+values, which there is the CIMS or PTR stream), and the reading count below
+cannot flag them, because sharing a reading between two pairs is a
+*correlation* between pairs rather than a shortfall of readings. Accounting for
+it belongs to the regression, which can see the covariance the shared overlap
+weights imply; it is recorded as an open question for Phase 7.
+
+The same sharing moves a fitted slope, not only its error, when the signal
+itself has structure at the scale of a cell. On a synthetic campaign of two
+noise-free 60 s instruments half a cell apart, with plumes about as wide as
+the cells and a true ratio of 0.25, a least-squares fit of tracer on CH₄ gives
+**0.285** on the tracer's clock and **0.169** on the CH₄'s, while the
+mass-weighted ratio is 0.251 on both. Which member gets smoothed decides which
+way the slope is biased. The 60 s stationary suite is in phase throughout, so
+the archive does not meet this at 60 s; at 1 s it would need plumes one or two
+samples wide, which the drive records do contain (§9.5).
+
+**The duplication a clock cannot remove.** A sparse member narrower than the
+clock can still straddle its boundaries: a 15 s canister fill across a minute
+boundary of a 60 s mean is one reading in two pairs whichever rule chooses
+the clock. In a synthetic campaign of 327 fills against 60 s means, 84 fills
+landed in two pairs, 20.5 % of the pairs. On real data the case is presently
+empty: all 261 iWAS fills of the 2024 drive days, paired against the
+mobile lab's own 60 s ground Picarro (each with its file's stop column naming
+exact cells), yield **one** pair, because the ground record has no value while
+the lab is driving. It is therefore recorded rather than prevented. Each
+paired species carries `tsara_pairing_readings`, the number of distinct finite
+readings behind the surviving pairs (a species already on the clock has one
+per pair by construction), `PairedSpecies` exposes the same counts, and a
+warning names the species when either count falls below the number of pairs.
+That count, not the pair count, is a ceiling on a regression's N — a ceiling
+and not an estimate, since readings shared between neighbouring pairs, as in
+the dense case above, reduce the independent information without reducing the
+count.
+
+### 11.5 Circular statistics for angular variables
+
+Supersedes the §1.5 stub. A direction is a point on a circle, so directions
+are averaged as unit vectors, never arithmetically. Config:
+`VariableConfig.circular`, valid only for `role: met`.
+
+Measured on the ten 2024 mobile-lab drive days (MetNav `WindDir_calc_deg`),
+the 3337 epoch-aligned sixty-second cells holding at least 30 readings: the arithmetic mean differs from the vector mean by more
+than 45° in **26.7 %** of cells, with a median error of 7.0° and a maximum of
+180.0°.
+
+**What a binned direction carries.** Summing unit vectors gives two numbers,
+not one: the mean direction, and the mean resultant length *R* — the length
+of the average vector, 1 when every sample agrees and 0 when they cancel.
+TSARA stores *R*, because every dispersion statistic in the circular
+literature is a transform of it, so choosing between them is choosing a
+presentation rather than an estimator.
+
+The dispersion reported alongside it is the **exact circular standard
+deviation**, $s = \sqrt{-2\ln R}$, exact for a wrapped normal (whose
+resultant length is $e^{-\sigma^2/2}$) and the standard definition otherwise.
+It is unbounded: as directions spread toward uniform it runs to infinity,
+which is the honest description of a direction that has ceased to exist.
+
+**Yamartino (1984) is deliberately not implemented.** It approximates the same
+quantity in a single pass, for dataloggers that could not hold the sample
+vectors in memory — not a constraint TSARA operates under. Measured on the
+same drive data, the two agree to 0.16° in the median cell and diverge by up
+to 66.5°, entirely in the tumbling cells where Yamartino saturates near 105°
+and the exact form correctly does not. Anyone needing it has *R* and one line
+of arithmetic.
+
+**Why the dispersion is not decoration.** On a moving platform a 60 s mean
+direction is usually not a well-determined quantity:
+
+| resultant length | cells | share | exact sd, median |
+|---|---|---|---|
+| steady, *R* > 0.99 | 58 | 1.7 % | 7.1° |
+| *R* 0.90–0.99 | 1140 | 34.2 % | 18.5° |
+| *R* 0.50–0.90 | 1713 | 51.3 % | 40.6° |
+| tumbling, *R* < 0.50 | 426 | 12.8 % | 80.5° |
+
+Part of that spread is the van turning rather than the atmosphere — a
+documented limit, not a correction TSARA applies.
+
+**How far to trust R depends on how many readings made it.** *R* is a
+statistic of a sample and is biased high when the sample is small: even
+directions carrying no information at all cannot average to an *R* near zero
+from a handful of readings, and the dispersion derived from *R* is understated
+correspondingly. Measured, each figure the median (dispersion) or mean (*R*)
+over 3000 draws:
+
+| contributing readings *N* | mean *R*, directions uniformly random (truth 0) | reported dispersion, wrapped normal of true spread 40° |
+|---|---|---|
+| 2 | 0.64 | 19° |
+| 5 | 0.40 | 34° |
+| 10 | 0.28 | 37° |
+| 15 | 0.23 | 38° |
+| 60 | 0.11 | 40° |
+
+For uniformly random directions the mean *R* tracks 1/√*N*. At the 60 readings
+of a minute of 1 Hz wind the bias is a degree; at the ten of a 10 s analyzer
+cell or the fifteen of a canister fill it is not negligible, and a cell with
+two readings says almost nothing. TSARA does not correct for it: a
+bias-corrected *R* assumes a distribution, and `n_source_<name>` travels with
+every binned direction so the reader can see what the *R* rests on. The same
+is true of a cell with one contributing reading, whose *R* is 1 by
+construction — agreement of that reading with itself, not a steady wind.
+
+**Unit vectors, not speed-weighted vectors.** Every reading counts equally
+whatever the wind speed. The other established convention weights each
+reading by its speed, and so reports the direction the air moved in on
+average rather than the direction the vane usually pointed. Measured on 325
+minute cells of the 2024-07-18 drive (`WindDir_calc_deg` and
+`WindSpd_calc_m_s` from the mobile-lab MetNav file, cells with at least 30
+readings), the two differ by a median 2.2°, by more than 8.4° in a tenth of
+cells, by more than 20° in 1.5 %, and by 54.6° at worst; the difference grows as
+the wind becomes variable (median 1.2° where *R* > 0.9, 8.2° where
+*R* < 0.5). TSARA uses unit vectors because the join is variable-agnostic
+(§11.2): speed-weighting would require the binner to know which speed
+variable belongs to which direction, and a direction binned alone is the
+case it must handle. A speed-weighted direction is recoverable by a caller
+who bins the wind components `u` and `v` as ordinary scalars.
+
+**The pass-through path carries the same columns.** A direction whose stream
+already sits on the target cells is not re-averaged (§11.2), but it still
+gains `<name>_resultant_length` (1 where a reading is present) and
+`<name>_dispersion` (0), and carries no sigma, exactly as the general path
+produces for one contributing reading. Until the Phase-4 walkthrough it gained
+neither and kept its sigma, so a product's columns depended on whether a
+stream happened to share the target's cells: the 2024 ground MetNav's 60 s
+`WindDir_calc_deg` on a 60 s grid aligned to its cells — which the grid's own
+phase warning recommends (§11.9.1) — had no *R*, and one grid period later it
+did.
+
+**No scientific threshold is applied.** A direction with *R* = 0.001 is
+meaningless and is reported anyway, beside the *R* that says so; picking a
+cut-off would put a magic number in the library where the judgement belongs
+to the user. Guarding on *R* is left to the caller, exactly as the pairing
+coverage guard is (§11.4).
+
+**One numerical threshold is applied**, and it is a fact about float64 rather
+than about wind. Directions that cancel mathematically do not cancel
+numerically: `sin(180°)` is 1.22e-16, so a north/south pair leaves a residual
+vector of length 6.1e-17 pointing due *east*, and `atan2` reports 90.000°
+with complete confidence. Summed in three different orders the four compass
+points give **129.60°, 153.43° and 132.19°** — a number that changes when its
+inputs are reordered is not a measurement. So a resultant length at or below
+$N\epsilon$, the rounding floor of the sum of *N* unit vectors that produced
+it, is snapped to exactly zero and its direction reported as `nan`; *R* = 0,
+a `nan` direction and an infinite dispersion then all say the same thing.
+This is distinct from *R* = `nan`, which means nothing contributed at all.
+
+A related defect in the same family: `-1e-17 % 360` is `360.0` in float64, so
+the wrap can leave the half-open interval it documents and two readings either
+side of north can average to 360.0 rather than 0.0. Angles landing on a full
+turn are folded back to zero.
+
+**Shared weighting.** `bin_circular_onto_cells` and `bin_onto_cells` both call
+`tsara.core.support.overlap_pairs`, so a cell's wind direction and its methane
+are averaged over exactly the same interval; a test compares the contributing
+counts and coverage of the two paths.
+
+**How it is checked** (§11.1): pencil-checkable fixtures (359° and 1° average
+to 0°; the compass points cancel); the closed form above, over three decades
+of σ, plus a 200 000-draw sample of a wrapped normal recovering its σ to 2 %;
+an independent O(N·M) reimplementation written from the definition, agreeing
+with the vectorized path to 1e-12; and on real data, the identity invariant —
+binning a record onto its own cells returned it to within **5.7e-14 degrees**
+over 19 470 samples, and the table above reproduces an independent script's
+numbers exactly. The pass-through path is compared with the general path on
+the same rows (the full cell array takes the pass-through, the same cells less
+one do not), column by column; the ingestion wrap is pinned by the
+magnetic-to-true case above. Eight defects were injected into those two
+changes (no wrap, the wrap after QA/QC, the wrap applied to every variable, a
+masked pass-through value counted or covered, the old pass-through columns,
+*R* of 1 where a reading is masked, the wrong single-reading dispersion) and
+all eight were caught.
+
+### 11.6 Auxiliary fields, and the only interpolation TSARA performs
+
+Implemented in `tsara.align.auxiliary`. §1.2 states the prohibition —
+quantified species are never interpolated, only bin-averaged — and this
+section is its single exception. Position and ambient meteorology vary
+smoothly on sampling timescales, so evaluating them *between* samples is
+physically justified where evaluating a concentration between samples is not.
+This is the only module in TSARA that interpolates anything.
+
+**Two guards, both refusals.**
+
+*What.* A variable declaring `role: gas` is refused outright, and so is one
+declaring **no role at all**. The second is deliberate: TSARA's own streams
+always carry roles, so an absent one means the dataset came from elsewhere and
+its smoothness is unknown. Admitting it on the assumption that someone would
+have said otherwise is exactly how a prohibition erodes.
+
+*How far.* A target instant whose bracketing samples are further apart than
+`AlignmentConfig.max_interp_gap` gets `nan` rather than a bridged value, and
+nothing is extrapolated past either end of a record. Both counts are reported
+separately, because "there was no position here" and "the position here was
+too uncertain to state" are different facts about a cell.
+
+One case is deliberately exempt from the gap guard: a target landing **exactly
+on** a source sample. That value was measured, not interpolated, so refusing it
+would discard real data.
+
+**A record sparser than its guard says so.** The exemption has a consequence
+worth stating: when a record's own sampling interval is longer than the guard,
+every gap is refused and only the cells whose midpoints happen to land exactly
+on a sample keep a value — in the Phase-4 notebook, a 50 s GPS against a 10 s
+guard positions 36 of 1800 one-second cells, one in fifty, and the result looks
+like a join that worked. This is not hypothetical: 7 of the 13 Univ_Wyoming GPS
+files in the 2024 archive (D06–D12) record a fix every 50 s, and at the default
+guard they position **0.0 %** of 1 s gas cells whose midpoints fall between
+seconds. Until the Phase-4 walkthrough the only record was an INFO log line,
+which a notebook does not show. `interpolate_onto_cells` now logs a **warning**
+when any target was refused *and* the source's median interval between finite
+samples exceeds the guard, naming the interval, the guard and the counts. The
+median rather than the mean, so that an ordinary 1 s record with one long
+outage — refused and counted, correctly — does not trip it; and strictly
+longer, since a gap exactly as long as the guard is bridged.
+
+**Where a value is placed: the cell midpoint.** For a smooth field under a
+linear model that is the representative instant, identical to the cell mean for
+a straight constant-speed path and different only where the path curves.
+Interpolation rather than binning is also what makes a *sparse* auxiliary
+record usable at all: a fix every 10 s cannot fill 1 s cells by averaging,
+since most cells contain no fix.
+
+**What the guard costs.** `max_interp_gap` is not a technicality; it is how far
+a platform may be allowed to stray from the straight chord between two fixes.
+Measured on real driving: the 1 Hz MetNav track of all ten 2024 mobile-lab
+drive days, scored only while the van was moving (ground speed above 2 m/s;
+median 13.0 m/s, 90th percentile 18.7), thinned drive by drive to every *k*-th
+fix with a finite position, interpolated linearly, and compared with the removed
+fixes that sit strictly inside a thinned bracket of exactly *k* seconds. (The
+thinning counts finite fixes, not seconds of clock: keeping one fix per *k*
+seconds from the record's start instead scores 0.5–3.5 % more positions and
+moves the p99 and maximum by up to 5 m.)
+
+| one fix every | positions scored | median error | p90 | p99 | max |
+|---|---|---|---|---|---|
+| 5 s | 117 253 | 0.9 m | 2.8 m | 6.1 m | 118 m |
+| 10 s | 131 146 | 2.3 m | 9.5 m | 19.3 m | 133 m |
+| 30 s | 139 222 | 13.5 m | 54.7 m | 92.7 m | 166 m |
+| 50 s | 140 183 | 29.9 m | 108 m | 180 m | 326 m |
+| 60 s | 140 335 | 39.5 m | 137 m | 225 m | 383 m |
+
+So the 10 s default corresponds to about 10 m at the 90th percentile on urban
+driving, and raising the guard to 60 s to use the 50 s Wyoming GPS accepts
+positions about 110 m wrong at the 90th percentile and over 300 m at worst.
+Whether that is acceptable depends on what the position is for — a
+source-complex cluster radius is a different question from a street address —
+which is why it is configuration rather than a constant. The error peaks
+mid-way between fixes, where the van has had longest to turn away from the
+chord (notebook 04 §11 plots the shape).
+
+**Bin, or interpolate?** Interpolation evaluates a field at each cell's
+midpoint. For a record *sparser* than the cells that is the only option: a fix
+every 10 s cannot fill 1 s cells by averaging. For a record *denser* than the
+cells it throws most of the record away and reports an instant for a value
+that describes an interval, and the two can differ a great deal. Measured on
+the 2024-07-18 drive's 1 Hz MetNav record, as the midpoint value against the
+overlap-weighted cell mean (vector mean for direction) over the 32 iWAS fills
+(exact cells from `iWAS_Stop_UTC`) and over epoch-aligned 60 s cells (325
+where both are finite):
+
+| field | 15 s fills: median / p90 / max | 60 s cells: median / p90 / max |
+|---|---|---|
+| wind direction | 7.9° / 30.1° / 59.6° | 13.1° / 39.5° / 159.7° |
+| wind speed | 0.41 / 1.15 / 1.48 m/s | 0.56 / 1.31 / 3.28 m/s |
+| air temperature | 0.04 / 0.10 / 0.28 °C | 0.10 / 0.29 / 0.62 °C |
+| position, north | 0.4 / 3.4 / 4.7 m | 8.5 / 56.7 / 96.4 m |
+| position, east | 0.1 / 3.7 / 7.3 m | 6.8 / 52.0 / 104.7 m |
+
+The rule is therefore: **bin a field that is denser than the cells, interpolate
+one that is sparser.** The output grid follows it — every selected variable,
+met included, is binned (§11.7), and a binned direction carries the resultant
+length that says how much it means. `attach_positions` interpolates because a
+GPS record is often the sparser one and because, for a *position* on
+canister-width cells, the instant costs a few metres against the
+**127 m** median path covered during a fill.
+
+**Circular fields are interpolated as unit vectors** (§11.5), so a direction
+crossing the compass seam takes the short way — 359° to 1° passes through 0°,
+not through 180°.
+
+**The mobile position join.** Ingestion attaches a stationary site's single
+position, which is exact and free, and deliberately leaves a moving platform's
+track alone: putting it on a gas instrument's clock is interpolation, and its
+guard lives in a config object ingestion has no business reading (§9.7). The
+binding is recorded in stream attributes there and consumed here. The resulting
+coordinates are named exactly as a stationary platform's are, so downstream
+code reads position identically and only has to care about the shape.
+
+The synthetic generator does **not** leave mobile gas streams in that shape: it
+attaches positions to them directly, computed as linear interpolation of its
+own GPS samples (`tsara.core.geodesy.positions_at`), with no binding. Two
+consequences. Code exercised only on generated streams never calls
+`attach_positions` and finds positions an ingested stream lacks — a
+substitutability gap recorded for the phase that first consumes mobile
+positions. And the generator cannot supply accuracy evidence for this join,
+since its "true" positions are the same linear construction; the accuracy
+evidence is the real-driving table above.
+
+**Antimeridian: detected, not modelled.** Longitude is interpolated linearly,
+which is right everywhere except across ±180°, where a step from 179.9 to
+−179.9 would read as a journey most of the way round the planet. A track whose
+longitudes span more than 180° is refused with a message saying so. The
+alternative — treating longitude as circular always — would put a sine and
+cosine round trip into every position on Earth to serve a case the target
+archive does not contain, and a silently wrong position cannot be recovered
+downstream.
+
+**Spatial extent is not modelled.** Measured on the 32 iWAS fills of the
+2024-07-18 drive, the van covers a median of **127 m** and up to **307 m**
+during a single canister fill. TSARA reports the midpoint position and records
+that limit (§10.10) rather than inventing a path length it has no information
+for.
+
+**Attributes** an interpolated coordinate carries:
+
+| attribute | meaning |
+|---|---|
+| `tsara_interpolated_from` | the stream and variable the values came from |
+| `tsara_max_interp_gap` | the guard that was applied |
+| `tsara_interp_gap_masked` | targets refused because the gap was too long |
+| `tsara_interp_outside_record` | targets beyond either end of the source |
+
+**How it is checked** (§11.1): both refusals are asserted directly, since a
+refusal that quietly stops refusing is invisible; a straight line interpolates
+to itself exactly, which is also what would catch a timestamp-precision bug,
+since epoch nanoseconds do not fit a float64 mantissa and converting them
+directly quantises every timestamp onto a ~378 ns grid; and a direction across
+the seam is checked against the short path with the non-circular case beside it
+for contrast. The sparse-record warning is pinned from both sides — it fires
+for a 50 s record against a 10 s guard, and stays silent for a guard the record
+can meet, for one long outage in a dense record, and for a spacing exactly
+equal to the guard.
+
+The join is also checked **through real ingestion**: a generated mobile
+campaign with a fix every 3 s and start-labelled 1 s gas cells is written as
+raw files, ingested, and joined, and must reproduce the generator's positions
+to 1e-9 degrees on every interpolated cell. That is consistency, not accuracy,
+for the reason given above, but it is the only test on the path production
+takes — the binding ingestion writes, the labels it reads, the midpoints it
+recovers. Six defects were injected: three into the warning (equal spacing
+warned, mean instead of median, no warning) were caught by the warning tests;
+of three into the join, a target or source cell's start used in place of its
+midpoint was caught by the hand-built fixtures and the round trip alike, and
+ingestion binding latitude to the longitude column was caught **only** by the
+round trip.
+
+**And on real data.** The 2024-07-18 drive's MetNav track was attached to the
+same 32 iWAS canister cells the pairing section uses: all 32 positioned, none
+gap-masked, none outside the record, two landing exactly on a GPS second and
+thirty interpolated between two. Wind direction interpolated circularly onto
+the same cells stayed inside [0, 360) throughout.
+
+One trap found while writing it, worth recording because it is the same family:
+`pd.Timedelta("1ns").total_seconds()` is **0.0**, so validating a duration by
+reading seconds off it rejects every sub-microsecond value as non-positive.
+Positivity is tested by comparing `Timedelta` objects, matching
+`tsara.config.base.validate_positive_timedelta` and TSARA's integer-nanosecond
+convention everywhere else.
+
+### 11.7 Output grid
+
+Implemented in `tsara.align.grid`, specified in §1.4. A single uniform
+`(time × variable)` cube, built **only** for the products that inherently need
+one: the continuous rolling state, and the matrix a receptor model such as PMF
+consumes. Baselines, detection and cross-species regression all run at native
+rate and never see it (§1.1).
+
+It is a thin layer over §11.2 — the only things it adds are *which cells* and
+the rule that the period must respect the data going into it.
+
+**There is deliberately no "PMF matrix" object.** A receptor-model matrix is
+this function called with a chosen set of columns. Which columns is a
+scientific decision — raw concentrations or the enhancements §5 will compute,
+which species, whether met belongs in the same cube — and hard-coding any of it
+would make the block need editing every time that decision changed.
+
+#### The period rule
+
+**A grid may not be so fine that one selected reading would cover two of its
+cells.** A 60 s mean evaluated on 1 s cells is the same value repeated sixty
+times: resolution the instrument never had, and sixty points where there is one
+measurement. Every count downstream would then believe there were sixty. That
+is the prohibition the interval model exists to enforce (§10), so it is an
+error naming the offending instrument and a period that would work — longer
+than half its widest reading — not a warning. The test is the binner's own
+(§11.2.1), run against the grid's actual cells inside the requested window
+before anything is binned, so the grid and the operation it calls cannot
+disagree about the same data.
+
+**It replaced a comparison of median widths**, found wanting in the Phase-4
+walkthrough: "the period must be at least the widest selected cell". On a real
+2026-01-19 LANL record the Aeris pico measures its cells at 1.023 s, so that
+rule refused a one-second grid and said one measurement would be repeated
+across several cells — while the binner accepted the same one-second cells
+with 2.6 % more occupied rows than readings, and the next round period the
+grid allowed was two seconds. The old rule also offered no protection the
+overlap rule lacks.
+
+Checked against the *selection* rather than against every stream the campaign
+contains, and that is a real lever rather than a formality. Measured on the
+2024-07-18 drive with five instruments loaded — the Picarro's measured CO₂ and
+CH₄, the MetNav wind direction and air temperature, NOy-LIF NOy, PTR-MS
+benzene, and iWAS benzene and toluene on their exact fill cells:
+
+| request | outcome |
+|---|---|
+| 5 s over everything | refused — `iwas` has fills of about 15 s that day |
+| 15 s over everything | 1302 cells |
+| 1 s, canisters excluded | 19 502 cells |
+
+(The LIF's mid-labelled cells begin half a second before the others', so an
+epoch-anchored grid over this selection starts one cell earlier than over the
+drive's 19 501 rows.)
+
+The same run's 60 s matrix shows what the qualifying columns are for. MetNav
+wind and temperature come back 99.7 % filled at a median of 60 contributing
+readings per minute and the LIF 100 % at 61; the Picarro's CO₂ and CH₄ 99.4 %
+filled at a median of **26**, because the analyzer reports every 2–3 s and
+`n_source` says so; the PTR benzene 97.2 %; and the two canister species 11.3 %
+with a median of **zero**. A sparse instrument on a campaign grid is mostly
+absent, which is honest, and is exactly why a two-species ratio uses a pair
+clock (§11.4) rather than this product.
+
+**Corrected in the Phase-4 final audit**, like §11.4: the first version of this
+paragraph and table (100 % at a median of 60, 97.5 %, 1301 and 19 501 cells)
+did not state its selection and could only be reproduced with the Picarro's
+interpolated `_i` columns (§9.2.3).
+
+#### Readings that land in more than one row
+
+What the period rule does not refuse, the grid records. A 15 s canister fill
+that crosses a minute boundary contributes to both minutes, and each row
+reports that fill's value, so the matrix holds one measurement in two rows and
+a receptor model treating rows as independent observations counts it twice.
+Measured over all ten 2024 drive days on a 60 s grid (iWAS fills with exact
+cells from `iWAS_Stop_UTC`): **68 of 261 fills** land in two rows, and **320
+rows** hold benzene from 261 fills. A fill crosses a boundary whenever it
+starts in the last fifteen seconds of a minute, so about a quarter do.
+
+Each gridded column therefore carries `tsara_grid_readings`, the number of
+distinct finite readings behind it, and one warning names the columns whose
+occupied rows outnumber their readings, worst first. One warning for the
+whole grid rather than one per column, because a canister's VOCs share a
+sampling pattern and would otherwise repeat the same sentence fifty times.
+Like the pairing count (§11.4.1) it is a ceiling on independent rows, not an
+estimate: readings shared at small weight between neighbouring rows lower the
+independent information without lowering the count.
+
+**How the rule and the record are checked.** The rule is pinned where it bites
+hardest: a 2 s record refused on a 1 s grid at phases 0, 0.3 s and 0.5 s
+(the case the old rule passed), a 1.9 s record allowed, mixed target widths
+measured against the widest touched, a zero-width target cell ignored, and on
+the grid a 1.023 s record accepted, a 60 s record refused at 30 s and accepted
+at 31 s, and a wide instrument outside the window constraining nothing. The
+record is pinned by a straddling fill (three rows, two readings, one warning),
+a masked reading left uncounted, and ten canister columns producing one
+warning that lists eight. Nine defects were injected — `>` for `>=` at exactly
+two widths, the narrowest touched target instead of the widest, the old
+whole-cell count, zero-width targets counted, the grid skipping its check,
+masked readings counted, a warning when rows merely equal readings, every
+column listed, and the widest-cell attribute taken as a median — and all nine
+were caught, after the first run caught seven: no test had a masked value in a
+gridded column, or cells of varying width, which are the only cases where
+those two defects are visible.
+
+**And on real data**, through the new code: the 2026-01-19 LANL pair now grids
+at one second, with `ch4_pico` warned as 17 517 rows from 17 069 readings and
+the ultra silent; the ten-day 60 s drive grid warns for benzene, 320 rows from
+261 readings.
+
+#### A uniform grid spans the gaps
+
+The grid runs from the first selected cell to the last, so a campaign of
+separate drives puts every hour between them into the matrix. Measured on the
+Picarro CO₂, CH₄ and MetNav wind direction of the ten 2024 drive days: a 60 s
+grid spans 29.5 days in 42 443 rows, 7.9 % of them holding any data; a 1 s grid
+spans the same 29.5 days in **2 546 521 rows, 92.1 % empty**, built in 1.5 s
+but holding 285 MB for three variables — about 95 MB per variable once its
+count, coverage and angular columns are included, so a few dozen VOCs is
+several gigabytes of mostly `nan`. For a receptor-model matrix, grid each drive
+with `start` and `end`; the uniform span is for the continuous state, which
+wants the gaps.
+
+#### Where the cells fall
+
+Abutting cells of exactly the requested period. With no explicit `start`, the
+grid begins at the largest whole multiple of the period at or before the
+earliest selected cell — anchored to the epoch rather than to whenever the
+data happened to start, so that two runs over overlapping periods produce
+cells that line up. Grids that never share a boundary could not have their
+outputs compared at all.
+
+#### Attributes
+
+| attribute | meaning |
+|---|---|
+| `tsara_grid_freq` | the period, as requested |
+| `tsara_grid_widest_source_cell_s` | the widest single selected cell, in seconds |
+| `tsara_grid_variables` | which variables were selected, instrument-qualified |
+
+and per variable, `tsara_grid_readings`: the distinct finite readings behind
+the column's occupied rows.
+
+The last is recorded because a reader cannot tell from the columns alone
+whether a variable is absent because it was excluded or because it had no
+data.
+
+#### Persistence
+
+`save_grid` writes `grid.nc` into a bundle directory and `load_grid` reads it
+back. It does **not** touch `bundle.json`: that descriptor records which stage
+created the bundle and what streams it wrote, and a grid is a different
+stage's product arriving later, so editing it would make it say something its
+writer never said. The grid carries its own provenance in its attributes
+instead, which is what §1 asks of every saved output anyway — and loading
+checks `tsara_stage`, because a stream and a grid are both netCDF files with a
+time axis and reading one as the other would produce a plausible object with
+the wrong meaning. Writing checks the same label: until the Phase-4
+walkthrough `save_grid` wrote any dataset, so a paired product saved through it
+became a `grid.nc` that `load_grid` then refused, and the mistake surfaced only
+when someone loaded it. Writing also refuses a grid whose bounds were
+destroyed upstream, rather than producing a product claiming cells it does not
+have.
+
+**Compression is opt-in** (`save_grid(..., compression=1..9)`, zlib on every
+array including the time axis and its bounds, merged into their pinned
+encoding so they still round-trip exactly). Measured on the one-second grid
+over the ten 2024 drive days (three variables, 2 546 521 rows, 92 % empty), with
+every value identical after reload:
+
+| level | file | write | load |
+|---|---|---|---|
+| none (default) | 285.2 MB | 1.5 s | 0.3 s |
+| 1 | 5.5 MB | 2.7 s | 0.9 s |
+| 4 | 3.7 MB | 3.0 s | 1.1 s |
+| 9 | 3.3 MB | 10.4 s | 1.1 s |
+
+The time axis matters: compressing only the data variables left the same file
+at 64 MB, because a regular time axis and its bounds, 24 bytes per row, are
+the bulk of a sparse grid and the most compressible arrays in it. The default
+stays uncompressed because it is fastest for the dense grids a single drive
+produces.
+
+Both changes are pinned, and six defects were injected against them: no stage
+check, compression of data variables only, the pinned time encoding replaced
+instead of merged, a boolean accepted as a level, level zero accepted, and
+compression on by default. All six were caught after a first run caught five.
+The miss was the encoding replacement, which leaves every *value* intact on
+whole-second cells: xarray then writes `time` as seconds since 00:00:00.5 and
+its bounds as seconds since 00:00:00, two epochs for one axis, with a CF
+warning. The test now reads the stored units and treats that warning as an
+error.
+
+#### 11.7.1 Why there is no median binning option
+
+`OutputGridConfig.bin_statistic` was specified in Phase 1 with values `mean`
+and `median`, and removed in Phase 4 before it was ever implemented — Phase 4
+would have been its first consumer.
+
+The purpose of a median is robustness to sub-grid spikes. In this science a
+sub-grid spike **is the plume**, which is the same argument that deleted the
+QA/QC spike rule (§9.5): TSARA has no stage that can distinguish a sharp real
+enhancement from a glitch, so it should not offer a statistic whose only job
+is to suppress one.
+
+Measured on the real mobile-lab CH₄ of all ten 2024 drive days — the measured
+`CH4_ppb` column, a reading every 2–3 s — with the rule stated so it can be
+re-run: the enhancement of each reading is its value minus a rolling 10-minute
+5th-percentile baseline of the readings themselves; readings are grouped into
+epoch-aligned 60 s cells; a cell is *enhanced* when its mean enhancement
+exceeds 5 ppb; and the median is scored with negative medians counted as zero
+enhancement:
+
+| | |
+|---|---|
+| enhanced cells | 2147 (median 26 readings each) |
+| **enhancement mass the median discards** | **19.6 %** |
+| cells in which fewer than half the readings exceed 5 ppb | 334 (15.6 %) |
+| …median loses, over those cells | 78.8 % |
+| cells a median reduces to zero | 20, the largest a 42.8 ppb mean enhancement |
+
+The 19.6 % is the number that decides it. It is not noise, it is a *bias*, and
+it scales with how sharp each species' plumes are relative to the cell — so
+two species with different plume widths are biased by different amounts and
+their ratio, computed from a median-binned PMF matrix, is wrong by the
+difference. That is precisely the quantity TSARA exists to produce.
+
+**Re-measured in the Phase-4 final audit.** The decision was first recorded as
+19.3 % of 2329 cells, with 49 (2.1 %) half-filled cells losing 87.5 % and a
+28 ppb cell reduced to zero, under a rule the text did not state. It could not
+be reproduced exactly; under the rule above the headline moves by three tenths
+of a point (18.9 % on the interpolated column), which leaves the decision where
+it was, while the sub-counts depend entirely on the unstated definitions. They
+are replaced rather than reconciled.
+
+Two lesser costs, recorded because they were part of the decision: an
+overlap-weighted median is a different algorithm from a weighted mean, so it
+would be a second code path through binning *and* uncertainty propagation; and
+the median standard-error inflation factor $\sqrt{\pi/2} \approx 1.253$ that
+the deleted median-binning section specified is valid only for Gaussian noise
+under equal weights,
+which overlap weighting does not provide.
+
+A caller who wants robustness has the tools: QA/QC `range` bounds and `flag`
+columns act where the information about what is a glitch actually lives (§9.5).
+
+### 11.8 The AR(1) model against generated ground truth
+
+§3.4 closed half of the effective-sample-size question by measurement: the
+finite-*N* form *solves* the AR(1) model correctly, and the large-*N*
+approximation does not. It could not close the other half — whether the AR(1)
+model describes real instrument error at all — because that is not a question
+about algebra.
+
+The generator can answer it. It injects error with a **declared** τ, and it
+keeps the noise-free truth beside the observable. Bin both onto wide cells and
+the difference between them *is* the error of the binned value: no baseline
+estimate, no plume, nothing else in it. The scatter of that difference across
+cells is what the uncertainty should have been.
+
+Measured on six hours of 1 Hz data with a 5 ppb absolute random component,
+binned to 60 s cells (358 cells, so the scatter itself is good to about 4 %):
+
+| declared τ | form | observed scatter | reported σ |
+|---|---|---|---|
+| none | `independent` | 0.677 | 0.645 |
+| 30 s | `ar1_neff` | 4.018 | 3.768 |
+| 30 s | `ar1_asymptotic` | 4.018 | 5.000 |
+
+Three things follow.
+
+**The AR(1) model is describing the error.** With a 30 s timescale the binned
+values scatter by 4.0 ppb, and the finite-*N* form predicts 3.8 — inside the
+measurement's own precision. The model is not merely solved correctly; it is
+approximately right about this error.
+
+**The naive rule is not wrong at the margin, it is wrong by a factor of six.**
+Independent averaging would have reported 0.645 ppb for the same cells. A
+confidence interval built on it would be six times too narrow, which is why
+§10.8 refuses to apply √N when no τ is declared rather than applying it
+hopefully.
+
+**The asymptotic form errs the other way, and saturates.** At N = 60 with
+τ = 30 s it returns exactly N_eff = 1 — the whole minute worth one sample —
+and so reports 5.000, overstating the real scatter by 24 %. Between the two
+registered approximations the finite-*N* one is closer to the truth, which
+is the empirical half of the §3.4 argument.
+
+The residual disagreement is real and worth stating rather than rounding away:
+the observed scatter implies N_eff ≈ 1.55 where `ar1_neff` computes 1.76. The
+model is an approximation to a real error process, and this is the size of
+that approximation on generated data whose τ is exactly known. A user whose
+instrument does not decorrelate as an AR(1) process should expect no better.
+
+**Which is also why estimating τ from data is a §7 avenue rather than a
+field.** No file declares one, and this measurement shows what a wrong one
+costs.
+
+#### 11.8.1 A measured number without its denominator
+
+Recorded because this is the third phase in which it has happened. The
+canister figures above were first written as "14.7 s fills every 441 s",
+measured from **one** drive day and quoted as though they described the
+instrument. Re-run at the phase boundary across all ten 2024 drive days and
+261 fills, the medians are **14.9 s and 530 s**, and the text was corrected
+from "thirty times slower by rate" to "thirty-five".
+
+Both of those were wrong, and the correction repeated the error. Each divided
+the canister's cadence by the canister's *own* fill width (441 ÷ 14.7 = 30,
+530 ÷ 14.9 = 36), which is a duty cycle, not a comparison with anything. The
+claim is about a 60 s mean, against which the canister is about **seven** times
+slower by rate on that one day (441 ÷ 60) and about **nine** across all ten
+(530 ÷ 60). Found in the Phase-4 walkthrough (§11.4.1 came from the same
+stage) and corrected wherever it was quoted.
+
+The conclusion survives untouched, which is exactly why both errors were
+invisible: rate and support still disagree, and the canister is still narrower
+by support than a 60 s mean while being far slower by rate. What was wrong the
+first time was the *provenance*. A number quoted without saying what it was
+measured over cannot be checked by anyone, including its author a week later.
+What was wrong the second time is the complement: re-measuring the inputs does
+not re-check the arithmetic that consumes them, so a stated ratio should show
+its numerator and denominator.
+
+Every archive-derived number in §11 has now been re-run and states its sample.
+The day-specific checks say which day; the instrument-level claims say how many
+fills over how many days.
+
+### 11.9 The acceptance criterion
+
+One source drives two species. One is measured every second, the other once a
+minute, and the ratio between them is fixed and known. If pairing averages
+both members over the same air, that ratio comes back; if it averages them
+over *different* air — one stream placed out of time, an off-by-one cell, an
+overlap weight applied to the wrong partner — the ratio drifts, and nothing
+else in the suite would say so.
+
+| quantity | result |
+|---|---|
+| mass-weighted ratio, paired | 0.250000034 against a truth of 0.25 |
+| per-cell ratio, median relative error | 8 × 10⁻⁶ |
+| worst per-cell error, fully covered | 3 × 10⁻⁴, on the smallest enhancement |
+
+The per-cell residual is not the aligner's arithmetic, and it has two sources.
+It appears as a *relative* error only where the enhancement is a couple of ppb,
+which is the signature of a fixed absolute error rather than a ratio bias.
+
+**Corrected 2026-09-15.** This paragraph used to attribute the whole residual
+to the generator's midpoint-rule quadrature for the slow instrument's 60 s
+cells. Varying one thing at a time on the acceptance campaign (median per-cell
+error / worst cell, fully covered pairs above 1 ppb):
+
+| fast instrument's 1 s cells | slow subsamples 64 | 256 | 1024 | 4096 |
+|---|---|---|---|---|
+| centred on whole seconds (as tested) | 8.1 × 10⁻⁶ / 3.1 × 10⁻⁴ | 6.9 × 10⁻⁶ / 1.6 × 10⁻⁴ | 6.8 × 10⁻⁶ / 1.3 × 10⁻⁴ | 6.7 × 10⁻⁶ / 1.4 × 10⁻⁴ |
+| starting on whole seconds | 2.0 × 10⁻⁶ / 1.8 × 10⁻⁴ | 1.5 × 10⁻⁷ / 2.7 × 10⁻⁵ | 2.2 × 10⁻⁸ / 6.1 × 10⁻⁶ | 4.1 × 10⁻⁹ / 1.8 × 10⁻⁶ |
+
+The quadrature is real: it is what converges as 1/n² in the second row. But in
+the tested configuration most of the median residual is a floor that more
+quadrature does not remove. The fast instrument's 1 s *mean* cells are centred
+on whole seconds, so one straddles every minute boundary, and the join gives
+half of that second's mean to each minute. That is exact only if the air was
+uniform within the second, and a 1 s mean carries no information about its own
+interior. It is a property of interval data, not a defect of the join: **the
+finest detail any join can respect is the source's own cell.** For plumes a few
+seconds wide the same term fails the acceptance thresholds outright, and no
+quadrature setting rescues it (notebook 04 §14 shows both).
+
+**Coverage was scored against the same truth.** Exactly one cell of 120 is
+partly covered — the fast instrument's record begins inside the slow
+instrument's first cell — and it is the only cell whose ratio is wrong, by
+10 %. The correlation between one-minus-coverage and absolute ratio error is
+**1.000**. The number that qualifies a pair does what it claims.
+
+**How small an error it sees.** A pass is only evidence if the check would fail
+on the error it exists for, so the most important one was injected directly:
+the fast stream moved later by a known amount, both scores recomputed with the
+tests' own filtering (fully covered pairs, enhancement above 1 ppb).
+
+| fast stream misplaced by | mass-weighted ratio error | per-cell median error |
+|---|---|---|
+| 0 | 1.4 × 10⁻⁷ | 8.1 × 10⁻⁶ |
+| 0.1 s | 9.1 × 10⁻⁶ | 3.4 × 10⁻⁴ |
+| 1 s | 9.1 × 10⁻⁵ | 3.3 × 10⁻³ |
+| 5 s | 4.6 × 10⁻⁴ | 1.7 × 10⁻² |
+| 30 s, half a slow cell | 3.0 × 10⁻³ | 0.10 |
+
+Both scores are past their thresholds (10⁻⁶ and 10⁻⁴) at every shift down to a
+tenth of a second, and both grow in proportion to the shift, which is what a
+misplacement rather than noise looks like. The mass-weighted ratio is about a
+hundred times less sensitive than the per-cell one, because a shift moves
+methane between neighbouring minutes without much changing the total; its
+threshold is strict enough to compensate. The 0.1 s case is pinned as a test.
+
+**What it cannot see.** The test builds its streams from the generator, so it
+never reads a timestamp label, and the claim once made here — that it would
+catch "a label read as a midpoint when it was a start" — was wrong: labels are
+read only at ingestion. That error is caught there. Measured in the Phase-4
+walkthrough by planting it (a start label handled as a mid label in
+`CellBounds.from_label`), **14 tests fail**, among them the ingestion
+round-trip harness (§9.9) and the support-resolution tests, and none of the
+acceptance tests. What the acceptance campaign adds is the size of the
+consequence. Written as raw files with the slow instrument's timestamps naming
+the start of each minute and ingested:
+
+| label in the manifest | TSARA uses | mass-weighted ratio error | per-cell median error |
+|---|---|---|---|
+| declared | `start` | 9.5 × 10⁻⁸ | 8.4 × 10⁻⁶ |
+| not declared | `unknown`, treated as centred | 2.3 × 10⁻³ | 9.5 × 10⁻² |
+
+An undeclared label is a ratio error of a tenth, cell by cell — the §10
+headline restated as this phase's acceptance criterion.
+
+#### 11.9.1 A grid out of phase with its source blends two cells
+
+Found by running the same check through the grid. The slow instrument's cells
+are centred on its timestamps, so they sit half a cell off an epoch-anchored
+grid of the *same* period. Every grid value is then a weighted mean of two
+adjacent source cells — an honest average, but a smoothed one — and the
+recovered ratio moves from **0.250000034** to **0.249940526**. Aligning the
+grid's start to that instrument's own cell boundaries restores it exactly.
+
+Nothing is silently wrong: `n_source` reports 2 instead of 1, and `grid_cells`
+warns when it detects a source whose cells match the period but not its phase.
+It is a warning rather than a refusal because blending is sometimes
+unavoidable, and which instrument a grid should be in phase with is the user's
+choice, not TSARA's.
 
 ---
 
@@ -2242,6 +3592,8 @@ row, in the direction that overlaps its neighbour.
 - Wu, C., & Yu, J. Z. (2018). Evaluation of linear regression techniques for
   atmospheric applications: the importance of appropriate weighting.
   *Atmospheric Measurement Techniques*, 11, 1233–1250.
+- Mardia, K. V., & Jupp, P. E. (2000). *Directional Statistics.* Wiley.
+  (Circular mean, mean resultant length and circular standard deviation, §11.5.)
 - Yamartino, R. J. (1984). A comparison of several "single-pass" estimators
   of the standard deviation of wind direction. *Journal of Climate and
   Applied Meteorology*, 23, 1362–1366.

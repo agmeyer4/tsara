@@ -16,7 +16,7 @@ section there before it has a caller.
 
 ## Status
 
-**Alpha — phases 1–3 and 3.5 of the roadmap are complete.** The package is
+**Alpha — phases 1–4 of the roadmap are complete.** The package is
 built one phase per review cycle, and only what is listed as done below exists.
 
 | Phase | | |
@@ -25,7 +25,7 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 2 | Synthetic data generator with ground-truth plumes *and* ground-truth error | ✅ done |
 | 3 | Ingestion (reader registry, CSV / ICARTT / Parquet, crawler, QA/QC, units, uncertainty) | ✅ done |
 | 3.5 | Temporal support: every value carries the interval of air it describes | ✅ done |
-| 4 | Alignment & pairing (native-rate pairing, error propagation, circular stats, output grid) | planned |
+| 4 | Alignment & pairing (one joining operation, error propagation, circular stats, output grid) | ✅ done |
 | 5 | Baselines + continuous rolling state | planned |
 | 6 | Plume detection + nested-event bookkeeping | planned |
 | 7 | Regression (OLS / York / ODR), combined UQ, stability cube | planned |
@@ -33,10 +33,11 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 9 | `Pipeline` class + `tsara` CLI | planned |
 | 10 | Docs + tutorial | planned |
 
-So today TSARA can **manufacture a campaign with a known answer key, and read a
+So today TSARA can **manufacture a campaign with a known answer key, read a
 real one into analysis-ready streams whose values each carry the time interval
-they describe**. It cannot yet compute baselines, ratios,
-or the stability cube; there is no CLI yet (phase 9).
+they describe, and put any set of those variables onto a common support with
+their uncertainty propagated through the same weights**. It cannot yet compute
+baselines, ratios, or the stability cube; there is no CLI yet (phase 9).
 
 ## Install
 
@@ -136,9 +137,18 @@ examples ship in [`examples/configs/`](examples/configs/):
 **Streams stay at native rate.** A 10 Hz analyzer is not resampled onto a 1 Hz
 GPS clock at ingestion, or ever, on the gas side. Interpolating a gas creates
 samples that were never measured and would inflate a regression's `N` with
-pseudo-replicates. Streams are paired late, per event, on the slower clock, with
-the faster stream bin-averaged onto it. Smooth auxiliary fields (GPS, met) *may*
-be interpolated, under an explicit maximum-gap guard. (`METHODS.md` §1.1)
+pseudo-replicates. Streams are paired late, per event, on the cells of the
+**wider-supported** member, with its partner bin-averaged onto them. Smooth
+auxiliary fields (GPS, met) *may* be interpolated, under an explicit
+maximum-gap guard. (`METHODS.md` §1.1)
+
+**There is one joining operation, not several.** Every value that ends up on a
+clock other than its own got there the same way: averaged onto target cells,
+weighted by overlap, carrying its uncertainty, its contributing count and its
+cell coverage. A species pair for a regression and a campaign-wide matrix for a
+receptor model differ only in *which cells* — so there is no "PMF matrix"
+object, only that function called with a chosen set of columns. (`METHODS.md`
+§11.2)
 
 **Uncertainty is first class, and never assumed.** Every variable can declare a
 two-component budget: a `random` part that averages down and a `systematic` part
@@ -182,8 +192,10 @@ and audited later. A bundle is a plain directory: `bundle.json`, the resolved
 ```
 src/tsara/
   config/      Pydantic schemas + YAML loader (manifest, analysis, synthetic)
-  core/        Shared primitives: exceptions, logging, timebase, geodesy, naming
+  core/        Shared primitives: exceptions, logging, timebase, geodesy,
+               naming, support, propagation, circular
   ingest/      Readers, crawler, QA/QC, units, uncertainty, campaign, bundles
+  align/       One joining operation: pairing, auxiliary fields, output grid
   synthetic/   Ground-truth data generation, profiling, raw-file export
 docs/METHODS.md   The methods document: mathematics, rationale, rejected options
 examples/configs/    Commented YAML for every schema
@@ -193,8 +205,8 @@ tests/               pytest suite, 100% line + branch coverage enforced
 
 ## Notebooks
 
-All three are committed with their outputs, so they read on GitHub without being
-run, and none needs any real data:
+The four walkthroughs are committed with their outputs, so they read on GitHub
+without being run, and none needs any real data:
 
 - [`01_synthetic_data_walkthrough.ipynb`](examples/notebooks/01_synthetic_data_walkthrough.ipynb)
   — what the generator makes, and what "ground truth" means for error as well as
@@ -206,6 +218,26 @@ run, and none needs any real data:
   — why a value is not an instant: cells and CF bounds, what a missing label
   costs in ppb, duty-cycled samplers, the provenance ladder, and binning one
   stream onto another's cells.
+- [`04_alignment_walkthrough.ipynb`](examples/notebooks/04_alignment_walkthrough.ipynb)
+  — combining measurements without inventing any: overlap-weighted binning,
+  uncertainty checked against Monte Carlo, pairing and its clock, circular
+  statistics, the one interpolation and its cost, and the campaign grid. Built
+  to be changed: every section is self-contained, opens with a parameters cell,
+  prints ✔ checks comparing TSARA with a calculation written independently from
+  the definition, and ends with "Try it" changes whose outcomes were run. A
+  closing scoreboard collects every check.
+
+One companion runs on the real campaign archive instead, and is therefore
+committed **without** outputs:
+
+- [`04b_alignment_real_data.ipynb`](examples/notebooks/04b_alignment_real_data.ipynb)
+  — notebook 04's operations on the 2024 mobile-lab drives and the 2026 van,
+  ending in a ledger that re-measures every archive number `docs/METHODS.md` §11
+  quotes. The drive day and each section's settings are parameters; the ✔ checks
+  hold on any day, and a ledger number is compared only at the settings METHODS
+  measured under. Set `TSARA_ARCHIVE` to the directory holding the archive's `2024/` and
+  `2026/` trees before starting Jupyter; without it the first cell stops and
+  says so.
 
 ## Development
 

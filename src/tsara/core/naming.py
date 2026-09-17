@@ -30,11 +30,15 @@ __all__ = [
     "BOUNDS_ATTR",
     "BOUNDS_DIM",
     "CELL_METHODS_ATTR",
+    "COVERAGE_PREFIX",
+    "DISPERSION_SUFFIX",
     "LATITUDE_COORD",
     "LOD_COUNT_KEY",
     "LONGITUDE_COORD",
+    "N_SOURCE_PREFIX",
     "RAW_TIME_START_COLUMN",
     "RAW_TIME_STOP_COLUMN",
+    "RESULTANT_LENGTH_SUFFIX",
     "SIGMA_RAND_PREFIX",
     "SIGMA_SYS_PREFIX",
     "SUPPORT_COVERAGE_ATTR",
@@ -50,7 +54,10 @@ __all__ = [
     "TIME_BOUNDS_VAR",
     "TIME_COORD",
     "TIME_SHIFT_ATTR",
+    "coverage_name",
+    "is_companion_name",
     "is_sigma_name",
+    "n_source_name",
     "sigma_rand_name",
     "sigma_sys_name",
 ]
@@ -239,6 +246,84 @@ def sigma_sys_name(variable: str) -> str:
         e.g. ``'sigma_sys_ch4'``.
     """
     return f"{SIGMA_SYS_PREFIX}{variable}"
+
+
+#: Columns the joining operation adds beside every value it puts on new cells
+#: (``docs/METHODS.md`` §11.2): how many source cells contributed, and how much
+#: of the target cell they covered.
+N_SOURCE_PREFIX = "n_source_"
+COVERAGE_PREFIX = "coverage_"
+
+#: What an angular variable gets instead of a sigma, since a direction has no
+#: meaningful arithmetic spread (§11.5).
+RESULTANT_LENGTH_SUFFIX = "_resultant_length"
+DISPERSION_SUFFIX = "_dispersion"
+
+
+def n_source_name(variable: str) -> str:
+    """Return the name of a variable's contributing-cell count.
+
+    Parameters
+    ----------
+    variable : str
+        Column name as it appears in the joined product, e.g. ``'ch4'``.
+
+    Returns
+    -------
+    str
+        e.g. ``'n_source_ch4'``.
+    """
+    return f"{N_SOURCE_PREFIX}{variable}"
+
+
+def coverage_name(variable: str) -> str:
+    """Return the name of a variable's coverage fraction.
+
+    Parameters
+    ----------
+    variable : str
+        Column name as it appears in the joined product, e.g. ``'ch4'``.
+
+    Returns
+    -------
+    str
+        e.g. ``'coverage_ch4'``.
+    """
+    return f"{COVERAGE_PREFIX}{variable}"
+
+
+def is_companion_name(name: str) -> bool:
+    """Return whether a name describes another variable rather than being one.
+
+    Four families of column exist only to qualify the column they are named
+    after: the two uncertainty components, the contributing-cell count, the
+    coverage fraction, and the two an angular variable carries instead of a
+    sigma. None is a measurement in its own right, and each is produced
+    automatically alongside its parent.
+
+    The distinction is load-bearing rather than tidy. A stage that selects
+    "every variable" and gets these too will bin a coverage fraction as though
+    it were data, yielding ``coverage_coverage_ch4`` -- a column with no parent
+    and no meaning -- and will grow a further layer on every pass. Asking about
+    the *name* is the only test available, exactly as for the sigma companions:
+    nothing else in a stream marks them, and a stream may have come from the
+    generator, from ingestion, or from a file reloaded from disk.
+
+    Parameters
+    ----------
+    name : str
+        Variable name to test.
+
+    Returns
+    -------
+    bool
+        True for a companion of any of the four families.
+    """
+    return (
+        is_sigma_name(name)
+        or name.startswith((N_SOURCE_PREFIX, COVERAGE_PREFIX))
+        or name.endswith((RESULTANT_LENGTH_SUFFIX, DISPERSION_SUFFIX))
+    )
 
 
 #: Attr key under which a reader reports per-raw-column counts of samples

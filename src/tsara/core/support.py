@@ -109,6 +109,7 @@ __all__ = [
     "BinnedOntoCells",
     "CellBounds",
     "NAT_NS",
+    "OverlapPairs",
     "SupportLabel",
     "SupportMethod",
     "SupportSource",
@@ -120,6 +121,7 @@ __all__ = [
     "declared_bounds_name",
     "ensure_time_bounds",
     "nominal_cadence_ns",
+    "overlap_pairs",
     "support_attrs",
 ]
 
@@ -458,6 +460,113 @@ class BinnedOntoCells:
     n_overlapping: npt.NDArray[np.int64]
 
 
+@dataclass(frozen=True, eq=False)
+class OverlapPairs:
+    """Every (target cell, source cell) pair that overlaps, and by how much.
+
+    The seam between *finding* overlaps and *doing something with them*.
+    Extracted when circular binning became the second caller: an angle cannot
+    be averaged arithmetically, so it needs its own aggregation, but it must
+    weight by exactly the same overlaps as a scalar does or the wind direction
+    reported for a cell would describe a different interval than the methane.
+
+    The arrays are "long form": one entry per overlapping pair, so
+    ``target_index``, ``source_index`` and ``overlap_ns`` are parallel and a
+    caller aggregates with :func:`numpy.bincount` on ``target_index``.
+
+    ``eq=False`` because the fields are arrays, matching :class:`CellBounds`.
+
+    Attributes
+    ----------
+    target_index, source_index : numpy.ndarray
+        Indices into the target and source cells, one pair per entry.
+    overlap_ns : numpy.ndarray
+        Nanoseconds of overlap for each pair, never negative. Zero entries
+        can occur: the candidate search brackets a window and the exact test
+        below decides membership, so a bracketed pair that touches only at a
+        boundary is kept with weight zero rather than dropped, which keeps
+        the "overlapped at all" and "contributed" counts distinguishable.
+    n_target : int
+        How many target cells there are, needed to size any aggregation.
+    """
+
+    target_index: npt.NDArray[np.int64]
+    source_index: npt.NDArray[np.int64]
+    overlap_ns: npt.NDArray[np.int64]
+    n_target: int
+
+
+def overlap_pairs(source: CellBounds, target: CellBounds) -> OverlapPairs:
+    """Find every overlapping pair of source and target cells.
+
+    Vectorized rather than looped: a binary search brackets the candidate
+    source cells for each target cell, the (target, candidate) pairs are
+    expanded without a Python loop, and the exact overlap decides membership.
+
+    Parameters
+    ----------
+    source : CellBounds
+        Cells being averaged. Must be sorted by start time.
+    target : CellBounds
+        Cells to average onto.
+
+    Returns
+    -------
+    OverlapPairs
+        The pairs, possibly empty.
+
+    Raises
+    ------
+    TsaraSupportError
+        If the source cells are not sorted by start time.
+    """
+    n_target = len(target)
+    empty = np.empty(0, dtype=np.int64)
+    if n_target == 0 or len(source) == 0:
+        return OverlapPairs(
+            target_index=empty, source_index=empty, overlap_ns=empty, n_target=n_target
+        )
+
+    if np.any(np.diff(source.start_ns) < 0):
+        raise TsaraSupportError(
+            "Binning onto cells requires source cells sorted by start time; the "
+            "candidate search below is a binary search and would silently miss "
+            "overlaps on an unsorted input."
+        )
+
+    # Candidate window per target cell. `running_stop` is a cumulative
+    # maximum so that it is non-decreasing and therefore searchable, which
+    # matters because jittered timestamps give fixed-width cells that can
+    # overlap slightly -- their raw stops are then not sorted. Using the
+    # running maximum only ever widens the candidate window, so the exact
+    # overlap test below still decides membership.
+    running_stop = np.maximum.accumulate(source.stop_ns)
+    lo = np.searchsorted(running_stop, target.start_ns, side="right")
+    hi = np.searchsorted(source.start_ns, target.stop_ns, side="left")
+    counts = np.maximum(hi - lo, 0).astype(np.int64)
+    total = int(counts.sum())
+    if total == 0:
+        return OverlapPairs(
+            target_index=empty, source_index=empty, overlap_ns=empty, n_target=n_target
+        )
+
+    # Expand (target, candidate-source) pairs without a Python loop: repeat
+    # each target index `counts` times, then walk 0..count-1 within each run.
+    target_index = np.repeat(np.arange(n_target, dtype=np.int64), counts)
+    run_start = np.repeat(np.cumsum(counts) - counts, counts)
+    source_index = np.repeat(lo, counts) + (np.arange(total, dtype=np.int64) - run_start)
+
+    overlap = np.minimum(source.stop_ns[source_index], target.stop_ns[target_index]) - np.maximum(
+        source.start_ns[source_index], target.start_ns[target_index]
+    )
+    return OverlapPairs(
+        target_index=target_index,
+        source_index=source_index,
+        overlap_ns=np.maximum(overlap, 0),
+        n_target=n_target,
+    )
+
+
 def bin_onto_cells(
     source: CellBounds,
     values: npt.NDArray[np.float64],
@@ -484,7 +593,8 @@ def bin_onto_cells(
         excluded from ``coverage``, so a masked sample reduces coverage
         rather than silently passing as data.
     target : CellBounds
-        Cells to average onto, typically the slower stream's own cells.
+        Cells to average onto, typically the wider-supported stream's own
+        cells.
 
     Returns
     -------
@@ -508,50 +618,18 @@ def bin_onto_cells(
     out_counts = np.zeros(n_target, dtype=np.int64)
     out_coverage = np.zeros(n_target, dtype=np.float64)
     out_overlapping = np.zeros(n_target, dtype=np.int64)
-    if n_target == 0 or len(source) == 0:
+
+    pairs = overlap_pairs(source, target)
+    if pairs.overlap_ns.size == 0:
         return BinnedOntoCells(
             values=out_values,
             n_source=out_counts,
             coverage=out_coverage,
             n_overlapping=out_overlapping,
         )
-
-    if np.any(np.diff(source.start_ns) < 0):
-        raise TsaraSupportError(
-            "bin_onto_cells requires source cells sorted by start time; the "
-            "candidate search below is a binary search and would silently miss "
-            "overlaps on an unsorted input."
-        )
-
-    # Candidate window per target cell. `running_stop` is a cumulative
-    # maximum so that it is non-decreasing and therefore searchable, which
-    # matters because jittered timestamps give fixed-width cells that can
-    # overlap slightly -- their raw stops are then not sorted. Using the
-    # running maximum only ever widens the candidate window, so the exact
-    # overlap test below still decides membership.
-    running_stop = np.maximum.accumulate(source.stop_ns)
-    lo = np.searchsorted(running_stop, target.start_ns, side="right")
-    hi = np.searchsorted(source.start_ns, target.stop_ns, side="left")
-    counts = np.maximum(hi - lo, 0).astype(np.int64)
-    total = int(counts.sum())
-    if total == 0:
-        return BinnedOntoCells(
-            values=out_values,
-            n_source=out_counts,
-            coverage=out_coverage,
-            n_overlapping=out_overlapping,
-        )
-
-    # Expand (target, candidate-source) pairs without a Python loop: repeat
-    # each target index `counts` times, then walk 0..count-1 within each run.
-    target_index = np.repeat(np.arange(n_target, dtype=np.int64), counts)
-    run_start = np.repeat(np.cumsum(counts) - counts, counts)
-    source_index = np.repeat(lo, counts) + (np.arange(total, dtype=np.int64) - run_start)
-
-    overlap = np.minimum(source.stop_ns[source_index], target.stop_ns[target_index]) - np.maximum(
-        source.start_ns[source_index], target.start_ns[target_index]
-    )
-    overlap = np.maximum(overlap, 0)
+    target_index = pairs.target_index
+    source_index = pairs.source_index
+    overlap = pairs.overlap_ns
 
     paired = source_values[source_index]
     finite = np.isfinite(paired)

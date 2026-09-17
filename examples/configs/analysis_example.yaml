@@ -18,16 +18,30 @@
 # need a common (time x species) cube.
 output_grid:
   freq: 1s                # cadence of the continuous-state / PMF output cube
-  bin_statistic: mean     # how native samples are aggregated into grid bins
-  # start / end: optional UTC datetimes; default = union of all streams
+  start: 2024-07-18T18:00:00   # optional; default = first timestamp across streams
+  end: 2024-07-19T00:00:00     # optional; default = last timestamp across streams
+# There is deliberately no choice of binning statistic. A median option was
+# specified in Phase 1 and removed before it was ever implemented: its job is
+# robustness to sub-grid spikes, and here a sub-grid spike IS the plume.
+# Measured on real mobile CH4 over ten drive days, a 60 s median discards
+# 19.6% of the enhancement mass (METHODS.md §11.7.1).
 
 # --- Auxiliary-field alignment -------------------------------------------
 # Guards interpolation of SMOOTH fields (GPS, met) onto gas timestamps.
 # Gases themselves are never interpolated (METHODS.md §1.2) -- this has
 # nothing to do with cross-species pairing for regression (§1.3), which
-# always uses the slower-of-the-pair's native clock with no free parameters.
+# always uses the wider-support member of the pair as the clock.
 alignment:
   max_interp_gap: 10s     # never interpolate GPS/met across gaps longer than this
+
+# --- Cross-species pairing -----------------------------------------------
+# Pairing has no free parameters of its own -- the clock is always the cells
+# of whichever stream has the WIDER support (METHODS.md §1.3). It does have a
+# sufficiency question: a 15 s canister paired against a 60 s mean covers a
+# quarter of that cell, and the arithmetic cannot tell that from full
+# coverage. Coverage is always recorded; this decides whether to act on it.
+pairing:
+  min_coverage: 0.0       # 0.0 drops nothing; raise to exclude thin pairs
 
 # --- Rolling baselines -------------------------------------------------------
 baseline:

@@ -43,9 +43,20 @@ class OutputGridConfig(_StrictModel):
 
     Construction is binning-only in both directions: gas species are *never*
     interpolated (a concentration inside a plume is not a smooth field), so
-    a cell with zero native samples in its interval is NaN with `n_native =
-    0` — never papered over with a straight line. Aux-field interpolation
+    a cell with zero native samples in its interval is NaN with
+    `n_source_<name> = 0` — never papered over with a straight line. Aux-field interpolation
     (GPS, met) is a separate concern, see :class:`AlignmentConfig`.
+
+    There is deliberately no choice of binning statistic. A ``median``
+    option was specified in Phase 1 and removed in Phase 4 before it ever
+    had an implementation: its purpose is robustness to sub-grid spikes, and
+    a sub-grid spike in this science *is the plume*. Measured on the real
+    mobile-lab CH4 of the ten 2024 drive days, a 60 s median discards 19.6 %
+    of the enhancement mass and up to 100 % of an individual cell's — a low
+    bias that scales with how sharp each species' plumes are, so it corrupts
+    exactly the between-species ratios TSARA exists to compute (METHODS.md
+    §11.7.1). It is
+    the same argument that deleted the QA/QC spike rule (§9.5).
     """
 
     freq: str = Field(description="Grid spacing as a pandas offset alias, e.g. '1s', '5s', '1min'.")
@@ -56,15 +67,6 @@ class OutputGridConfig(_StrictModel):
     end: datetime | None = Field(
         default=None,
         description="Optional grid end (UTC). Default: last timestamp across streams.",
-    )
-    bin_statistic: Literal["mean", "median"] = Field(
-        default="mean",
-        description=(
-            "Statistic for binning native samples into each grid cell. "
-            "'median' is more robust to sub-grid spikes but slightly biases "
-            "sharp plume peaks low (see METHODS.md §3.5 for the median "
-            "standard-error inflation factor this implies)."
-        ),
     )
 
     @field_validator("freq")
@@ -105,7 +107,12 @@ class AlignmentConfig(_StrictModel):
         description=(
             "Longest data gap that interpolation may bridge when aligning "
             "auxiliary fields (GPS, met) onto gas timestamps. Gaps longer "
-            "than this remain NaN rather than being bridged."
+            "than this remain NaN rather than being bridged. For a moving "
+            "platform's position this is a statement about how far the track "
+            "may stray from a straight line between fixes: on real urban "
+            "driving at a median 13 m/s, 10 s costs about 10 m at the 90th "
+            "percentile, 50 s about 110 m (METHODS.md §11.6). A record sampled "
+            "more sparsely than this is almost entirely refused, with a warning."
         ),
     )
 
@@ -114,6 +121,45 @@ class AlignmentConfig(_StrictModel):
     def _valid_durations(cls, value: str, info: ValidationInfo) -> str:
         _validate_duration(value, field=f"AlignmentConfig.{info.field_name}")
         return value
+
+
+# ---------------------------------------------------------------------------
+# Cross-species pairing (the regression clock — NOT aux interpolation)
+# ---------------------------------------------------------------------------
+
+
+class PairingConfig(_StrictModel):
+    """How much of a cell must be measured for the pair to count.
+
+    Pairing two species measured at different rates has no free parameters
+    of its own: the clock is always the cells of whichever stream has the
+    *wider* support, and the other is averaged onto them weighted by overlap
+    (METHODS.md §1.3). What it does have is a question of *sufficiency*.
+
+    A canister that integrates for 15 s paired against a 60 s mean covers a
+    quarter of that cell. That pair is real and it is not comparable to one
+    with full coverage, and nothing in the arithmetic distinguishes them —
+    both produce a number. So every paired value carries the fraction of its
+    cell that contributing data actually covered, and this is the one knob
+    that can act on it.
+
+    Separate from :class:`AlignmentConfig`, which guards *interpolation* of
+    smooth auxiliary fields and has nothing to do with cross-species pairing.
+    """
+
+    min_coverage: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum fraction of a pairing cell that must be covered by "
+            "contributing partner data for the pair to be kept. The default "
+            "of 0.0 drops nothing: coverage is always recorded alongside "
+            "every pair, and how much is enough is a question about the "
+            "science rather than about the arithmetic. Raise it to exclude "
+            "thinly-covered pairs from regressions."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +492,10 @@ class AnalysisConfig(_StrictModel):
     alignment: AlignmentConfig = Field(
         default_factory=AlignmentConfig,
         description="Auxiliary-field (GPS/met) interpolation guard (METHODS.md §1.2).",
+    )
+    pairing: PairingConfig = Field(
+        default_factory=PairingConfig,
+        description="Sufficiency guard on cross-species pairs (METHODS.md §1.3).",
     )
     baseline: BaselineConfig = Field(description="Rolling baseline sweep settings.")
     detection: DetectionConfig = Field(

@@ -206,6 +206,11 @@ instruments:
     metadata:
       institution: noaa
     variables:
+      # Name the MEASURED column. Some merged archives also publish an
+      # interpolated copy filled into every row -- the 2024 NOAA mobile-lab
+      # files pair CH4_ppb with CH4_i_ppb -- and TSARA cannot tell the two
+      # apart, so a gas read from the copy arrives already interpolated, with
+      # full coverage it never had (METHODS.md 9.2.3).
       benzene:
         column: Benzene_ppbv
         role: gas

@@ -119,6 +119,51 @@ def test_role_and_circular_are_recorded() -> None:
     assert stream["wdir"].attrs["circular"] == 1
 
 
+def test_a_converted_direction_is_wrapped_before_qaqc_masks_it() -> None:
+    """A magnetic-to-true offset must not delete the sector just west of north.
+
+    +10.3 degrees takes 352 to 362.3. Unwrapped, the natural bound
+    `range: [0, 360]` masks it, and every other reading within 10.3 degrees
+    west of north with it -- a whole sector of the wind rose gone, silently.
+    Wrapped first, 362.3 is 2.3 and nothing is lost.
+    """
+    instrument = _instrument(
+        wdir={
+            "column": "WD",
+            "role": "met",
+            "units": "degrees",
+            "circular": True,
+            "convert": {
+                "from_unit": "degrees_magnetic",
+                "to_unit": "degrees",
+                "scale": 1.0,
+                "offset": 10.3,
+            },
+            "qaqc": [{"kind": "range", "min": 0.0, "max": 360.0}],
+        }
+    )
+    stream = _build(_frame(WD=np.array([352.0, 358.0, 1.0, 180.0])), instrument)
+    assert stream["wdir"].values == pytest.approx([2.3, 8.3, 11.3, 190.3])
+    assert stream["wdir"].attrs["masked_fraction"] == 0.0
+
+
+def test_a_direction_already_past_a_full_turn_is_wrapped_without_a_conversion() -> None:
+    """Loggers write -5 and 365 too; the wrap does not depend on a conversion."""
+    instrument = _instrument(
+        wdir={"column": "WD", "role": "met", "units": "degrees", "circular": True}
+    )
+    stream = _build(_frame(WD=np.array([-5.0, 365.0, 720.0, np.nan])), instrument)
+    assert stream["wdir"].values[:3] == pytest.approx([355.0, 5.0, 0.0])
+    assert np.isnan(stream["wdir"].values[3])
+
+
+def test_a_scalar_past_360_is_not_wrapped() -> None:
+    """Only a variable that declares itself circular is an angle."""
+    instrument = _instrument(temp={"column": "T", "role": "met", "units": "K"})
+    stream = _build(_frame(T=np.array([365.0, 370.0, 375.0, 380.0])), instrument)
+    assert stream["temp"].values == pytest.approx([365.0, 370.0, 375.0, 380.0])
+
+
 def test_many_species_scale_without_code_changes() -> None:
     """Species are data, not code — a 40-VOC instrument is a YAML edit."""
     columns: dict[str, Any] = {f"VOC{i}": np.zeros(4) for i in range(40)}
