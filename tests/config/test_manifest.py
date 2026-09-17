@@ -286,14 +286,87 @@ def test_duplicate_raw_column_within_instrument_rejected(
         Manifest.model_validate(bad)
 
 
-def test_duplicate_canonical_name_across_instruments_rejected(
+def test_a_name_may_repeat_across_instruments(
     mobile_manifest_dict: dict[str, Any],
 ) -> None:
-    bad = copy.deepcopy(mobile_manifest_dict)
-    # GPS instrument also claims to produce 'ch4' — collides with picarro's.
-    bad["instruments"]["gps"]["variables"]["ch4"] = {"column": "CH4", "units": "ppb"}
-    with pytest.raises(ValidationError, match="ch4"):
+    """Names are keys of one stream, so only one stream has to keep them apart.
+
+    This was refused until Phase 4.5, for a merged dataset that no longer
+    exists (METHODS §1.6). Both variables survive, each on its own instrument.
+    """
+    both = copy.deepcopy(mobile_manifest_dict)
+    both["instruments"]["gps"]["variables"]["ch4"] = {"column": "CH4", "units": "ppb"}
+    manifest = Manifest.model_validate(both)
+    assert manifest.instruments["picarro"].variables["ch4"].column == "CH4_dry"
+    assert manifest.instruments["gps"].variables["ch4"].column == "CH4"
+
+
+def test_field_defaults_to_the_variable_name(
+    stationary_manifest_dict: dict[str, Any],
+) -> None:
+    instrument = Manifest.model_validate(stationary_manifest_dict).instruments["picarro"]
+    # Nothing declared, and nothing written in: the config says what its author wrote.
+    assert instrument.variables["ch4"].field is None
+    assert instrument.field_of("ch4") == "ch4"
+
+
+def test_a_declared_field_is_what_the_variable_measures(
+    stationary_manifest_dict: dict[str, Any],
+) -> None:
+    declared = copy.deepcopy(stationary_manifest_dict)
+    declared["instruments"]["picarro"]["variables"]["ch4_backup"] = {
+        "column": "CH4_backup",
+        "units": "ppm",
+        "field": "ch4",
+    }
+    instrument = Manifest.model_validate(declared).instruments["picarro"]
+    assert instrument.field_of("ch4_backup") == "ch4"
+
+
+def test_field_of_an_undeclared_variable_raises(
+    stationary_manifest_dict: dict[str, Any],
+) -> None:
+    instrument = Manifest.model_validate(stationary_manifest_dict).instruments["picarro"]
+    with pytest.raises(KeyError, match="sf6"):
+        instrument.field_of("sf6")
+
+
+@pytest.mark.parametrize("spelling", ["ch4-dry", "CH4 (dry)", "4ch", ""])
+def test_field_must_be_spelled_like_a_name(
+    stationary_manifest_dict: dict[str, Any], spelling: str
+) -> None:
+    bad = copy.deepcopy(stationary_manifest_dict)
+    bad["instruments"]["picarro"]["variables"]["ch4"]["field"] = spelling
+    with pytest.raises(ValidationError, match="field .* must be a valid identifier"):
         Manifest.model_validate(bad)
+
+
+def test_gas_species_lists_a_gas_once_however_many_instruments_measure_it(
+    mobile_manifest_dict: dict[str, Any],
+) -> None:
+    """The question is physical, so two methane analyzers measure one gas.
+
+    Covers both routes to a shared field: the same name on another instrument,
+    and a different name declaring the field.
+    """
+    two = copy.deepcopy(mobile_manifest_dict)
+    gps_vars = two["instruments"]["gps"]["variables"]
+    gps_vars["ch4"] = {"column": "CH4", "units": "ppb"}
+    gps_vars["co2_open_path"] = {"column": "CO2_op", "units": "ppm", "field": "co2"}
+    manifest = Manifest.model_validate(two)
+    assert manifest.gas_species == ("ch4", "co2")
+
+
+def test_gas_species_is_in_first_appearance_order(
+    stationary_manifest_dict: dict[str, Any],
+) -> None:
+    reordered = copy.deepcopy(stationary_manifest_dict)
+    variables = reordered["instruments"]["picarro"]["variables"]
+    reordered["instruments"]["picarro"]["variables"] = {
+        "co2": variables["co2"],
+        "ch4": variables["ch4"],
+    }
+    assert Manifest.model_validate(reordered).gas_species == ("co2", "ch4")
 
 
 def test_instrument_requires_at_least_one_variable(

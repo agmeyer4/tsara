@@ -59,7 +59,7 @@ def test_declared_absolute_only() -> None:
 
     assert resolved.random is not None
     assert resolved.random.tolist() == pytest.approx([0.7, 0.7])
-    assert resolved.random_source == "declared"
+    assert resolved.random_provenance == "declared"
 
 
 def test_declared_relative_scales_with_the_reading() -> None:
@@ -117,7 +117,7 @@ def test_reported_reads_the_column() -> None:
 
     assert resolved.random is not None
     assert resolved.random.tolist() == pytest.approx([0.5, 0.6])
-    assert resolved.random_source == "reported"
+    assert resolved.random_provenance == "reported"
 
 
 def test_reported_column_is_scaled_but_not_offset() -> None:
@@ -194,9 +194,9 @@ def test_no_budget_means_empirical_random_and_unknown_systematic() -> None:
 
     assert resolved.random is None
     assert resolved.systematic is None
-    assert resolved.random_source == "empirical"
-    assert resolved.systematic_source == "unknown"
-    assert resolved.source == "empirical"
+    assert resolved.random_provenance == "empirical"
+    assert resolved.systematic_provenance == "unknown"
+    assert resolved.provenance == "empirical"
 
 
 def test_omitted_systematic_with_a_budget_is_zero_not_unknown() -> None:
@@ -205,8 +205,8 @@ def test_omitted_systematic_with_a_budget_is_zero_not_unknown() -> None:
     spec = _spec(random={"mode": "declared", "absolute": 0.7})
     resolved = _resolve(values, spec, _frame(values))
 
-    assert resolved.systematic_source == "zero"
-    assert resolved.random_source == "declared"
+    assert resolved.systematic_provenance == "zero"
+    assert resolved.random_provenance == "declared"
 
 
 def test_omitted_random_with_a_budget_falls_back_to_empirical() -> None:
@@ -215,8 +215,8 @@ def test_omitted_random_with_a_budget_falls_back_to_empirical() -> None:
     resolved = _resolve(values, spec, _frame(values))
 
     assert resolved.random is None
-    assert resolved.random_source == "empirical"
-    assert resolved.systematic_source == "declared"
+    assert resolved.random_provenance == "empirical"
+    assert resolved.systematic_provenance == "declared"
 
 
 def test_both_components_declared() -> None:
@@ -230,7 +230,7 @@ def test_both_components_declared() -> None:
     assert resolved.random is not None
     assert resolved.systematic is not None
     assert resolved.systematic[0] == pytest.approx(10.0)
-    assert resolved.source == "declared"
+    assert resolved.provenance == "declared"
 
 
 def test_mixed_modes_report_mixed() -> None:
@@ -243,9 +243,9 @@ def test_mixed_modes_report_mixed() -> None:
     )
     resolved = _resolve(values, spec, frame)
 
-    assert resolved.random_source == "reported"
-    assert resolved.systematic_source == "declared"
-    assert resolved.source == "mixed"
+    assert resolved.random_provenance == "reported"
+    assert resolved.systematic_provenance == "declared"
+    assert resolved.provenance == "mixed"
 
 
 def test_both_reported_reports_reported() -> None:
@@ -255,7 +255,7 @@ def test_both_reported_reports_reported() -> None:
         random={"mode": "reported", "column": "A"},
         systematic={"mode": "reported", "column": "B"},
     )
-    assert _resolve(values, spec, frame).source == "reported"
+    assert _resolve(values, spec, frame).provenance == "reported"
 
 
 def test_components_are_kept_separate() -> None:

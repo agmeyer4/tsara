@@ -66,9 +66,12 @@ from tsara.synthetic import export_raw, generate
 
 setup_logging()  # a library logs nothing until an application asks it to
 
-# 1. Manufacture a campaign whose answer key you already have.
+# 1. Manufacture a campaign whose answer key you already have. The generator
+#    realizes one atmosphere and lets every instrument sample it, so the true
+#    methane is queryable at any time -- here, at the Picarro's first samples.
 dataset = generate(load_synthetic("examples/configs/synthetic_example.yaml"))
-print(sorted(dataset.streams), len(dataset.ground_truth.events), "events")
+print(sorted(dataset.streams), len(dataset.ground_truth.event_ids), "plume events")
+print(dataset.atmosphere.value("ch4", dataset.streams["picarro"]["time"].values[:3]).round(3))
 
 # 2. Write it out as raw CSV plus the manifest that describes those files.
 manifest_path = export_raw(dataset, "demo_campaign")
@@ -83,15 +86,20 @@ save_streams(streams, "demo_bundle")
 ```
 
 ```
-['aeris', 'gps', 'met', 'picarro'] 170 events
-aeris {'time': 42977} ['ch4', 'sigma_rand_ch4', 'sigma_sys_ch4', 'c2h6', ...]
-picarro {'time': 10800} ['co2', 'sigma_rand_co2', 'sigma_sys_co2']
-met {'time': 2160} ['wind_dir', 'wind_speed']
-gps {'time': 21600} ['latitude', 'longitude']
+['aeris', 'gps', 'met', 'picarro'] 59 plume events
+[1971.651 1971.695 1971.69 ]
+aeris {'time': 42437, 'nv': 2} ['ch4', 'sigma_rand_ch4', 'sigma_sys_ch4', 'c2h6', 'sigma_rand_c2h6']
+picarro {'time': 10800, 'nv': 2} ['co2', 'sigma_rand_co2', 'sigma_sys_co2', 'ch4', 'sigma_rand_ch4', 'sigma_sys_ch4']
+met {'time': 2160, 'nv': 2} ['wind_dir', 'wind_speed']
+gps {'time': 21600, 'nv': 2} ['latitude', 'longitude']
 ```
 
 Four instruments, four different sampling rates, four `time` axes — that is the
-point, not an accident (see *Streams stay at native rate*, below).
+point, not an accident (see *Streams stay at native rate*, below). The `nv`
+dimension holds each row's cell boundaries: every value describes an interval
+of air, not an instant. And two of the instruments report `ch4`: both measure
+the one methane the atmosphere holds, each through its own clock and error, and
+each variable records that in its `field` attribute.
 
 ## Reading your own campaign
 
@@ -129,7 +137,7 @@ examples ship in [`examples/configs/`](examples/configs/):
 | `manifest_stationary_example.yaml` | fixed site, one static coordinate |
 | `manifest_mobile_example.yaml` | vehicle, GPS instrument, systematic uncertainty, reported per-point error |
 | `manifest_multiformat_example.yaml` | one campaign mixing CSV, ICARTT and Parquet, several directory layouts |
-| `synthetic_example.yaml`, `synthetic_bootstrap.yaml` | generating data, parametrically or bootstrapped from a real record's residuals |
+| `synthetic_example.yaml`, `synthetic_bootstrap.yaml` | generating data: an atmosphere (fields, backgrounds, sources) and the instruments measuring it, with backgrounds parametric or bootstrapped from a real record's residuals |
 | `analysis_example.yaml` | the analysis side: baseline sweeps, detection, regression, clustering |
 
 ## The ideas the API is shaped around

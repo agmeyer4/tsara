@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -26,6 +29,8 @@ from tsara.synthetic.plumes import (
     build_kernel,
     schedule_events,
 )
+
+WithSources = Callable[[SyntheticConfig, dict[str, Any]], SyntheticConfig]
 
 # ---------------------------------------------------------------------------
 # Kernels
@@ -191,36 +196,42 @@ def test_schedule_events_realizes_the_configured_ratio(
         )
 
 
-def test_zero_drawn_events_is_handled(noise_free_config: SyntheticConfig) -> None:
+def test_zero_drawn_events_is_handled(
+    noise_free_config: SyntheticConfig, with_sources: WithSources
+) -> None:
     """A source can legitimately draw zero events in a short record."""
-    quiet = noise_free_config.model_copy(
-        update={
-            "sources": {
-                "pad": noise_free_config.sources["pad"].model_copy(update={"rate_per_hour": 1e-9})
-            }
-        }
-    )
+    pad = noise_free_config.atmosphere.sources["pad"]
+    quiet = with_sources(noise_free_config, {"pad": pad.model_copy(update={"rate_per_hour": 1e-9})})
     assert schedule_events(quiet, np.random.default_rng(0)) == []
 
 
 def test_config_without_sources_schedules_nothing(
-    noise_free_config: SyntheticConfig,
+    noise_free_config: SyntheticConfig, with_sources: WithSources
 ) -> None:
-    empty = noise_free_config.model_copy(update={"sources": {}})
+    empty = with_sources(noise_free_config, {})
     assert schedule_events(empty, np.random.default_rng(0)) == []
 
 
-def test_inter_species_lag_shifts_only_the_lagged_species(
-    noise_free_config: SyntheticConfig,
+def test_the_window_is_the_kernel_support_around_the_lagged_centre(
+    noise_free_config: SyntheticConfig, with_sources: WithSources
 ) -> None:
-    lagged = noise_free_config.model_copy(
-        update={
-            "sources": {
-                "pad": noise_free_config.sources["pad"].model_copy(
-                    update={"inter_species_lag": {"c2h6": "45s"}}
-                )
-            }
-        }
+    """The interval the atmosphere evaluates and the answer key reports."""
+    pad = noise_free_config.atmosphere.sources["pad"]
+    lagged = with_sources(
+        noise_free_config, {"pad": pad.model_copy(update={"inter_species_lag": {"c2h6": "45s"}})}
+    )
+    event = schedule_events(lagged, np.random.default_rng(0))[0]
+    start, end = event.species_window("c2h6")
+    assert start == event.species_center("c2h6") - pd.Timedelta(seconds=80.0)
+    assert end == event.species_center("c2h6") + pd.Timedelta(seconds=80.0)
+
+
+def test_inter_species_lag_shifts_only_the_lagged_species(
+    noise_free_config: SyntheticConfig, with_sources: WithSources
+) -> None:
+    pad = noise_free_config.atmosphere.sources["pad"]
+    lagged = with_sources(
+        noise_free_config, {"pad": pad.model_copy(update={"inter_species_lag": {"c2h6": "45s"}})}
     )
     events = schedule_events(lagged, np.random.default_rng(0))
     assert events
@@ -235,22 +246,25 @@ def test_inter_species_lag_shifts_only_the_lagged_species(
 # ---------------------------------------------------------------------------
 
 
-def _nested_config(base: SyntheticConfig, **nested_kwargs: object) -> SyntheticConfig:
+def _nested_config(
+    base: SyntheticConfig, with_sources: WithSources, **nested_kwargs: object
+) -> SyntheticConfig:
     nested = NestedSpec(
         probability=1.0,
         shape=GaussianShape(kind="gaussian", sigma="3s"),
         amplitude_factor=0.5,
         **nested_kwargs,  # type: ignore[arg-type]
     )
-    return base.model_copy(
-        update={"sources": {"pad": base.sources["pad"].model_copy(update={"nested": nested})}}
-    )
+    pad = base.atmosphere.sources["pad"]
+    return with_sources(base, {"pad": pad.model_copy(update={"nested": nested})})
 
 
 def test_nested_children_are_linked_and_inside_their_parent(
-    noise_free_config: SyntheticConfig,
+    noise_free_config: SyntheticConfig, with_sources: WithSources
 ) -> None:
-    events = schedule_events(_nested_config(noise_free_config), np.random.default_rng(0))
+    events = schedule_events(
+        _nested_config(noise_free_config, with_sources), np.random.default_rng(0)
+    )
     by_id = {event.event_id: event for event in events}
     children = [event for event in events if event.parent_event_id is not None]
     assert children
@@ -266,9 +280,11 @@ def test_nested_children_are_linked_and_inside_their_parent(
 
 
 def test_nested_child_inherits_parent_ratios_by_default(
-    noise_free_config: SyntheticConfig,
+    noise_free_config: SyntheticConfig, with_sources: WithSources
 ) -> None:
-    events = schedule_events(_nested_config(noise_free_config), np.random.default_rng(0))
+    events = schedule_events(
+        _nested_config(noise_free_config, with_sources), np.random.default_rng(0)
+    )
     by_id = {event.event_id: event for event in events}
     for child in (e for e in events if e.parent_event_id is not None):
         parent = by_id[child.parent_event_id or ""]
@@ -276,10 +292,10 @@ def test_nested_child_inherits_parent_ratios_by_default(
 
 
 def test_nested_child_can_carry_its_own_ratio(
-    noise_free_config: SyntheticConfig,
+    noise_free_config: SyntheticConfig, with_sources: WithSources
 ) -> None:
     """A chemically distinct child superimposed on its parent."""
-    config = _nested_config(noise_free_config, ratios={"c2h6": RatioSpec(mean=0.4)})
+    config = _nested_config(noise_free_config, with_sources, ratios={"c2h6": RatioSpec(mean=0.4)})
     events = schedule_events(config, np.random.default_rng(0))
     children = [event for event in events if event.parent_event_id is not None]
     assert children
@@ -290,10 +306,16 @@ def test_nested_child_can_carry_its_own_ratio(
 
 
 def test_partial_nested_ratio_override_keeps_other_species(
-    noise_free_config: SyntheticConfig,
+    noise_free_config: SyntheticConfig, with_sources: WithSources
 ) -> None:
     """Overriding one species must not silently delete the parent's others."""
-    source = noise_free_config.sources["pad"].model_copy(
+    payload = noise_free_config.model_dump()
+    payload["atmosphere"]["fields"]["co2"] = {
+        "units": "ppm",
+        "background": {"kind": "parametric", "offset": 420.0},
+    }
+    with_co2 = SyntheticConfig.model_validate(payload)
+    source = with_co2.atmosphere.sources["pad"].model_copy(
         update={
             "ratios": {
                 "c2h6": RatioSpec(mean=0.05),
@@ -301,8 +323,8 @@ def test_partial_nested_ratio_override_keeps_other_species(
             }
         }
     )
-    config = noise_free_config.model_copy(update={"sources": {"pad": source}})
-    config = _nested_config(config, ratios={"c2h6": RatioSpec(mean=0.4)})
+    config = with_sources(with_co2, {"pad": source})
+    config = _nested_config(config, with_sources, ratios={"c2h6": RatioSpec(mean=0.4)})
     events = schedule_events(config, np.random.default_rng(0))
     children = [event for event in events if event.parent_event_id is not None]
     assert children
@@ -313,22 +335,18 @@ def test_partial_nested_ratio_override_keeps_other_species(
 
 
 def test_zero_nesting_probability_produces_no_children(
-    noise_free_config: SyntheticConfig,
+    noise_free_config: SyntheticConfig, with_sources: WithSources
 ) -> None:
-    config = noise_free_config.model_copy(
-        update={
-            "sources": {
-                "pad": noise_free_config.sources["pad"].model_copy(
-                    update={
-                        "nested": NestedSpec(
-                            probability=0.0,
-                            shape=GaussianShape(kind="gaussian", sigma="3s"),
-                            amplitude_factor=0.5,
-                        )
-                    }
-                )
-            }
-        }
+    config = _nested_config(noise_free_config, with_sources)
+    pad = config.atmosphere.sources["pad"]
+    assert pad.nested is not None
+    config = with_sources(
+        config,
+        {
+            "pad": pad.model_copy(
+                update={"nested": pad.nested.model_copy(update={"probability": 0.0})}
+            )
+        },
     )
     events = schedule_events(config, np.random.default_rng(0))
     assert all(event.parent_event_id is None for event in events)
@@ -345,6 +363,7 @@ def _event(**overrides: object) -> GroundTruthEvent:
         "parent_event_id": None,
         "source_name": "pad",
         "species": "ch4",
+        "field": "ch4",
         "instrument": "analyzer",
         "reference_species": "ch4",
         "start_time": pd.Timestamp("2026-01-01T00:00:00"),
@@ -367,11 +386,21 @@ def test_ground_truth_frame_has_the_fixed_column_order() -> None:
 
 
 def test_ground_truth_round_trips_through_a_frame() -> None:
-    truth = GroundTruth(events=(_event(), _event(event_id="pad_00002", species="c2h6")))
+    truth = GroundTruth(
+        events=(_event(), _event(event_id="pad_00002", species="ch4_minute", field="ch4"))
+    )
     restored = GroundTruth.from_frame(truth.to_frame())
     assert len(restored) == 2
     assert restored.events[0].event_id == "pad_00001"
-    assert restored.events[1].species == "c2h6"
+    # The variable's name and the field it measures travel separately.
+    assert (restored.events[1].species, restored.events[1].field) == ("ch4_minute", "ch4")
+
+
+def test_a_frame_from_before_the_field_column_is_refused() -> None:
+    """Catalogs written before Phase 4.5 lack `field`; they are not guessed at."""
+    frame = GroundTruth(events=(_event(),)).to_frame().drop(columns=["field"])
+    with pytest.raises(ValueError, match="missing columns \\['field'\\]"):
+        GroundTruth.from_frame(frame)
 
 
 def test_ground_truth_preserves_missing_parent_and_coordinates() -> None:

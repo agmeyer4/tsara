@@ -117,7 +117,7 @@ where = ["src"]
 
 # PEP 561: ship the `py.typed` marker so that type checkers run by *users* of
 # TSARA actually read our annotations. Without it, `import tsara` is treated as
-# untyped no matter how strictly the source is annotated — the annotations are
+# untyped no matter how strictly the code is annotated — the annotations are
 # there, but invisible to anyone outside this repo.
 [tool.setuptools.package-data]
 tsara = ["py.typed"]

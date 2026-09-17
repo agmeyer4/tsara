@@ -16,11 +16,10 @@ import pytest
 import xarray as xr
 
 from tsara.align import TsaraAlignError, bin_streams_onto_cells, resolve_variable
-from tsara.align.binning import readings_behind, stream_cells
+from tsara.align.binning import readings_behind, select_variables, stream_cells
 from tsara.core.naming import sigma_rand_name
 from tsara.core.support import CellBounds
-
-SECOND = 1_000_000_000
+from tsara.core.timebase import SECOND_NS as SECOND
 
 
 def cells(start_s: float, width_s: float, n: int) -> CellBounds:
@@ -78,7 +77,7 @@ def test_many_variables_from_many_streams_land_on_one_support() -> None:
     joined = bin_streams_onto_cells(streams, cells(0.0, 10.0, 6))
     for name in ("ch4", "c2h6", "co2", "temperature"):
         assert name in joined.data_vars
-        assert f"n_source_{name}" in joined.data_vars
+        assert f"n_readings_{name}" in joined.data_vars
         assert f"coverage_{name}" in joined.data_vars
     assert joined.sizes["time"] == 6
     assert joined["ch4"].values[0] == pytest.approx(np.arange(20.0).mean())
@@ -207,7 +206,7 @@ def test_angular_quality_columns_carry_no_cell_method() -> None:
     joined = bin_streams_onto_cells({"met": met}, cells(0.0, 4.0, 2))
     assert "cell_methods" not in joined["wind_dir_resultant_length"].attrs
     assert "cell_methods" not in joined["wind_dir_dispersion"].attrs
-    assert joined["n_source_wind_dir"].attrs["cell_methods"] == "time: sum"
+    assert joined["n_readings_wind_dir"].attrs["cell_methods"] == "time: sum"
 
 
 def test_an_angular_variable_gets_no_sigma_column() -> None:
@@ -247,8 +246,8 @@ def test_the_pass_through_path_counts_a_masked_value_as_nothing() -> None:
     general = bin_streams_onto_cells({"a": stream}, cells(0.0, 1.0, 5))
     assert native["ch4"].attrs["tsara_binned"] == 0
     assert general["ch4"].attrs["tsara_binned"] == 1
-    assert native["n_source_ch4"].values.tolist() == [1, 0, 1, 0, 1, 1]
-    assert native["n_source_ch4"].values[:5].tolist() == general["n_source_ch4"].values.tolist()
+    assert native["n_readings_ch4"].values.tolist() == [1, 0, 1, 0, 1, 1]
+    assert native["n_readings_ch4"].values[:5].tolist() == general["n_readings_ch4"].values.tolist()
     assert native["coverage_ch4"].values[:5] == pytest.approx(general["coverage_ch4"].values)
 
 
@@ -277,7 +276,7 @@ def test_an_angle_on_its_own_cells_carries_the_same_columns_as_a_binned_one() ->
     # can land one ULP below R = 1, and sqrt(-2 ln R) turns 1e-16 into 8.5e-7
     # degrees. The pass-through reports exactly 0, which is the true value.
     for column, tolerance in (
-        ("n_source_wind_dir", 0.0),
+        ("n_readings_wind_dir", 0.0),
         ("coverage_wind_dir", 1e-12),
         ("wind_dir_resultant_length", 1e-12),
         ("wind_dir_dispersion", 1e-5),
@@ -304,7 +303,25 @@ def test_one_species_measured_twice_keeps_both_columns() -> None:
     assert "ch4" not in joined.data_vars
     assert joined["ch4_aeris"].values == pytest.approx(np.full(4, 1900.0))
     assert joined["ch4_picarro"].values == pytest.approx(np.full(4, 1910.0))
-    assert joined["ch4_aeris"].attrs["tsara_source_instrument"] == "aeris"
+    assert joined["ch4_aeris"].attrs["tsara_instrument"] == "aeris"
+
+
+def test_a_suffixed_column_still_says_what_it_measures() -> None:
+    """The instrument goes into the spelling; the quantity stays in `field`.
+
+    Checked on both paths, one stream already on the target cells and one
+    averaged onto them, because they assemble a column in different branches.
+    """
+    methane: dict[str, object] = {"units": "ppb", "field": "ch4"}
+    streams = {
+        "aeris": make_stream(0.0, 1.0, 20, {"ch4": np.full(20, 1900.0)}, attrs={"ch4": methane}),
+        "picarro": make_stream(0.0, 5.0, 4, {"ch4": np.full(4, 1910.0)}, attrs={"ch4": methane}),
+    }
+    joined = bin_streams_onto_cells(streams, cells(0.0, 5.0, 4))
+    assert joined["ch4_aeris"].attrs["tsara_binned"] == 1
+    assert joined["ch4_picarro"].attrs["tsara_binned"] == 0
+    assert joined["ch4_aeris"].attrs["field"] == "ch4"
+    assert joined["ch4_picarro"].attrs["field"] == "ch4"
 
 
 def test_a_name_only_one_stream_claims_is_left_alone() -> None:
@@ -326,7 +343,7 @@ def test_a_cell_with_no_data_is_nan_rather_than_bridged() -> None:
     joined = bin_streams_onto_cells({"a": stream}, cells(0.0, 2.0, 6))
     assert np.isfinite(joined["ch4"].values[:2]).all()
     assert np.isnan(joined["ch4"].values[2:]).all()
-    assert joined["n_source_ch4"].values.tolist() == [2, 2, 0, 0, 0, 0]
+    assert joined["n_readings_ch4"].values.tolist() == [2, 2, 0, 0, 0, 0]
 
 
 def test_coverage_records_a_partly_filled_cell() -> None:
@@ -386,10 +403,14 @@ def test_the_joined_product_carries_cells_and_its_own_provenance() -> None:
     streams = {"a": make_stream(0.0, 1.0, 8, {"ch4": np.arange(8.0)})}
     joined = bin_streams_onto_cells(streams, cells(0.0, 4.0, 2))
     assert joined.attrs["tsara_stage"] == "binned"
-    assert joined.attrs["tsara_propagation_form"] == "ar1_neff"
+    # A propagation form belongs to a propagated sigma, not to the product: the
+    # dataset attr recorded the form *requested* while each column records the
+    # form used, and the two read differently on every product whose variables
+    # declare no decorrelation timescale (METHODS §11.2).
+    assert "tsara_propagation_form" not in joined.attrs
     assert "time_bnds" in joined.coords
     assert joined["time"].attrs["bounds"] == "time_bnds"
-    assert joined["ch4"].attrs["tsara_source_instrument"] == "a"
+    assert joined["ch4"].attrs["tsara_instrument"] == "a"
 
 
 # ---------------------------------------------------------------------------
@@ -465,15 +486,15 @@ def test_cells_that_differ_only_by_jitter_are_not_refused() -> None:
 def test_a_reading_two_target_cells_wide_is_refused_at_any_phase(offset_s: float) -> None:
     """The phase hole in the rule this guard replaced (METHODS §11.2.1).
 
-    That rule counted target cells lying wholly inside one source cell. A
+    That rule counted target cells lying wholly inside one reading. A
     regular 2 s record exactly in phase with a 1 s grid wholly contains two and
     was refused; offset by 0.3 s or 0.5 s it wholly contains one, passed, and
     each reading fed two or three rows. Two cells' worth of time is two cells'
     worth whatever the phase.
     """
-    source = make_stream(offset_s, 2.0, 50, {"ch4": np.arange(50.0)})
+    stream = make_stream(offset_s, 2.0, 50, {"ch4": np.arange(50.0)})
     with pytest.raises(TsaraAlignError, match="cover 2 target cells' worth"):
-        bin_streams_onto_cells({"picarro": source}, cells(0.0, 1.0, 102))
+        bin_streams_onto_cells({"picarro": stream}, cells(0.0, 1.0, 102))
 
 
 def test_a_reading_just_under_two_target_cells_wide_is_allowed() -> None:
@@ -483,8 +504,8 @@ def test_a_reading_just_under_two_target_cells_wide_is_allowed() -> None:
     readings behind them says so. It does not state a value at a resolution
     two whole cells finer than the instrument's.
     """
-    source = make_stream(0.3, 1.9, 50, {"ch4": np.arange(50.0)})
-    joined = bin_streams_onto_cells({"a": source}, cells(0.0, 1.0, 96))
+    stream = make_stream(0.3, 1.9, 50, {"ch4": np.arange(50.0)})
+    joined = bin_streams_onto_cells({"a": stream}, cells(0.0, 1.0, 96))
     assert np.isfinite(joined["ch4"].values).sum() > 50
 
 
@@ -495,23 +516,23 @@ def test_the_rule_is_measured_against_the_widest_target_cell_touched() -> None:
     cells and a half of the narrower, so it is not refused; the same reading
     across three 1 s cells is.
     """
-    source = make_stream(0.0, 3.0, 1, {"ch4": np.array([1.0])})
+    stream = make_stream(0.0, 3.0, 1, {"ch4": np.array([1.0])})
     mixed = CellBounds(
         start_ns=np.array([0, SECOND], dtype=np.int64),
         stop_ns=np.array([SECOND, 3 * SECOND], dtype=np.int64),
     )
-    assert np.isfinite(bin_streams_onto_cells({"a": source}, mixed)["ch4"].values).all()
+    assert np.isfinite(bin_streams_onto_cells({"a": stream}, mixed)["ch4"].values).all()
     with pytest.raises(TsaraAlignError):
-        bin_streams_onto_cells({"a": source}, cells(0.0, 1.0, 3))
+        bin_streams_onto_cells({"a": stream}, cells(0.0, 1.0, 3))
 
 
 def test_a_zero_width_target_cell_makes_nothing_look_replicated() -> None:
-    source = make_stream(0.0, 10.0, 2, {"ch4": np.arange(2.0)})
+    stream = make_stream(0.0, 10.0, 2, {"ch4": np.arange(2.0)})
     degenerate = CellBounds(
         start_ns=np.array([5 * SECOND, 5 * SECOND], dtype=np.int64),
         stop_ns=np.array([5 * SECOND, 15 * SECOND], dtype=np.int64),
     )
-    joined = bin_streams_onto_cells({"a": source}, degenerate)
+    joined = bin_streams_onto_cells({"a": stream}, degenerate)
     assert np.isfinite(joined["ch4"].values[1])
 
 
@@ -522,17 +543,17 @@ def test_readings_behind_counts_distinct_finite_contributors() -> None:
     assert count == 4
 
 
-def test_a_grid_out_of_phase_with_an_equal_width_source_is_not_refused() -> None:
-    """Half a period out of phase, every source cell straddles two targets.
+def test_a_grid_out_of_phase_with_an_equal_width_stream_is_not_refused() -> None:
+    """Half a period out of phase, every reading straddles two targets.
 
-    So no target cell lies wholly inside a source cell, nothing is replicated,
+    So no target cell lies wholly inside a reading, nothing is replicated,
     and the operation is allowed. It is documented as lossy elsewhere and
     warned about by the grid builder; it is not this guard's business.
     """
-    source = make_stream(0.0, 10.0, 6, {"ch4": np.arange(6.0)})
+    stream = make_stream(0.0, 10.0, 6, {"ch4": np.arange(6.0)})
     offset = cells(5.0, 10.0, 5)
-    joined = bin_streams_onto_cells({"a": source}, offset)
-    assert np.all(joined["n_source_ch4"].values == 2)
+    joined = bin_streams_onto_cells({"a": stream}, offset)
+    assert np.all(joined["n_readings_ch4"].values == 2)
 
 
 def test_a_zero_width_target_cell_does_not_count_as_replication() -> None:
@@ -555,30 +576,75 @@ def test_a_zero_width_target_cell_does_not_count_as_replication() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_joined_product_can_be_joined_again() -> None:
-    """Phase 5 will bin a baseline it computed from an already-binned product.
+def test_a_joined_product_is_refused_rather_than_joined_again() -> None:
+    """A product's rows are not readings, and the second pass cannot tell.
 
-    The default selection must therefore leave this stage's own bookkeeping
-    alone, or a second pass grows `coverage_coverage_ch4` and a third grows
-    another layer.
+    It would take each row as a measurement covering its whole cell, so
+    coverage, counts and weights would describe rows rather than air. Refused
+    on the antimeridian precedent: the information is gone from the input, so
+    nothing downstream could repair it (METHODS §11.2.3).
     """
     streams = {"a": make_stream(0.0, 1.0, 120, {"ch4": np.arange(120.0)})}
     once = bin_streams_onto_cells(streams, cells(0.0, 10.0, 12))
-    twice = bin_streams_onto_cells({"binned": once}, cells(0.0, 60.0, 2))
-    assert "ch4" in twice.data_vars
-    assert not [name for name in twice.data_vars if str(name).startswith("coverage_coverage")]
-    assert not [name for name in twice.data_vars if str(name).startswith("n_source_n_source")]
+    assert once.attrs["tsara_stage"] == "binned"
+    with pytest.raises(TsaraAlignError) as refused:
+        bin_streams_onto_cells({"binned": once}, cells(0.0, 60.0, 2))
+    # The message has to name which dataset and what it is, or a user holding a
+    # dict of ten streams cannot tell which one to replace.
+    assert "binned" in str(refused.value)
+    assert "tsara_stage" in str(refused.value)
+    assert "native streams" in str(refused.value)
 
 
-def test_angular_quality_columns_are_not_rebinned_either() -> None:
-    """A resultant length and a dispersion describe a cell, not the air in it."""
+def test_the_same_product_built_from_the_streams_is_what_the_refusal_asks_for() -> None:
+    """The escape route must exist, or the refusal is just a wall."""
+    streams = {"a": make_stream(0.0, 1.0, 120, {"ch4": np.arange(120.0)})}
+    direct = bin_streams_onto_cells(streams, cells(0.0, 60.0, 2))
+    assert np.isfinite(direct["ch4"].values).all()
+    assert direct["n_readings_ch4"].values.tolist() == [60, 60]
+
+
+def test_joining_leaves_the_input_stream_joinable() -> None:
+    """The stage travels with the *product*, never back onto its inputs.
+
+    Worth pinning because the check reads an attribute of the input: if a join
+    ever stamped its stage on what it consumed, a campaign would become
+    unusable after the first pairing, and every later call would fail with a
+    refusal about data the user never joined.
+    """
+    stream = make_stream(0.0, 1.0, 120, {"ch4": np.arange(120.0)})
+    stream.attrs["tsara_stage"] = "ingest"
+    bin_streams_onto_cells({"a": stream}, cells(0.0, 10.0, 12))
+    assert stream.attrs["tsara_stage"] == "ingest"
+    again = bin_streams_onto_cells({"a": stream}, cells(0.0, 20.0, 6))
+    assert again.sizes["time"] == 6
+
+
+@pytest.mark.parametrize("stage", ["ingest", "synthetic"])
+def test_a_stream_from_either_producer_is_joinable(stage: str) -> None:
+    """Both stream producers, and a bundle reloaded from either, carry these."""
+    stream = make_stream(0.0, 1.0, 60, {"ch4": np.arange(60.0)})
+    stream.attrs["tsara_stage"] = stage
+    joined = bin_streams_onto_cells({"a": stream}, cells(0.0, 10.0, 6))
+    assert joined.sizes["time"] == 6
+
+
+def test_angular_quality_columns_are_not_selected_as_variables() -> None:
+    """A resultant length and a dispersion describe a cell, not the air in it.
+
+    Checked through the selection rather than through a second join, which is
+    now refused: the rule is about which columns count as variables, and
+    `select_variables` is public and answers that for the grid as well.
+    """
     attrs: dict[str, dict[str, object]] = {"wind_dir": {"units": "degrees", "circular": 1}}
     met = make_stream(0.0, 1.0, 60, {"wind_dir": np.linspace(0.0, 50.0, 60)}, attrs=attrs)
     once = bin_streams_onto_cells({"met": met}, cells(0.0, 10.0, 6))
     assert "wind_dir_resultant_length" in once.data_vars
-    twice = bin_streams_onto_cells({"binned": once}, cells(0.0, 30.0, 2))
-    assert "wind_dir_resultant_length_resultant_length" not in twice.data_vars
-    assert "wind_dir_dispersion_dispersion" not in twice.data_vars
+    # The product's stage is what refuses a re-join; strip it and the selection
+    # rule alone is what is being measured here.
+    stripped = once.copy()
+    del stripped.attrs["tsara_stage"]
+    assert select_variables({"binned": stripped}) == [("binned", "wind_dir")]
 
 
 def test_cell_boundaries_carried_as_a_data_variable_are_not_selected() -> None:
@@ -586,7 +652,7 @@ def test_cell_boundaries_carried_as_a_data_variable_are_not_selected() -> None:
     stream = make_stream(0.0, 1.0, 20, {"ch4": np.arange(20.0)}).reset_coords("time_bnds")
     assert "time_bnds" in stream.data_vars
     joined = bin_streams_onto_cells({"a": stream}, cells(0.0, 5.0, 4))
-    assert sorted(map(str, joined.data_vars)) == ["ch4", "coverage_ch4", "n_source_ch4"]
+    assert sorted(map(str, joined.data_vars)) == ["ch4", "coverage_ch4", "n_readings_ch4"]
 
 
 def test_a_variable_that_is_not_one_value_per_cell_is_named_not_broadcast() -> None:

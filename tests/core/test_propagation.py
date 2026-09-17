@@ -287,6 +287,72 @@ def test_double_sum_and_neff_disagree_on_unequal_sigmas() -> None:
     assert exact.sigma != pytest.approx(fast.sigma, rel=1e-3)
 
 
+def test_the_cheap_form_is_not_always_conservative() -> None:
+    """Half the readings in a burst and half spread: `ar1_neff` understates σ.
+
+    METHODS §3.4 claimed the cheap form errs "on the safe side, bounded by how
+    badly a cell's readings clump". That is true of the ordinary clumping
+    patterns and false of this one, which is why the claim was withdrawn and
+    this case pinned.
+
+    The mechanism is the median. `ar1_neff` knows only a count and the median
+    gap; with fifteen readings inside 0.15 s and fifteen spread 100 s apart,
+    the median gap is the *large* one, so it treats thirty readings as thirty
+    nearly independent ones — while half of them are really a single effective
+    reading. Measured against exact AR(1) draws it reports about a third of the
+    true uncertainty; the pairwise form is right to within a per cent.
+    """
+    rng = np.random.default_rng(20260920)
+    tau_s, sigma_value, n_trials = 20.0, 2.0, 4000
+    times = np.concatenate([np.linspace(0.0, 0.15, 15), 100.0 * (1 + np.arange(15.0))])
+    sigmas = np.full(times.size, sigma_value)
+    weights = np.ones(times.size)
+
+    # The truth: exact AR(1) errors at these instants, averaged, many times.
+    lag = np.abs(times[:, None] - times[None, :])
+    covariance = sigma_value**2 * np.exp(-lag / tau_s)
+    draws = rng.multivariate_normal(
+        np.zeros(times.size), covariance, size=n_trials, method="cholesky"
+    )
+    observed = float(draws.mean(axis=1).std(ddof=1))
+
+    cheap = propagate_random(sigmas, weights, tau_s=tau_s, times_s=times, form="ar1_neff")
+    exact = propagate_random(sigmas, weights, tau_s=tau_s, times_s=times, form="ar1_double_sum")
+
+    # The pairwise form needs no tolerance argument: it evaluates the same
+    # covariance the draws came from. 4 % covers the sampling error of the
+    # standard deviation of 4000 means (about 1.1 %) with room to spare.
+    assert exact.sigma == pytest.approx(observed, rel=0.04)
+    # And the cheap one is wrong in the dangerous direction, by a lot.
+    assert cheap.sigma < 0.5 * observed
+
+
+def test_the_cheap_form_is_conservative_for_one_cadence_with_a_hole() -> None:
+    """The shape every real stream has, where the claim does hold.
+
+    Two blocks of fifteen a half-minute apart carry *more* information than a
+    single run, because the blocks have had time to decorrelate; the cheap
+    form cannot see that and overstates σ, which is the harmless direction.
+    """
+    rng = np.random.default_rng(20260921)
+    tau_s, sigma_value, n_trials = 20.0, 2.0, 4000
+    times = np.concatenate([np.arange(15.0), 30.0 + np.arange(15.0)])
+    sigmas = np.full(times.size, sigma_value)
+    weights = np.ones(times.size)
+
+    lag = np.abs(times[:, None] - times[None, :])
+    covariance = sigma_value**2 * np.exp(-lag / tau_s)
+    draws = rng.multivariate_normal(
+        np.zeros(times.size), covariance, size=n_trials, method="cholesky"
+    )
+    observed = float(draws.mean(axis=1).std(ddof=1))
+
+    cheap = propagate_random(sigmas, weights, tau_s=tau_s, times_s=times, form="ar1_neff")
+    exact = propagate_random(sigmas, weights, tau_s=tau_s, times_s=times, form="ar1_double_sum")
+    assert exact.sigma == pytest.approx(observed, rel=0.04)
+    assert cheap.sigma > observed
+
+
 def test_double_sum_reproduces_independence_when_tau_is_tiny() -> None:
     sigma = np.full(20, 3.0)
     times = np.arange(20.0)
@@ -502,9 +568,9 @@ def test_systematic_propagation_reports_its_form() -> None:
 
 
 def test_same_width_returns_the_sigma_untouched() -> None:
-    value, source = sigma_at_support(0.5, quoted_width_s=60.0, target_width_s=60.0)
+    value, form = sigma_at_support(0.5, quoted_width_s=60.0, target_width_s=60.0)
     assert value == pytest.approx(0.5)
-    assert source == "unchanged"
+    assert form == "unchanged"
 
 
 def test_no_timescale_leaves_the_sigma_alone_and_says_so() -> None:
@@ -514,9 +580,9 @@ def test_no_timescale_leaves_the_sigma_alone_and_says_so() -> None:
     but confidently wrong, so the honest answer is the unscaled number plus a
     label saying it was not scaled.
     """
-    value, source = sigma_at_support(0.5, quoted_width_s=1.0, target_width_s=60.0)
+    value, form = sigma_at_support(0.5, quoted_width_s=1.0, target_width_s=60.0)
     assert value == pytest.approx(0.5)
-    assert source == "unscaled"
+    assert form == "unscaled"
 
 
 def test_widening_shrinks_the_sigma_by_less_than_root_n() -> None:
@@ -526,9 +592,9 @@ def test_widening_shrinks_the_sigma_by_less_than_root_n() -> None:
     about 2.2 independent samples, not 60 -- so the sigma falls by 1.48, not
     by 7.75.
     """
-    value, source = sigma_at_support(0.5, quoted_width_s=1.0, target_width_s=60.0, tau_s=20.0)
+    value, form = sigma_at_support(0.5, quoted_width_s=1.0, target_width_s=60.0, tau_s=20.0)
     naive = 0.5 / np.sqrt(60)
-    assert source == "ar1_neff"
+    assert form == "ar1_neff"
     assert value == pytest.approx(0.3375, abs=1e-4)
     assert value > naive * 2
 
@@ -548,10 +614,10 @@ def test_sigma_at_support_accepts_an_array() -> None:
 
 
 def test_sigma_at_support_honours_the_asymptotic_form() -> None:
-    value, source = sigma_at_support(
+    value, form = sigma_at_support(
         1.0, quoted_width_s=1.0, target_width_s=200.0, tau_s=100.0, form="ar1_asymptotic"
     )
-    assert source == "ar1_asymptotic"
+    assert form == "ar1_asymptotic"
     assert value == pytest.approx(1.0)
 
 

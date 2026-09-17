@@ -148,14 +148,14 @@ class CircularMean:
     dispersion_deg : float
         Exact circular standard deviation, :math:`\\sqrt{-2\\ln R}` converted
         to degrees. Zero when all samples agree and ``inf`` when they cancel.
-    n_source : int
+    n_readings : int
         How many samples contributed, masked ones excluded.
     """
 
     mean_deg: float
     resultant_length: float
     dispersion_deg: float
-    n_source: int
+    n_readings: int
 
 
 @dataclass(frozen=True)
@@ -176,19 +176,19 @@ class BinnedCircular:
         Mean resultant length per cell, ``nan`` where nothing contributed.
     dispersion_deg : numpy.ndarray
         Exact circular standard deviation per cell, in degrees.
-    n_source : numpy.ndarray
-        Contributing source cells per target cell.
+    n_readings : numpy.ndarray
+        Contributing readings per target cell.
     coverage : numpy.ndarray
         Share of each target cell's width covered by contributing data.
     n_overlapping : numpy.ndarray
-        Source cells overlapping at all, masked ones included. The difference
-        from ``n_source`` separates "no data here" from "data rejected here".
+        Readings overlapping at all, masked ones included. The difference
+        from ``n_readings`` separates "no data here" from "data rejected here".
     """
 
     mean_deg: npt.NDArray[np.float64]
     resultant_length: npt.NDArray[np.float64]
     dispersion_deg: npt.NDArray[np.float64]
-    n_source: npt.NDArray[np.int64]
+    n_readings: npt.NDArray[np.int64]
     coverage: npt.NDArray[np.float64]
     n_overlapping: npt.NDArray[np.int64]
 
@@ -325,13 +325,13 @@ def circular_mean(
             mean_deg=float("nan"),
             resultant_length=float("nan"),
             dispersion_deg=float("nan"),
-            n_source=0,
+            n_readings=0,
         )
-    n_source = int(np.count_nonzero(np.isfinite(angles) & (w > 0)))
+    n_readings = int(np.count_nonzero(np.isfinite(angles) & (w > 0)))
     # The average vector, and its length R (clipped: rounding can push it past 1).
     sin_mean, cos_mean = sin_sum / total, cos_sum / total
     resultant = float(min(np.hypot(sin_mean, cos_mean), 1.0))
-    if resultant <= n_source * RESULTANT_EPSILON:
+    if resultant <= n_readings * RESULTANT_EPSILON:
         # The vectors cancelled to within the rounding of the sum that added
         # them up. What is left points somewhere, confidently and
         # irreproducibly -- see the module docstring.
@@ -339,7 +339,7 @@ def circular_mean(
             mean_deg=float("nan"),
             resultant_length=0.0,
             dispersion_deg=float("inf"),
-            n_source=n_source,
+            n_readings=n_readings,
         )
     # The mean direction is the angle of the average vector: atan2(east, north)
     # gives a compass bearing, wrapped onto [0, 360).
@@ -347,12 +347,12 @@ def circular_mean(
         mean_deg=float(wrap_degrees(np.degrees(np.arctan2(sin_mean, cos_mean)))),
         resultant_length=resultant,
         dispersion_deg=float(circular_dispersion(resultant)),
-        n_source=n_source,
+        n_readings=n_readings,
     )
 
 
 def bin_circular_onto_cells(
-    source: CellBounds,
+    readings: CellBounds,
     angles_deg: npt.NDArray[np.float64],
     target: CellBounds,
 ) -> BinnedCircular:
@@ -365,10 +365,10 @@ def bin_circular_onto_cells(
 
     Parameters
     ----------
-    source : CellBounds
+    readings : CellBounds
         Cells of the angular stream. Must be sorted by start time.
     angles_deg : numpy.ndarray
-        One direction per source cell, in degrees. ``nan`` contributes
+        One direction per reading, in degrees. ``nan`` contributes
         nothing and reduces coverage, exactly as a masked scalar does.
     target : CellBounds
         Cells to average onto.
@@ -382,34 +382,34 @@ def bin_circular_onto_cells(
     Raises
     ------
     TsaraCircularError
-        If ``angles_deg`` does not have one entry per source cell.
+        If ``angles_deg`` does not have one entry per reading.
     """
     angles = np.asarray(angles_deg, dtype=np.float64)
-    if angles.shape != (len(source),):
+    if angles.shape != (len(readings),):
         raise TsaraCircularError(
-            f"bin_circular_onto_cells got {angles.size} angle(s) for {len(source)} "
-            "source cell(s); they must correspond one to one."
+            f"bin_circular_onto_cells got {angles.size} angle(s) for {len(readings)} "
+            "reading(s); they must correspond one to one."
         )
     n_target = len(target)
     mean_deg = np.full(n_target, np.nan, dtype=np.float64)
     resultant = np.full(n_target, np.nan, dtype=np.float64)
     dispersion = np.full(n_target, np.nan, dtype=np.float64)
-    n_source = np.zeros(n_target, dtype=np.int64)
+    n_readings = np.zeros(n_target, dtype=np.int64)
     coverage = np.zeros(n_target, dtype=np.float64)
     n_overlapping = np.zeros(n_target, dtype=np.int64)
 
-    pairs = overlap_pairs(source, target)
+    pairs = overlap_pairs(readings, target)
     if pairs.overlap_ns.size == 0:
         return BinnedCircular(
             mean_deg=mean_deg,
             resultant_length=resultant,
             dispersion_deg=dispersion,
-            n_source=n_source,
+            n_readings=n_readings,
             coverage=coverage,
             n_overlapping=n_overlapping,
         )
 
-    paired = angles[pairs.source_index]
+    paired = angles[pairs.reading_index]
     finite = np.isfinite(paired)
     weight = np.where(finite, pairs.overlap_ns, 0).astype(np.float64)
     # Zero the angle before taking sine and cosine: sin(nan) is nan, so a
@@ -421,7 +421,7 @@ def bin_circular_onto_cells(
     sin_sum = np.bincount(pairs.target_index, weights=weight * np.sin(radians), minlength=n_target)
     cos_sum = np.bincount(pairs.target_index, weights=weight * np.cos(radians), minlength=n_target)
     weight_sum = np.bincount(pairs.target_index, weights=weight, minlength=n_target)
-    n_source = np.bincount(
+    n_readings = np.bincount(
         pairs.target_index, weights=(weight > 0).astype(np.float64), minlength=n_target
     ).astype(np.int64)
     n_overlapping = np.bincount(
@@ -438,7 +438,7 @@ def bin_circular_onto_cells(
     # irreproducibly. Snapped to exactly zero so that the three reported
     # numbers agree with each other -- R of 0, a nan direction, and an
     # infinite dispersion all say the same thing.
-    cancelled = cell_resultant <= n_source[contributing] * RESULTANT_EPSILON
+    cancelled = cell_resultant <= n_readings[contributing] * RESULTANT_EPSILON
     cell_resultant = np.where(cancelled, 0.0, cell_resultant)
     resultant[contributing] = cell_resultant
     dispersion[contributing] = circular_dispersion(cell_resultant)
@@ -454,7 +454,7 @@ def bin_circular_onto_cells(
         mean_deg=mean_deg,
         resultant_length=resultant,
         dispersion_deg=dispersion,
-        n_source=n_source,
+        n_readings=n_readings,
         coverage=coverage,
         n_overlapping=n_overlapping,
     )

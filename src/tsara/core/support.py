@@ -88,18 +88,19 @@ from tsara.core.naming import (
     CELL_METHODS_ATTR,
     SUPPORT_COVERAGE_ATTR,
     SUPPORT_LABEL_ATTR,
-    SUPPORT_LABEL_SOURCE_ATTR,
-    SUPPORT_METHOD_SOURCE_ATTR,
+    SUPPORT_LABEL_PROVENANCE_ATTR,
+    SUPPORT_METHOD_PROVENANCE_ATTR,
     SUPPORT_WIDENED_ATTR,
     SUPPORT_WIDTH_ATTR,
-    SUPPORT_WIDTH_SOURCE_ATTR,
+    SUPPORT_WIDTH_PROVENANCE_ATTR,
     TIME_BOUNDS_VAR,
     TIME_COORD,
     SupportLabel,
     SupportMethod,
-    SupportSource,
+    SupportProvenance,
     is_sigma_name,
 )
+from tsara.core.timebase import NS_PER_S, epoch_ns
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt
@@ -112,7 +113,7 @@ __all__ = [
     "OverlapPairs",
     "SupportLabel",
     "SupportMethod",
-    "SupportSource",
+    "SupportProvenance",
     "TsaraSupportError",
     "attach_time_bounds",
     "bin_onto_cells",
@@ -125,7 +126,7 @@ __all__ = [
     "support_attrs",
 ]
 
-# `SupportLabel`, `SupportMethod` and `SupportSource` are re-exported above
+# `SupportLabel`, `SupportMethod` and `SupportProvenance` are re-exported above
 # from `tsara.core.naming`, which is where they are defined and documented.
 # They live there because the config layer needs the same vocabulary and must
 # not pay for this module's NumPy import; they are re-exported here so that
@@ -436,33 +437,33 @@ class BinnedOntoCells:
     values : numpy.ndarray
         Overlap-weighted mean per target cell; ``nan`` where nothing
         contributed. Never interpolated: a target cell with no overlapping
-        source data stays ``nan`` rather than being bridged.
-    n_source : numpy.ndarray
-        How many source cells *contributed* to each target cell. The honest
+        readings stays ``nan`` rather than being bridged.
+    n_readings : numpy.ndarray
+        How many readings *contributed* to each target cell. The honest
         sample size, and what stops interpolated points posing as
         independent samples in a later regression.
     n_overlapping : numpy.ndarray
-        How many source cells overlapped it at all, masked ones included.
-        The difference between this and ``n_source`` is the number of
+        How many readings overlapped it at all, masked ones included.
+        The difference between this and ``n_readings`` is the number of
         samples QA/QC removed, which is what separates "there was no data
         here" from "the data here was rejected". Both leave a NaN, and a
         later stage diagnosing a dropped pair needs to tell them apart.
     coverage : numpy.ndarray
-        Share of each target cell's width covered by contributing source
-        cells. The guard a later stage needs: a canister whose 15 s fill
+        Share of each target cell's width covered by contributing
+        readings. The guard a later stage needs: a canister whose 15 s fill
         overlaps only 3 s of partner data is not comparable to one with full
         coverage, even though both produce a number.
     """
 
     values: npt.NDArray[np.float64]
-    n_source: npt.NDArray[np.int64]
+    n_readings: npt.NDArray[np.int64]
     coverage: npt.NDArray[np.float64]
     n_overlapping: npt.NDArray[np.int64]
 
 
 @dataclass(frozen=True, eq=False)
 class OverlapPairs:
-    """Every (target cell, source cell) pair that overlaps, and by how much.
+    """Every (target cell, reading) pair that overlaps, and by how much.
 
     The seam between *finding* overlaps and *doing something with them*.
     Extracted when circular binning became the second caller: an angle cannot
@@ -471,15 +472,15 @@ class OverlapPairs:
     reported for a cell would describe a different interval than the methane.
 
     The arrays are "long form": one entry per overlapping pair, so
-    ``target_index``, ``source_index`` and ``overlap_ns`` are parallel and a
+    ``target_index``, ``reading_index`` and ``overlap_ns`` are parallel and a
     caller aggregates with :func:`numpy.bincount` on ``target_index``.
 
     ``eq=False`` because the fields are arrays, matching :class:`CellBounds`.
 
     Attributes
     ----------
-    target_index, source_index : numpy.ndarray
-        Indices into the target and source cells, one pair per entry.
+    target_index, reading_index : numpy.ndarray
+        Indices into the target cells and readings, one pair per entry.
     overlap_ns : numpy.ndarray
         Nanoseconds of overlap for each pair, never negative. Zero entries
         can occur: the candidate search brackets a window and the exact test
@@ -491,21 +492,21 @@ class OverlapPairs:
     """
 
     target_index: npt.NDArray[np.int64]
-    source_index: npt.NDArray[np.int64]
+    reading_index: npt.NDArray[np.int64]
     overlap_ns: npt.NDArray[np.int64]
     n_target: int
 
 
-def overlap_pairs(source: CellBounds, target: CellBounds) -> OverlapPairs:
-    """Find every overlapping pair of source and target cells.
+def overlap_pairs(readings: CellBounds, target: CellBounds) -> OverlapPairs:
+    """Find every overlapping pair of reading and target cell.
 
     Vectorized rather than looped: a binary search brackets the candidate
-    source cells for each target cell, the (target, candidate) pairs are
+    readings for each target cell, the (target, candidate) pairs are
     expanded without a Python loop, and the exact overlap decides membership.
 
     Parameters
     ----------
-    source : CellBounds
+    readings : CellBounds
         Cells being averaged. Must be sorted by start time.
     target : CellBounds
         Cells to average onto.
@@ -518,18 +519,18 @@ def overlap_pairs(source: CellBounds, target: CellBounds) -> OverlapPairs:
     Raises
     ------
     TsaraSupportError
-        If the source cells are not sorted by start time.
+        If the readings are not sorted by start time.
     """
     n_target = len(target)
     empty = np.empty(0, dtype=np.int64)
-    if n_target == 0 or len(source) == 0:
+    if n_target == 0 or len(readings) == 0:
         return OverlapPairs(
-            target_index=empty, source_index=empty, overlap_ns=empty, n_target=n_target
+            target_index=empty, reading_index=empty, overlap_ns=empty, n_target=n_target
         )
 
-    if np.any(np.diff(source.start_ns) < 0):
+    if np.any(np.diff(readings.start_ns) < 0):
         raise TsaraSupportError(
-            "Binning onto cells requires source cells sorted by start time; the "
+            "Binning onto cells requires readings sorted by start time; the "
             "candidate search below is a binary search and would silently miss "
             "overlaps on an unsorted input."
         )
@@ -540,56 +541,56 @@ def overlap_pairs(source: CellBounds, target: CellBounds) -> OverlapPairs:
     # overlap slightly -- their raw stops are then not sorted. Using the
     # running maximum only ever widens the candidate window, so the exact
     # overlap test below still decides membership.
-    running_stop = np.maximum.accumulate(source.stop_ns)
+    running_stop = np.maximum.accumulate(readings.stop_ns)
     lo = np.searchsorted(running_stop, target.start_ns, side="right")
-    hi = np.searchsorted(source.start_ns, target.stop_ns, side="left")
+    hi = np.searchsorted(readings.start_ns, target.stop_ns, side="left")
     counts = np.maximum(hi - lo, 0).astype(np.int64)
     total = int(counts.sum())
     if total == 0:
         return OverlapPairs(
-            target_index=empty, source_index=empty, overlap_ns=empty, n_target=n_target
+            target_index=empty, reading_index=empty, overlap_ns=empty, n_target=n_target
         )
 
-    # Expand (target, candidate-source) pairs without a Python loop: repeat
+    # Expand (target, candidate reading) pairs without a Python loop: repeat
     # each target index `counts` times, then walk 0..count-1 within each run.
     target_index = np.repeat(np.arange(n_target, dtype=np.int64), counts)
     run_start = np.repeat(np.cumsum(counts) - counts, counts)
-    source_index = np.repeat(lo, counts) + (np.arange(total, dtype=np.int64) - run_start)
+    reading_index = np.repeat(lo, counts) + (np.arange(total, dtype=np.int64) - run_start)
 
-    overlap = np.minimum(source.stop_ns[source_index], target.stop_ns[target_index]) - np.maximum(
-        source.start_ns[source_index], target.start_ns[target_index]
-    )
+    overlap = np.minimum(
+        readings.stop_ns[reading_index], target.stop_ns[target_index]
+    ) - np.maximum(readings.start_ns[reading_index], target.start_ns[target_index])
     return OverlapPairs(
         target_index=target_index,
-        source_index=source_index,
+        reading_index=reading_index,
         overlap_ns=np.maximum(overlap, 0),
         n_target=n_target,
     )
 
 
 def bin_onto_cells(
-    source: CellBounds,
+    readings: CellBounds,
     values: npt.NDArray[np.float64],
     target: CellBounds,
 ) -> BinnedOntoCells:
     """Average one stream onto another stream's cells, weighted by overlap.
 
     The primitive behind cross-rate pairing and the output grid. Each target
-    cell receives the mean of the source values that overlap it, each
-    weighted by *how much* of the source cell falls inside the target cell.
+    cell receives the mean of the readings that overlap it, each
+    weighted by *how much* of the reading's cell falls inside the target cell.
     That is the operation the interval model exists to make well defined:
     a 60 s mean can only be compared with the mean of a faster stream over
     the same 60 s, and "the same 60 s" is exactly what bounds say.
 
     Gases are never interpolated here, only averaged, per METHODS §1.2. A
-    target cell with no overlapping source data yields ``nan``.
+    target cell with no overlapping readings yields ``nan``.
 
     Parameters
     ----------
-    source : CellBounds
+    readings : CellBounds
         Cells of the stream being averaged. Must be sorted by start time.
     values : numpy.ndarray
-        One value per source cell. ``nan`` entries contribute nothing and are
+        One value per reading. ``nan`` entries contribute nothing and are
         excluded from ``coverage``, so a masked sample reduces coverage
         rather than silently passing as data.
     target : CellBounds
@@ -604,14 +605,14 @@ def bin_onto_cells(
     Raises
     ------
     TsaraSupportError
-        If ``values`` does not have one entry per source cell, or the source
+        If ``values`` does not have one entry per reading, or the readings
         cells are not sorted by start time.
     """
-    source_values = np.asarray(values, dtype=np.float64)
-    if source_values.shape != (len(source),):
+    reading_values = np.asarray(values, dtype=np.float64)
+    if reading_values.shape != (len(readings),):
         raise TsaraSupportError(
-            f"bin_onto_cells got {source_values.size} value(s) for {len(source)} "
-            "source cell(s); they must correspond one to one."
+            f"bin_onto_cells got {reading_values.size} value(s) for {len(readings)} "
+            "reading(s); they must correspond one to one."
         )
     n_target = len(target)
     out_values = np.full(n_target, np.nan, dtype=np.float64)
@@ -619,19 +620,19 @@ def bin_onto_cells(
     out_coverage = np.zeros(n_target, dtype=np.float64)
     out_overlapping = np.zeros(n_target, dtype=np.int64)
 
-    pairs = overlap_pairs(source, target)
+    pairs = overlap_pairs(readings, target)
     if pairs.overlap_ns.size == 0:
         return BinnedOntoCells(
             values=out_values,
-            n_source=out_counts,
+            n_readings=out_counts,
             coverage=out_coverage,
             n_overlapping=out_overlapping,
         )
     target_index = pairs.target_index
-    source_index = pairs.source_index
+    reading_index = pairs.reading_index
     overlap = pairs.overlap_ns
 
-    paired = source_values[source_index]
+    paired = reading_values[reading_index]
     finite = np.isfinite(paired)
     weight = np.where(finite, overlap, 0).astype(np.float64)
     # NaN values are zeroed *before* multiplying: 0 * nan is nan, so relying
@@ -658,7 +659,7 @@ def bin_onto_cells(
     out_coverage[wide] = weight_sum[wide] / target_width[wide]
     return BinnedOntoCells(
         values=out_values,
-        n_source=out_counts,
+        n_readings=out_counts,
         coverage=out_coverage,
         n_overlapping=out_overlapping,
     )
@@ -837,9 +838,9 @@ def support_attrs(
     label: SupportLabel,
     width_ns: int | None,
     coverage: float,
-    label_source: SupportSource,
-    width_source: SupportSource,
-    method_source: SupportSource,
+    label_provenance: SupportProvenance,
+    width_provenance: SupportProvenance,
+    method_provenance: SupportProvenance,
     n_widened: int = 0,
 ) -> dict[str, str | float]:
     """Build the stream attributes that describe temporal support.
@@ -862,8 +863,8 @@ def support_attrs(
     coverage : float
         Share of the record's extent that cells cover, the duty-cycle
         diagnostic from :attr:`CellBounds.coverage_fraction`.
-    label_source, width_source, method_source : str
-        Where each fact came from; see :data:`SupportSource`.
+    label_provenance, width_provenance, method_provenance : str
+        Where each fact came from; see :data:`SupportProvenance`.
 
     Returns
     -------
@@ -873,12 +874,12 @@ def support_attrs(
     attrs: dict[str, str | float] = {
         SUPPORT_LABEL_ATTR: label,
         SUPPORT_COVERAGE_ATTR: float(coverage),
-        SUPPORT_LABEL_SOURCE_ATTR: label_source,
-        SUPPORT_WIDTH_SOURCE_ATTR: width_source,
-        SUPPORT_METHOD_SOURCE_ATTR: method_source,
+        SUPPORT_LABEL_PROVENANCE_ATTR: label_provenance,
+        SUPPORT_WIDTH_PROVENANCE_ATTR: width_provenance,
+        SUPPORT_METHOD_PROVENANCE_ATTR: method_provenance,
     }
     if width_ns is not None:
-        attrs[SUPPORT_WIDTH_ATTR] = float(width_ns) / 1e9
+        attrs[SUPPORT_WIDTH_ATTR] = float(width_ns) / NS_PER_S
     if n_widened:
         attrs[SUPPORT_WIDENED_ATTR] = float(n_widened)
     return attrs
@@ -904,8 +905,6 @@ def ensure_time_bounds(dataset: xr.Dataset) -> bool:
         True if cells were attached, False if the stream already had them.
         The caller decides whether that is worth logging; it is not an error.
     """
-    from tsara.core.timebase import epoch_ns
-
     if TIME_COORD not in dataset.variables:
         return False
     if declared_bounds_name(dataset) is not None:
@@ -930,9 +929,9 @@ def ensure_time_bounds(dataset: xr.Dataset) -> bool:
             label="unknown",
             width_ns=cadence,
             coverage=bounds.coverage_fraction,
-            label_source="assumed",
-            width_source="inferred",
-            method_source="assumed",
+            label_provenance="assumed",
+            width_provenance="inferred",
+            method_provenance="assumed",
         )
     )
     return True

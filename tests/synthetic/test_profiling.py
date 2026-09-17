@@ -59,7 +59,7 @@ def test_profile_reports_basic_shape(autocorrelated_series: pd.Series) -> None:
     assert profile.n_blocks > 0
     assert profile.block_length == 128
     assert profile.sample_period_s == pytest.approx(1.0)
-    assert profile.n_source_points == len(autocorrelated_series)
+    assert profile.n_record_points == len(autocorrelated_series)
     assert profile.decorrelation_timescale_s is not None
 
 
@@ -143,7 +143,7 @@ def test_profile_summary_reports_absent_tau() -> None:
         background_median=0.0,
         background_iqr=0.0,
         sample_period_s=1.0,
-        n_source_points=8,
+        n_record_points=8,
     )
     assert "tau=none" in profile.summary()
 
@@ -195,7 +195,7 @@ def test_nan_samples_are_excluded(autocorrelated_series: pd.Series) -> None:
     holed = autocorrelated_series.copy()
     holed.iloc[100:200] = np.nan
     profile = profile_series(holed, name="holed", block_length=64)
-    assert profile.n_source_points == len(holed) - 100
+    assert profile.n_record_points == len(holed) - 100
     assert np.all(np.isfinite(profile.residual_blocks))
 
 

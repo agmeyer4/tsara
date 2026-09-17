@@ -14,7 +14,8 @@ to be substitutable for real data everywhere. Concretely a stream is an
 :class:`xarray.Dataset` with:
 
 * a ``time`` dimension carrying tz-naive UTC nanosecond timestamps;
-* one variable per canonical name, in canonical units, QA/QC masked;
+* one variable per canonical name, in canonical units, QA/QC masked, each
+  recording in a ``field`` attribute the physical quantity it measures;
 * ``sigma_rand_<name>`` / ``sigma_sys_<name>`` companions wherever the
   manifest let ingestion compute them, named via :mod:`tsara.core.naming` so
   the two producers cannot drift apart;
@@ -90,7 +91,7 @@ def build_stream(
     name: str,
     platform: PlatformConfig,
     campaign: str = "",
-    sources: Sequence[Path] = (),
+    files: Sequence[Path] = (),
     file_attrs: Mapping[str, object] | None = None,
     support: ResolvedSupport | None = None,
     time_shift: str | None = None,
@@ -113,15 +114,15 @@ def build_stream(
         Campaign platform, stationary or mobile.
     campaign : str, optional
         ``Manifest.name``, recorded in attrs.
-    sources : Sequence of pathlib.Path, optional
+    files : Sequence of pathlib.Path, optional
         Files that contributed, recorded as provenance.
     file_attrs : Mapping, optional
-        What the source files declared about *themselves*, reconciled
+        What the files declared about *themselves*, reconciled
         across them by
         :func:`~tsara.ingest.campaign._merge_file_attrs` — an ICARTT
         header's PI, mission, revision and limit-of-detection flags, for
         instance. Written into the stream's attrs so a saved product
-        explains itself without its source archive (CLAUDE.md §5). Counts
+        explains itself without its original archive (CLAUDE.md §5). Counts
         of samples masked as out-of-detection-range are routed to the
         variable they describe instead of the dataset.
     support : ResolvedSupport, optional
@@ -160,8 +161,9 @@ def build_stream(
             frame,
             canonical,
             variable,
+            field=instrument.field_of(canonical),
             instrument_name=name,
-            sources=sources,
+            files=files,
             lod_by_column=lod_by_column,
             cell_width_ns=None if bounds is None else bounds.width_ns,
         )
@@ -174,7 +176,7 @@ def build_stream(
             instrument,
             platform,
             campaign=campaign,
-            sources=sources,
+            files=files,
             declared=declared,
             support=support,
             bounds=bounds,
@@ -244,12 +246,18 @@ def _add_variable(
     canonical: str,
     variable: VariableConfig,
     *,
+    field: str,
     instrument_name: str,
-    sources: Sequence[Path],
+    files: Sequence[Path],
     lod_by_column: Mapping[str, int] = MappingProxyType({}),
     cell_width_ns: Any = None,
 ) -> None:
-    """Convert, mask and resolve one variable, adding it and its sigmas."""
+    """Convert, mask and resolve one variable, adding it and its sigmas.
+
+    ``field`` arrives resolved (:meth:`InstrumentConfig.field_of`) rather than
+    read off ``variable``, which cannot know its own name and so cannot apply
+    the default.
+    """
     if variable.column not in frame.columns:
         raise TsaraIngestError(
             f"Variable '{canonical}' of instrument '{instrument_name}' reads "
@@ -257,7 +265,7 @@ def _add_variable(
             f"Columns present: {list(frame.columns)[:12]}."
         )
 
-    label = _source_label(sources)
+    label = _files_label(files)
 
     # Order is fixed and load-bearing: convert first so QA/QC bounds and the
     # declared `absolute` noise floor are both interpreted in canonical
@@ -290,13 +298,18 @@ def _add_variable(
     attrs: dict[str, Any] = {
         "units": units,
         "role": variable.role,
+        # What is measured, as opposed to what this stream calls it. Written
+        # even when it equals the name, so a reader never has to know the
+        # default: every variable says, and a joined product keeps it, since
+        # the joins copy a variable's attributes onto its column (METHODS §1.6).
+        "field": field,
         # netCDF has no boolean type, so this is stored as 0/1 — the same
         # convention the synthetic generator uses.
         "circular": int(variable.circular),
         "raw_column": variable.column,
-        "uncertainty_source": resolved.source,
-        "uncertainty_source_random": resolved.random_source,
-        "uncertainty_source_systematic": resolved.systematic_source,
+        "uncertainty_provenance": resolved.provenance,
+        "uncertainty_provenance_random": resolved.random_provenance,
+        "uncertainty_provenance_systematic": resolved.systematic_provenance,
         "masked_fraction": masked_fraction(masked),
     }
     if variable.description:
@@ -337,7 +350,7 @@ def _add_variable(
                 "units": units,
                 "description": f"Random 1-sigma for {canonical}.",
                 "uncertainty_component": "random",
-                "uncertainty_source": resolved.random_source,
+                "uncertainty_provenance": resolved.random_provenance,
             },
         )
     if resolved.systematic is not None:
@@ -348,12 +361,12 @@ def _add_variable(
                 "units": units,
                 "description": f"Systematic 1-sigma for {canonical}.",
                 "uncertainty_component": "systematic",
-                "uncertainty_source": resolved.systematic_source,
+                "uncertainty_provenance": resolved.systematic_provenance,
             },
         )
 
 
-def _source_label(sources: Sequence[Path]) -> Path:
+def _files_label(files: Sequence[Path]) -> Path:
     """Return something path-like to name in messages about a merged table.
 
     After concatenation there is no single file to blame, so messages name
@@ -363,11 +376,11 @@ def _source_label(sources: Sequence[Path]) -> Path:
     """
     from pathlib import Path as _Path
 
-    if len(sources) == 1:
-        return sources[0]
-    if not sources:
+    if len(files) == 1:
+        return files[0]
+    if not files:
         return _Path("<data>")
-    return _Path(f"<{len(sources)} files starting {sources[0].name}>")
+    return _Path(f"<{len(files)} files starting {files[0].name}>")
 
 
 def _stream_attrs(
@@ -376,7 +389,7 @@ def _stream_attrs(
     platform: PlatformConfig,
     *,
     campaign: str,
-    sources: Sequence[Path],
+    files: Sequence[Path],
     declared: Mapping[str, object] = MappingProxyType({}),
     support: ResolvedSupport | None = None,
     bounds: CellBounds | None = None,
@@ -398,7 +411,7 @@ def _stream_attrs(
         "tsara_stage": "ingest",
         "instrument": name,
         "platform_kind": platform.kind,
-        "n_source_files": len(sources),
+        "n_files": len(files),
         "loader_format": instrument.loader.format,
     }
     if support is not None:
@@ -406,9 +419,9 @@ def _stream_attrs(
             label=support.label,
             width_ns=support.width_ns,
             coverage=bounds.coverage_fraction if bounds is not None else float("nan"),
-            label_source=support.label_source,
-            width_source=support.width_source,
-            method_source=support.method_source,
+            label_provenance=support.label_provenance,
+            width_provenance=support.width_provenance,
+            method_provenance=support.method_provenance,
             n_widened=support.n_widened,
         )
     if time_shift is not None:

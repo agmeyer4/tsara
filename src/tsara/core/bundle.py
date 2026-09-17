@@ -33,10 +33,13 @@ __all__ = [
     "BUNDLE_STAGE_KEY",
     "BUNDLE_STREAMS_DIR",
     "BUNDLE_VERSION_WITH_CELLS",
+    "BUNDLE_VERSION_WITH_READINGS_AND_PROVENANCE",
+    "RETIRED_ATTR_NAMES",
     "SUPPORTED_BUNDLE_VERSIONS",
     "TIME_ENCODING",
     "TsaraBundleError",
     "pin_time_encoding",
+    "rename_retired_attrs",
 ]
 
 #: Machine-readable description of what a bundle directory contains.
@@ -61,7 +64,12 @@ BUNDLE_GRID_FILE = "grid.nc"
 #:
 #: Version 2 (Phase 3.5) added CF cell boundaries to every stream: each value
 #: now carries the time interval it describes rather than a bare instant.
-BUNDLE_FORMAT_VERSION = 2
+#:
+#: Version 3 renamed attributes, and changed nothing else. The word "source"
+#: had come to mean four things -- an emitter, a binning input, where a number
+#: came from, and a file -- and it now means only the first. See
+#: :data:`RETIRED_ATTR_NAMES`.
+BUNDLE_FORMAT_VERSION = 3
 
 #: First format version whose streams record their own cells.
 #:
@@ -87,7 +95,33 @@ BUNDLE_VERSION_WITH_CELLS = 2
 #: not allowed to move. Refusing would strand any bundle written before the
 #: upgrade for no gain: the whole point of labelling provenance is that a weak
 #: reading can be admitted safely.
-SUPPORTED_BUNDLE_VERSIONS = (1, 2)
+SUPPORTED_BUNDLE_VERSIONS = (1, 2, 3)
+
+#: First format version whose attributes use the current vocabulary.
+BUNDLE_VERSION_WITH_READINGS_AND_PROVENANCE = 3
+
+#: Attribute names written by format versions 1 and 2, mapped to their names now.
+#:
+#: A rename, not a change of meaning, so an older stream has an exact reading
+#: and is migrated rather than refused -- the same judgment as the version-1
+#: cells above, with less at stake: nothing here is inferred, only respelled.
+#: "Source" is reserved for an emission source, so where a value came from is
+#: its *provenance*, the files behind a stream are its *files*, and the ICARTT
+#: header line naming the instrument is its *instrument description*.
+#:
+#: Stream products only. The grid product (``grid.nc``) and its ``n_source_``
+#: columns were never released in a bundle format, so nothing is mapped for
+#: them.
+RETIRED_ATTR_NAMES: dict[str, str] = {
+    "uncertainty_source": "uncertainty_provenance",
+    "uncertainty_source_random": "uncertainty_provenance_random",
+    "uncertainty_source_systematic": "uncertainty_provenance_systematic",
+    "tsara_support_label_source": "tsara_support_label_provenance",
+    "tsara_support_width_source": "tsara_support_width_provenance",
+    "tsara_support_method_source": "tsara_support_method_provenance",
+    "n_source_files": "n_files",
+    "icartt_data_source": "icartt_instrument_description",
+}
 
 #: Key in ``bundle.json`` naming the stage that wrote the bundle.
 #:
@@ -177,3 +211,45 @@ def pin_time_encoding(dataset: xr.Dataset) -> xr.Dataset:
             dataset[name] = variable.astype("datetime64[ns]")
         dataset[name].encoding.update(TIME_ENCODING)
     return dataset
+
+
+def rename_retired_attrs(dataset: xr.Dataset) -> bool:
+    """Respell a stream's format-1/2 attribute names as they are now, in place.
+
+    Applied by every stream-bundle loader to bundles older than
+    :data:`BUNDLE_VERSION_WITH_READINGS_AND_PROVENANCE`, and before any other
+    migration, so that later steps see only current names.
+
+    Parameters
+    ----------
+    dataset : xarray.Dataset
+        A stream read from an older bundle. Dataset-level attributes and every
+        variable's and coordinate's attributes are checked, since the
+        uncertainty labels sit on variables and the support labels on the
+        dataset.
+
+    Returns
+    -------
+    bool
+        Whether anything was renamed.
+
+    Raises
+    ------
+    TsaraBundleError
+        If an attribute is present under both its old and its new name, which
+        no TSARA version writes; picking one would discard the other silently.
+    """
+    renamed = False
+    holders = [dataset.attrs, *(dataset.variables[name].attrs for name in dataset.variables)]
+    for attrs in holders:
+        for old, new in RETIRED_ATTR_NAMES.items():
+            if old not in attrs:
+                continue
+            if new in attrs:
+                raise TsaraBundleError(
+                    f"A stream carries both '{old}' and '{new}'; no TSARA version "
+                    "writes both, so this file cannot be read unambiguously."
+                )
+            attrs[new] = attrs.pop(old)
+            renamed = True
+    return renamed

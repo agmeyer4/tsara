@@ -16,6 +16,10 @@ from typing import Any, TypeAlias
 import pytest
 import yaml
 
+#: The callable `respell_as_format_2` hands back: bundle directory in, count of
+#: attributes respelled out.
+RespellBundle: TypeAlias = Callable[[Path], int]
+
 #: The callable `write_yaml` hands back. Named rather than spelled inline at
 #: every use site so that the tests reading it stay about configuration, and
 #: so the signature has one place to change.
@@ -119,21 +123,64 @@ def write_yaml(tmp_path: Path) -> WriteYaml:
 
 @pytest.fixture()
 def synthetic_dict() -> dict[str, Any]:
-    """Minimal valid synthetic-dataset configuration."""
+    """Minimal valid synthetic-dataset configuration: one field, measured once."""
     return {
         "name": "cfg",
         "start": "2026-01-01T00:00:00Z",
         "duration": "1h",
         "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
+        "atmosphere": {
+            "fields": {
+                "ch4": {
+                    "units": "ppb",
+                    "background": {"kind": "parametric", "offset": 1900.0},
+                }
+            },
+        },
         "instruments": {
             "analyzer": {
                 "native_rate": "1s",
-                "species": {
-                    "ch4": {
-                        "background": {"kind": "parametric", "offset": 1900.0},
-                        "units": "ppb",
-                    }
-                },
+                "measures": {"ch4": {}},
             }
         },
     }
+
+
+@pytest.fixture()
+def respell_as_format_2() -> RespellBundle:
+    """Return a helper that rewrites a saved stream bundle as format 2 wrote it.
+
+    Format 3 renamed attributes and changed nothing else, so an honest format-2
+    bundle is a current one with the retired spellings put back and the version
+    number lowered. Built from `RETIRED_ATTR_NAMES` itself, so a name added to
+    that map is exercised without editing this helper -- and the count it
+    returns lets a test insist that something was actually respelled, since a
+    migration test over a bundle carrying none of the old names passes
+    vacuously.
+    """
+    import json
+
+    import xarray as xr
+
+    from tsara.core.bundle import BUNDLE_MANIFEST, BUNDLE_STREAMS_DIR, RETIRED_ATTR_NAMES
+
+    current_to_retired = {new: old for old, new in RETIRED_ATTR_NAMES.items()}
+
+    def _respell(bundle: Path) -> int:
+        count = 0
+        for target in sorted((bundle / BUNDLE_STREAMS_DIR).glob("*.nc")):
+            with xr.open_dataset(target, engine="netcdf4", decode_coords="all") as opened:
+                stream = opened.load()
+            holders = [stream.attrs, *(stream.variables[name].attrs for name in stream.variables)]
+            for attrs in holders:
+                for new, old in current_to_retired.items():
+                    if new in attrs:
+                        attrs[old] = attrs.pop(new)
+                        count += 1
+            stream.to_netcdf(target, engine="netcdf4")
+        descriptor = json.loads((bundle / BUNDLE_MANIFEST).read_text())
+        descriptor["bundle_format_version"] = 2
+        (bundle / BUNDLE_MANIFEST).write_text(json.dumps(descriptor))
+        return count
+
+    return _respell

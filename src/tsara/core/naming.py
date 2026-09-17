@@ -23,7 +23,10 @@ that true by construction instead of by coincidence.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Mapping
 
 __all__ = [
     "ALTITUDE_COORD",
@@ -35,7 +38,7 @@ __all__ = [
     "LATITUDE_COORD",
     "LOD_COUNT_KEY",
     "LONGITUDE_COORD",
-    "N_SOURCE_PREFIX",
+    "N_READINGS_PREFIX",
     "RAW_TIME_START_COLUMN",
     "RAW_TIME_STOP_COLUMN",
     "RESULTANT_LENGTH_SUFFIX",
@@ -43,21 +46,22 @@ __all__ = [
     "SIGMA_SYS_PREFIX",
     "SUPPORT_COVERAGE_ATTR",
     "SUPPORT_LABEL_ATTR",
-    "SUPPORT_LABEL_SOURCE_ATTR",
-    "SUPPORT_METHOD_SOURCE_ATTR",
+    "SUPPORT_LABEL_PROVENANCE_ATTR",
+    "SUPPORT_METHOD_PROVENANCE_ATTR",
     "SUPPORT_WIDENED_ATTR",
     "SUPPORT_WIDTH_ATTR",
-    "SUPPORT_WIDTH_SOURCE_ATTR",
+    "SUPPORT_WIDTH_PROVENANCE_ATTR",
     "SupportLabel",
     "SupportMethod",
-    "SupportSource",
+    "SupportProvenance",
     "TIME_BOUNDS_VAR",
     "TIME_COORD",
     "TIME_SHIFT_ATTR",
     "coverage_name",
+    "is_circular",
     "is_companion_name",
     "is_sigma_name",
-    "n_source_name",
+    "n_readings_name",
     "sigma_rand_name",
     "sigma_sys_name",
 ]
@@ -92,7 +96,7 @@ CELL_METHODS_ATTR = "cell_methods"
 #: second is weight. :mod:`tsara.core.support` imports NumPy, and the config
 #: layer imports neither NumPy nor pandas today; measured, importing it from
 #: the schema would add roughly 120 ms to every config load and every CLI
-#: ``--help``. This module imports nothing at all.
+#: ``--help``. This module imports nothing at runtime beyond :mod:`typing`.
 
 #: Where the timestamp sits inside its cell.
 #:
@@ -126,7 +130,7 @@ SupportMethod = Literal["point", "mean"]
 #: * ``declared``  -- the manifest states it.
 #: * ``inferred``  -- TSARA read it from the file (column names, cadence).
 #: * ``assumed``   -- nothing said; a default was applied and labelled.
-SupportSource = Literal["reported", "declared", "inferred", "assumed"]
+SupportProvenance = Literal["reported", "declared", "inferred", "assumed"]
 
 #: Stream attributes describing temporal support and where it came from.
 #:
@@ -139,9 +143,9 @@ SupportSource = Literal["reported", "declared", "inferred", "assumed"]
 #: nominal width (a continuous logger) are different situations and a later
 #: stage may need to know which it has.
 #:
-#: The three ``_SOURCE`` attrs are the provenance ladder, recorded per field
+#: The three ``_PROVENANCE`` attrs are the provenance ladder, recorded per field
 #: rather than once per stream, exactly as the uncertainty system records it
-#: per component. See :data:`SupportSource`.
+#: per component. See :data:`SupportProvenance`.
 SUPPORT_LABEL_ATTR = "tsara_support_label"
 SUPPORT_WIDTH_ATTR = "tsara_nominal_cell_width_s"
 SUPPORT_COVERAGE_ATTR = "tsara_cell_coverage"
@@ -154,9 +158,9 @@ SUPPORT_COVERAGE_ATTR = "tsara_cell_coverage"
 #: looking like data while never contributing to anything -- so it is widened
 #: to the record's own cadence, and the count says the repair took place.
 SUPPORT_WIDENED_ATTR = "tsara_cells_widened"
-SUPPORT_LABEL_SOURCE_ATTR = "tsara_support_label_source"
-SUPPORT_WIDTH_SOURCE_ATTR = "tsara_support_width_source"
-SUPPORT_METHOD_SOURCE_ATTR = "tsara_support_method_source"
+SUPPORT_LABEL_PROVENANCE_ATTR = "tsara_support_label_provenance"
+SUPPORT_WIDTH_PROVENANCE_ATTR = "tsara_support_width_provenance"
+SUPPORT_METHOD_PROVENANCE_ATTR = "tsara_support_method_provenance"
 
 #: Stream attribute recording a clock correction that was applied.
 #:
@@ -194,13 +198,42 @@ SIGMA_RAND_PREFIX = "sigma_rand_"
 SIGMA_SYS_PREFIX = "sigma_sys_"
 
 
+def is_circular(attrs: Mapping[str, object]) -> bool:
+    """Return whether a variable's attributes declare it angular.
+
+    Asked by spelling rather than by truthiness, because the flag arrives as
+    more than one type. Both producers write a Python ``int`` (the generator
+    from ``field.circular``, ingestion from ``variable.circular``); measured, a
+    netCDF round trip returns it as ``numpy.int64``; and a dataset built by
+    hand or by another tool may carry either of the string spellings. The trap
+    is the last of those: ``bool("0")`` is ``True``, so the obvious test would
+    read a non-angular variable as a direction and vector-average it.
+
+    One function rather than the same expression in each caller: the binner
+    and the auxiliary interpolator both have to make this decision, and two
+    copies of a predicate this easy to get backwards is the coupling this
+    module exists to remove.
+
+    Parameters
+    ----------
+    attrs : mapping
+        A variable's attributes, e.g. ``stream['wind_dir'].attrs``.
+
+    Returns
+    -------
+    bool
+        True when the variable declares itself circular.
+    """
+    return str(attrs.get("circular", 0)) not in ("0", "False", "None", "")
+
+
 def is_sigma_name(name: str) -> bool:
     """Return whether a variable name is one of the uncertainty companions.
 
     The prefixes are the seam the two producers agree on -- the synthetic
     generator and ingestion both build companion names this way, and neither
     records anything else that identifies them -- so asking about a name is
-    the only test that works on a stream from either source, or on one
+    the only test that works on a stream from either producer, or on one
     reloaded from disk.
 
     Parameters
@@ -249,9 +282,9 @@ def sigma_sys_name(variable: str) -> str:
 
 
 #: Columns the joining operation adds beside every value it puts on new cells
-#: (``docs/METHODS.md`` §11.2): how many source cells contributed, and how much
+#: (``docs/METHODS.md`` §11.2): how many readings contributed, and how much
 #: of the target cell they covered.
-N_SOURCE_PREFIX = "n_source_"
+N_READINGS_PREFIX = "n_readings_"
 COVERAGE_PREFIX = "coverage_"
 
 #: What an angular variable gets instead of a sigma, since a direction has no
@@ -260,7 +293,7 @@ RESULTANT_LENGTH_SUFFIX = "_resultant_length"
 DISPERSION_SUFFIX = "_dispersion"
 
 
-def n_source_name(variable: str) -> str:
+def n_readings_name(variable: str) -> str:
     """Return the name of a variable's contributing-cell count.
 
     Parameters
@@ -271,9 +304,9 @@ def n_source_name(variable: str) -> str:
     Returns
     -------
     str
-        e.g. ``'n_source_ch4'``.
+        e.g. ``'n_readings_ch4'``.
     """
-    return f"{N_SOURCE_PREFIX}{variable}"
+    return f"{N_READINGS_PREFIX}{variable}"
 
 
 def coverage_name(variable: str) -> str:
@@ -321,7 +354,7 @@ def is_companion_name(name: str) -> bool:
     """
     return (
         is_sigma_name(name)
-        or name.startswith((N_SOURCE_PREFIX, COVERAGE_PREFIX))
+        or name.startswith((N_READINGS_PREFIX, COVERAGE_PREFIX))
         or name.endswith((RESULTANT_LENGTH_SUFFIX, DISPERSION_SUFFIX))
     )
 

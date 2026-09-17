@@ -25,6 +25,27 @@ if TYPE_CHECKING:  # pragma: no cover
 #: Nanoseconds per second, the scale between the two helpers below.
 NS_PER_S = 1e9
 
+#: One second, in the integer nanoseconds TSARA does interval arithmetic in.
+#:
+#: The same fact as :data:`NS_PER_S` in the other of this module's two units,
+#: and a separate name because the two do different jobs: ``NS_PER_S`` is a
+#: scale that a float division applies, while this is a *duration* that cell
+#: boundaries are built from and compared against. Integer nanoseconds are what
+#: :mod:`tsara.core.support` works in throughout, because float seconds lose
+#: nanosecond resolution above about 10^8 s of epoch.
+SECOND_NS = 1_000_000_000
+
+#: Seconds in an hour, and in a day.
+#:
+#: Here rather than beside the code that uses them because the same two numbers
+#: had been written out in four places across two subpackages, and a unit
+#: conversion is exactly the kind of fact that should have one home — this
+#: module is where TSARA converts between time units. Both appear wherever a
+#: configured *rate* meets a real time span: the synthetic generator quotes
+#: drift and random-walk amplitudes per day, and plume rates per hour.
+SECONDS_PER_HOUR = 3600.0
+SECONDS_PER_DAY = 86_400.0
+
 
 def to_utc_naive(times: pd.DatetimeIndex) -> pd.DatetimeIndex:
     """Return ``times`` as tz-naive UTC.

@@ -17,7 +17,7 @@ begins at line ``NLHEAD + 1``, and the header is self-describing::
     line 1        NLHEAD, FFI              (FFI is 1001 for this format)
     line 2        principal investigator
     line 3        organization
-    line 4        data source description
+    line 4        instrument, platform or model description
     line 5        mission name
     line 6        volume number, total volumes
     line 7        data date, revision date  (YYYY, MM, DD, YYYY, MM, DD)
@@ -159,7 +159,7 @@ class IcarttHeader:
         ``NLHEAD``; data begins at this 0-based line index.
     file_format_index : int
         ``FFI``; 1001 for this format.
-    pi_name, organization, data_source, mission : str
+    pi_name, organization, instrument_description, mission : str
         Provenance lines 2-5.
     volume : tuple of int
         ``(volume number, total volumes)``.
@@ -191,7 +191,7 @@ class IcarttHeader:
     file_format_index: int
     pi_name: str
     organization: str
-    data_source: str
+    instrument_description: str
     mission: str
     volume: tuple[int, int]
     data_date: date
@@ -447,7 +447,7 @@ def parse_icartt_header(lines: list[str], path: Path) -> IcarttHeader:
     lines : list of str
         All lines of the file.
     path : pathlib.Path
-        Source file, for error messages.
+        File being read, for error messages.
 
     Returns
     -------
@@ -584,7 +584,7 @@ def parse_icartt_header(lines: list[str], path: Path) -> IcarttHeader:
         file_format_index=ffi,
         pi_name=lines[1].strip(),
         organization=lines[2].strip(),
-        data_source=lines[3].strip(),
+        instrument_description=lines[3].strip(),
         mission=lines[4].strip(),
         volume=(int(_split(lines[5])[0]), int(_split(lines[5])[1])),
         data_date=data_date,
@@ -756,7 +756,7 @@ def _choose_column_names(body: list[str], header: IcarttHeader, path: Path) -> l
     header : IcarttHeader
         Parsed header supplying both candidate name lists.
     path : pathlib.Path
-        Source file, for messages.
+        File being read, for messages.
 
     Returns
     -------
@@ -1207,7 +1207,7 @@ def _provenance(
     provenance: dict[str, Any] = {
         "icartt_pi": header.pi_name,
         "icartt_organization": header.organization,
-        "icartt_data_source": header.data_source,
+        "icartt_instrument_description": header.instrument_description,
         "icartt_mission": header.mission,
         "icartt_data_date": header.data_date.isoformat(),
         "icartt_revision_date": header.revision_date.isoformat(),

@@ -34,12 +34,11 @@ from tsara.align import bin_streams_onto_cells
 from tsara.config.loader import load_manifest
 from tsara.core.naming import TIME_BOUNDS_VAR, sigma_rand_name, sigma_sys_name
 from tsara.core.support import CellBounds
+from tsara.core.timebase import SECOND_NS as SECOND
 from tsara.ingest import ingest_campaign
 from tsara.synthetic import generate
 from tsara.synthetic.config import SyntheticConfig
 from tsara.synthetic.export import export_raw
-
-SECOND = 1_000_000_000
 
 #: Per-point random 1-sigma declared in the manifest, in ppb.
 RANDOM_PPB = 2.0
@@ -57,14 +56,20 @@ SPEC: dict[str, Any] = {
     "start": "2026-01-01T00:00:00Z",
     "duration": "20min",
     "platform": {"kind": "stationary", "latitude": 40.77, "longitude": -111.85},
+    "atmosphere": {
+        "fields": {
+            "ch4": {
+                "background": {"kind": "parametric", "offset": BACKGROUND_PPB},
+                "role": "gas",
+                "units": "ppb",
+            }
+        },
+    },
     "instruments": {
         "analyzer": {
             "native_rate": "1s",
-            "species": {
+            "measures": {
                 "ch4": {
-                    "background": {"kind": "parametric", "offset": BACKGROUND_PPB},
-                    "role": "gas",
-                    "units": "ppb",
                     "uncertainty": {
                         "random": {"absolute": RANDOM_PPB},
                         "systematic": {"relative": SYSTEMATIC_FRACTION},
@@ -73,7 +78,6 @@ SPEC: dict[str, Any] = {
             },
         }
     },
-    "sources": {},
 }
 
 
@@ -135,13 +139,19 @@ def test_a_declared_budget_reaches_the_binner_through_a_file(tmp_path: Path) -> 
     stream, _, _ = _walk(tmp_path, seed=1)
     assert sigma_rand_name("ch4") in stream.data_vars
     assert sigma_sys_name("ch4") in stream.data_vars
-    assert stream["ch4"].attrs["uncertainty_source_random"] == "declared"
-    assert stream["ch4"].attrs["uncertainty_source_systematic"] == "declared"
+    assert stream["ch4"].attrs["uncertainty_provenance_random"] == "declared"
+    assert stream["ch4"].attrs["uncertainty_provenance_systematic"] == "declared"
 
     joined = bin_streams_onto_cells({"analyzer": stream}, _uniform(_epoch(stream), CELL_S), ["ch4"])
     assert sigma_rand_name("ch4") in joined.data_vars
-    assert joined[sigma_rand_name("ch4")].attrs["uncertainty_source"] == "declared"
+    assert joined[sigma_rand_name("ch4")].attrs["uncertainty_provenance"] == "declared"
+    # The form is recorded where it is true: on the sigma it produced. This
+    # manifest declares no decorrelation timescale, so the readings are
+    # independent by declaration and the default 'ar1_neff' never runs -- and
+    # the product must not carry a second, dataset-level attribute claiming it
+    # did. That disagreement was live until the notebook-04 walkthrough.
     assert joined[sigma_rand_name("ch4")].attrs["tsara_propagation_form"] == "independent"
+    assert "tsara_propagation_form" not in joined.attrs
 
 
 def test_the_random_component_falls_as_one_over_root_n(tmp_path: Path) -> None:
@@ -155,7 +165,7 @@ def test_the_random_component_falls_as_one_over_root_n(tmp_path: Path) -> None:
     epoch = _epoch(stream)
     for width_s in (1, 10, 60, 600):
         joined = bin_streams_onto_cells({"analyzer": stream}, _uniform(epoch, width_s), ["ch4"])
-        n = float(np.nanmedian(joined["n_source_ch4"].values))
+        n = float(np.nanmedian(joined["n_readings_ch4"].values))
         got = float(np.nanmedian(joined[sigma_rand_name("ch4")].values))
         assert n == pytest.approx(width_s)
         assert got == pytest.approx(RANDOM_PPB / np.sqrt(n), rel=1e-9)
@@ -247,7 +257,7 @@ def test_the_offset_from_truth_is_the_generators_own_systematic_draw(tmp_path: P
 
 
 def _slow_cell_sigmas(
-    source: CellBounds,
+    readings: CellBounds,
     values: np.ndarray,
     sigma_rand: np.ndarray,
     sigma_sys: np.ndarray,
@@ -255,7 +265,7 @@ def _slow_cell_sigmas(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Recompute value and both sigmas per cell, slowly, from the definitions.
 
-    Plain Python loops over every (target, source) pair, with the overlap
+    Plain Python loops over every (target, reading) pair, with the overlap
     written as ``max(0, min(stops) - max(starts))``. Independent of the
     vectorized path in every way that matters: no binary search, no
     ``bincount``, no long form, and the weights are rebuilt from the
@@ -267,9 +277,9 @@ def _slow_cell_sigmas(
     out_sys = np.full(n, np.nan)
     for cell in range(n):
         weights, keep_value, rand_here, sys_here = [], [], [], []
-        for row in range(len(source)):
-            overlap = min(source.stop_ns[row], target.stop_ns[cell]) - max(
-                source.start_ns[row], target.start_ns[cell]
+        for row in range(len(readings)):
+            overlap = min(readings.stop_ns[row], target.stop_ns[cell]) - max(
+                readings.start_ns[row], target.start_ns[cell]
             )
             if overlap <= 0 or not np.isfinite(values[row]):
                 continue
@@ -324,9 +334,9 @@ def test_an_awkward_cell_matches_a_slow_reimplementation(tmp_path: Path) -> None
     joined = bin_streams_onto_cells({"analyzer": perturbed}, target, ["ch4"])
 
     bounds = perturbed[TIME_BOUNDS_VAR].values.astype("datetime64[ns]").astype(np.int64)
-    source = CellBounds(start_ns=bounds[:, 0], stop_ns=bounds[:, 1])
+    readings = CellBounds(start_ns=bounds[:, 0], stop_ns=bounds[:, 1])
     want_value, want_rand, want_sys = _slow_cell_sigmas(
-        source,
+        readings,
         perturbed["ch4"].values,
         perturbed[sigma_rand_name("ch4")].values,
         perturbed[sigma_sys_name("ch4")].values,
@@ -339,7 +349,7 @@ def test_an_awkward_cell_matches_a_slow_reimplementation(tmp_path: Path) -> None
     # cell holds three samples, but not with equal weight: two whole ones and
     # a half. Equal-weight arithmetic would therefore give a visibly different
     # answer, which is what makes a substituted weight detectable here.
-    counts = joined["n_source_ch4"].values
+    counts = joined["n_readings_ch4"].values
     assert set(np.unique(counts)) == {3}
     equal_weight = RANDOM_PPB / np.sqrt(counts)
     assert not np.allclose(joined[sigma_rand_name("ch4")].values, equal_weight, rtol=1e-3)

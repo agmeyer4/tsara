@@ -7,22 +7,25 @@ top-level conftest: everything is valid except the thing under test.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypeAlias
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from tsara.synthetic.config import (
+    AtmosphereSpec,
     EMGShape,
+    FieldSpec,
     GaussianShape,
     InstrumentSpec,
     LognormalAmplitude,
+    MeasurementSpec,
     ParametricBackground,
     RatioSpec,
     SourceSpec,
-    SpeciesSpec,
     StationarySite,
     SyntheticConfig,
     TrueComponent,
@@ -53,25 +56,27 @@ def noise_free_config(flat_background: ParametricBackground) -> SyntheticConfig:
         duration="1h",
         seed=1234,
         platform=StationarySite(kind="stationary", latitude=40.0, longitude=-111.0),
+        atmosphere=AtmosphereSpec(
+            fields={
+                "ch4": FieldSpec(background=flat_background, units="ppb"),
+                "c2h6": FieldSpec(
+                    background=ParametricBackground(kind="parametric", offset=2.0), units="ppb"
+                ),
+            },
+            sources={
+                "pad": SourceSpec(
+                    rate_per_hour=10.0,
+                    shape=GaussianShape(kind="gaussian", sigma="20s"),
+                    reference_species="ch4",
+                    amplitude=LognormalAmplitude(kind="lognormal", median=100.0, sigma_log=0.4),
+                    ratios={"c2h6": RatioSpec(mean=0.05)},
+                )
+            },
+        ),
         instruments={
             "analyzer": InstrumentSpec(
                 native_rate="1s",
-                species={
-                    "ch4": SpeciesSpec(background=flat_background, units="ppb"),
-                    "c2h6": SpeciesSpec(
-                        background=ParametricBackground(kind="parametric", offset=2.0),
-                        units="ppb",
-                    ),
-                },
-            )
-        },
-        sources={
-            "pad": SourceSpec(
-                rate_per_hour=10.0,
-                shape=GaussianShape(kind="gaussian", sigma="20s"),
-                reference_species="ch4",
-                amplitude=LognormalAmplitude(kind="lognormal", median=100.0, sigma_log=0.4),
-                ratios={"c2h6": RatioSpec(mean=0.05)},
+                measures={"ch4": MeasurementSpec(), "c2h6": MeasurementSpec()},
             )
         },
     )
@@ -88,13 +93,22 @@ def noisy_config(flat_background: ParametricBackground) -> SyntheticConfig:
         platform=StationarySite(
             kind="stationary", latitude=40.0, longitude=-111.0, altitude_m=1500.0
         ),
+        atmosphere=AtmosphereSpec(
+            fields={"ch4": FieldSpec(background=flat_background, units="ppb")},
+            sources={
+                "pad": SourceSpec(
+                    rate_per_hour=4.0,
+                    shape=EMGShape(kind="emg", sigma="15s", tau="30s"),
+                    reference_species="ch4",
+                    amplitude=LognormalAmplitude(kind="lognormal", median=80.0, sigma_log=0.5),
+                )
+            },
+        ),
         instruments={
             "analyzer": InstrumentSpec(
                 native_rate="1s",
-                species={
-                    "ch4": SpeciesSpec(
-                        background=flat_background,
-                        units="ppb",
+                measures={
+                    "ch4": MeasurementSpec(
                         uncertainty=TrueUncertainty(
                             random=TrueComponent(absolute=2.0, report_as="ch4_err"),
                             systematic=TrueComponent(relative=0.01),
@@ -103,15 +117,34 @@ def noisy_config(flat_background: ParametricBackground) -> SyntheticConfig:
                 },
             )
         },
-        sources={
-            "pad": SourceSpec(
-                rate_per_hour=4.0,
-                shape=EMGShape(kind="emg", sigma="15s", tau="30s"),
-                reference_species="ch4",
-                amplitude=LognormalAmplitude(kind="lognormal", median=80.0, sigma_log=0.5),
-            )
-        },
     )
+
+
+#: The callable the `with_sources` fixture hands back. A fixture rather than an
+#: importable helper because test modules here are not a package, so importing
+#: from a conftest resolves only when pytest happens to run from the repo root.
+WithSources: TypeAlias = Callable[[SyntheticConfig, dict[str, Any]], SyntheticConfig]
+
+
+@pytest.fixture()
+def with_sources() -> WithSources:
+    """Return a helper that swaps a config's sources and re-validates it.
+
+    Sources live one level down, under the atmosphere, so the one-line
+    ``model_copy(update={"sources": ...})`` tests used to write would now need
+    two levels. Validating the result rather than copying it also keeps the
+    source cross-checks honest in every test that swaps sources.
+    """
+
+    def _swap(config: SyntheticConfig, sources: dict[str, Any]) -> SyntheticConfig:
+        payload = config.model_dump()
+        payload["atmosphere"]["sources"] = {
+            name: source.model_dump() if isinstance(source, SourceSpec) else source
+            for name, source in sources.items()
+        }
+        return SyntheticConfig.model_validate(payload)
+
+    return _swap
 
 
 @pytest.fixture()
@@ -150,7 +183,7 @@ def white_noise_profile() -> RealDataProfile:
         background_median=1900.0,
         background_iqr=4.0,
         sample_period_s=1.0,
-        n_source_points=5120,
+        n_record_points=5120,
     )
 
 

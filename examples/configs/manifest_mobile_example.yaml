@@ -48,8 +48,9 @@ instruments:
     metadata:
       institution: uutah
     variables:
-      # Keys are CANONICAL names: they become variable names in the merged
-      # dataset, and role=gas entries form the `species` dimension.
+      # Keys are CANONICAL names: the variable names in this instrument's
+      # stream. They must be unique within the instrument, and another
+      # instrument may reuse one (see the multiformat example).
       ch4:
         column: CH4_dry
         role: gas

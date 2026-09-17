@@ -174,7 +174,7 @@ def check_raw_table(table: RawTable, *, reader_name: str) -> RawTable:
     """Verify a reader honoured the :class:`RawTable` contract.
 
     Applied by the registry to every reader's output, so that a
-    contract violation is reported at its source — naming the reader and the
+    contract violation is reported where it happens — naming the reader and the
     file — rather than surfacing hundreds of lines later as an unrelated
     failure in stream assembly. The failure mode this actually prevents is
     the tz-aware index: it compares fine, sorts fine, and survives every

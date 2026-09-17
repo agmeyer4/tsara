@@ -72,14 +72,21 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from tsara.align.binning import TsaraAlignError, resolve_variable, stream_cells
+from tsara.align.binning import (
+    TsaraAlignError,
+    VariableRef,
+    resolve_variable,
+    stream_cells,
+)
 from tsara.core.circular import wrap_degrees
 from tsara.core.naming import (
     ALTITUDE_COORD,
     LATITUDE_COORD,
     LONGITUDE_COORD,
     TIME_COORD,
+    is_circular,
 )
+from tsara.core.timebase import NS_PER_S
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Mapping
@@ -118,9 +125,9 @@ class InterpolatedField:
     ----------
     values : numpy.ndarray
         The field at each target cell's midpoint, ``nan`` where the guard
-        refused to bridge or the target lies outside the source record.
+        refused to bridge or the target lies outside the input record.
     n_exact : int
-        Targets that landed exactly on a source sample. Those are measured
+        Targets that landed exactly on a sample. Those are measured
         rather than interpolated, so the gap guard does not apply to them.
     n_interpolated : int
         Targets whose value was interpolated between two samples.
@@ -159,7 +166,7 @@ def _as_seconds(duration: str | pd.Timedelta) -> float:
             f"max_interp_gap must be positive, got {duration}. Use a positive "
             "duration, or bin the field instead of interpolating it."
         )
-    return float(delta.value) / 1e9
+    return float(delta.value) / NS_PER_S
 
 
 def _check_role(stream: xr.Dataset, variable: str, instrument: str) -> None:
@@ -182,7 +189,7 @@ def _check_role(stream: xr.Dataset, variable: str, instrument: str) -> None:
 
 
 def _interpolate(
-    source_ns: np.ndarray,
+    sample_ns: np.ndarray,
     values: np.ndarray,
     target_ns: np.ndarray,
     max_gap_s: float,
@@ -192,8 +199,8 @@ def _interpolate(
     """Evaluate a field at ``target_ns``, refusing to bridge long gaps."""
     # Interpolate between samples that hold a value; a masked sample is not a fix.
     finite = np.isfinite(values)
-    source_ns, values = source_ns[finite], values[finite]
-    if source_ns.size == 0:
+    sample_ns, values = sample_ns[finite], values[finite]
+    if sample_ns.size == 0:
         return InterpolatedField(
             values=np.full(target_ns.size, np.nan),
             n_exact=0,
@@ -202,43 +209,43 @@ def _interpolate(
             n_outside=int(target_ns.size),
         )
     # np.interp and the bracketing search below both need samples in time order.
-    order = np.argsort(source_ns, kind="stable")
-    source_ns, values = source_ns[order], values[order]
+    order = np.argsort(sample_ns, kind="stable")
+    sample_ns, values = sample_ns[order], values[order]
 
     # Epoch nanoseconds do not fit in a float64 mantissa: at 2024 epochs the
     # spacing between representable values is about 378 ns, so converting
     # directly would quantise every timestamp onto a coarse grid. Subtracting
     # a reference first keeps the arithmetic exact.
-    reference = int(source_ns[0])
-    source_s = (source_ns - reference).astype(np.float64) / 1e9
-    target_s = (target_ns - reference).astype(np.float64) / 1e9
+    reference = int(sample_ns[0])
+    sample_s = (sample_ns - reference).astype(np.float64) / NS_PER_S
+    target_s = (target_ns - reference).astype(np.float64) / NS_PER_S
 
     if circular:
         # A direction is interpolated as a unit vector, so 350 -> 10 passes through
         # north rather than through south.
         radians = np.radians(values)
-        sin_part = np.interp(target_s, source_s, np.sin(radians))
-        cos_part = np.interp(target_s, source_s, np.cos(radians))
+        sin_part = np.interp(target_s, sample_s, np.sin(radians))
+        cos_part = np.interp(target_s, sample_s, np.cos(radians))
         interpolated = wrap_degrees(np.degrees(np.arctan2(sin_part, cos_part)))
     else:
         # Straight-line interpolation between the two samples around each target.
-        interpolated = np.interp(target_s, source_s, values)
+        interpolated = np.interp(target_s, sample_s, values)
 
-    # Where each target sits among the sources. `right` is the first sample at
+    # Where each target sits among the samples. `right` is the first sample at
     # or after it, so `right - 1` is the last one before.
-    right = np.searchsorted(source_ns, target_ns, side="left")
+    right = np.searchsorted(sample_ns, target_ns, side="left")
     # A target landing exactly on a sample was measured, not interpolated.
-    exact = (right < source_ns.size) & (
-        source_ns[np.minimum(right, source_ns.size - 1)] == target_ns
+    exact = (right < sample_ns.size) & (
+        sample_ns[np.minimum(right, sample_ns.size - 1)] == target_ns
     )
     # Before the first sample or after the last: never extrapolated.
-    outside = ((target_ns < source_ns[0]) | (target_ns > source_ns[-1])) & ~exact
+    outside = ((target_ns < sample_ns[0]) | (target_ns > sample_ns[-1])) & ~exact
     # The gap between the two samples bracketing each target ...
-    left = np.clip(right - 1, 0, source_ns.size - 1)
-    right_clipped = np.clip(right, 0, source_ns.size - 1)
-    gap_ns = (source_ns[right_clipped] - source_ns[left]).astype(np.float64)
+    left = np.clip(right - 1, 0, sample_ns.size - 1)
+    right_clipped = np.clip(right, 0, sample_ns.size - 1)
+    gap_ns = (sample_ns[right_clipped] - sample_ns[left]).astype(np.float64)
     # ... refused when strictly longer than the guard (a gap equal to it is bridged).
-    too_far = (gap_ns / 1e9 > max_gap_s) & ~exact & ~outside
+    too_far = (gap_ns / NS_PER_S > max_gap_s) & ~exact & ~outside
 
     result = np.asarray(interpolated, dtype=np.float64)
     result[outside | too_far] = np.nan
@@ -251,21 +258,21 @@ def _interpolate(
     )
 
 
-def _median_spacing_s(source_ns: np.ndarray, values: np.ndarray) -> float:
+def _median_spacing_s(sample_ns: np.ndarray, values: np.ndarray) -> float:
     """Return the median interval between consecutive finite samples, in seconds.
 
     ``inf`` for a record with fewer than two finite samples, which has no
     spacing to compare and is reported by the outside-the-record count instead.
     """
-    present = np.sort(source_ns[np.isfinite(values)])
+    present = np.sort(sample_ns[np.isfinite(values)])
     if present.size < 2:
         return float("inf")
-    return float(np.median(np.diff(present))) / 1e9
+    return float(np.median(np.diff(present))) / NS_PER_S
 
 
 def interpolate_onto_cells(
     streams: Mapping[str, xr.Dataset],
-    variable: str | tuple[str, str],
+    variable: VariableRef,
     target: CellBounds,
     *,
     max_interp_gap: str | pd.Timedelta = "10s",
@@ -300,19 +307,19 @@ def interpolate_onto_cells(
     # Guard 1, what: a gas, or anything without a role, is refused here.
     _check_role(stream, name, instrument)
     max_gap_s = _as_seconds(max_interp_gap)
-    source = stream_cells(stream, instrument)
-    circular = str(stream[name].attrs.get("circular", 0)) not in ("0", "False", "None", "")
+    samples = stream_cells(stream, instrument)
+    circular = is_circular(stream[name].attrs)
     values = np.asarray(stream[name].values, dtype=np.float64)
-    # Guard 2, how far, applied inside: each source sample stands at its cell
+    # Guard 2, how far, applied inside: each sample stands at its cell
     # midpoint, and the field is wanted at each target cell's midpoint.
     result = _interpolate(
-        source.midpoint_ns,
+        samples.midpoint_ns,
         values,
         target.midpoint_ns,
         max_gap_s,
         circular=circular,
     )
-    spacing_s = _median_spacing_s(source.midpoint_ns, values)
+    spacing_s = _median_spacing_s(samples.midpoint_ns, values)
     if result.n_gap_masked and spacing_s > max_gap_s:
         # Refusing is right; refusing silently is not. When the record's own
         # typical spacing is wider than the guard, the guard can almost never
@@ -419,21 +426,21 @@ def attach_positions(
         (LONGITUDE_COORD, stream.attrs.get("platform_lon_variable")),
         (ALTITUDE_COORD, stream.attrs.get("platform_alt_variable")),
     ]
-    for coord, source_name in wanted:
-        if source_name is None:
+    for coord, column_name in wanted:
+        if column_name is None:
             continue  # e.g. a platform that declared no altitude
         if coord == LONGITUDE_COORD:
-            _refuse_antimeridian(streams[gps_name], str(source_name), gps_name)
+            _refuse_antimeridian(streams[gps_name], str(column_name), gps_name)
         # Each coordinate through the one guarded interpolation, onto this stream's cells.
         result = interpolate_onto_cells(
-            streams, (gps_name, str(source_name)), target, max_interp_gap=max_interp_gap
+            streams, (gps_name, str(column_name)), target, max_interp_gap=max_interp_gap
         )
         joined.coords[coord] = (
             TIME_COORD,
             result.values,
             {
-                **dict(streams[gps_name][str(source_name)].attrs),
-                INTERPOLATED_FROM_ATTR: f"{gps_name}.{source_name}",
+                **dict(streams[gps_name][str(column_name)].attrs),
+                INTERPOLATED_FROM_ATTR: f"{gps_name}.{column_name}",
                 INTERP_GAP_ATTR: str(max_interp_gap),
                 INTERP_MASKED_ATTR: result.n_gap_masked,
                 INTERP_OUTSIDE_ATTR: result.n_outside,

@@ -11,6 +11,10 @@ import pandas as pd
 import pytest
 
 from tsara.core.timebase import (
+    NS_PER_S,
+    SECOND_NS,
+    SECONDS_PER_DAY,
+    SECONDS_PER_HOUR,
     epoch_ns,
     epoch_s,
     timestamp_epoch_ns,
@@ -91,3 +95,26 @@ def test_timestamp_helpers_shift_a_non_utc_stamp() -> None:
     stamp = pd.Timestamp("2026-01-01 02:00:00", tz="Etc/GMT-2")
     assert timestamp_epoch_ns(stamp) == EPOCH_NS_2026
     assert timestamp_epoch_s(stamp) == pytest.approx(EPOCH_NS_2026 / 1e9)
+
+
+# ---------------------------------------------------------------------------
+# The unit constants
+# ---------------------------------------------------------------------------
+
+
+def test_the_two_spellings_of_one_second_agree() -> None:
+    """The float scale and the integer duration are one fact in two units.
+
+    They are separate names because they do different jobs — one is a divisor,
+    the other a duration that cell boundaries are built from — which is exactly
+    why a typo in either would be invisible until a cell width came back a
+    thousand times wrong and still looked like a number.
+    """
+    assert SECOND_NS == int(NS_PER_S)
+    assert float(SECOND_NS) == NS_PER_S
+    assert isinstance(SECOND_NS, int)
+
+
+def test_a_day_is_twenty_four_hours() -> None:
+    assert SECONDS_PER_DAY == 24 * SECONDS_PER_HOUR
+    assert SECONDS_PER_HOUR == 60 * 60

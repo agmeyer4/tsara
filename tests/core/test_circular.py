@@ -22,8 +22,7 @@ from tsara.core.circular import (
     wrap_degrees,
 )
 from tsara.core.support import CellBounds
-
-SECOND = 1_000_000_000
+from tsara.core.timebase import SECOND_NS as SECOND
 
 
 def cells(start_s: float, width_s: float, n: int) -> CellBounds:
@@ -33,11 +32,11 @@ def cells(start_s: float, width_s: float, n: int) -> CellBounds:
 
 
 def slow_bin(
-    source: CellBounds, angles: np.ndarray, target: CellBounds
+    readings: CellBounds, angles: np.ndarray, target: CellBounds
 ) -> list[tuple[float, float]]:
     """Bin angles onto cells with a Python loop, written from the definition.
 
-    Deliberately naive: for every target cell, walk every source cell, compute
+    Deliberately naive: for every target cell, walk every reading, compute
     the overlap by hand, and accumulate. It is O(N*M) and unmistakably
     correct, which is the point -- the fast path uses a binary search, an
     index expansion and three ``bincount`` calls, none of which is obviously
@@ -46,11 +45,11 @@ def slow_bin(
     out = []
     for t in range(len(target)):
         sin_sum = cos_sum = weight = 0.0
-        for s in range(len(source)):
+        for s in range(len(readings)):
             if not np.isfinite(angles[s]):
                 continue
-            lo = max(int(source.start_ns[s]), int(target.start_ns[t]))
-            hi = min(int(source.stop_ns[s]), int(target.stop_ns[t]))
+            lo = max(int(readings.start_ns[s]), int(target.start_ns[t]))
+            hi = min(int(readings.stop_ns[s]), int(target.stop_ns[t]))
             overlap = max(hi - lo, 0)
             if overlap == 0:
                 continue
@@ -113,7 +112,7 @@ def test_the_four_compass_points_cancel_exactly() -> None:
     assert np.isnan(result.mean_deg)
     assert result.resultant_length == 0.0
     assert np.isinf(result.dispersion_deg)
-    assert result.n_source == 4
+    assert result.n_readings == 4
 
 
 def test_two_opposite_directions_also_cancel() -> None:
@@ -152,7 +151,7 @@ def test_weights_are_normalized_so_their_scale_does_not_matter() -> None:
 def test_zero_weight_samples_do_not_contribute() -> None:
     result = circular_mean([10.0, 200.0], weights=[1.0, 0.0])
     assert result.mean_deg == pytest.approx(10.0)
-    assert result.n_source == 1
+    assert result.n_readings == 1
 
 
 def test_circular_mean_rejects_mismatched_weights() -> None:
@@ -178,7 +177,7 @@ def test_circular_mean_rejects_two_dimensional_input() -> None:
 def test_masked_angles_drop_out() -> None:
     result = circular_mean([10.0, np.nan, 10.0])
     assert result.mean_deg == pytest.approx(10.0)
-    assert result.n_source == 2
+    assert result.n_readings == 2
 
 
 def test_nothing_to_average_is_nan_everywhere() -> None:
@@ -192,13 +191,13 @@ def test_nothing_to_average_is_nan_everywhere() -> None:
     assert np.isnan(result.mean_deg)
     assert np.isnan(result.resultant_length)
     assert np.isnan(result.dispersion_deg)
-    assert result.n_source == 0
+    assert result.n_readings == 0
 
 
 def test_all_zero_weights_is_nan_everywhere() -> None:
     result = circular_mean([10.0, 20.0], weights=[0.0, 0.0])
     assert np.isnan(result.resultant_length)
-    assert result.n_source == 0
+    assert result.n_readings == 0
 
 
 # ---------------------------------------------------------------------------
@@ -271,12 +270,12 @@ def test_binning_matches_a_slow_reimplementation() -> None:
     loop is.
     """
     rng = np.random.default_rng(20260913)
-    source = cells(0.0, 1.0, 240)
+    readings = cells(0.0, 1.0, 240)
     angles = rng.uniform(0.0, 360.0, size=240)
     angles[::17] = np.nan
     target = cells(0.5, 7.0, 34)
-    fast = bin_circular_onto_cells(source, angles, target)
-    slow = slow_bin(source, angles, target)
+    fast = bin_circular_onto_cells(readings, angles, target)
+    slow = slow_bin(readings, angles, target)
     for i, (angle, r) in enumerate(slow):
         if np.isnan(r):
             assert np.isnan(fast.resultant_length[i])
@@ -292,9 +291,9 @@ def test_binning_onto_the_same_cells_is_the_identity() -> None:
     not, the weighting is wrong in a way no comparison against another
     implementation of the same idea would reveal.
     """
-    source = cells(0.0, 1.0, 50)
+    readings = cells(0.0, 1.0, 50)
     angles = np.linspace(0.0, 359.0, 50)
-    result = bin_circular_onto_cells(source, angles, source)
+    result = bin_circular_onto_cells(readings, angles, readings)
     assert result.mean_deg == pytest.approx(angles, rel=1e-9)
     assert result.resultant_length == pytest.approx(np.ones(50))
     assert result.coverage == pytest.approx(np.ones(50))
@@ -302,52 +301,52 @@ def test_binning_onto_the_same_cells_is_the_identity() -> None:
 
 def test_binning_wraps_across_the_seam() -> None:
     """Four samples straddling north average to north, not to south."""
-    source = cells(0.0, 1.0, 4)
+    readings = cells(0.0, 1.0, 4)
     angles = np.array([358.0, 359.0, 1.0, 2.0])
     target = cells(0.0, 4.0, 1)
-    result = bin_circular_onto_cells(source, angles, target)
+    result = bin_circular_onto_cells(readings, angles, target)
     assert result.mean_deg[0] == pytest.approx(0.0, abs=1e-9)
-    assert result.n_source[0] == 4
+    assert result.n_readings[0] == 4
 
 
 def test_a_partly_covered_cell_reports_its_coverage() -> None:
     """The canister case: 15 s of data inside a 60 s cell."""
-    source = cells(0.0, 15.0, 1)
+    readings = cells(0.0, 15.0, 1)
     target = cells(0.0, 60.0, 1)
-    result = bin_circular_onto_cells(source, np.array([90.0]), target)
+    result = bin_circular_onto_cells(readings, np.array([90.0]), target)
     assert result.mean_deg[0] == pytest.approx(90.0)
     assert result.coverage[0] == pytest.approx(0.25)
-    assert result.n_source[0] == 1
+    assert result.n_readings[0] == 1
 
 
 def test_an_empty_cell_is_nan_and_is_not_bridged() -> None:
-    source = cells(0.0, 1.0, 3)
+    readings = cells(0.0, 1.0, 3)
     target = cells(100.0, 1.0, 2)
-    result = bin_circular_onto_cells(source, np.array([1.0, 2.0, 3.0]), target)
+    result = bin_circular_onto_cells(readings, np.array([1.0, 2.0, 3.0]), target)
     assert np.all(np.isnan(result.mean_deg))
-    assert np.all(result.n_source == 0)
+    assert np.all(result.n_readings == 0)
     assert np.all(result.coverage == 0.0)
 
 
 def test_a_masked_sample_separates_no_data_from_rejected_data() -> None:
-    source = cells(0.0, 1.0, 2)
+    readings = cells(0.0, 1.0, 2)
     target = cells(0.0, 2.0, 1)
-    result = bin_circular_onto_cells(source, np.array([np.nan, np.nan]), target)
+    result = bin_circular_onto_cells(readings, np.array([np.nan, np.nan]), target)
     assert np.isnan(result.mean_deg[0])
-    assert result.n_source[0] == 0
+    assert result.n_readings[0] == 0
     assert result.n_overlapping[0] == 2
 
 
 def test_a_cancelling_cell_has_no_direction_but_keeps_its_count() -> None:
-    source = cells(0.0, 1.0, 2)
+    readings = cells(0.0, 1.0, 2)
     target = cells(0.0, 2.0, 1)
-    result = bin_circular_onto_cells(source, np.array([0.0, 180.0]), target)
+    result = bin_circular_onto_cells(readings, np.array([0.0, 180.0]), target)
     assert np.isnan(result.mean_deg[0])
     assert result.resultant_length[0] == pytest.approx(0.0, abs=1e-15)
-    assert result.n_source[0] == 2
+    assert result.n_readings[0] == 2
 
 
-def test_binning_with_no_source_cells() -> None:
+def test_binning_with_no_reading_cells() -> None:
     empty = CellBounds(start_ns=np.empty(0, dtype=np.int64), stop_ns=np.empty(0, dtype=np.int64))
     result = bin_circular_onto_cells(empty, np.empty(0), cells(0.0, 1.0, 3))
     assert np.all(np.isnan(result.mean_deg))
@@ -361,11 +360,11 @@ def test_binning_with_no_target_cells() -> None:
 
 
 def test_a_zero_width_target_cell_has_no_coverage_rather_than_a_division() -> None:
-    source = cells(0.0, 1.0, 3)
+    readings = cells(0.0, 1.0, 3)
     target = CellBounds(
         start_ns=np.array([0], dtype=np.int64), stop_ns=np.array([0], dtype=np.int64)
     )
-    result = bin_circular_onto_cells(source, np.array([1.0, 2.0, 3.0]), target)
+    result = bin_circular_onto_cells(readings, np.array([1.0, 2.0, 3.0]), target)
     assert result.coverage[0] == 0.0
 
 
@@ -444,10 +443,10 @@ def test_a_genuine_direction_survives_the_rounding_guard() -> None:
 
 def test_the_binned_path_has_the_same_guard_as_the_scalar_one() -> None:
     """Two code paths, one rule; they were written separately."""
-    source = cells(0.0, 1.0, 4)
+    readings = cells(0.0, 1.0, 4)
     target = cells(0.0, 4.0, 1)
     angles = np.array([0.0, 90.0, 180.0, 270.0])
-    binned = bin_circular_onto_cells(source, angles, target)
+    binned = bin_circular_onto_cells(readings, angles, target)
     scalar = circular_mean(angles)
     assert np.isnan(binned.mean_deg[0]) and np.isnan(scalar.mean_deg)
     assert binned.resultant_length[0] == scalar.resultant_length == 0.0

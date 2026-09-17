@@ -26,8 +26,7 @@ import xarray as xr
 from tsara.align import PairedSpecies, TsaraAlignError, pair_species
 from tsara.core.naming import sigma_rand_name, sigma_sys_name
 from tsara.core.propagation import propagate_random, propagate_systematic
-
-SECOND = 1_000_000_000
+from tsara.core.timebase import SECOND_NS as SECOND
 
 
 def make_stream(
@@ -64,21 +63,21 @@ def make_stream(
 
 
 def slow_pair(
-    source: xr.Dataset, source_name: str, target: xr.Dataset, target_name: str
+    readings: xr.Dataset, readings_name: str, target: xr.Dataset, target_name: str
 ) -> list[float]:
     """Bin one species onto another's cells with a Python loop.
 
     Written from the definition in METHODS §1.3 and deliberately naive: for
-    every target cell, walk every source cell, compute the overlap by hand and
+    every target cell, walk every reading, compute the overlap by hand and
     accumulate. The production path uses a binary search, an index expansion
     and four ``bincount`` calls; this uses none of that, which is what makes
     the comparison worth anything.
     """
-    s_start = source["time_bnds"].values[:, 0].astype("int64")
-    s_stop = source["time_bnds"].values[:, 1].astype("int64")
+    s_start = readings["time_bnds"].values[:, 0].astype("int64")
+    s_stop = readings["time_bnds"].values[:, 1].astype("int64")
     t_start = target["time_bnds"].values[:, 0].astype("int64")
     t_stop = target["time_bnds"].values[:, 1].astype("int64")
-    values = source[source_name].values
+    values = readings[readings_name].values
     out = []
     for t in range(len(t_start)):
         total = weighted = 0.0
@@ -222,6 +221,27 @@ def test_each_species_records_the_readings_behind_its_pairs(
     assert paired.dataset["co2"].attrs["tsara_pairing_readings"] == 2
 
 
+def test_a_paired_product_may_not_be_paired_again(two_rates: dict[str, xr.Dataset]) -> None:
+    """Pairing is the binner with a clock chosen, so it inherits the refusal.
+
+    The pairs of a first call are rows, not readings: each already averages
+    whatever fell in its cell, and pairing them against a third species would
+    weight those rows as measurements (METHODS §11.2.3).
+    """
+    paired = pair_species(two_rates, "ch4", "co2")
+    assert paired.dataset.attrs["tsara_stage"] == "paired"
+    # Named by instrument, because the product carries both species and a bare
+    # name would be refused as ambiguous before the stage was ever looked at.
+    with pytest.raises(TsaraAlignError) as refused:
+        pair_species(
+            {"pairs": paired.dataset, "fast": two_rates["fast"]},
+            ("pairs", "co2"),
+            ("fast", "ch4"),
+        )
+    assert "paired" in str(refused.value)
+    assert "native streams" in str(refused.value)
+
+
 def test_a_masked_sample_is_not_a_reading() -> None:
     fast = make_stream(0.0, 1.0, 4, {"ch4": np.array([1.0, np.nan, 3.0, 4.0])})
     slow = make_stream(0.0, 4.0, 1, {"co2": np.array([10.0])})
@@ -230,7 +250,7 @@ def test_a_masked_sample_is_not_a_reading() -> None:
 
 
 def test_a_cell_bracketed_but_not_overlapped_is_not_a_reading() -> None:
-    """Nested source cells make the overlap search return a zero-weight pair.
+    """Nested readings make the overlap search return a zero-weight pair.
 
     A 10 s cell holding a 1 s cell (a file whose per-row bounds nest one
     sample inside another, which `stream_cells` deliberately accepts) raises
@@ -322,7 +342,7 @@ def test_worked_example_checkable_by_hand(two_rates: dict[str, xr.Dataset]) -> N
     paired = pair_species(two_rates, "ch4", "co2")
     assert paired.dataset["ch4"].values == pytest.approx([1.5, 5.5])
     assert paired.dataset["co2"].values == pytest.approx([100.0, 200.0])
-    assert paired.dataset["n_source_ch4"].values.tolist() == [4, 4]
+    assert paired.dataset["n_readings_ch4"].values.tolist() == [4, 4]
     assert paired.dataset["coverage_ch4"].values == pytest.approx([1.0, 1.0])
 
 
@@ -415,7 +435,7 @@ def test_binning_a_stream_onto_matching_cells_returns_it() -> None:
     b = make_stream(0.0, 1.0, 30, {"co2": np.arange(30.0)})
     paired = pair_species({"a": a, "b": b}, "ch4", "co2")
     assert paired.dataset["ch4"].values == pytest.approx(values, rel=1e-12)
-    assert paired.dataset["n_source_ch4"].values.tolist() == [1] * 30
+    assert paired.dataset["n_readings_ch4"].values.tolist() == [1] * 30
 
 
 def test_a_pair_is_never_fabricated_across_a_gap() -> None:
@@ -433,7 +453,7 @@ def test_a_masked_sample_reduces_coverage_rather_than_the_value() -> None:
     slow = make_stream(0.0, 4.0, 1, {"co2": np.array([10.0])})
     paired = pair_species({"fast": fast, "slow": slow}, "ch4", "co2")
     assert paired.dataset["ch4"].values[0] == pytest.approx((1.0 + 3.0 + 4.0) / 3)
-    assert paired.dataset["n_source_ch4"].values[0] == 3
+    assert paired.dataset["n_readings_ch4"].values[0] == 3
     assert paired.dataset["coverage_ch4"].values[0] == pytest.approx(0.75)
 
 
@@ -495,7 +515,7 @@ def test_a_declared_sigma_is_moved_onto_its_cells_at_the_point_of_use() -> None:
             "units": "ppb",
             "uncertainty_at_width": "1s",
             "decorrelation_timescale": "2s",
-            "uncertainty_source_random": "declared",
+            "uncertainty_provenance_random": "declared",
         },
         sigma_rand_name("ch4"): {"units": "ppb"},
     }
@@ -506,7 +526,7 @@ def test_a_declared_sigma_is_moved_onto_its_cells_at_the_point_of_use() -> None:
     paired = pair_species({"fast": fast, "slow": slow}, "ch4", "co2")
     companion = paired.dataset[sigma_rand_name("ch4")]
     assert companion.attrs["tsara_sigma_at_support"] == "ar1_neff"
-    assert companion.attrs["uncertainty_source"] == "declared"
+    assert companion.attrs["uncertainty_provenance"] == "declared"
 
 
 def test_a_declared_sigma_without_a_timescale_is_left_alone_and_says_so() -> None:
@@ -685,7 +705,7 @@ def test_counts_are_sums_and_coverage_is_neither(two_rates: dict[str, xr.Dataset
     """A count is a sum over the cell; a coverage fraction is not a statistic
     of the data inside the cell at all, so it gets no cell method."""
     paired = pair_species(two_rates, "ch4", "co2")
-    assert paired.dataset["n_source_ch4"].attrs["cell_methods"] == "time: sum"
+    assert paired.dataset["n_readings_ch4"].attrs["cell_methods"] == "time: sum"
     assert "cell_methods" not in paired.dataset["coverage_ch4"].attrs
 
 
@@ -694,8 +714,10 @@ def test_the_product_records_how_it_was_made(two_rates: dict[str, xr.Dataset]) -
     attrs = paired.dataset.attrs
     assert attrs["tsara_stage"] == "paired"
     assert attrs["tsara_pairing_clock"] == "slow"
-    assert attrs["tsara_propagation_form"] == "ar1_neff"
-    assert paired.dataset["ch4"].attrs["tsara_source_instrument"] == "fast"
+    # Inherited from the binner: the form is recorded per propagated sigma, and
+    # nowhere on the product itself (METHODS §11.2).
+    assert "tsara_propagation_form" not in attrs
+    assert paired.dataset["ch4"].attrs["tsara_instrument"] == "fast"
     assert paired.dataset["co2"].attrs["tsara_binned"] == 0
 
 
@@ -773,10 +795,10 @@ def test_the_clock_species_carries_its_own_sigma_through_unbinned() -> None:
     assert companion.attrs["tsara_propagation_form"] == "native"
 
 
-def test_a_single_cell_source_has_no_gap_to_measure() -> None:
+def test_a_single_cell_stream_has_no_gap_to_measure() -> None:
     """One cell has no spacing between samples, so the width stands in for it.
 
-    Reached by a canister-like source: one fill, paired onto a wider mean,
+    Reached by a canister-like stream: one fill, paired onto a wider mean,
     with a declared timescale that would otherwise need a cadence.
     """
     attrs: dict[str, dict[str, object]] = {

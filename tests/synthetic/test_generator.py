@@ -8,6 +8,7 @@ being scored against a broken answer key.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -16,33 +17,33 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
+from tsara.core.circular import wrap_degrees
 from tsara.core.naming import (
     BOUNDS_ATTR,
     BOUNDS_DIM,
     CELL_METHODS_ATTR,
     SUPPORT_COVERAGE_ATTR,
     SUPPORT_LABEL_ATTR,
-    SUPPORT_LABEL_SOURCE_ATTR,
-    SUPPORT_METHOD_SOURCE_ATTR,
-    SUPPORT_WIDTH_SOURCE_ATTR,
+    SUPPORT_LABEL_PROVENANCE_ATTR,
+    SUPPORT_METHOD_PROVENANCE_ATTR,
+    SUPPORT_WIDTH_PROVENANCE_ATTR,
     TIME_BOUNDS_VAR,
     TIME_COORD,
 )
+from tsara.synthetic.atmosphere import realize_atmosphere
 from tsara.synthetic.background import TsaraSyntheticError
 from tsara.synthetic.config import (
-    BootstrapBackground,
-    DropoutSpec,
+    AtmosphereSpec,
+    FieldSpec,
     GaussianShape,
     InstrumentSpec,
-    MobileTrack,
+    MeasurementSpec,
     NestedSpec,
     ParametricBackground,
     RatioSpec,
-    SpeciesSpec,
     SyntheticConfig,
     TrueComponent,
     TrueUncertainty,
-    UniformAmplitude,
 )
 from tsara.synthetic.generator import (
     TRUTH_PREFIX,
@@ -50,8 +51,48 @@ from tsara.synthetic.generator import (
     _build_times,
     generate,
 )
-from tsara.synthetic.plumes import schedule_events
 from tsara.synthetic.profiling import RealDataProfile
+
+WithSources = Callable[[SyntheticConfig, dict[str, Any]], SyntheticConfig]
+
+SITE: dict[str, Any] = {"kind": "stationary", "latitude": 40.0, "longitude": -111.0}
+
+
+def _one_instrument(
+    *, name: str, duration: str, seed: int = 0, sources: dict[str, Any] | None = None, **inst: Any
+) -> SyntheticConfig:
+    """One instrument measuring a flat methane field; ``inst`` sets its clock."""
+    return SyntheticConfig.model_validate(
+        {
+            "name": name,
+            "start": "2026-01-01T00:00:00Z",
+            "duration": duration,
+            "seed": seed,
+            "platform": SITE,
+            "atmosphere": {
+                "fields": {
+                    "ch4": {"units": "ppb", "background": {"kind": "parametric", "offset": 1900.0}}
+                },
+                "sources": sources or {},
+            },
+            "instruments": {"inst": {"native_rate": "1s", "measures": {"ch4": {}}, **inst}},
+        }
+    )
+
+
+def _add_field(
+    config: SyntheticConfig, instrument: str, field: str, spec: dict[str, Any], **inst: Any
+) -> SyntheticConfig:
+    """Return ``config`` with one more field, measured by ``instrument``.
+
+    The instrument is created when absent, with ``inst`` as its clock.
+    """
+    payload = config.model_dump()
+    payload["atmosphere"]["fields"][field] = spec
+    entry = payload["instruments"].setdefault(instrument, {"measures": {}, **inst})
+    entry["measures"][field] = {}
+    return SyntheticConfig.model_validate(payload)
+
 
 # ---------------------------------------------------------------------------
 # Structure
@@ -252,30 +293,36 @@ def test_injected_noise_matches_the_declared_budget(
 # ---------------------------------------------------------------------------
 
 
-def _single_species_config(**species_kwargs: object) -> SyntheticConfig:
+def _single_field_config(
+    background: dict[str, Any] | None = None, **measurement: Any
+) -> SyntheticConfig:
+    """One methane field measured by one 1 s instrument; ``measurement`` sets its error."""
     return SyntheticConfig(
         name="single",
         start=datetime(2026, 1, 1, tzinfo=UTC),
         duration="30min",
         seed=5,
-        platform={"kind": "stationary", "latitude": 40.0, "longitude": -111.0},  # type: ignore[arg-type]
+        platform=SITE,  # type: ignore[arg-type]
+        atmosphere=AtmosphereSpec.model_validate(
+            {
+                "fields": {
+                    "ch4": {
+                        "units": "ppb",
+                        "background": background or {"kind": "parametric", "offset": 1900.0},
+                    }
+                }
+            }
+        ),
         instruments={
             "inst": InstrumentSpec(
-                native_rate="1s",
-                species={
-                    "ch4": SpeciesSpec(
-                        background=ParametricBackground(kind="parametric", offset=1900.0),
-                        units="ppb",
-                        **species_kwargs,  # type: ignore[arg-type]
-                    )
-                },
+                native_rate="1s", measures={"ch4": MeasurementSpec(**measurement)}
             )
         },
     )
 
 
 def test_quantized_values_land_on_the_reporting_grid() -> None:
-    config = _single_species_config(
+    config = _single_field_config(
         quantization=0.01, uncertainty=TrueUncertainty(random=TrueComponent(absolute=1.0))
     )
     stream = generate(config).streams["inst"]
@@ -291,21 +338,21 @@ def test_circular_variable_wraps_into_zero_to_360() -> None:
         start=datetime(2026, 1, 1, tzinfo=UTC),
         duration="6h",
         seed=3,
-        platform={"kind": "stationary", "latitude": 40.0, "longitude": -111.0},  # type: ignore[arg-type]
+        platform=SITE,  # type: ignore[arg-type]
+        atmosphere=AtmosphereSpec(
+            fields={
+                "wind_dir": FieldSpec(
+                    background=ParametricBackground(
+                        kind="parametric", offset=10.0, random_walk_std=2000.0
+                    ),
+                    role="met",
+                    circular=True,
+                    units="degrees",
+                )
+            }
+        ),
         instruments={
-            "met": InstrumentSpec(
-                native_rate="10s",
-                species={
-                    "wind_dir": SpeciesSpec(
-                        background=ParametricBackground(
-                            kind="parametric", offset=10.0, random_walk_std=2000.0
-                        ),
-                        role="met",
-                        circular=True,
-                        units="degrees",
-                    )
-                },
-            )
+            "met": InstrumentSpec(native_rate="10s", measures={"wind_dir": MeasurementSpec()})
         },
     )
     values = generate(config).streams["met"]["wind_dir"].values
@@ -315,24 +362,32 @@ def test_circular_variable_wraps_into_zero_to_360() -> None:
     assert values.max() - values.min() > 180.0
 
 
+def test_the_wrap_closes_the_interval_it_documents() -> None:
+    """A direction a hair west of north must land on 0, not on a full turn.
+
+    The generator wraps through `core.circular.wrap_degrees` rather than
+    `np.mod`, which does not close the half-open interval it appears to:
+    a tiny negative value modulo 360 rounds *up* to exactly 360.0 in float64.
+    A reading that left [0, 360) would be a direction no consumer expects,
+    reported with complete confidence.
+
+    Pinned at the helper rather than through a generated campaign, and
+    deliberately so: the window where the two spellings disagree is about
+    3e-14 degrees wide, so reaching it from a background plus noise is a
+    coincidence no seed can be relied on to produce. What the campaign above
+    checks is the invariant; what this checks is that the invariant needs the
+    helper to hold.
+    """
+    assert np.mod(-1e-17, 360.0) == 360.0
+    assert float(wrap_degrees(-1e-17)) == 0.0
+
+
 def test_met_species_receive_no_plumes(noise_free_config: SyntheticConfig) -> None:
-    config = noise_free_config.model_copy(
-        update={
-            "instruments": {
-                "analyzer": noise_free_config.instruments["analyzer"].model_copy(
-                    update={
-                        "species": {
-                            **noise_free_config.instruments["analyzer"].species,
-                            "temperature": SpeciesSpec(
-                                background=ParametricBackground(kind="parametric", offset=290.0),
-                                role="aux",
-                                units="K",
-                            ),
-                        }
-                    }
-                )
-            }
-        }
+    config = _add_field(
+        noise_free_config,
+        "analyzer",
+        "temperature",
+        {"role": "aux", "units": "K", "background": {"kind": "parametric", "offset": 290.0}},
     )
     dataset = generate(config)
     enhancement = dataset.streams["analyzer"][f"{TRUTH_PREFIX}enhancement_temperature"]
@@ -346,24 +401,7 @@ def test_met_species_receive_no_plumes(noise_free_config: SyntheticConfig) -> No
 
 
 def test_jitter_produces_an_irregular_but_increasing_clock() -> None:
-    config = SyntheticConfig(
-        name="jittered",
-        start=datetime(2026, 1, 1, tzinfo=UTC),
-        duration="20min",
-        seed=1,
-        platform={"kind": "stationary", "latitude": 40.0, "longitude": -111.0},  # type: ignore[arg-type]
-        instruments={
-            "inst": InstrumentSpec(
-                native_rate="1s",
-                timestamp_jitter="0.3s",
-                species={
-                    "ch4": SpeciesSpec(
-                        background=ParametricBackground(kind="parametric", offset=1900.0)
-                    )
-                },
-            )
-        },
-    )
+    config = _one_instrument(name="jittered", duration="20min", seed=1, timestamp_jitter="0.3s")
     times = pd.DatetimeIndex(generate(config).streams["inst"]["time"].values)
     assert times.is_monotonic_increasing
     deltas = np.diff(times.to_numpy().astype("datetime64[ns]").astype(np.int64))
@@ -371,23 +409,11 @@ def test_jitter_produces_an_irregular_but_increasing_clock() -> None:
 
 
 def test_dropouts_delete_samples_and_open_gaps() -> None:
-    config = SyntheticConfig(
+    config = _one_instrument(
         name="gappy",
-        start=datetime(2026, 1, 1, tzinfo=UTC),
         duration="6h",
         seed=2,
-        platform={"kind": "stationary", "latitude": 40.0, "longitude": -111.0},  # type: ignore[arg-type]
-        instruments={
-            "inst": InstrumentSpec(
-                native_rate="1s",
-                dropouts=DropoutSpec(rate_per_day=200.0, duration="120s"),
-                species={
-                    "ch4": SpeciesSpec(
-                        background=ParametricBackground(kind="parametric", offset=1900.0)
-                    )
-                },
-            )
-        },
+        dropouts={"rate_per_day": 200.0, "duration": "120s"},
     )
     times = pd.DatetimeIndex(generate(config).streams["inst"]["time"].values)
     assert len(times) < 6 * 3600
@@ -396,66 +422,25 @@ def test_dropouts_delete_samples_and_open_gaps() -> None:
 
 
 def test_zero_drawn_dropouts_leaves_the_clock_intact() -> None:
-    config = SyntheticConfig(
+    config = _one_instrument(
         name="lucky",
-        start=datetime(2026, 1, 1, tzinfo=UTC),
         duration="10min",
-        seed=0,
-        platform={"kind": "stationary", "latitude": 40.0, "longitude": -111.0},  # type: ignore[arg-type]
-        instruments={
-            "inst": InstrumentSpec(
-                native_rate="1s",
-                dropouts=DropoutSpec(rate_per_day=1e-9, duration="60s"),
-                species={
-                    "ch4": SpeciesSpec(
-                        background=ParametricBackground(kind="parametric", offset=1900.0)
-                    )
-                },
-            )
-        },
+        dropouts={"rate_per_day": 1e-9, "duration": "60s"},
     )
     assert len(generate(config).streams["inst"]["time"]) == 600
 
 
 def test_a_rate_coarser_than_the_record_still_yields_one_sample() -> None:
-    config = SyntheticConfig(
-        name="too_slow",
-        start=datetime(2026, 1, 1, tzinfo=UTC),
-        duration="1s",
-        platform={"kind": "stationary", "latitude": 40.0, "longitude": -111.0},  # type: ignore[arg-type]
-        instruments={
-            "inst": InstrumentSpec(
-                native_rate="1h",
-                species={
-                    "ch4": SpeciesSpec(
-                        background=ParametricBackground(kind="parametric", offset=1900.0)
-                    )
-                },
-            )
-        },
-    )
+    config = _one_instrument(name="too_slow", duration="1s", native_rate="1h")
     assert len(generate(config).streams["inst"]["time"]) == 1
 
 
 def test_dropouts_removing_every_sample_is_reported() -> None:
     """Absurd outage settings must fail loudly, not return an empty stream."""
-    config = SyntheticConfig(
+    config = _one_instrument(
         name="wiped",
-        start=datetime(2026, 1, 1, tzinfo=UTC),
         duration="1min",
-        seed=0,
-        platform={"kind": "stationary", "latitude": 40.0, "longitude": -111.0},  # type: ignore[arg-type]
-        instruments={
-            "inst": InstrumentSpec(
-                native_rate="1s",
-                dropouts=DropoutSpec(rate_per_day=40_000.0, duration="1h"),
-                species={
-                    "ch4": SpeciesSpec(
-                        background=ParametricBackground(kind="parametric", offset=1900.0)
-                    )
-                },
-            )
-        },
+        dropouts={"rate_per_day": 40_000.0, "duration": "1h"},
     )
     with pytest.raises(TsaraSyntheticError, match="removed every sample"):
         generate(config)
@@ -468,23 +453,11 @@ def test_an_outage_can_predate_the_record_start() -> None:
     artificially immune to dropouts, which is an artifact rather than a
     property of real loggers.
     """
-    config = SyntheticConfig(
+    config = _one_instrument(
         name="early_gap",
-        start=datetime(2026, 1, 1, tzinfo=UTC),
         duration="30min",
         seed=1,
-        platform={"kind": "stationary", "latitude": 40.0, "longitude": -111.0},  # type: ignore[arg-type]
-        instruments={
-            "inst": InstrumentSpec(
-                native_rate="1s",
-                dropouts=DropoutSpec(rate_per_day=400.0, duration="300s"),
-                species={
-                    "ch4": SpeciesSpec(
-                        background=ParametricBackground(kind="parametric", offset=1900.0)
-                    )
-                },
-            )
-        },
+        dropouts={"rate_per_day": 400.0, "duration": "300s"},
     )
     times = pd.DatetimeIndex(generate(config).streams["inst"]["time"].values)
     # The stream begins later than the configured start, i.e. an outage was
@@ -502,59 +475,47 @@ def test_instruments_keep_their_own_native_clocks(
     noise_free_config: SyntheticConfig,
 ) -> None:
     """The multi-rate case the whole 'synchronize late' design exists for."""
-    config = noise_free_config.model_copy(
-        update={
-            "instruments": {
-                **noise_free_config.instruments,
-                "fast": InstrumentSpec(
-                    native_rate="0.1s",
-                    species={
-                        "co2": SpeciesSpec(
-                            background=ParametricBackground(kind="parametric", offset=420.0),
-                            units="ppm",
-                        )
-                    },
-                ),
-            }
-        }
+    config = _add_field(
+        noise_free_config,
+        "fast",
+        "co2",
+        {"units": "ppm", "background": {"kind": "parametric", "offset": 420.0}},
+        native_rate="0.1s",
     )
     dataset = generate(config)
     assert len(dataset.streams["fast"]["time"]) == 10 * len(dataset.streams["analyzer"]["time"])
 
 
 def test_mobile_platform_emits_a_separate_gps_stream() -> None:
-    config = SyntheticConfig(
-        name="mobile",
-        start=datetime(2026, 1, 1, tzinfo=UTC),
-        duration="1h",
-        seed=8,
-        platform=MobileTrack(
-            kind="mobile",
-            start_latitude=40.0,
-            start_longitude=-111.0,
-            gps_rate="1s",
-            pattern="circuit",
-            radius_m=400.0,
-        ),
-        instruments={
-            "analyzer": InstrumentSpec(
-                native_rate="2s",
-                species={
-                    "ch4": SpeciesSpec(
-                        background=ParametricBackground(kind="parametric", offset=1900.0),
-                        units="ppb",
-                    )
+    config = SyntheticConfig.model_validate(
+        {
+            "name": "mobile",
+            "start": "2026-01-01T00:00:00Z",
+            "duration": "1h",
+            "seed": 8,
+            "platform": {
+                "kind": "mobile",
+                "start_latitude": 40.0,
+                "start_longitude": -111.0,
+                "gps_rate": "1s",
+                "pattern": "circuit",
+                "radius_m": 400.0,
+            },
+            "atmosphere": {
+                "fields": {
+                    "ch4": {"units": "ppb", "background": {"kind": "parametric", "offset": 1900.0}}
                 },
-            )
-        },
-        sources={
-            "pad": {  # type: ignore[dict-item]
-                "rate_per_hour": 8.0,
-                "shape": GaussianShape(kind="gaussian", sigma="20s"),
-                "reference_species": "ch4",
-                "amplitude": UniformAmplitude(kind="uniform", low=50.0, high=150.0),
-            }
-        },
+                "sources": {
+                    "pad": {
+                        "rate_per_hour": 8.0,
+                        "shape": {"kind": "gaussian", "sigma": "20s"},
+                        "reference_species": "ch4",
+                        "amplitude": {"kind": "uniform", "low": 50.0, "high": 150.0},
+                    }
+                },
+            },
+            "instruments": {"analyzer": {"native_rate": "2s", "measures": {"ch4": {}}}},
+        }
     )
     dataset = generate(config)
     assert set(dataset.streams) == {"analyzer", "gps"}
@@ -589,22 +550,22 @@ def test_stationary_without_altitude_omits_the_coordinate(
 
 
 def test_nested_children_appear_in_the_catalog_with_parent_links(
-    noise_free_config: SyntheticConfig,
+    noise_free_config: SyntheticConfig, with_sources: WithSources
 ) -> None:
-    config = noise_free_config.model_copy(
-        update={
-            "sources": {
-                "pad": noise_free_config.sources["pad"].model_copy(
-                    update={
-                        "nested": NestedSpec(
-                            probability=1.0,
-                            shape=GaussianShape(kind="gaussian", sigma="3s"),
-                            amplitude_factor=0.6,
-                        )
-                    }
-                )
-            }
-        }
+    pad = noise_free_config.atmosphere.sources["pad"]
+    config = with_sources(
+        noise_free_config,
+        {
+            "pad": pad.model_copy(
+                update={
+                    "nested": NestedSpec(
+                        probability=1.0,
+                        shape=GaussianShape(kind="gaussian", sigma="3s"),
+                        amplitude_factor=0.6,
+                    )
+                }
+            )
+        },
     )
     truth = generate(config).ground_truth
     children = [event for event in truth.events if event.parent_event_id is not None]
@@ -614,7 +575,7 @@ def test_nested_children_appear_in_the_catalog_with_parent_links(
 
 
 def test_nested_child_can_carry_a_species_its_parent_never_emits(
-    noise_free_config: SyntheticConfig,
+    noise_free_config: SyntheticConfig, with_sources: WithSources
 ) -> None:
     """The landfill-plus-blip case, end to end.
 
@@ -624,22 +585,21 @@ def test_nested_child_can_carry_a_species_its_parent_never_emits(
     proof that relaxing the schema restriction actually renders — the config
     layer permitting it would be worthless if the injection path did not.
     """
-    config = noise_free_config.model_copy(
-        update={
-            "sources": {
-                "landfill": noise_free_config.sources["pad"].model_copy(
-                    update={
-                        "ratios": {},  # parent: methane only, no ethane
-                        "nested": NestedSpec(
-                            probability=1.0,
-                            shape=GaussianShape(kind="gaussian", sigma="3s"),
-                            amplitude_factor=0.5,
-                            ratios={"c2h6": RatioSpec(mean=0.06)},
-                        ),
-                    }
-                )
-            }
-        }
+    config = with_sources(
+        noise_free_config,
+        {
+            "landfill": noise_free_config.atmosphere.sources["pad"].model_copy(
+                update={
+                    "ratios": {},  # parent: methane only, no ethane
+                    "nested": NestedSpec(
+                        probability=1.0,
+                        shape=GaussianShape(kind="gaussian", sigma="3s"),
+                        amplitude_factor=0.5,
+                        ratios={"c2h6": RatioSpec(mean=0.06)},
+                    ),
+                }
+            )
+        },
     )
     dataset = generate(config)
 
@@ -662,15 +622,16 @@ def test_nested_child_can_carry_a_species_its_parent_never_emits(
 
 
 def test_plume_dense_configuration_produces_overlapping_events(
-    noise_free_config: SyntheticConfig,
+    noise_free_config: SyntheticConfig, with_sources: WithSources
 ) -> None:
     """The required adversarial case: enhancements occupy most of the record."""
-    dense = noise_free_config.model_copy(
-        update={
-            "sources": {
-                "pad": noise_free_config.sources["pad"].model_copy(update={"rate_per_hour": 400.0})
-            }
-        }
+    dense = with_sources(
+        noise_free_config,
+        {
+            "pad": noise_free_config.atmosphere.sources["pad"].model_copy(
+                update={"rate_per_hour": 400.0}
+            )
+        },
     )
     dataset = generate(dense)
     enhancement = dataset.streams["analyzer"][f"{TRUTH_PREFIX}enhancement_ch4"].values
@@ -688,51 +649,22 @@ def test_plume_dense_configuration_produces_overlapping_events(
 def test_bootstrap_background_flows_through_the_generator(
     white_noise_profile: RealDataProfile,
 ) -> None:
-    config = _single_species_config()
-    config = config.model_copy(
-        update={
-            "instruments": {
-                "inst": InstrumentSpec(
-                    native_rate="1s",
-                    species={
-                        "ch4": SpeciesSpec(
-                            background=BootstrapBackground(kind="bootstrap", profile="white"),
-                            units="ppb",
-                        )
-                    },
-                )
-            }
-        }
-    )
+    config = _single_field_config(background={"kind": "bootstrap", "profile": "white"})
     stream = generate(config, profiles={"white": white_noise_profile}).streams["inst"]
     assert float(stream["ch4"].std()) == pytest.approx(3.0, rel=0.2)
 
 
 def test_missing_profile_is_reported_at_generate_time() -> None:
-    config = _single_species_config()
-    config = config.model_copy(
-        update={
-            "instruments": {
-                "inst": InstrumentSpec(
-                    native_rate="1s",
-                    species={
-                        "ch4": SpeciesSpec(
-                            background=BootstrapBackground(kind="bootstrap", profile="absent")
-                        )
-                    },
-                )
-            }
-        }
-    )
+    config = _single_field_config(background={"kind": "bootstrap", "profile": "absent"})
     with pytest.raises(TsaraSyntheticError, match="not supplied"):
         generate(config)
 
 
 def test_source_free_config_yields_an_empty_catalog(
-    noise_free_config: SyntheticConfig,
+    noise_free_config: SyntheticConfig, with_sources: WithSources
 ) -> None:
     """The control case for measuring an algorithm's false-positive rate."""
-    control = noise_free_config.model_copy(update={"sources": {}})
+    control = with_sources(noise_free_config, {})
     dataset = generate(control)
     assert len(dataset.ground_truth) == 0
     enhancement = dataset.streams["analyzer"][f"{TRUTH_PREFIX}enhancement_ch4"].values
@@ -750,26 +682,10 @@ def test_aware_and_naive_starts_produce_identical_streams() -> None:
     A tz-aware axis would also fail to encode to netCDF at save time, so this
     normalization is load-bearing for persistence as well as correctness.
     """
-    aware = SyntheticConfig(
-        name="tz",
-        start=datetime(2026, 1, 1, tzinfo=UTC),
-        duration="10min",
-        seed=11,
-        platform={"kind": "stationary", "latitude": 40.0, "longitude": -111.0},  # type: ignore[arg-type]
-        instruments={
-            "inst": InstrumentSpec(
-                native_rate="1s",
-                species={
-                    "ch4": SpeciesSpec(
-                        background=ParametricBackground(
-                            kind="parametric", offset=1900.0, diurnal_amplitude=15.0
-                        ),
-                        uncertainty=TrueUncertainty(random=TrueComponent(absolute=1.0)),
-                    )
-                },
-            )
-        },
-    )
+    aware = _single_field_config(
+        background={"kind": "parametric", "offset": 1900.0, "diurnal_amplitude": 15.0},
+        uncertainty=TrueUncertainty(random=TrueComponent(absolute=1.0)),
+    ).model_copy(update={"name": "tz", "duration": "10min", "seed": 11})
     naive = aware.model_copy(update={"start": datetime(2026, 1, 1)})
 
     aware_stream = generate(aware).streams["inst"]
@@ -806,29 +722,16 @@ def test_ground_truth_windows_can_slice_their_own_stream(noisy_config: Synthetic
 
 def test_ground_truth_is_identical_across_timezone_spellings() -> None:
     """The catalog, not only the streams, must be spelling-independent."""
-    aware = SyntheticConfig(
+    aware = _one_instrument(
         name="tz_truth",
-        start=datetime(2026, 1, 1, tzinfo=UTC),
         duration="30min",
         seed=5,
-        platform={"kind": "stationary", "latitude": 40.0, "longitude": -111.0},  # type: ignore[arg-type]
-        instruments={
-            "inst": InstrumentSpec(
-                native_rate="1s",
-                species={
-                    "ch4": SpeciesSpec(
-                        background=ParametricBackground(kind="parametric", offset=1900.0),
-                        units="ppb",
-                    )
-                },
-            )
-        },
         sources={
-            "pad": {  # type: ignore[dict-item]
+            "pad": {
                 "rate_per_hour": 30.0,
-                "shape": GaussianShape(kind="gaussian", sigma="10s"),
+                "shape": {"kind": "gaussian", "sigma": "10s"},
                 "reference_species": "ch4",
-                "amplitude": UniformAmplitude(kind="uniform", low=50.0, high=150.0),
+                "amplitude": {"kind": "uniform", "low": 50.0, "high": 150.0},
             }
         },
     )
@@ -851,31 +754,28 @@ def test_every_stream_uses_nanosecond_time_resolution() -> None:
     for a `datetime.datetime`). Mixed resolutions in one dataset would also
     make save/load change dtypes, since netCDF stores nanoseconds.
     """
-    config = SyntheticConfig(
-        name="units",
-        start=datetime(2026, 1, 1, tzinfo=UTC),
-        duration="5min",
-        seed=3,
-        platform={"kind": "stationary", "latitude": 40.0, "longitude": -111.0},  # type: ignore[arg-type]
-        instruments={
-            "plain": InstrumentSpec(
-                native_rate="1s",
-                species={
-                    "ch4": SpeciesSpec(
-                        background=ParametricBackground(kind="parametric", offset=1900.0)
-                    )
+    config = SyntheticConfig.model_validate(
+        {
+            "name": "units",
+            "start": "2026-01-01T00:00:00Z",
+            "duration": "5min",
+            "seed": 3,
+            "platform": SITE,
+            "atmosphere": {
+                "fields": {
+                    "ch4": {"background": {"kind": "parametric", "offset": 1900.0}},
+                    "co2": {"background": {"kind": "parametric", "offset": 410.0}},
+                }
+            },
+            "instruments": {
+                "plain": {"native_rate": "1s", "measures": {"ch4": {}}},
+                "jittered": {
+                    "native_rate": "1s",
+                    "timestamp_jitter": "100ms",
+                    "measures": {"co2": {}},
                 },
-            ),
-            "jittered": InstrumentSpec(
-                native_rate="1s",
-                timestamp_jitter="100ms",
-                species={
-                    "co2": SpeciesSpec(
-                        background=ParametricBackground(kind="parametric", offset=410.0)
-                    )
-                },
-            ),
-        },
+            },
+        }
     )
     streams = generate(config).streams
     assert {str(stream["time"].dtype) for stream in streams.values()} == {"datetime64[ns]"}
@@ -888,30 +788,17 @@ def test_an_event_inside_a_data_gap_has_no_sampled_peak() -> None:
     *sampled* amplitude is unknown, which is exactly the distinction between
     `true_amplitude` and `sampled_peak_amplitude`.
     """
-    config = SyntheticConfig(
+    config = _one_instrument(
         name="gap_event",
-        start=datetime(2026, 1, 1, tzinfo=UTC),
         duration="4h",
         seed=1,
-        platform={"kind": "stationary", "latitude": 40.0, "longitude": -111.0},  # type: ignore[arg-type]
-        instruments={
-            "inst": InstrumentSpec(
-                native_rate="1s",
-                dropouts=DropoutSpec(rate_per_day=600.0, duration="600s"),
-                species={
-                    "ch4": SpeciesSpec(
-                        background=ParametricBackground(kind="parametric", offset=1900.0),
-                        units="ppb",
-                    )
-                },
-            )
-        },
+        dropouts={"rate_per_day": 600.0, "duration": "600s"},
         sources={
-            "pad": {  # type: ignore[dict-item]
+            "pad": {
                 "rate_per_hour": 60.0,
-                "shape": GaussianShape(kind="gaussian", sigma="5s"),
+                "shape": {"kind": "gaussian", "sigma": "5s"},
                 "reference_species": "ch4",
-                "amplitude": UniformAmplitude(kind="uniform", low=50.0, high=150.0),
+                "amplitude": {"kind": "uniform", "low": 50.0, "high": 150.0},
             }
         },
     )
@@ -935,20 +822,15 @@ def _flat_config(**support: Any) -> SyntheticConfig:
             "start": "2026-01-01T00:00:00Z",
             "duration": "1h",
             "seed": 7,
-            "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
-            "instruments": {
-                "slow": {
-                    "native_rate": "60s",
-                    "support": support,
-                    "species": {
-                        "ch4": {
-                            "units": "ppb",
-                            "background": {"kind": "parametric", "offset": 1900.0},
-                        }
-                    },
+            "platform": SITE,
+            "atmosphere": {
+                "fields": {
+                    "ch4": {"units": "ppb", "background": {"kind": "parametric", "offset": 1900.0}}
                 }
             },
-            "sources": {},
+            "instruments": {
+                "slow": {"native_rate": "60s", "support": support, "measures": {"ch4": {}}}
+            },
         }
     )
 
@@ -1003,9 +885,9 @@ def test_a_cell_wider_than_the_clock_is_refused() -> None:
 
 def test_the_generator_declares_all_three_support_facts() -> None:
     stream = generate(_flat_config(method="mean")).streams["slow"]
-    assert stream.attrs[SUPPORT_LABEL_SOURCE_ATTR] == "declared"
-    assert stream.attrs[SUPPORT_WIDTH_SOURCE_ATTR] == "declared"
-    assert stream.attrs[SUPPORT_METHOD_SOURCE_ATTR] == "declared"
+    assert stream.attrs[SUPPORT_LABEL_PROVENANCE_ATTR] == "declared"
+    assert stream.attrs[SUPPORT_WIDTH_PROVENANCE_ATTR] == "declared"
+    assert stream.attrs[SUPPORT_METHOD_PROVENANCE_ATTR] == "declared"
 
 
 # --- does `mean` actually average? -----------------------------------------
@@ -1017,19 +899,17 @@ def test_averaging_a_flat_background_is_exact() -> None:
     assert np.allclose(stream["ch4"].values, 1900.0, rtol=0, atol=1e-12)
 
 
-def test_averaging_a_linear_drift_is_exact_in_its_increments() -> None:
+def test_averaging_a_linear_drift_reproduces_the_closed_form() -> None:
     """The midpoint rule is exact for a linear function, so this pins the cell
-    geometry rather than the quadrature: any error here is a wrong interval,
-    not a rounding cost.
+    geometry and the drift's origin rather than the quadrature.
 
-    Compared as increments rather than absolute values because the background's
-    drift term is anchored on the FIRST RENDERED SAMPLE, and a fine grid begins
-    half a sub-step before the first cell midpoint. That shifts every value of a
-    `mean` stream by one constant -- here about 1.3e-4 ppb, four orders below
-    the noise of any real instrument. Pre-existing behaviour rather than
-    something cells introduced (a stream whose opening samples are dropped has
-    always anchored later), and re-anchoring would break the guarantee that
-    existing configs emit byte-identical output.
+    Compared as absolute values, which the previous generator could not be:
+    it measured drift from the FIRST RENDERED SAMPLE of each instrument, and a
+    `mean` instrument's first sample sits half a sub-step before its first cell
+    midpoint, so every value carried a small constant offset (about 1.3e-4 ppb
+    here) and only increments could be checked. Drift is now measured from the
+    campaign start, once, for the whole atmosphere, so the 60 s cell starting
+    at minute k reads exactly 1000 + (k + 0.5)/60 ppb.
     """
     config = SyntheticConfig.model_validate(
         {
@@ -1037,29 +917,32 @@ def test_averaging_a_linear_drift_is_exact_in_its_increments() -> None:
             "start": "2026-01-01T00:00:00Z",
             "duration": "1h",
             "seed": 3,
-            "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
+            "platform": SITE,
+            "atmosphere": {
+                "fields": {
+                    "ch4": {
+                        "units": "ppb",
+                        "background": {
+                            "kind": "parametric",
+                            "offset": 1000.0,
+                            "drift_per_day": 24.0,
+                        },
+                    }
+                }
+            },
             "instruments": {
                 "slow": {
                     "native_rate": "60s",
                     "support": {"method": "mean", "label": "start"},
-                    "species": {
-                        "ch4": {
-                            "units": "ppb",
-                            "background": {
-                                "kind": "parametric",
-                                "offset": 1000.0,
-                                "drift_per_day": 24.0,
-                            },
-                        }
-                    },
+                    "measures": {"ch4": {}},
                 }
             },
-            "sources": {},
         }
     )
     values = generate(config).streams["slow"]["ch4"].values
-    # 24 ppb/day is 1 ppb/hour, so consecutive 60 s cells differ by 1/60 ppb.
-    assert np.allclose(np.diff(values), 1.0 / 60.0, rtol=0, atol=1e-12)
+    # 24 ppb/day is 1 ppb/hour; the k-th cell's midpoint is (k + 0.5) minutes in.
+    expected = 1000.0 + (np.arange(60) + 0.5) / 60.0
+    assert np.allclose(values, expected, rtol=0, atol=1e-9)
 
 
 def test_the_cell_average_converges_as_the_fine_grid_refines() -> None:
@@ -1079,26 +962,29 @@ def test_the_cell_average_converges_as_the_fine_grid_refines() -> None:
                 "start": "2026-01-01T00:00:00Z",
                 "duration": "2h",
                 "seed": 11,
-                "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
+                "platform": SITE,
+                "atmosphere": {
+                    "fields": {
+                        "ch4": {
+                            "units": "ppb",
+                            "background": {"kind": "parametric", "offset": 1900.0},
+                        }
+                    },
+                    "sources": {
+                        "leak": {
+                            "rate_per_hour": 20.0,
+                            "reference_species": "ch4",
+                            "shape": {"kind": "gaussian", "sigma": "20s"},
+                            "amplitude": {"kind": "uniform", "low": 100.0, "high": 100.001},
+                            "ratios": {},
+                        }
+                    },
+                },
                 "instruments": {
                     "slow": {
                         "native_rate": "60s",
                         "support": {"method": "mean", "subsamples": subsamples},
-                        "species": {
-                            "ch4": {
-                                "units": "ppb",
-                                "background": {"kind": "parametric", "offset": 1900.0},
-                            }
-                        },
-                    }
-                },
-                "sources": {
-                    "leak": {
-                        "rate_per_hour": 20.0,
-                        "reference_species": "ch4",
-                        "shape": {"kind": "gaussian", "sigma": "20s"},
-                        "amplitude": {"kind": "uniform", "low": 100.0, "high": 100.001},
-                        "ratios": {},
+                        "measures": {"ch4": {}},
                     }
                 },
             }
@@ -1128,26 +1014,26 @@ def test_a_narrow_plume_inside_a_wide_cell_comes_out_diluted() -> None:
             "start": "2026-01-01T00:00:00Z",
             "duration": "6h",
             "seed": 5,
-            "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
+            "platform": SITE,
+            "atmosphere": {
+                "fields": {
+                    "ch4": {"units": "ppb", "background": {"kind": "parametric", "offset": 1900.0}}
+                },
+                "sources": {
+                    "blip": {
+                        "rate_per_hour": 10.0,
+                        "reference_species": "ch4",
+                        "shape": {"kind": "gaussian", "sigma": "3s"},
+                        "amplitude": {"kind": "uniform", "low": 100.0, "high": 100.001},
+                        "ratios": {},
+                    }
+                },
+            },
             "instruments": {
                 "slow": {
                     "native_rate": "60s",
                     "support": {"method": "mean"},
-                    "species": {
-                        "ch4": {
-                            "units": "ppb",
-                            "background": {"kind": "parametric", "offset": 1900.0},
-                        }
-                    },
-                }
-            },
-            "sources": {
-                "blip": {
-                    "rate_per_hour": 10.0,
-                    "reference_species": "ch4",
-                    "shape": {"kind": "gaussian", "sigma": "3s"},
-                    "amplitude": {"kind": "uniform", "low": 100.0, "high": 100.001},
-                    "ratios": {},
+                    "measures": {"ch4": {}},
                 }
             },
         }
@@ -1196,7 +1082,21 @@ def test_a_jittered_mean_instrument_gets_an_exact_answer_key() -> None:
             "start": "2026-01-01T00:00:00Z",
             "duration": "1h",
             "seed": 7,
-            "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
+            "platform": SITE,
+            "atmosphere": {
+                "fields": {
+                    "ch4": {"units": "ppb", "background": {"kind": "parametric", "offset": 1900.0}}
+                },
+                "sources": {
+                    "leak": {
+                        "rate_per_hour": 60.0,
+                        "reference_species": "ch4",
+                        "shape": {"kind": "gaussian", "sigma": "3s"},
+                        "amplitude": {"kind": "uniform", "low": 100.0, "high": 100.001},
+                        "ratios": {},
+                    }
+                },
+            },
             "instruments": {
                 "a": {
                     "native_rate": "10s",
@@ -1204,33 +1104,21 @@ def test_a_jittered_mean_instrument_gets_an_exact_answer_key() -> None:
                     # which is where the cells overlap most.
                     "timestamp_jitter": "4s",
                     "support": {"method": "mean"},
-                    "species": {
-                        "ch4": {
-                            "units": "ppb",
-                            "background": {"kind": "parametric", "offset": 1900.0},
-                        }
-                    },
-                }
-            },
-            "sources": {
-                "leak": {
-                    "rate_per_hour": 60.0,
-                    "reference_species": "ch4",
-                    "shape": {"kind": "gaussian", "sigma": "3s"},
-                    "amplitude": {"kind": "uniform", "low": 100.0, "high": 100.001},
-                    "ratios": {},
+                    "measures": {"ch4": {}},
                 }
             },
         }
     )
     produced = np.asarray(generate(config).streams["a"][f"{TRUTH_PREFIX}enhancement_ch4"].values)
 
-    # Rebuild the same clock and events, then brute-force the enhancement.
+    # Rebuild the same atmosphere and clock, in the generator's draw order,
+    # then brute-force the enhancement.
     rng = np.random.default_rng(config.seed)
-    events = schedule_events(config, rng)
+    events = realize_atmosphere(config, rng).events
     start = pd.Timestamp(config.start).tz_localize(None)
     times = _build_times(start, start + pd.Timedelta(config.duration), "10s", "4s", None, rng, "a")
-    bounds, fine = _build_cells(times, config.instruments["a"])
+    grid = _build_cells(times, config.instruments["a"])
+    bounds, fine = grid.cells, grid.fine_ns
     assert np.any(bounds.start_ns[1:] < bounds.stop_ns[:-1]), (
         "this configuration must actually produce overlapping cells, or the test proves nothing"
     )
@@ -1247,3 +1135,598 @@ def test_a_jittered_mean_instrument_gets_an_exact_answer_key() -> None:
         ).mean(axis=1)
 
     assert np.allclose(produced, expected, rtol=0, atol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# One atmosphere, several instruments (Phase 4.5)
+# ---------------------------------------------------------------------------
+
+
+def _two_analyzers(**fast_measurement: Any) -> SyntheticConfig:
+    """A methane plume field measured by a 1 s analyzer and a 60 s mean analyzer."""
+    return SyntheticConfig.model_validate(
+        {
+            "name": "two_analyzers",
+            "start": "2026-01-01T00:00:00Z",
+            "duration": "2h",
+            "seed": 21,
+            "platform": SITE,
+            "atmosphere": {
+                "fields": {
+                    "ch4": {"units": "ppb", "background": {"kind": "parametric", "offset": 1900.0}}
+                },
+                "sources": {
+                    "pad": {
+                        "rate_per_hour": 12.0,
+                        "reference_species": "ch4",
+                        "shape": {"kind": "gaussian", "sigma": "30s"},
+                        "amplitude": {"kind": "uniform", "low": 50.0, "high": 150.0},
+                    }
+                },
+            },
+            "instruments": {
+                "fast": {"native_rate": "1s", "measures": {"ch4": fast_measurement}},
+                "minute": {
+                    "native_rate": "60s",
+                    "support": {"method": "mean"},
+                    "measures": {"ch4": {"name": "ch4_minute"}},
+                },
+            },
+        }
+    )
+
+
+def test_a_renamed_measurement_is_written_under_its_name_and_keeps_its_field() -> None:
+    stream = generate(_two_analyzers()).streams["minute"]
+    assert "ch4_minute" in stream.data_vars
+    assert "ch4" not in stream.data_vars
+    assert stream["ch4_minute"].attrs["field"] == "ch4"
+    # The answer key follows the variable's name, as every stream column does.
+    assert f"{TRUTH_PREFIX}enhancement_ch4_minute" in stream.data_vars
+
+
+def test_each_instrument_measuring_a_species_gets_its_own_truth_rows() -> None:
+    """One event, seen twice: once per variable, each through its own cells."""
+    frame = generate(_two_analyzers()).ground_truth.to_frame()
+    per_instrument = frame.groupby("instrument")["event_id"].apply(list).to_dict()
+    assert per_instrument["fast"] == per_instrument["minute"]
+    assert set(frame["field"]) == {"ch4"}
+    assert set(frame.loc[frame["instrument"] == "minute", "species"]) == {"ch4_minute"}
+    assert set(frame.loc[frame["instrument"] == "fast", "species"]) == {"ch4"}
+    # Same event, same true amplitude; the wide cells record it diluted.
+    fast = frame[frame["instrument"] == "fast"].set_index("event_id")
+    minute = frame[frame["instrument"] == "minute"].set_index("event_id")
+    assert np.array_equal(fast["true_amplitude"], minute["true_amplitude"])
+    seen = np.isfinite(minute["sampled_peak_amplitude"]) & np.isfinite(
+        fast["sampled_peak_amplitude"]
+    )
+    assert np.all(minute["sampled_peak_amplitude"][seen] < fast["sampled_peak_amplitude"][seen])
+
+
+def test_a_measurement_error_belongs_to_its_instrument() -> None:
+    """Noise on one analyzer must not reach the other's record of the same air."""
+    noisy = generate(_two_analyzers(uncertainty={"random": {"absolute": 5.0}}))
+    quiet = generate(_two_analyzers())
+    assert not np.array_equal(
+        noisy.streams["fast"]["ch4"].values, quiet.streams["fast"]["ch4"].values
+    )
+    assert np.array_equal(
+        noisy.streams["minute"]["ch4_minute"].values, quiet.streams["minute"]["ch4_minute"].values
+    )
+
+
+def test_the_dataset_carries_the_atmosphere_it_sampled() -> None:
+    dataset = generate(_two_analyzers())
+    assert dataset.atmosphere is not None
+    assert set(dataset.atmosphere.fields) == {"ch4"}
+    assert len(dataset.atmosphere.events) == len(dataset.ground_truth.event_ids)
+
+
+# ---------------------------------------------------------------------------
+# Is this instrument configured to sample this atmosphere faithfully?
+# ---------------------------------------------------------------------------
+#
+# Two warnings, both about a configuration that is valid and still
+# misrepresents the air. Each is tested at the boundary it is measured at, in
+# both directions, because a warning that fires for everything is noise and one
+# that fires for nothing is decoration.
+
+
+def _sampling_config(
+    *,
+    plume_sigma: str = "20s",
+    subsamples: int = 64,
+    cell: str = "60s",
+    method: str = "mean",
+    random_walk: float = 0.0,
+    truth_resolution: str = "1s",
+) -> SyntheticConfig:
+    """A one-source, one-instrument campaign with every relevant knob exposed."""
+    return SyntheticConfig.model_validate(
+        {
+            "name": "sampling",
+            "start": datetime(2026, 1, 1, tzinfo=UTC),
+            "duration": "20min",
+            "seed": 1,
+            "platform": SITE,
+            "atmosphere": {
+                "truth_resolution": truth_resolution,
+                "fields": {
+                    "ch4": {
+                        "role": "gas",
+                        "units": "ppb",
+                        "background": {
+                            "kind": "parametric",
+                            "offset": 1900.0,
+                            "random_walk_std": random_walk,
+                        },
+                    }
+                },
+                "sources": {
+                    "pad": {
+                        "rate_per_hour": 20.0,
+                        "reference_species": "ch4",
+                        "shape": {"kind": "gaussian", "sigma": plume_sigma},
+                        "amplitude": {"kind": "lognormal", "median": 50.0, "sigma_log": 0.4},
+                    }
+                },
+            },
+            "instruments": {
+                "analyzer": {
+                    "native_rate": cell,
+                    "measures": {"ch4": {}},
+                    "support": {"method": method, "label": "mid", "subsamples": subsamples},
+                }
+            },
+        }
+    )
+
+
+def _warnings(config: SyntheticConfig, caplog: pytest.LogCaptureFixture) -> str:
+    """Generate, and return whatever the generator warned about."""
+    import logging
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tsara.synthetic.generator"):
+        generate(config)
+    return caplog.text
+
+
+def test_subsamples_too_coarse_for_the_narrowest_plume_are_warned_about(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A 60 s cell at 16 subsamples samples every 3.75 s, inside a 5 s plume.
+
+    The cell means such an instrument reports are a quadrature error rather
+    than the average of that plume, and nothing in the output says so.
+    """
+    text = _warnings(_sampling_config(plume_sigma="5s", subsamples=16), caplog)
+    assert "averages the air at 3.75 s intervals" in text
+    assert "narrowest plume it can see is 5 s wide" in text
+    # The number of subsamples that would satisfy the rule, so the warning is
+    # actionable rather than merely disapproving.
+    assert "48 subsamples" in text
+
+
+def test_subsamples_fine_enough_for_the_plume_are_not_warned_about(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The same campaign one step past the threshold says nothing."""
+    assert "averages the air" not in _warnings(
+        _sampling_config(plume_sigma="5s", subsamples=48), caplog
+    )
+
+
+def test_the_subsample_warning_fires_exactly_at_the_measured_threshold(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Spacing equal to the fraction is fine; a hair coarser is not.
+
+    A 60 s cell and a 20 s plume: the rule allows a spacing of 5 s, so twelve
+    subsamples are enough and eleven are not.
+    """
+    assert "averages the air" not in _warnings(
+        _sampling_config(plume_sigma="20s", subsamples=12), caplog
+    )
+    assert "averages the air" in _warnings(
+        _sampling_config(plume_sigma="20s", subsamples=11), caplog
+    )
+
+
+def test_a_point_instrument_has_no_subsamples_to_warn_about(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`subsamples` is ignored for a point sampler, so the rule cannot apply."""
+    assert "averages the air" not in _warnings(
+        _sampling_config(plume_sigma="1s", subsamples=1, cell="1s", method="point"), caplog
+    )
+
+
+def test_the_narrowest_plume_counted_is_a_nested_child(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A nested child is meant to be much narrower, so it sets the requirement.
+
+    Counting only the parent's shape would pass an instrument that cannot
+    resolve any of the children riding inside it.
+    """
+    config = _sampling_config(plume_sigma="60s", subsamples=16)
+    parent = config.atmosphere.sources["pad"]
+    nested = config.model_copy(
+        update={
+            "atmosphere": config.atmosphere.model_copy(
+                update={
+                    "sources": {
+                        "pad": parent.model_copy(
+                            update={
+                                "nested": NestedSpec(
+                                    probability=1.0,
+                                    shape=GaussianShape(kind="gaussian", sigma="3s"),
+                                    amplitude_factor=0.5,
+                                )
+                            }
+                        )
+                    }
+                }
+            )
+        }
+    )
+    assert "averages the air" not in _warnings(config, caplog)
+    text = _warnings(nested, caplog)
+    assert "narrowest plume it can see is 3 s wide" in text
+    assert "pad's nested child" in text
+
+
+def test_cells_finer_than_a_wandering_background_are_warned_about(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Between its nodes a random walk is a straight line, and nothing says so.
+
+    An instrument reporting values every 0.5 s from an atmosphere defined at
+    1 s is reporting interpolation as measurement, for half its samples.
+    """
+    text = _warnings(
+        _sampling_config(cell="0.5s", method="point", random_walk=20.0, truth_resolution="1s"),
+        caplog,
+    )
+    assert "has 0.5 s cells, finer than the 1 s nodes" in text
+    assert "random walk on truth_resolution" in text
+
+
+def test_a_background_with_no_stochastic_term_has_no_node_spacing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An analytic background is smooth at every scale, so nothing is warned.
+
+    This is what keeps the warning off almost every configuration in the
+    repository: a background of an offset and a diurnal cycle has no nodes.
+    """
+    assert "finer than" not in _warnings(
+        _sampling_config(cell="0.5s", method="point", random_walk=0.0), caplog
+    )
+
+
+def test_cells_matching_the_node_spacing_are_not_warned_about(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Equal is fine: the instrument resolves exactly what the air has."""
+    assert "finer than" not in _warnings(
+        _sampling_config(cell="1s", method="point", random_walk=20.0, truth_resolution="1s"),
+        caplog,
+    )
+
+
+def test_a_finer_truth_resolution_is_what_the_warning_asks_for(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The fix the message names must actually silence it."""
+    assert "finer than" not in _warnings(
+        _sampling_config(cell="0.5s", method="point", random_walk=20.0, truth_resolution="0.5s"),
+        caplog,
+    )
+
+
+def test_a_bootstrap_background_is_measured_against_its_profiles_own_period(
+    white_noise_profile: RealDataProfile, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Bootstrap fluctuations are replayed at the profile's cadence, not the
+    atmosphere's, so that is the spacing an instrument is compared against.
+
+    The profile here samples at 1 s while the atmosphere's own nodes are 1 s
+    too, so the instrument is put at 0.5 s: under the atmosphere's resolution
+    alone there would be nothing to say, and the warning has to come from the
+    profile.
+    """
+    import logging
+
+    config = SyntheticConfig.model_validate(
+        {
+            "name": "boot",
+            "start": datetime(2026, 1, 1, tzinfo=UTC),
+            "duration": "10min",
+            "seed": 1,
+            "platform": SITE,
+            "atmosphere": {
+                "truth_resolution": "1s",
+                "fields": {
+                    "ch4": {
+                        "role": "gas",
+                        "units": "ppb",
+                        "background": {"kind": "bootstrap", "profile": "picarro", "scale": 1.0},
+                    }
+                },
+            },
+            "instruments": {
+                "fast": {"native_rate": "0.5s", "measures": {"ch4": {}}},
+            },
+        }
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tsara.synthetic.generator"):
+        generate(config, profiles={"picarro": white_noise_profile})
+    assert "nodes of the background" in caplog.text
+    assert "bootstrap profile 'picarro'" in caplog.text
+
+
+def test_a_nested_child_emitting_its_own_species_still_sets_the_requirement(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The landfill case: a child may name a species its parent never emits.
+
+    An instrument measuring only that species sees nothing but children, so
+    the child's kernel is the only one that can set its requirement — and
+    walking the parent's ratios alone would find no source at all.
+    """
+    config = SyntheticConfig.model_validate(
+        {
+            "name": "nested-only",
+            "start": datetime(2026, 1, 1, tzinfo=UTC),
+            "duration": "20min",
+            "seed": 1,
+            "platform": SITE,
+            "atmosphere": {
+                "fields": {
+                    "ch4": {"background": {"kind": "parametric", "offset": 1900.0}},
+                    "c2h6": {"background": {"kind": "parametric", "offset": 2.0}},
+                },
+                "sources": {
+                    "landfill": {
+                        "rate_per_hour": 20.0,
+                        "reference_species": "ch4",
+                        "shape": {"kind": "gaussian", "sigma": "90s"},
+                        "amplitude": {"kind": "lognormal", "median": 50.0, "sigma_log": 0.4},
+                        "nested": {
+                            "probability": 1.0,
+                            "shape": {"kind": "gaussian", "sigma": "2s"},
+                            "amplitude_factor": 0.5,
+                            "ratios": {"c2h6": {"mean": 0.05, "relative_spread": 0.1}},
+                        },
+                    }
+                },
+            },
+            # Measures the child's species only, on 60 s means at the default 64
+            # subsamples: 0.9375 s spacing, against the 0.5 s the 2 s child allows.
+            "instruments": {
+                "ethane": {
+                    "native_rate": "60s",
+                    "measures": {"c2h6": {}},
+                    "support": {"method": "mean", "label": "mid", "subsamples": 64},
+                }
+            },
+        }
+    )
+    text = _warnings(config, caplog)
+    assert "narrowest plume it can see is 2 s wide" in text
+    assert "landfill's nested child" in text
+
+
+def test_a_source_emitting_nothing_this_instrument_measures_is_ignored(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A wind vane is not held to the sharpness of a methane plume.
+
+    Two sources: a sharp one this instrument cannot see, and a broad one it
+    can. Only the second may set the requirement, and if the first leaked in,
+    every met instrument in a plume-dense campaign would be warned about.
+    """
+    config = SyntheticConfig.model_validate(
+        {
+            "name": "two-sources",
+            "start": datetime(2026, 1, 1, tzinfo=UTC),
+            "duration": "20min",
+            "seed": 1,
+            "platform": SITE,
+            "atmosphere": {
+                "fields": {
+                    "ch4": {"background": {"kind": "parametric", "offset": 1900.0}},
+                    "co2": {"background": {"kind": "parametric", "offset": 420.0}},
+                },
+                "sources": {
+                    "sharp_methane": {
+                        "rate_per_hour": 20.0,
+                        "reference_species": "ch4",
+                        "shape": {"kind": "gaussian", "sigma": "2s"},
+                        "amplitude": {"kind": "lognormal", "median": 50.0, "sigma_log": 0.4},
+                    },
+                    "broad_carbon": {
+                        "rate_per_hour": 10.0,
+                        "reference_species": "co2",
+                        "shape": {"kind": "gaussian", "sigma": "300s"},
+                        "amplitude": {"kind": "lognormal", "median": 5.0, "sigma_log": 0.4},
+                    },
+                },
+            },
+            "instruments": {
+                "carbon": {
+                    "native_rate": "60s",
+                    "measures": {"co2": {}},
+                    "support": {"method": "mean", "label": "mid", "subsamples": 64},
+                }
+            },
+        }
+    )
+    assert "averages the air" not in _warnings(config, caplog)
+
+
+@pytest.mark.parametrize("order", [("broad", "sharp"), ("sharp", "broad")])
+def test_the_narrowest_of_several_visible_sources_decides(
+    order: tuple[str, str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two sources both emitting the measured field: the sharper one binds.
+
+    Run in both declaration orders, because "the narrowest" must not mean
+    "whichever happened to be written last".
+    """
+    config = SyntheticConfig.model_validate(
+        {
+            "name": "narrowest-wins",
+            "start": datetime(2026, 1, 1, tzinfo=UTC),
+            "duration": "20min",
+            "seed": 1,
+            "platform": SITE,
+            "atmosphere": {
+                "fields": {"ch4": {"background": {"kind": "parametric", "offset": 1900.0}}},
+                "sources": {
+                    "broad": {
+                        "rate_per_hour": 10.0,
+                        "reference_species": "ch4",
+                        "shape": {"kind": "gaussian", "sigma": "300s"},
+                        "amplitude": {"kind": "lognormal", "median": 50.0, "sigma_log": 0.4},
+                    },
+                    "sharp": {
+                        "rate_per_hour": 10.0,
+                        "reference_species": "ch4",
+                        "shape": {"kind": "gaussian", "sigma": "2s"},
+                        "amplitude": {"kind": "lognormal", "median": 50.0, "sigma_log": 0.4},
+                    },
+                },
+            },
+            "instruments": {
+                "analyzer": {
+                    "native_rate": "60s",
+                    "measures": {"ch4": {}},
+                    "support": {"method": "mean", "label": "mid", "subsamples": 64},
+                }
+            },
+        }
+    )
+    sources = config.atmosphere.sources
+    reordered = config.model_copy(
+        update={
+            "atmosphere": config.atmosphere.model_copy(
+                update={"sources": {name: sources[name] for name in order}}
+            )
+        }
+    )
+    text = _warnings(reordered, caplog)
+    assert "narrowest plume it can see is 2 s wide (sharp)" in text
+
+
+def test_a_bootstrap_on_a_wandering_base_is_measured_against_the_coarser_nodes(
+    white_noise_profile: RealDataProfile, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two stochastic terms with different node spacings, and the coarser binds.
+
+    The profile replays every 1 s while the base wanders on 10 s atmosphere
+    nodes. A 5 s instrument resolves the profile's cadence and not the base's,
+    so the base is what it turns into straight lines — and naming the finer
+    term would tell the user to fix something that is already fine.
+    """
+    import logging
+
+    config = SyntheticConfig.model_validate(
+        {
+            "name": "boot-base",
+            "start": datetime(2026, 1, 1, tzinfo=UTC),
+            "duration": "20min",
+            "seed": 1,
+            "platform": SITE,
+            "atmosphere": {
+                "truth_resolution": "10s",
+                "fields": {
+                    "ch4": {
+                        "background": {
+                            "kind": "bootstrap",
+                            "profile": "picarro",
+                            "scale": 1.0,
+                            "base": {
+                                "kind": "parametric",
+                                "offset": 1900.0,
+                                "random_walk_std": 20.0,
+                            },
+                        }
+                    }
+                },
+            },
+            "instruments": {"fast": {"native_rate": "5s", "measures": {"ch4": {}}}},
+        }
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tsara.synthetic.generator"):
+        generate(config, profiles={"picarro": white_noise_profile})
+    assert "5 s cells, finer than the 10 s nodes" in caplog.text
+    assert "random walk on truth_resolution" in caplog.text
+    assert "bootstrap profile" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("truth_resolution", "rate", "expect_nodes", "expect_named"),
+    [
+        # The walk is the coarser term, and it is listed second.
+        ("10s", "0.5s", "0.5 s cells, finer than the 10 s nodes", "random walk"),
+        # The profile is the coarser term, and it is listed first: the second
+        # term must not displace it just by being looked at later.
+        ("0.1s", "0.05s", "0.05 s cells, finer than the 1 s nodes", "bootstrap profile"),
+    ],
+)
+def test_the_coarsest_stochastic_term_of_a_field_is_the_one_named(
+    truth_resolution: str,
+    rate: str,
+    expect_nodes: str,
+    expect_named: str,
+    white_noise_profile: RealDataProfile,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One field, two stochastic terms, an instrument finer than both.
+
+    The coarsest is what the instrument turns into the longest straight lines,
+    so that is what the message names and what its suggested resolution has to
+    fix; naming the finer one would tell the user to change something that is
+    already fine. And two terms of one field are one affected *field*, which
+    is the easy thing to count wrongly.
+    """
+    import logging
+
+    config = SyntheticConfig.model_validate(
+        {
+            "name": "two-terms",
+            "start": datetime(2026, 1, 1, tzinfo=UTC),
+            "duration": "5min",
+            "seed": 1,
+            "platform": SITE,
+            "atmosphere": {
+                "truth_resolution": truth_resolution,
+                "fields": {
+                    "ch4": {
+                        "background": {
+                            "kind": "bootstrap",
+                            "profile": "picarro",
+                            "scale": 1.0,
+                            "base": {
+                                "kind": "parametric",
+                                "offset": 1900.0,
+                                "random_walk_std": 20.0,
+                            },
+                        }
+                    }
+                },
+            },
+            "instruments": {"fast": {"native_rate": rate, "measures": {"ch4": {}}}},
+        }
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tsara.synthetic.generator"):
+        generate(config, profiles={"picarro": white_noise_profile})
+    assert expect_nodes in caplog.text
+    assert expect_named in caplog.text
+    assert "other measured field" not in caplog.text

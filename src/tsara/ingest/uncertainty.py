@@ -85,10 +85,10 @@ if TYPE_CHECKING:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ResolvedUncertainty", "UncertaintySource", "resolve_uncertainty"]
+__all__ = ["ResolvedUncertainty", "UncertaintyProvenance", "resolve_uncertainty"]
 
 #: Provenance of one uncertainty component. See the module docstring.
-UncertaintySource = Literal["declared", "reported", "empirical", "zero", "unknown"]
+UncertaintyProvenance = Literal["declared", "reported", "empirical", "zero", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -101,10 +101,10 @@ class ResolvedUncertainty:
         Per-point 1-sigma random component in canonical units, or ``None``
         when the component was not computed here (``empirical``, ``zero``,
         ``unknown``). ``None`` is not "no uncertainty" — read
-        :attr:`random_source` to learn what it means.
+        :attr:`random_provenance` to learn what it means.
     systematic : numpy.ndarray or None
         Per-point 1-sigma systematic component, same convention.
-    random_source, systematic_source : str
+    random_provenance, systematic_provenance : str
         Provenance of each component.
     decorrelation_timescale : str or None
         The random component's correlation timescale as declared, passed
@@ -133,16 +133,16 @@ class ResolvedUncertainty:
 
     random: npt.NDArray[np.float64] | None
     systematic: npt.NDArray[np.float64] | None
-    random_source: UncertaintySource
-    systematic_source: UncertaintySource
+    random_provenance: UncertaintyProvenance
+    systematic_provenance: UncertaintyProvenance
     decorrelation_timescale: str | None = None
     at_width: str | None = None
     at_width_ratio: float | None = None
     systematic_at_width: str | None = None
 
     @property
-    def source(self) -> str:
-        """Species-level provenance label for the output's ``uncertainty_source``.
+    def provenance(self) -> str:
+        """Species-level provenance label for the output's ``uncertainty_provenance``.
 
         METHODS §2.4 specifies one label per species. Real manifests mix
         modes freely — the shipped example pairs a *reported* random
@@ -154,10 +154,10 @@ class ResolvedUncertainty:
         ``mixed``: its systematic component is unknown precisely *because*
         the fallback is empirical, so one word describes it honestly.
         """
-        if self.random_source == "empirical" and self.systematic_source == "unknown":
+        if self.random_provenance == "empirical" and self.systematic_provenance == "unknown":
             return "empirical"
-        if self.random_source == self.systematic_source:
-            return self.random_source
+        if self.random_provenance == self.systematic_provenance:
+            return self.random_provenance
         return "mixed"
 
 
@@ -188,7 +188,7 @@ def resolve_uncertainty(
     variable : str
         Canonical variable name, for messages.
     path : pathlib.Path
-        Source file, for messages.
+        File being read, for messages.
     cell_width_ns : numpy.ndarray or None
         Each row's cell width. Used **only** to record how a declared
         ``at_width`` compares with the cells the figures landed on; no sigma
@@ -211,27 +211,27 @@ def resolve_uncertainty(
         return ResolvedUncertainty(
             random=None,
             systematic=None,
-            random_source="empirical",
-            systematic_source="unknown",
+            random_provenance="empirical",
+            systematic_provenance="unknown",
         )
 
-    random, random_source = _resolve_component(
+    random, random_provenance = _resolve_component(
         spec.random,
         values,
         frame,
         conversion=conversion,
         variable=variable,
         path=path,
-        absent_source="empirical",
+        absent_provenance="empirical",
     )
-    systematic, systematic_source = _resolve_component(
+    systematic, systematic_provenance = _resolve_component(
         spec.systematic,
         values,
         frame,
         conversion=conversion,
         variable=variable,
         path=path,
-        absent_source="zero",
+        absent_provenance="zero",
     )
 
     at_width, at_width_ratio = None, None
@@ -261,8 +261,8 @@ def resolve_uncertainty(
     return ResolvedUncertainty(
         random=random,
         systematic=systematic,
-        random_source=random_source,
-        systematic_source=systematic_source,
+        random_provenance=random_provenance,
+        systematic_provenance=systematic_provenance,
         decorrelation_timescale=spec.decorrelation_timescale,
         at_width=at_width,
         at_width_ratio=at_width_ratio,
@@ -320,11 +320,11 @@ def _resolve_component(
     conversion: UnitConversion | None,
     variable: str,
     path: Path,
-    absent_source: UncertaintySource,
-) -> tuple[npt.NDArray[np.float64] | None, UncertaintySource]:
+    absent_provenance: UncertaintyProvenance,
+) -> tuple[npt.NDArray[np.float64] | None, UncertaintyProvenance]:
     """Resolve one component (random or systematic) to sigmas plus provenance."""
     if declared is None:
-        return None, absent_source
+        return None, absent_provenance
     if isinstance(declared, DeclaredUncertainty):
         return _declared_sigma(declared, values), "declared"
     return (

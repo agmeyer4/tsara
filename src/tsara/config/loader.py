@@ -53,12 +53,20 @@ class TsaraConfig(_StrictModel):
 
     @model_validator(mode="after")
     def _reference_species_is_a_declared_gas(self) -> TsaraConfig:
+        """Check the reference species against fields, because it names a gas.
+
+        A ratio's denominator is a physical quantity rather than one
+        analyzer's column, so the comparison is with each variable's
+        ``field`` (which is its name unless declared otherwise). Two methane
+        analyzers declaring ``field: ch4`` make ``ch4`` a valid reference
+        whatever their variables are called.
+        """
         ref = self.analysis.regression.reference_species
         gases = self.manifest.gas_species
         if ref not in gases:
             raise ValueError(
-                f"regression.reference_species '{ref}' is not a role='gas' variable "
-                f"in manifest '{self.manifest.name}'; declared gases: {sorted(gases)}."
+                f"regression.reference_species '{ref}' is not the field of any role='gas' "
+                f"variable in manifest '{self.manifest.name}'; declared gases: {sorted(gases)}."
             )
         return self
 

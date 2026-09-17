@@ -9,7 +9,7 @@ piece can observe.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +24,7 @@ from tsara.core.naming import (
     RAW_TIME_START_COLUMN,
     RAW_TIME_STOP_COLUMN,
     SUPPORT_WIDTH_ATTR,
-    SUPPORT_WIDTH_SOURCE_ATTR,
+    SUPPORT_WIDTH_PROVENANCE_ATTR,
     TIME_BOUNDS_VAR,
     TIME_SHIFT_ATTR,
 )
@@ -44,6 +44,10 @@ from tsara.ingest.campaign import (
     ingest_campaign,
 )
 from tsara.ingest.streams import build_stream
+
+# Spelled out rather than imported from conftest, as in tests/config/test_loader.py:
+# `from tests.conftest import ...` resolves only when pytest runs from the repo root.
+RespellBundle = Callable[[Path], int]
 
 
 def _write_csv(path: Path, rows: list[tuple[str, float]]) -> None:
@@ -119,7 +123,7 @@ def test_ingests_every_instrument(tmp_path: Path) -> None:
 
 def test_files_are_concatenated_across_the_archive(tmp_path: Path) -> None:
     collection = ingest_campaign(_manifest(_archive(tmp_path)))
-    assert collection["picarro"].attrs["n_source_files"] == 2
+    assert collection["picarro"].attrs["n_files"] == 2
 
 
 def test_records_are_sorted_into_time_order(tmp_path: Path) -> None:
@@ -301,7 +305,7 @@ def test_round_trip_preserves_provenance_attrs(tmp_path: Path) -> None:
     reloaded = load_streams(tmp_path / "bundle")
 
     assert reloaded["picarro"].attrs["tsara_stage"] == "ingest"
-    assert reloaded["picarro"]["ch4"].attrs["uncertainty_source"] == "empirical"
+    assert reloaded["picarro"]["ch4"].attrs["uncertainty_provenance"] == "empirical"
 
 
 def test_bundle_layout(tmp_path: Path) -> None:
@@ -647,7 +651,7 @@ def test_each_file_keeps_its_own_cadence(tmp_path: Path) -> None:
     assert widths == [pd.Timedelta("1s")] * 2 + [pd.Timedelta("5s")] * 2
     # And so no single nominal width is reported for the instrument.
     assert ingested.support.width_ns is None
-    assert ingested.support.width_source == "inferred"
+    assert ingested.support.width_provenance == "inferred"
 
 
 def test_a_gap_does_not_widen_the_cell_before_it(tmp_path: Path) -> None:
@@ -821,6 +825,27 @@ def test_a_version_1_ingest_bundle_is_still_migrated(
         assert declared_bounds_name(reloaded[name]) is not None, name
 
 
+def test_a_format_2_ingest_bundle_is_respelled_on_load(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, respell_as_format_2: RespellBundle
+) -> None:
+    """Format 3 only renamed attributes, so an older bundle reads back identical.
+
+    Compared with `identical` against a reload of the same bundle before it
+    was respelled, which checks every attribute of the dataset and of each
+    variable, not only the renamed ones.
+    """
+    bundle = tmp_path / "bundle"
+    save_streams(ingest_campaign(_manifest(_archive(tmp_path))), bundle)
+    expected = load_streams(bundle)
+    assert respell_as_format_2(bundle) > 0
+
+    with caplog.at_level(logging.INFO, logger="tsara.ingest.bundle"):
+        reloaded = load_streams(bundle)
+    assert "current vocabulary" in caplog.text
+    for name in expected.streams:
+        assert reloaded[name].identical(expected[name]), name
+
+
 def test_a_version_2_stream_without_cells_is_left_alone(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -833,7 +858,7 @@ def test_a_version_2_stream_without_cells_is_left_alone(
 
     The loader ran the migration on every stream regardless of version, so
     saving and reloading this instrument attached 60 s cells and moved
-    `width_source` from `assumed` to `inferred`. A stream was promoted up the
+    `width_provenance` from `assumed` to `inferred`. A stream was promoted up the
     provenance ladder by nothing but a trip through disk, and the log line
     said it had been "written before cell boundaries existed" about a bundle
     written a moment earlier at version 2.
@@ -847,7 +872,7 @@ def test_a_version_2_stream_without_cells_is_left_alone(
 
     streams = ingest_campaign(_manifest(base))
     assert declared_bounds_name(streams["picarro"]) is None
-    assert streams["picarro"].attrs[SUPPORT_WIDTH_SOURCE_ATTR] == "assumed"
+    assert streams["picarro"].attrs[SUPPORT_WIDTH_PROVENANCE_ATTR] == "assumed"
 
     bundle = tmp_path / "bundle"
     save_streams(streams, bundle)
@@ -855,7 +880,7 @@ def test_a_version_2_stream_without_cells_is_left_alone(
         reloaded = load_streams(bundle)
 
     assert declared_bounds_name(reloaded["picarro"]) is None
-    assert reloaded["picarro"].attrs[SUPPORT_WIDTH_SOURCE_ATTR] == "assumed"
+    assert reloaded["picarro"].attrs[SUPPORT_WIDTH_PROVENANCE_ATTR] == "assumed"
     assert SUPPORT_WIDTH_ATTR not in reloaded["picarro"].attrs
     assert "assumed cells" not in caplog.text
 

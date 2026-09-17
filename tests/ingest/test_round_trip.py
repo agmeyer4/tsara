@@ -66,38 +66,42 @@ def _config(**overrides: Any) -> SyntheticConfig:
         "start": "2026-01-01T00:00:00Z",
         "duration": "20min",
         "platform": {"kind": "stationary", "latitude": 40.77, "longitude": -111.85},
+        "atmosphere": {
+            "fields": {
+                "ch4": {
+                    "background": {"kind": "parametric", "offset": 1900.0},
+                    "role": "gas",
+                    "units": "ppb",
+                },
+                "c2h6": {
+                    "background": {"kind": "parametric", "offset": 2.0},
+                    "role": "gas",
+                    "units": "ppb",
+                },
+                "wind_dir": {
+                    "background": {"kind": "parametric", "offset": 180.0},
+                    "role": "met",
+                    "units": "degrees",
+                    "circular": True,
+                },
+            },
+        },
         "instruments": {
             "analyzer": {
                 "native_rate": "2s",
-                "species": {
+                "measures": {
                     "ch4": {
-                        "background": {"kind": "parametric", "offset": 1900.0},
-                        "role": "gas",
-                        "units": "ppb",
                         "uncertainty": {
                             "random": {"absolute": 0.7},
                             "systematic": {"relative": 0.005},
                         },
                     },
                     "c2h6": {
-                        "background": {"kind": "parametric", "offset": 2.0},
-                        "role": "gas",
-                        "units": "ppb",
                         "uncertainty": {"random": {"absolute": 0.05, "report_as": "c2h6_err"}},
                     },
                 },
             },
-            "met": {
-                "native_rate": "10s",
-                "species": {
-                    "wind_dir": {
-                        "background": {"kind": "parametric", "offset": 180.0},
-                        "role": "met",
-                        "units": "degrees",
-                        "circular": True,
-                    }
-                },
-            },
+            "met": {"native_rate": "10s", "measures": {"wind_dir": {}}},
         },
     }
     spec.update(overrides)
@@ -124,6 +128,31 @@ def test_export_writes_a_loadable_manifest(tmp_path: Path) -> None:
     assert manifest_path.name == EXPORT_MANIFEST
     assert (tmp_path / "export" / EXPORT_RAW_DIR / "analyzer.csv").is_file()
     assert load_manifest(manifest_path).name == "round_trip"
+
+
+def test_an_archive_exported_to_a_relative_path_ingests_from_anywhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The README's quickstart, which exports to "demo_campaign".
+
+    The manifest wrote the path it was given as `base_path`, and the loader
+    resolves a relative `base_path` against the manifest's own directory, so
+    a relative export looked for its files in demo_campaign/demo_campaign/raw.
+    Every other test exports to an absolute temporary path, which is why the
+    two conventions never met. The archive is also moved after writing: a
+    manifest naming its files relative to itself travels with them.
+    """
+    monkeypatch.chdir(tmp_path)
+    generated = generate(_config())
+    manifest_path = export_raw(generated, "demo_campaign")
+    assert yaml.safe_load(manifest_path.read_text(encoding="utf-8"))["base_path"] == "raw"
+
+    moved = tmp_path / "elsewhere" / "campaign"
+    moved.parent.mkdir()
+    (tmp_path / "demo_campaign").rename(moved)
+    monkeypatch.chdir(moved.parent)
+    ingested = ingest_campaign(load_manifest(moved / EXPORT_MANIFEST))
+    assert set(ingested.streams) == set(generated.streams)
 
 
 def test_every_instrument_survives_the_trip(tmp_path: Path) -> None:
@@ -168,6 +197,63 @@ def test_units_and_roles_survive(tmp_path: Path) -> None:
     assert ingested["met"]["wind_dir"].attrs["circular"] == 1
 
 
+def _assert_both_producers_record_the_same_fields(generated: Any, ingested: Any) -> None:
+    """Every ingested variable's field is the one its generated original names.
+
+    Walked from the ingested side, because ingestion writes the attribute on
+    every variable its manifest declares, so that side lists exactly the
+    measurements; walked from the generated side, a variable the generator
+    forgot to label would simply be skipped. Counted, because a walk that
+    found no field would pass.
+    """
+    checked = 0
+    for name, stream in ingested.streams.items():
+        for variable in stream.data_vars:
+            if "field" in stream[variable].attrs:
+                original = generated.streams[name][variable].attrs.get("field")
+                assert original == stream[variable].attrs["field"], (name, variable)
+                checked += 1
+    assert checked > 0
+
+
+def test_both_producers_record_the_same_fields(tmp_path: Path) -> None:
+    """Substitutability for the identity attribute (METHODS §1.6, §9.7)."""
+    generated, ingested = _round_trip(tmp_path)
+    _assert_both_producers_record_the_same_fields(generated, ingested)
+
+
+def test_two_instruments_measuring_one_field_round_trip_with_its_identity(
+    tmp_path: Path,
+) -> None:
+    """The generator's `measures` and the manifest's `field` are one idea.
+
+    A second analyzer measures the same methane under its own name. The
+    exported manifest must declare `field: ch4` for exactly that variable and
+    leave the default to speak for the other, and ingestion must hand both
+    streams back naming one field, with the values the generator wrote.
+    """
+    spec = _config().model_dump(mode="json")
+    spec["instruments"]["aeris"] = {
+        "native_rate": "1s",
+        "measures": {"ch4": {"name": "ch4_aeris", "uncertainty": {"random": {"absolute": 2.0}}}},
+    }
+    generated, ingested = _round_trip(tmp_path, SyntheticConfig.model_validate(spec))
+
+    manifest = load_manifest(tmp_path / "export" / EXPORT_MANIFEST)
+    assert manifest.instruments["aeris"].variables["ch4_aeris"].field == "ch4"
+    assert manifest.instruments["analyzer"].variables["ch4"].field is None
+    assert manifest.gas_species == ("ch4", "c2h6")
+
+    assert ingested["aeris"]["ch4_aeris"].attrs["field"] == "ch4"
+    assert ingested["analyzer"]["ch4"].attrs["field"] == "ch4"
+    np.testing.assert_allclose(
+        ingested["aeris"]["ch4_aeris"].values,
+        generated.streams["aeris"]["ch4_aeris"].values,
+        rtol=RTOL,
+    )
+    _assert_both_producers_record_the_same_fields(generated, ingested)
+
+
 # ---------------------------------------------------------------------------
 # The uncertainty budget, which is the part with a right answer
 # ---------------------------------------------------------------------------
@@ -210,7 +296,7 @@ def test_reported_uncertainty_is_read_from_its_column(tmp_path: Path) -> None:
     """An instrument that publishes its own per-point sigma (the EM27 case)."""
     generated, ingested = _round_trip(tmp_path)
 
-    assert ingested["analyzer"]["c2h6"].attrs["uncertainty_source_random"] == "reported"
+    assert ingested["analyzer"]["c2h6"].attrs["uncertainty_provenance_random"] == "reported"
     np.testing.assert_allclose(
         ingested["analyzer"][sigma_rand_name("c2h6")].values,
         generated.streams["analyzer"]["truth_sigma_rand_c2h6"].values,
@@ -222,19 +308,19 @@ def test_provenance_labels_match_what_was_declared(tmp_path: Path) -> None:
     _, ingested = _round_trip(tmp_path)
 
     ch4 = ingested["analyzer"]["ch4"].attrs
-    assert ch4["uncertainty_source_random"] == "declared"
-    assert ch4["uncertainty_source_systematic"] == "declared"
+    assert ch4["uncertainty_provenance_random"] == "declared"
+    assert ch4["uncertainty_provenance_systematic"] == "declared"
 
     # c2h6 declares only a random component, so its systematic is a
     # deliberate zero rather than unknown.
     c2h6 = ingested["analyzer"]["c2h6"].attrs
-    assert c2h6["uncertainty_source_systematic"] == "zero"
+    assert c2h6["uncertainty_provenance_systematic"] == "zero"
 
     # wind_dir declares no budget at all: random falls back to the empirical
     # estimator and systematic is genuinely unknown.
     wind = ingested["met"]["wind_dir"].attrs
-    assert wind["uncertainty_source"] == "empirical"
-    assert wind["uncertainty_source_systematic"] == "unknown"
+    assert wind["uncertainty_provenance"] == "empirical"
+    assert wind["uncertainty_provenance_systematic"] == "unknown"
     assert sigma_rand_name("wind_dir") not in ingested["met"].data_vars
 
 
@@ -277,6 +363,7 @@ def test_mobile_campaign_round_trips_with_a_gps_instrument(tmp_path: Path) -> No
 
     assert "gps" in ingested.streams
     assert ingested["gps"]["latitude"].attrs["role"] == "gps_lat"
+    _assert_both_producers_record_the_same_fields(generated, ingested)
     # The gas streams get no coordinates: attaching a track to their clocks
     # is interpolation, which belongs to Phase 4.
     assert "latitude" not in ingested["analyzer"].coords
@@ -297,7 +384,7 @@ def test_full_loop_through_a_bundle(tmp_path: Path) -> None:
     truth = generated.streams["analyzer"]
     np.testing.assert_allclose(reloaded["analyzer"]["ch4"].values, truth["ch4"].values, rtol=RTOL)
     np.testing.assert_array_equal(reloaded["analyzer"]["time"].values, truth["time"].values)
-    assert reloaded["analyzer"]["ch4"].attrs["uncertainty_source"] == "declared"
+    assert reloaded["analyzer"]["ch4"].attrs["uncertainty_provenance"] == "declared"
 
 
 def test_quantized_species_round_trip(tmp_path: Path) -> None:
@@ -311,7 +398,7 @@ def test_quantized_species_round_trip(tmp_path: Path) -> None:
     """
     config = _config()
     spec = config.model_dump(mode="json")
-    spec["instruments"]["analyzer"]["species"]["ch4"]["quantization"] = 0.1
+    spec["instruments"]["analyzer"]["measures"]["ch4"]["quantization"] = 0.1
     generated, ingested = _round_trip(tmp_path, SyntheticConfig.model_validate(spec))
 
     np.testing.assert_allclose(
@@ -528,19 +615,14 @@ def _cell_config(**support: Any) -> SyntheticConfig:
             "duration": "20min",
             "seed": 4,
             "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
-            "instruments": {
-                "slow": {
-                    "native_rate": "60s",
-                    "support": support,
-                    "species": {
-                        "ch4": {
-                            "units": "ppb",
-                            "background": {"kind": "parametric", "offset": 1900.0},
-                        }
-                    },
+            "atmosphere": {
+                "fields": {
+                    "ch4": {"units": "ppb", "background": {"kind": "parametric", "offset": 1900.0}}
                 }
             },
-            "sources": {},
+            "instruments": {
+                "slow": {"native_rate": "60s", "support": support, "measures": {"ch4": {}}}
+            },
         }
     )
 
@@ -660,9 +742,10 @@ def test_shifting_an_unknown_instrument_is_refused(tmp_path: Path) -> None:
         export_raw(generate(_cell_config()), tmp_path / "a", time_shift={"nope": "1s"})
 
 
-def test_a_species_colliding_with_a_boundary_column_is_refused(tmp_path: Path) -> None:
-    """`time_stop` is a legal species name, and writing a cell boundary over a
-    measurement would leave the round trip comparing the wrong column."""
+def test_a_variable_colliding_with_a_boundary_column_is_refused(tmp_path: Path) -> None:
+    """`time_stop` is a legal variable name, and writing a cell boundary over a
+    measurement would leave the round trip comparing the wrong column. Reached
+    here through a renamed measurement, the route a field name cannot take."""
     config = SyntheticConfig.model_validate(
         {
             "name": "clash",
@@ -670,18 +753,14 @@ def test_a_species_colliding_with_a_boundary_column_is_refused(tmp_path: Path) -
             "duration": "5min",
             "seed": 1,
             "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
-            "instruments": {
-                "slow": {
-                    "native_rate": "60s",
-                    "species": {
-                        STOP_COLUMN: {
-                            "units": "ppb",
-                            "background": {"kind": "parametric", "offset": 1.0},
-                        }
-                    },
+            "atmosphere": {
+                "fields": {
+                    "ch4": {"units": "ppb", "background": {"kind": "parametric", "offset": 1.0}}
                 }
             },
-            "sources": {},
+            "instruments": {
+                "slow": {"native_rate": "60s", "measures": {"ch4": {"name": STOP_COLUMN}}}
+            },
         }
     )
     with pytest.raises(TsaraSyntheticError, match="would be overwritten"):
@@ -747,7 +826,7 @@ def test_a_declared_label_is_read_back_exactly(tmp_path: Path) -> None:
     )
     assert stream["ch4"].attrs["cell_methods"] == "time: mean"
     assert stream.attrs["tsara_support_label"] == "start"
-    assert stream.attrs["tsara_support_label_source"] == "declared"
+    assert stream.attrs["tsara_support_label_provenance"] == "declared"
 
 
 def test_a_file_that_states_its_cells_is_read_back_exactly(tmp_path: Path) -> None:
@@ -759,8 +838,8 @@ def test_a_file_that_states_its_cells_is_read_back_exactly(tmp_path: Path) -> No
         np.asarray(stream[TIME_BOUNDS_VAR].values, dtype="datetime64[ns]"),
         np.asarray(dataset.streams["slow"][TIME_BOUNDS_VAR].values, dtype="datetime64[ns]"),
     )
-    assert stream.attrs["tsara_support_label_source"] == "reported"
-    assert stream.attrs["tsara_support_width_source"] == "reported"
+    assert stream.attrs["tsara_support_label_provenance"] == "reported"
+    assert stream.attrs["tsara_support_width_provenance"] == "reported"
 
 
 def test_an_archive_that_says_nothing_is_read_back_wrong_and_says_so(
@@ -782,8 +861,8 @@ def test_an_archive_that_says_nothing_is_read_back_wrong_and_says_so(
     read_back = np.asarray(stream[TIME_COORD].values, dtype="datetime64[ns]")
     offset = (generated - read_back) / np.timedelta64(1, "s")
     assert np.all(offset == 30.0), "half a cell, exactly the label being unknown"
-    assert stream.attrs["tsara_support_label_source"] == "assumed"
-    assert stream.attrs["tsara_support_method_source"] == "assumed"
+    assert stream.attrs["tsara_support_label_provenance"] == "assumed"
+    assert stream.attrs["tsara_support_method_provenance"] == "assumed"
     assert stream["ch4"].attrs["cell_methods"] == "time: point"
     # The width is still right, because it is measured from the file's own
     # cadence rather than guessed. This is the ONLY path that exercises that

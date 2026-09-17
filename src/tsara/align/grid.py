@@ -75,6 +75,7 @@ import pandas as pd
 
 from tsara.align.binning import (
     TsaraAlignError,
+    VariableRef,
     _output_names,
     bin_streams_onto_cells,
     measure_replication,
@@ -82,9 +83,9 @@ from tsara.align.binning import (
     stream_cells,
     touched_readings,
 )
-from tsara.core.naming import n_source_name
+from tsara.core.naming import n_readings_name
 from tsara.core.support import CellBounds
-from tsara.core.timebase import to_utc_naive_stamp
+from tsara.core.timebase import NS_PER_S, to_utc_naive_stamp
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Mapping, Sequence
@@ -100,7 +101,7 @@ __all__ = ["build_output_grid", "grid_cells"]
 
 #: Attrs the gridded product carries, documented in ``docs/METHODS.md`` §11.7.
 GRID_FREQ_ATTR = "tsara_grid_freq"
-GRID_WIDEST_CELL_ATTR = "tsara_grid_widest_source_cell_s"
+GRID_WIDEST_CELL_ATTR = "tsara_grid_widest_reading_cell_s"
 GRID_VARIABLES_ATTR = "tsara_grid_variables"
 #: Per-variable: distinct readings behind the grid's occupied rows (§11.7).
 GRID_READINGS_ATTR = "tsara_grid_readings"
@@ -109,7 +110,7 @@ GRID_READINGS_ATTR = "tsara_grid_readings"
 def grid_cells(
     streams: Mapping[str, xr.Dataset],
     config: OutputGridConfig,
-    variables: Sequence[str | tuple[str, str]] | None = None,
+    variables: Sequence[VariableRef] | None = None,
 ) -> CellBounds:
     """Build the uniform cells a campaign's output grid sits on.
 
@@ -216,20 +217,20 @@ def _refuse_a_period_too_fine(
 def _warn_if_out_of_phase(cells: Mapping[str, CellBounds], start_ns: int, period_ns: int) -> None:
     """Note any stream whose cells are as wide as the grid but offset from it.
 
-    A legitimate but easily-missed situation. When a source's cells are the
+    A legitimate but easily-missed situation. When a stream's cells are the
     same width as the grid period and share its phase, each grid value comes
-    from exactly one source cell. When the phases differ, each grid value is a
-    *blend* of two adjacent source cells -- still an honest weighted mean, but
+    from exactly one reading. When the phases differ, each grid value is a
+    *blend* of two adjacent readings -- still an honest weighted mean, but
     a smoothed one, and a ratio taken across two columns treated differently
     that way carries a small bias.
 
     Measured on the acceptance campaign: a 60 s instrument whose cells are
     centred on its timestamps sits half a cell off an epoch-anchored 60 s
-    grid, every grid value then draws from two source cells, and the recovered
+    grid, every grid value then draws from two readings, and the recovered
     ratio moves from 0.250000034 to 0.249940526. Aligning the grid start to
     that instrument's own boundaries removes it entirely.
 
-    The ``n_source`` column already reports the blend, so this is a note
+    The ``n_readings`` column already reports the blend, so this is a note
     rather than a refusal: blending is sometimes unavoidable, and which
     instrument the grid should be in phase with is the user's choice.
     """
@@ -241,21 +242,25 @@ def _warn_if_out_of_phase(cells: Mapping[str, CellBounds], start_ns: int, period
         # How far each cell starts past a grid boundary; zero everywhere means in phase.
         offsets = (bounds.start_ns - start_ns) % period_ns
         if np.any(offsets != 0):
+            # In seconds, not the raw nanoseconds the arithmetic runs in: a
+            # reader of the log is being asked to act on these two numbers by
+            # moving the grid start, and "60000000000 ns" is a period nobody
+            # recognises as one minute.
             logger.warning(
-                "Stream '%s' has cells exactly as wide as the %d ns grid period but "
-                "offset from it by %d ns, so every grid value will blend two of its "
-                "cells (n_source = 2) rather than reproduce one. Set the grid start "
+                "Stream '%s' has cells exactly as wide as the %.6g s grid period but "
+                "offset from it by %.6g s, so every grid value will blend two of its "
+                "cells (n_readings = 2) rather than reproduce one. Set the grid start "
                 "to one of its cell boundaries to avoid the smoothing.",
                 instrument,
-                period_ns,
-                int(offsets[0]),
+                period_ns / NS_PER_S,
+                int(offsets[0]) / NS_PER_S,
             )
 
 
 def build_output_grid(
     streams: Mapping[str, xr.Dataset],
     config: OutputGridConfig,
-    variables: Sequence[str | tuple[str, str]] | None = None,
+    variables: Sequence[VariableRef] | None = None,
     *,
     propagation_form: PropagationForm = "ar1_neff",
 ) -> xr.Dataset:
@@ -297,7 +302,7 @@ def build_output_grid(
     # Provenance: what was gridded, at what period, against which widest cell.
     instruments = sorted({instrument for instrument, _ in selection})
     cells = {name: stream_cells(streams[name], name) for name in instruments}
-    widest = max(float(bounds.width_ns.max()) for bounds in cells.values()) / 1e9
+    widest = max(float(bounds.width_ns.max()) for bounds in cells.values()) / NS_PER_S
     gridded.attrs["tsara_stage"] = "gridded"
     gridded.attrs[GRID_FREQ_ATTR] = str(config.freq)
     gridded.attrs[GRID_WIDEST_CELL_ATTR] = float(widest)
@@ -308,7 +313,7 @@ def build_output_grid(
     )
     _record_readings(gridded, streams, selection, cells, target)
     logger.info(
-        "Built a %s grid of %d cells over %d variable(s); widest source cell %.6g s.",
+        "Built a %s grid of %d cells over %d variable(s); widest reading cell %.6g s.",
         config.freq,
         len(target),
         len(selection),
@@ -341,7 +346,7 @@ def _record_readings(
         finite = np.isfinite(np.asarray(streams[instrument][variable].values, dtype=np.float64))
         # Distinct readings behind the column, against rows that hold a value.
         readings = int(np.count_nonzero(touched[instrument] & finite))
-        occupied = int(np.count_nonzero(gridded[n_source_name(column)].values > 0))
+        occupied = int(np.count_nonzero(gridded[n_readings_name(column)].values > 0))
         gridded[column].attrs[GRID_READINGS_ATTR] = readings
         if readings < occupied:
             shared.append((column, occupied, readings))

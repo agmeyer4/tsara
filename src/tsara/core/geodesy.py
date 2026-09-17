@@ -171,8 +171,8 @@ def positions_at(
     synthetic generator does not need it, since it controls the track.
     """
     target = _epoch_s(times)
-    source = _epoch_s(track_times)
+    track = _epoch_s(track_times)
     return (
-        np.interp(target, source, latitude),
-        np.interp(target, source, longitude),
+        np.interp(target, track, latitude),
+        np.interp(target, track, longitude),
     )

@@ -23,12 +23,11 @@ from tsara.align import TsaraAlignError
 from tsara.align.auxiliary import attach_positions, interpolate_onto_cells
 from tsara.config.loader import load_manifest
 from tsara.core.support import CellBounds
+from tsara.core.timebase import SECOND_NS as SECOND
 from tsara.ingest import ingest_campaign
 from tsara.synthetic import generate
 from tsara.synthetic.config import SyntheticConfig
 from tsara.synthetic.export import export_raw
-
-SECOND = 1_000_000_000
 
 
 def cells(start_s: float, width_s: float, n: int) -> CellBounds:
@@ -109,22 +108,22 @@ def test_every_smooth_role_is_permitted(role: str) -> None:
 
 def test_a_gap_longer_than_the_limit_is_not_bridged() -> None:
     """The value is nan, and the refusal is counted rather than silent."""
-    source = CellBounds(
+    readings = CellBounds(
         start_ns=np.array([0, 100 * SECOND], dtype=np.int64),
         stop_ns=np.array([SECOND, 101 * SECOND], dtype=np.int64),
     )
-    streams = {"gps": make_stream(source, {"field": np.array([0.0, 100.0])})}
+    streams = {"gps": make_stream(readings, {"field": np.array([0.0, 100.0])})}
     result = interpolate_onto_cells(streams, "field", cells(0.0, 10.0, 10), max_interp_gap="10s")
     assert result.n_gap_masked > 0
     assert np.isnan(result.values[3])
 
 
 def test_a_gap_inside_the_limit_is_bridged() -> None:
-    source = CellBounds(
+    readings = CellBounds(
         start_ns=np.array([0, 8 * SECOND], dtype=np.int64),
         stop_ns=np.array([SECOND, 9 * SECOND], dtype=np.int64),
     )
-    streams = {"gps": make_stream(source, {"field": np.array([0.0, 8.0])})}
+    streams = {"gps": make_stream(readings, {"field": np.array([0.0, 8.0])})}
     result = interpolate_onto_cells(streams, "field", cells(0.0, 2.0, 4), max_interp_gap="10s")
     assert np.isfinite(result.values).all()
     assert result.n_gap_masked == 0
@@ -137,8 +136,8 @@ def test_a_target_landing_on_a_sample_is_measured_not_interpolated() -> None:
     which is correct -- but the cells that coincide with a fix are measured,
     and refusing those would discard real data.
     """
-    source = cells(0.5, 1.0, 3)  # midpoints at 1, 2, 3 s
-    streams = {"gps": make_stream(source, {"field": np.array([10.0, 20.0, 30.0])})}
+    readings = cells(0.5, 1.0, 3)  # midpoints at 1, 2, 3 s
+    streams = {"gps": make_stream(readings, {"field": np.array([10.0, 20.0, 30.0])})}
     target = CellBounds(
         start_ns=np.array([0, 100 * SECOND], dtype=np.int64),
         stop_ns=np.array([2 * SECOND, 102 * SECOND], dtype=np.int64),
@@ -150,8 +149,8 @@ def test_a_target_landing_on_a_sample_is_measured_not_interpolated() -> None:
 
 
 def test_nothing_is_extrapolated_past_the_ends_of_a_record() -> None:
-    source = cells(10.0, 1.0, 5)
-    streams = {"gps": make_stream(source, {"field": np.arange(5.0)})}
+    readings = cells(10.0, 1.0, 5)
+    streams = {"gps": make_stream(readings, {"field": np.arange(5.0)})}
     target = cells(0.0, 1.0, 30)
     result = interpolate_onto_cells(streams, "field", target, max_interp_gap="1h")
     assert result.n_outside > 0
@@ -159,7 +158,7 @@ def test_nothing_is_extrapolated_past_the_ends_of_a_record() -> None:
     assert np.isnan(result.values[-1])
 
 
-def test_a_source_with_no_finite_values_yields_nothing() -> None:
+def test_a_stream_with_no_finite_values_yields_nothing() -> None:
     streams = {"gps": make_stream(cells(0.0, 1.0, 4), {"field": np.full(4, np.nan)})}
     result = interpolate_onto_cells(streams, "field", cells(0.0, 1.0, 4))
     assert np.all(np.isnan(result.values))
@@ -169,8 +168,8 @@ def test_a_source_with_no_finite_values_yields_nothing() -> None:
 def sparse_record(times_s: list[float]) -> dict[str, xr.Dataset]:
     """A field sampled at the given instants, on 1 s cells centred on them."""
     starts = (np.asarray(times_s) * SECOND).astype(np.int64) - SECOND // 2
-    source = CellBounds(start_ns=starts, stop_ns=starts + SECOND)
-    return {"gps": make_stream(source, {"field": np.arange(float(len(times_s)))})}
+    readings = CellBounds(start_ns=starts, stop_ns=starts + SECOND)
+    return {"gps": make_stream(readings, {"field": np.arange(float(len(times_s)))})}
 
 
 def test_a_record_sampled_more_sparsely_than_the_guard_says_so(
@@ -265,10 +264,10 @@ def test_a_straight_line_interpolates_to_itself() -> None:
     """
     epoch_2024 = np.datetime64("2024-07-18T18:00:00", "ns").astype(np.int64)
     start = epoch_2024 + np.arange(600, dtype=np.int64) * SECOND
-    source = CellBounds(start_ns=start, stop_ns=start + SECOND)
+    readings = CellBounds(start_ns=start, stop_ns=start + SECOND)
     slope = 3.0
     values = slope * np.arange(600.0)
-    streams = {"gps": make_stream(source, {"field": values})}
+    streams = {"gps": make_stream(readings, {"field": values})}
     target_start = epoch_2024 + np.arange(120, dtype=np.int64) * 5 * SECOND
     target = CellBounds(start_ns=target_start, stop_ns=target_start + 5 * SECOND)
     result = interpolate_onto_cells(streams, "field", target, max_interp_gap="10s")
@@ -286,8 +285,8 @@ def test_a_direction_does_not_travel_the_long_way_round_the_compass() -> None:
     attrs: dict[str, dict[str, object]] = {
         "wind_dir": {"units": "degrees", "role": "met", "circular": 1}
     }
-    source = cells(0.0, 2.0, 2)  # midpoints at 1 s and 3 s
-    streams = {"met": make_stream(source, {"wind_dir": np.array([359.0, 1.0])}, attrs=attrs)}
+    readings = cells(0.0, 2.0, 2)  # midpoints at 1 s and 3 s
+    streams = {"met": make_stream(readings, {"wind_dir": np.array([359.0, 1.0])}, attrs=attrs)}
     target = CellBounds(
         start_ns=np.array([int(1.5 * SECOND)], dtype=np.int64),
         stop_ns=np.array([int(2.5 * SECOND)], dtype=np.int64),
@@ -299,8 +298,8 @@ def test_a_direction_does_not_travel_the_long_way_round_the_compass() -> None:
 def test_a_non_circular_field_is_interpolated_linearly() -> None:
     """The contrast: the same numbers without the circular flag sweep through 180."""
     attrs: dict[str, dict[str, object]] = {"bearing": {"units": "degrees", "role": "aux"}}
-    source = cells(0.0, 2.0, 2)
-    streams = {"met": make_stream(source, {"bearing": np.array([359.0, 1.0])}, attrs=attrs)}
+    readings = cells(0.0, 2.0, 2)
+    streams = {"met": make_stream(readings, {"bearing": np.array([359.0, 1.0])}, attrs=attrs)}
     target = CellBounds(
         start_ns=np.array([int(1.5 * SECOND)], dtype=np.int64),
         stop_ns=np.array([int(2.5 * SECOND)], dtype=np.int64),
@@ -426,7 +425,7 @@ def test_a_sub_microsecond_gap_is_accepted() -> None:
     """
     streams = {"gps": make_stream(cells(0.0, 1.0, 4), {"field": np.arange(4.0)})}
     result = interpolate_onto_cells(streams, "field", cells(0.0, 1.0, 4), max_interp_gap="1ns")
-    # Every target is exactly on a source midpoint, so none needs bridging.
+    # Every target is exactly on a reading's midpoint, so none needs bridging.
     assert result.n_exact == 4
 
 
@@ -470,20 +469,22 @@ def test_the_track_join_survives_real_ingestion(tmp_path: Path) -> None:
             "pattern": "random_walk",
             "heading_volatility": 0.2,
         },
+        "atmosphere": {
+            "fields": {
+                "ch4": {
+                    "background": {"kind": "parametric", "offset": 1950.0},
+                    "role": "gas",
+                    "units": "ppb",
+                }
+            },
+        },
         "instruments": {
             "analyzer": {
                 "native_rate": "1s",
                 "support": {"method": "mean", "label": "start"},
-                "species": {
-                    "ch4": {
-                        "background": {"kind": "parametric", "offset": 1950.0},
-                        "role": "gas",
-                        "units": "ppb",
-                    }
-                },
+                "measures": {"ch4": {}},
             }
         },
-        "sources": {},
     }
     generated = generate(SyntheticConfig.model_validate(spec))
     streams = ingest_campaign(load_manifest(export_raw(generated, tmp_path / "raw")))

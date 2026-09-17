@@ -30,7 +30,7 @@ PACKAGES_WITH_EXPORTS = ["tsara", "tsara.ingest", "tsara.synthetic"]
 def _modules_declaring_all() -> list[str]:
     """Return every ``tsara`` module that declares ``__all__``, discovered.
 
-    Enumerated by walking the source tree rather than by listing names,
+    Enumerated by walking the package tree rather than by listing names,
     because a hand-maintained list only guards what someone remembered to
     add to it. Measured when this replaced a three-item list: 21 modules
     declare ``__all__`` and 3 were being checked, and two of the unchecked
@@ -64,7 +64,7 @@ MODULES_WITH_EXPORTS = _modules_declaring_all()
 
 
 def _tsara_imports(module_path: Path) -> list[str]:
-    """Return every ``tsara.*`` module name imported by one source file.
+    """Return every ``tsara.*`` module name imported by one module.
 
     Parsed with :mod:`ast` rather than by importing, so the check is static:
     it sees imports guarded by ``TYPE_CHECKING`` and imports nested inside
@@ -74,7 +74,7 @@ def _tsara_imports(module_path: Path) -> list[str]:
     Parameters
     ----------
     module_path : pathlib.Path
-        Python source file to scan.
+        Python file to scan.
 
     Returns
     -------
@@ -368,8 +368,8 @@ def test_every_attribute_a_product_carries_is_documented() -> None:
     place that promise is explained is METHODS.md.
 
     This has failed for real: both provenance families were documented by
-    halves -- the support section named the label and width sources but
-    abbreviated the method one to `_method_source`, and the uncertainty
+    halves -- the support section named the label and width attributes but
+    abbreviated the method one, and the uncertainty
     section named the species-level label while the per-component attributes
     that carry it went unmentioned.
     """
@@ -396,7 +396,7 @@ def test_the_document_names_no_attribute_that_nothing_writes() -> None:
     """The reverse of the check above, and the direction a rename breaks.
 
     `test_every_attribute_a_product_carries_is_documented` walks from the
-    source to the document, so it notices a *new* attribute with no
+    code to the document, so it notices a *new* attribute with no
     definition. It cannot notice the opposite: rename an attribute and its old
     name sits in the document forever, looking documented and describing
     nothing.
@@ -434,6 +434,104 @@ def test_no_documented_attr_exemption_is_stale() -> None:
     absent = sorted(a for a in DOCUMENTED_ONLY_ATTRS if a not in documented)
     assert revived == [], f"DOCUMENTED_ONLY_ATTRS excuses attributes now written: {revived}"
     assert absent == [], f"DOCUMENTED_ONLY_ATTRS names attributes the document lost: {absent}"
+
+
+# ---------------------------------------------------------------------------
+# Time-unit conversions are spelled once
+# ---------------------------------------------------------------------------
+
+#: Numbers that are a conversion between time units rather than a quantity.
+#:
+#: Each of these was written out in several modules at once, in two spellings
+#: (`1e9` beside `1_000_000_000.0`, `86400` beside `86_400.0`), which is how a
+#: unit conversion becomes four independent facts that can disagree. They now
+#: live in ``tsara.core.timebase``, the module whose whole subject is
+#: converting between time units, and this keeps them there.
+#:
+#: Python compares `1e9 == 1_000_000_000`, so both spellings match either entry.
+TIME_UNIT_LITERALS = (1e9, 3600.0, 86_400.0)
+
+#: The one module allowed to write them out, relative to ``src/tsara``.
+TIME_UNIT_HOME = "core/timebase.py"
+
+#: Modules that may spell a time unit out anyway, each with its reason.
+#: `test_no_time_unit_exemption_is_stale` gives every reason a shelf life.
+EXEMPT_LITERALS: dict[str, str] = {}
+
+
+def _time_unit_literals() -> dict[str, str]:
+    """Return every time-unit literal written outside its home module.
+
+    Read from the syntax tree rather than the text, so that the same number
+    inside a comment or a docstring — ``icartt.py`` explains ICARTT's
+    seconds-after-midnight convention and names 86400 while computing nothing —
+    is correctly invisible. Only an actual numeric constant is a second copy of
+    the fact.
+
+    Returns
+    -------
+    dict
+        ``"path:line"`` mapped to the source line, for each offending literal.
+    """
+    found: dict[str, str] = {}
+    for path in sorted(SRC.rglob("*.py")):
+        relative = str(path.relative_to(SRC))
+        if relative == TIME_UNIT_HOME:
+            continue
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        for node in ast.walk(ast.parse(text)):
+            if not isinstance(node, ast.Constant) or isinstance(node.value, bool):
+                continue
+            if not isinstance(node.value, int | float):
+                continue
+            if any(node.value == literal for literal in TIME_UNIT_LITERALS):
+                found[f"{relative}:{node.lineno}"] = lines[node.lineno - 1].strip()
+    return found
+
+
+def test_the_time_unit_detector_sees_the_home_module() -> None:
+    """Guard the scan itself: a check that finds nothing anywhere passes."""
+    home = (SRC / TIME_UNIT_HOME).read_text(encoding="utf-8")
+    hits = [
+        node.value
+        for node in ast.walk(ast.parse(home))
+        if isinstance(node, ast.Constant)
+        and not isinstance(node.value, bool)
+        and isinstance(node.value, int | float)
+        and any(node.value == literal for literal in TIME_UNIT_LITERALS)
+    ]
+    assert len(hits) >= len(TIME_UNIT_LITERALS), (
+        f"{TIME_UNIT_HOME} should define every time unit this test polices, found {hits}"
+    )
+
+
+def test_a_time_unit_is_written_out_only_where_it_is_defined() -> None:
+    """Nanoseconds per second, seconds per hour and seconds per day have one home.
+
+    Not tidiness: the census that prompted this found the same second written
+    as ``1e9`` in seven places and as ``1_000_000_000.0`` in an eighth, and the
+    day written twice. A conversion copied is a conversion that can be typed
+    wrongly in one copy, and nothing downstream would fail loudly — a factor of
+    a thousand in a cell width comes back as a plausible number.
+    """
+    offenders = {
+        where: line
+        for where, line in _time_unit_literals().items()
+        if where.split(":")[0] not in EXEMPT_LITERALS
+    }
+    assert offenders == {}, (
+        f"These modules write a time unit out instead of importing it from "
+        f"tsara.core.timebase: {offenders}. Import NS_PER_S, SECOND_NS, "
+        "SECONDS_PER_HOUR or SECONDS_PER_DAY, or record why not in EXEMPT_LITERALS."
+    )
+
+
+def test_no_time_unit_exemption_is_stale() -> None:
+    """An excuse for a module that no longer writes one out rots like any other."""
+    written = {where.split(":")[0] for where in _time_unit_literals()}
+    gone = sorted(module for module in EXEMPT_LITERALS if module not in written)
+    assert gone == [], f"EXEMPT_LITERALS excuses modules with no time-unit literal: {gone}"
 
 
 def test_no_attr_exemption_is_stale() -> None:

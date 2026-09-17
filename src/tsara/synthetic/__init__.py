@@ -14,44 +14,52 @@ before real files are readable.
 Submodules
 ----------
 config
-    Pydantic schemas describing the dataset to manufacture.
+    Pydantic schemas describing the dataset to manufacture: the atmosphere
+    (fields, backgrounds, sources) and the instruments measuring it.
 profiling
     Measuring real data's statistical shape, so synthetic parameters are
     grounded in reality rather than guessed.
 background
-    Rendering the plume-free signal, parametrically or by block-bootstrap
-    from a real-data profile.
+    Realizing one field's plume-free signal, parametrically or by
+    block-bootstrap from a real-data profile.
 plumes
     Plume shape kernels, Poisson event scheduling, and the ground-truth
     catalog.
+atmosphere
+    The realized air: every field's true value at any time, which every
+    instrument samples.
 noise
     Two-component error injection (random, optionally AR(1)-correlated;
     systematic, correlated by construction) and quantization.
 platform
     Fixed-site coordinates and synthetic mobile GPS tracks.
 generator
-    The orchestrator turning one config into streams plus ground truth.
+    The orchestrator: realize the atmosphere, then let each instrument
+    sample it.
 bundle
     Reading and writing the on-disk TSARA bundle directory.
 """
 
 from __future__ import annotations
 
+from tsara.synthetic.atmosphere import Atmosphere, realize_atmosphere
 from tsara.synthetic.background import TsaraSyntheticError
 from tsara.synthetic.bundle import TsaraBundleError, load_bundle, save_bundle
 from tsara.synthetic.config import (
+    AtmosphereSpec,
     BootstrapBackground,
     DropoutSpec,
     EMGShape,
+    FieldSpec,
     GaussianShape,
     InstrumentSpec,
     LognormalAmplitude,
+    MeasurementSpec,
     MobileTrack,
     NestedSpec,
     ParametricBackground,
     RatioSpec,
     SourceSpec,
-    SpeciesSpec,
     StationarySite,
     SyntheticConfig,
     TrueComponent,
@@ -68,21 +76,24 @@ from tsara.synthetic.profiling import (
 )
 
 __all__ = [
+    "Atmosphere",
+    "AtmosphereSpec",
     "BootstrapBackground",
     "DropoutSpec",
     "EMGShape",
+    "FieldSpec",
     "GaussianShape",
     "GroundTruth",
     "GroundTruthEvent",
     "InstrumentSpec",
     "LognormalAmplitude",
+    "MeasurementSpec",
     "MobileTrack",
     "NestedSpec",
     "ParametricBackground",
     "RatioSpec",
     "RealDataProfile",
     "SourceSpec",
-    "SpeciesSpec",
     "StationarySite",
     "SyntheticConfig",
     "SyntheticDataset",
@@ -96,5 +107,6 @@ __all__ = [
     "generate",
     "load_bundle",
     "profile_series",
+    "realize_atmosphere",
     "save_bundle",
 ]
