@@ -37,6 +37,7 @@ from tsara.config.analysis import OutputGridConfig
 from tsara.core.naming import sigma_rand_name
 from tsara.core.propagation import PROPAGATION_FORMS, PropagationForm
 from tsara.core.support import CellBounds
+from tsara.core.timebase import SECOND_NS as SECOND
 from tsara.synthetic import generate
 from tsara.synthetic.config import (
     AtmosphereSpec,
@@ -57,7 +58,6 @@ from tsara.synthetic.config import (
 from tsara.synthetic.generator import SyntheticDataset
 
 START = pd.Timestamp("2026-07-01T00:00:00Z").to_pydatetime()
-SECOND = 1_000_000_000
 #: Known ratio between the two species the acceptance campaign injects.
 TRUE_RATIO = 0.25
 

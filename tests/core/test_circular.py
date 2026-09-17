@@ -22,8 +22,7 @@ from tsara.core.circular import (
     wrap_degrees,
 )
 from tsara.core.support import CellBounds
-
-SECOND = 1_000_000_000
+from tsara.core.timebase import SECOND_NS as SECOND
 
 
 def cells(start_s: float, width_s: float, n: int) -> CellBounds:

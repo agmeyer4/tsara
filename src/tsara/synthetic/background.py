@@ -55,7 +55,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from tsara.core.exceptions import TsaraError
-from tsara.core.timebase import NS_PER_S
+from tsara.core.timebase import NS_PER_S, SECONDS_PER_DAY, SECONDS_PER_HOUR
 from tsara.synthetic.config import (
     BackgroundConfig,
     BootstrapBackground,
@@ -68,10 +68,6 @@ if TYPE_CHECKING:  # pragma: no cover
     from tsara.synthetic.profiling import RealDataProfile
 
 logger = logging.getLogger(__name__)
-
-#: Seconds in one day; the reference interval for drift and random-walk
-#: parameters, so those knobs mean the same thing at any sampling rate.
-SECONDS_PER_DAY = 86_400.0
 
 
 class TsaraSyntheticError(TsaraError):
@@ -274,7 +270,7 @@ def _realize_parametric(
         offset=float(config.offset),
         diurnal_amplitude=float(config.diurnal_amplitude),
         diurnal_period_s=float(pd.Timedelta(config.diurnal_period).total_seconds()),
-        diurnal_phase_s=config.diurnal_phase_hours * 3600.0,
+        diurnal_phase_s=config.diurnal_phase_hours * SECONDS_PER_HOUR,
         drift_per_day=float(config.drift_per_day),
         origin_s=start_ns / NS_PER_S,
         stochastic=stochastic,

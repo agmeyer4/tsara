@@ -34,12 +34,11 @@ from tsara.align import bin_streams_onto_cells
 from tsara.config.loader import load_manifest
 from tsara.core.naming import TIME_BOUNDS_VAR, sigma_rand_name, sigma_sys_name
 from tsara.core.support import CellBounds
+from tsara.core.timebase import SECOND_NS as SECOND
 from tsara.ingest import ingest_campaign
 from tsara.synthetic import generate
 from tsara.synthetic.config import SyntheticConfig
 from tsara.synthetic.export import export_raw
-
-SECOND = 1_000_000_000
 
 #: Per-point random 1-sigma declared in the manifest, in ppb.
 RANDOM_PPB = 2.0
@@ -146,7 +145,13 @@ def test_a_declared_budget_reaches_the_binner_through_a_file(tmp_path: Path) -> 
     joined = bin_streams_onto_cells({"analyzer": stream}, _uniform(_epoch(stream), CELL_S), ["ch4"])
     assert sigma_rand_name("ch4") in joined.data_vars
     assert joined[sigma_rand_name("ch4")].attrs["uncertainty_provenance"] == "declared"
+    # The form is recorded where it is true: on the sigma it produced. This
+    # manifest declares no decorrelation timescale, so the readings are
+    # independent by declaration and the default 'ar1_neff' never runs -- and
+    # the product must not carry a second, dataset-level attribute claiming it
+    # did. That disagreement was live until the notebook-04 walkthrough.
     assert joined[sigma_rand_name("ch4")].attrs["tsara_propagation_form"] == "independent"
+    assert "tsara_propagation_form" not in joined.attrs
 
 
 def test_the_random_component_falls_as_one_over_root_n(tmp_path: Path) -> None:

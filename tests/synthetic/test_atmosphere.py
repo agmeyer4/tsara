@@ -17,12 +17,11 @@ import pandas as pd
 import pytest
 
 from tsara.core.support import CellBounds
+from tsara.core.timebase import SECOND_NS as SECOND
 from tsara.synthetic import generate
 from tsara.synthetic.atmosphere import CellGrid, realize_atmosphere
 from tsara.synthetic.config import SyntheticConfig
 from tsara.synthetic.generator import TRUTH_PREFIX
-
-SECOND = 1_000_000_000
 
 
 def _wandering_spec(**instruments: Any) -> dict[str, Any]:

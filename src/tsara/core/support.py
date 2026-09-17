@@ -100,6 +100,7 @@ from tsara.core.naming import (
     SupportProvenance,
     is_sigma_name,
 )
+from tsara.core.timebase import NS_PER_S, epoch_ns
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt
@@ -878,7 +879,7 @@ def support_attrs(
         SUPPORT_METHOD_PROVENANCE_ATTR: method_provenance,
     }
     if width_ns is not None:
-        attrs[SUPPORT_WIDTH_ATTR] = float(width_ns) / 1e9
+        attrs[SUPPORT_WIDTH_ATTR] = float(width_ns) / NS_PER_S
     if n_widened:
         attrs[SUPPORT_WIDENED_ATTR] = float(n_widened)
     return attrs
@@ -904,8 +905,6 @@ def ensure_time_bounds(dataset: xr.Dataset) -> bool:
         True if cells were attached, False if the stream already had them.
         The caller decides whether that is worth logging; it is not an error.
     """
-    from tsara.core.timebase import epoch_ns
-
     if TIME_COORD not in dataset.variables:
         return False
     if declared_bounds_name(dataset) is not None:

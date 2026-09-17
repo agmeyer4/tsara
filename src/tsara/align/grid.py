@@ -75,6 +75,7 @@ import pandas as pd
 
 from tsara.align.binning import (
     TsaraAlignError,
+    VariableRef,
     _output_names,
     bin_streams_onto_cells,
     measure_replication,
@@ -84,7 +85,7 @@ from tsara.align.binning import (
 )
 from tsara.core.naming import n_readings_name
 from tsara.core.support import CellBounds
-from tsara.core.timebase import to_utc_naive_stamp
+from tsara.core.timebase import NS_PER_S, to_utc_naive_stamp
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Mapping, Sequence
@@ -109,7 +110,7 @@ GRID_READINGS_ATTR = "tsara_grid_readings"
 def grid_cells(
     streams: Mapping[str, xr.Dataset],
     config: OutputGridConfig,
-    variables: Sequence[str | tuple[str, str]] | None = None,
+    variables: Sequence[VariableRef] | None = None,
 ) -> CellBounds:
     """Build the uniform cells a campaign's output grid sits on.
 
@@ -241,21 +242,25 @@ def _warn_if_out_of_phase(cells: Mapping[str, CellBounds], start_ns: int, period
         # How far each cell starts past a grid boundary; zero everywhere means in phase.
         offsets = (bounds.start_ns - start_ns) % period_ns
         if np.any(offsets != 0):
+            # In seconds, not the raw nanoseconds the arithmetic runs in: a
+            # reader of the log is being asked to act on these two numbers by
+            # moving the grid start, and "60000000000 ns" is a period nobody
+            # recognises as one minute.
             logger.warning(
-                "Stream '%s' has cells exactly as wide as the %d ns grid period but "
-                "offset from it by %d ns, so every grid value will blend two of its "
+                "Stream '%s' has cells exactly as wide as the %.6g s grid period but "
+                "offset from it by %.6g s, so every grid value will blend two of its "
                 "cells (n_readings = 2) rather than reproduce one. Set the grid start "
                 "to one of its cell boundaries to avoid the smoothing.",
                 instrument,
-                period_ns,
-                int(offsets[0]),
+                period_ns / NS_PER_S,
+                int(offsets[0]) / NS_PER_S,
             )
 
 
 def build_output_grid(
     streams: Mapping[str, xr.Dataset],
     config: OutputGridConfig,
-    variables: Sequence[str | tuple[str, str]] | None = None,
+    variables: Sequence[VariableRef] | None = None,
     *,
     propagation_form: PropagationForm = "ar1_neff",
 ) -> xr.Dataset:
@@ -297,7 +302,7 @@ def build_output_grid(
     # Provenance: what was gridded, at what period, against which widest cell.
     instruments = sorted({instrument for instrument, _ in selection})
     cells = {name: stream_cells(streams[name], name) for name in instruments}
-    widest = max(float(bounds.width_ns.max()) for bounds in cells.values()) / 1e9
+    widest = max(float(bounds.width_ns.max()) for bounds in cells.values()) / NS_PER_S
     gridded.attrs["tsara_stage"] = "gridded"
     gridded.attrs[GRID_FREQ_ATTR] = str(config.freq)
     gridded.attrs[GRID_WIDEST_CELL_ATTR] = float(widest)

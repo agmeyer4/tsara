@@ -23,12 +23,11 @@ from tsara.align import TsaraAlignError
 from tsara.align.auxiliary import attach_positions, interpolate_onto_cells
 from tsara.config.loader import load_manifest
 from tsara.core.support import CellBounds
+from tsara.core.timebase import SECOND_NS as SECOND
 from tsara.ingest import ingest_campaign
 from tsara.synthetic import generate
 from tsara.synthetic.config import SyntheticConfig
 from tsara.synthetic.export import export_raw
-
-SECOND = 1_000_000_000
 
 
 def cells(start_s: float, width_s: float, n: int) -> CellBounds:

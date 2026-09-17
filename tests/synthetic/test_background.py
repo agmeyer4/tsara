@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from tsara.core.timebase import SECOND_NS, SECONDS_PER_DAY
 from tsara.synthetic.background import (
-    SECONDS_PER_DAY,
     RealizedBackground,
     TsaraSyntheticError,
     realize_background,
@@ -21,7 +21,6 @@ from tsara.synthetic.profiling import RealDataProfile
 #: The campaign every test realizes over: 2026-01-01, two days.
 START_NS = int(pd.Timestamp("2026-01-01").value)
 DAY_NS = 86_400 * 1_000_000_000
-SECOND_NS = 1_000_000_000
 
 
 def _realize(

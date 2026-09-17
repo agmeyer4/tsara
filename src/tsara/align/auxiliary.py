@@ -72,14 +72,21 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from tsara.align.binning import TsaraAlignError, resolve_variable, stream_cells
+from tsara.align.binning import (
+    TsaraAlignError,
+    VariableRef,
+    resolve_variable,
+    stream_cells,
+)
 from tsara.core.circular import wrap_degrees
 from tsara.core.naming import (
     ALTITUDE_COORD,
     LATITUDE_COORD,
     LONGITUDE_COORD,
     TIME_COORD,
+    is_circular,
 )
+from tsara.core.timebase import NS_PER_S
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Mapping
@@ -159,7 +166,7 @@ def _as_seconds(duration: str | pd.Timedelta) -> float:
             f"max_interp_gap must be positive, got {duration}. Use a positive "
             "duration, or bin the field instead of interpolating it."
         )
-    return float(delta.value) / 1e9
+    return float(delta.value) / NS_PER_S
 
 
 def _check_role(stream: xr.Dataset, variable: str, instrument: str) -> None:
@@ -210,8 +217,8 @@ def _interpolate(
     # directly would quantise every timestamp onto a coarse grid. Subtracting
     # a reference first keeps the arithmetic exact.
     reference = int(sample_ns[0])
-    sample_s = (sample_ns - reference).astype(np.float64) / 1e9
-    target_s = (target_ns - reference).astype(np.float64) / 1e9
+    sample_s = (sample_ns - reference).astype(np.float64) / NS_PER_S
+    target_s = (target_ns - reference).astype(np.float64) / NS_PER_S
 
     if circular:
         # A direction is interpolated as a unit vector, so 350 -> 10 passes through
@@ -238,7 +245,7 @@ def _interpolate(
     right_clipped = np.clip(right, 0, sample_ns.size - 1)
     gap_ns = (sample_ns[right_clipped] - sample_ns[left]).astype(np.float64)
     # ... refused when strictly longer than the guard (a gap equal to it is bridged).
-    too_far = (gap_ns / 1e9 > max_gap_s) & ~exact & ~outside
+    too_far = (gap_ns / NS_PER_S > max_gap_s) & ~exact & ~outside
 
     result = np.asarray(interpolated, dtype=np.float64)
     result[outside | too_far] = np.nan
@@ -260,12 +267,12 @@ def _median_spacing_s(sample_ns: np.ndarray, values: np.ndarray) -> float:
     present = np.sort(sample_ns[np.isfinite(values)])
     if present.size < 2:
         return float("inf")
-    return float(np.median(np.diff(present))) / 1e9
+    return float(np.median(np.diff(present))) / NS_PER_S
 
 
 def interpolate_onto_cells(
     streams: Mapping[str, xr.Dataset],
-    variable: str | tuple[str, str],
+    variable: VariableRef,
     target: CellBounds,
     *,
     max_interp_gap: str | pd.Timedelta = "10s",
@@ -301,7 +308,7 @@ def interpolate_onto_cells(
     _check_role(stream, name, instrument)
     max_gap_s = _as_seconds(max_interp_gap)
     samples = stream_cells(stream, instrument)
-    circular = str(stream[name].attrs.get("circular", 0)) not in ("0", "False", "None", "")
+    circular = is_circular(stream[name].attrs)
     values = np.asarray(stream[name].values, dtype=np.float64)
     # Guard 2, how far, applied inside: each sample stands at its cell
     # midpoint, and the field is wanted at each target cell's midpoint.

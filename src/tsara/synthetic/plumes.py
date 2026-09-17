@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
+from tsara.core.timebase import SECONDS_PER_HOUR
 from tsara.core.timebase import to_utc_naive_stamp as _to_utc_naive_stamp
 from tsara.synthetic.config import (
     AmplitudeSpec,
@@ -471,7 +472,7 @@ def schedule_events(config: SyntheticConfig, rng: np.random.Generator) -> list[R
     # TypeError on any comparison between an aware and a naive timestamp.
     start = _to_utc_naive_stamp(pd.Timestamp(config.start))
     span = pd.Timedelta(config.duration)
-    span_hours = span.total_seconds() / 3600.0
+    span_hours = span.total_seconds() / SECONDS_PER_HOUR
     span_s = span.total_seconds()
 
     events: list[RealizedEvent] = []

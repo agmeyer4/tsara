@@ -16,6 +16,7 @@ import pytest
 
 from tsara.config.manifest import CSVLoader, ICARTTLoader, ParquetLoader, SupportSpec, TimeParsing
 from tsara.core.naming import RAW_TIME_START_COLUMN, RAW_TIME_STOP_COLUMN
+from tsara.core.timebase import SECOND_NS as SECOND
 from tsara.ingest.base import TsaraIngestError
 from tsara.ingest.csv_reader import read_csv
 from tsara.ingest.icartt import read_icartt
@@ -27,8 +28,6 @@ from tsara.ingest.support import (
     resolve_support,
     shift_and_centre,
 )
-
-SECOND = 1_000_000_000
 
 
 def _frame(n: int = 5, step: str = "60s") -> pd.DataFrame:

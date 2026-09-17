@@ -21,8 +21,7 @@ from tsara.align import TsaraAlignError, build_output_grid, grid_cells, load_gri
 from tsara.config.analysis import OutputGridConfig
 from tsara.core.bundle import BUNDLE_GRID_FILE, TsaraBundleError
 from tsara.core.support import CellBounds
-
-SECOND = 1_000_000_000
+from tsara.core.timebase import SECOND_NS as SECOND
 
 
 def cells(start_s: float, width_s: float, n: int) -> CellBounds:

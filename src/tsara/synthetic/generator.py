@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from tsara import __version__
+from tsara.core.circular import wrap_degrees
 from tsara.core.geodesy import positions_at
 from tsara.core.naming import (
     ALTITUDE_COORD,
@@ -72,7 +73,7 @@ from tsara.core.naming import (
     sigma_sys_name,
 )
 from tsara.core.support import CellBounds, attach_time_bounds, support_attrs
-from tsara.core.timebase import NS_PER_S
+from tsara.core.timebase import NS_PER_S, SECONDS_PER_DAY
 from tsara.core.timebase import epoch_ns as _epoch_ns
 from tsara.core.timebase import epoch_s as _epoch_s
 from tsara.core.timebase import timestamp_epoch_s as _stamp_s
@@ -438,7 +439,7 @@ def _apply_dropouts(
 
     assert isinstance(dropouts, DropoutSpec)  # narrowed by the caller
 
-    span_days = (times[-1] - times[0]).total_seconds() / 86_400.0
+    span_days = (times[-1] - times[0]).total_seconds() / SECONDS_PER_DAY
     n_outages = int(rng.poisson(dropouts.rate_per_day * span_days))
     if n_outages == 0:
         return times
@@ -579,7 +580,12 @@ def _render_instrument(
             # Wrap after everything else: noise on a value near 0 or 360 must
             # be able to cross the discontinuity, which is precisely the case
             # circular statistics exist to handle (METHODS.md §1.5).
-            observable = np.mod(observable, 360.0)
+            #
+            # Through `wrap_degrees` rather than `np.mod`, which does not close
+            # the interval it appears to: a tiny negative value modulo 360 rounds
+            # up to exactly 360.0 in float64, so a reading a hair west of north
+            # would leave [0, 360) (METHODS.md §11.5).
+            observable = wrap_degrees(observable)
 
         attrs: dict[str, object] = {
             "units": field.units,

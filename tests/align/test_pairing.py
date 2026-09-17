@@ -26,8 +26,7 @@ import xarray as xr
 from tsara.align import PairedSpecies, TsaraAlignError, pair_species
 from tsara.core.naming import sigma_rand_name, sigma_sys_name
 from tsara.core.propagation import propagate_random, propagate_systematic
-
-SECOND = 1_000_000_000
+from tsara.core.timebase import SECOND_NS as SECOND
 
 
 def make_stream(
@@ -694,7 +693,9 @@ def test_the_product_records_how_it_was_made(two_rates: dict[str, xr.Dataset]) -
     attrs = paired.dataset.attrs
     assert attrs["tsara_stage"] == "paired"
     assert attrs["tsara_pairing_clock"] == "slow"
-    assert attrs["tsara_propagation_form"] == "ar1_neff"
+    # Inherited from the binner: the form is recorded per propagated sigma, and
+    # nowhere on the product itself (METHODS §11.2).
+    assert "tsara_propagation_form" not in attrs
     assert paired.dataset["ch4"].attrs["tsara_instrument"] == "fast"
     assert paired.dataset["co2"].attrs["tsara_binned"] == 0
 

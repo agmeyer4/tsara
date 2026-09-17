@@ -2828,7 +2828,6 @@ product is the output grid (§11.7). Its attributes:
 | `tsara_pairing_min_coverage` | the guard applied (`PairingConfig.min_coverage`) |
 | `tsara_pairing_cells_considered` | candidate cells before dropping |
 | `tsara_pairing_cells_dropped` | how many produced no usable pair |
-| `tsara_propagation_form` | registered form used for correlated random error (§3.4) |
 
 and per variable:
 
@@ -2838,6 +2837,19 @@ and per variable:
 | `tsara_binned` | 1 if averaged onto the clock, 0 if already on it |
 | `tsara_sigma_at_support` | how a declared σ was moved onto its own cells, or `unscaled` |
 | `tsara_pairing_readings` | distinct readings of this species behind the surviving pairs (§11.4.1) |
+
+and on each propagated σ companion, `tsara_propagation_form`: the registered
+form that produced *that* number, or `independent` when no decorrelation
+timescale was declared, or `native` for a species already on the clock (§3.4).
+
+**There is no product-level propagation form**, and its removal is worth
+recording because the attribute looked harmless. The joined product used to
+carry `tsara_propagation_form` with the form the caller *requested*, while each
+σ carried the form actually used. Those differ on every product whose variables
+declare no τ — which today is every product built from the real archive, since
+no file in it declares one (§3.4) — so a dataset would say `ar1_neff` above
+columns that each said `independent`. One fact, one spelling: the form belongs
+to the σ it produced.
 
 **How it is checked** (§11.1): a two-cell fixture whose paired values (1.5 and
 5.5) can be worked out on paper; an independent O(N·M) reimplementation

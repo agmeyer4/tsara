@@ -41,8 +41,7 @@ from tsara.core.support import (
     overlap_pairs,
     support_attrs,
 )
-
-SECOND = 1_000_000_000
+from tsara.core.timebase import SECOND_NS as SECOND
 
 
 def _times(start: int, step: int, n: int) -> np.ndarray:

@@ -102,6 +102,7 @@ import pandas as pd
 from tsara.align.binning import (
     BINNED_ATTR,
     TsaraAlignError,
+    VariableRef,
     bin_streams_onto_cells,
     median_width_s,
     readings_behind,
@@ -287,8 +288,8 @@ def _readings_behind(
 
 def pair_species(
     streams: Mapping[str, xr.Dataset],
-    y: str | tuple[str, str],
-    x: str | tuple[str, str],
+    y: VariableRef,
+    x: VariableRef,
     *,
     interval: tuple[pd.Timestamp, pd.Timestamp] | None = None,
     min_coverage: float = 0.0,

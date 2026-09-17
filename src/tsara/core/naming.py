@@ -23,7 +23,10 @@ that true by construction instead of by coincidence.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Mapping
 
 __all__ = [
     "ALTITUDE_COORD",
@@ -55,6 +58,7 @@ __all__ = [
     "TIME_COORD",
     "TIME_SHIFT_ATTR",
     "coverage_name",
+    "is_circular",
     "is_companion_name",
     "is_sigma_name",
     "n_readings_name",
@@ -92,7 +96,7 @@ CELL_METHODS_ATTR = "cell_methods"
 #: second is weight. :mod:`tsara.core.support` imports NumPy, and the config
 #: layer imports neither NumPy nor pandas today; measured, importing it from
 #: the schema would add roughly 120 ms to every config load and every CLI
-#: ``--help``. This module imports nothing at all.
+#: ``--help``. This module imports nothing at runtime beyond :mod:`typing`.
 
 #: Where the timestamp sits inside its cell.
 #:
@@ -192,6 +196,35 @@ ALTITUDE_COORD = "altitude"
 #: behave differently under averaging (``docs/METHODS.md`` §2.1).
 SIGMA_RAND_PREFIX = "sigma_rand_"
 SIGMA_SYS_PREFIX = "sigma_sys_"
+
+
+def is_circular(attrs: Mapping[str, object]) -> bool:
+    """Return whether a variable's attributes declare it angular.
+
+    Asked by spelling rather than by truthiness, because the flag arrives as
+    more than one type. Both producers write a Python ``int`` (the generator
+    from ``field.circular``, ingestion from ``variable.circular``); measured, a
+    netCDF round trip returns it as ``numpy.int64``; and a dataset built by
+    hand or by another tool may carry either of the string spellings. The trap
+    is the last of those: ``bool("0")`` is ``True``, so the obvious test would
+    read a non-angular variable as a direction and vector-average it.
+
+    One function rather than the same expression in each caller: the binner
+    and the auxiliary interpolator both have to make this decision, and two
+    copies of a predicate this easy to get backwards is the coupling this
+    module exists to remove.
+
+    Parameters
+    ----------
+    attrs : mapping
+        A variable's attributes, e.g. ``stream['wind_dir'].attrs``.
+
+    Returns
+    -------
+    bool
+        True when the variable declares itself circular.
+    """
+    return str(attrs.get("circular", 0)) not in ("0", "False", "None", "")
 
 
 def is_sigma_name(name: str) -> bool:

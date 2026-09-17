@@ -17,6 +17,7 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
+from tsara.core.circular import wrap_degrees
 from tsara.core.naming import (
     BOUNDS_ATTR,
     BOUNDS_DIM,
@@ -359,6 +360,26 @@ def test_circular_variable_wraps_into_zero_to_360() -> None:
     assert values.max() < 360.0
     # The walk is large enough that wrapping actually occurred.
     assert values.max() - values.min() > 180.0
+
+
+def test_the_wrap_closes_the_interval_it_documents() -> None:
+    """A direction a hair west of north must land on 0, not on a full turn.
+
+    The generator wraps through `core.circular.wrap_degrees` rather than
+    `np.mod`, which does not close the half-open interval it appears to:
+    a tiny negative value modulo 360 rounds *up* to exactly 360.0 in float64.
+    A reading that left [0, 360) would be a direction no consumer expects,
+    reported with complete confidence.
+
+    Pinned at the helper rather than through a generated campaign, and
+    deliberately so: the window where the two spellings disagree is about
+    3e-14 degrees wide, so reaching it from a background plus noise is a
+    coincidence no seed can be relied on to produce. What the campaign above
+    checks is the invariant; what this checks is that the invariant needs the
+    helper to hold.
+    """
+    assert np.mod(-1e-17, 360.0) == 360.0
+    assert float(wrap_degrees(-1e-17)) == 0.0
 
 
 def test_met_species_receive_no_plumes(noise_free_config: SyntheticConfig) -> None:

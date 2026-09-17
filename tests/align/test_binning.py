@@ -19,8 +19,7 @@ from tsara.align import TsaraAlignError, bin_streams_onto_cells, resolve_variabl
 from tsara.align.binning import readings_behind, stream_cells
 from tsara.core.naming import sigma_rand_name
 from tsara.core.support import CellBounds
-
-SECOND = 1_000_000_000
+from tsara.core.timebase import SECOND_NS as SECOND
 
 
 def cells(start_s: float, width_s: float, n: int) -> CellBounds:
@@ -404,7 +403,11 @@ def test_the_joined_product_carries_cells_and_its_own_provenance() -> None:
     streams = {"a": make_stream(0.0, 1.0, 8, {"ch4": np.arange(8.0)})}
     joined = bin_streams_onto_cells(streams, cells(0.0, 4.0, 2))
     assert joined.attrs["tsara_stage"] == "binned"
-    assert joined.attrs["tsara_propagation_form"] == "ar1_neff"
+    # A propagation form belongs to a propagated sigma, not to the product: the
+    # dataset attr recorded the form *requested* while each column records the
+    # form used, and the two read differently on every product whose variables
+    # declare no decorrelation timescale (METHODS §11.2).
+    assert "tsara_propagation_form" not in joined.attrs
     assert "time_bnds" in joined.coords
     assert joined["time"].attrs["bounds"] == "time_bnds"
     assert joined["ch4"].attrs["tsara_instrument"] == "a"

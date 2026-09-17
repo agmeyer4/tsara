@@ -48,7 +48,7 @@ contributing data stays ``nan``: gases are binned, never interpolated (§1.2).
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias
 
 import numpy as np
 import pandas as pd
@@ -65,6 +65,7 @@ from tsara.core.naming import (
     TIME_BOUNDS_VAR,
     TIME_COORD,
     coverage_name,
+    is_circular,
     is_companion_name,
     n_readings_name,
     sigma_rand_name,
@@ -77,6 +78,7 @@ from tsara.core.propagation import (
     sigma_at_support,
 )
 from tsara.core.support import CellBounds, attach_time_bounds, overlap_pairs
+from tsara.core.timebase import NS_PER_S
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Iterable, Mapping, Sequence
@@ -93,7 +95,13 @@ __all__ = [
 
 #: How a caller names a variable: by its canonical name, or by the instrument
 #: that measured it when more than one did.
-VariableRef = "str | tuple[str, str]"
+#:
+#: A real type alias, not a string that looks like one. It was written as
+#: ``"str | tuple[str, str]"`` — an ordinary ``str`` object — and exported, so
+#: it described the convention in prose while checking nothing and appearing in
+#: no signature. Every function here and in the modules layered on top now
+#: annotates with it, which is what makes the name worth having.
+VariableRef: TypeAlias = str | tuple[str, str]
 
 #: Attrs the joined product carries, documented in ``docs/METHODS.md`` §11.2.
 INSTRUMENT_ATTR = "tsara_instrument"
@@ -101,9 +109,14 @@ BINNED_ATTR = "tsara_binned"
 PROPAGATION_FORM_ATTR = "tsara_propagation_form"
 SIGMA_AT_SUPPORT_ATTR = "tsara_sigma_at_support"
 
-#: Nanoseconds per second, for turning cell widths into the units the
-#: propagation module speaks.
-NS_PER_S = 1_000_000_000.0
+#: Sentinel standing where a variable's own ``cell_methods`` would be, saying
+#: that this call averaged it rather than passing it through.
+#:
+#: ``None`` cannot do the job: a stream that declares no cell method at all is
+#: a real case, and must stay distinguishable from one this stage averaged.
+#: Named rather than repeated as a literal in four places, where a typo in one
+#: of them would silently restore a cell method to a variable that was binned.
+_BINNED_HERE = "__binned__"
 
 
 class TsaraAlignError(TsaraError):
@@ -116,9 +129,7 @@ class TsaraAlignError(TsaraError):
     """
 
 
-def resolve_variable(
-    streams: Mapping[str, xr.Dataset], reference: str | tuple[str, str]
-) -> tuple[str, str]:
+def resolve_variable(streams: Mapping[str, xr.Dataset], reference: VariableRef) -> tuple[str, str]:
     """Return ``(instrument, variable)`` for a caller's reference.
 
     A bare name is searched across the streams. Two instruments measuring the
@@ -231,7 +242,7 @@ def cadence_s(cells: CellBounds) -> float:
 
 def select_variables(
     streams: Mapping[str, xr.Dataset],
-    variables: Sequence[str | tuple[str, str]] | None = None,
+    variables: Sequence[VariableRef] | None = None,
 ) -> list[tuple[str, str]]:
     """Resolve which variables a call acts on, as ``(instrument, name)`` pairs.
 
@@ -534,7 +545,7 @@ def _same_cells(readings: CellBounds, target: CellBounds) -> bool:
 def bin_streams_onto_cells(
     streams: Mapping[str, xr.Dataset],
     target: CellBounds,
-    variables: Sequence[str | tuple[str, str]] | None = None,
+    variables: Sequence[VariableRef] | None = None,
     *,
     propagation_form: PropagationForm = "ar1_neff",
 ) -> xr.Dataset:
@@ -620,7 +631,6 @@ def bin_streams_onto_cells(
         attrs={
             "tsara_version": __version__,
             "tsara_stage": "binned",
-            PROPAGATION_FORM_ATTR: propagation_form,
         },
     )
     # 6. Describe the cells (CF `time_bnds`), then correct the blanket
@@ -655,8 +665,8 @@ def _correct_cell_methods(
       no cell method — the same reason the sigma companions get none (§10.2).
     """
     for column in columns:
-        declared = native.get(column, "__binned__")
-        if declared != "__binned__":
+        declared = native.get(column, _BINNED_HERE)
+        if declared != _BINNED_HERE:
             # Passed through: restore what the stream itself declared, or nothing.
             if declared is None:
                 dataset[column].attrs.pop(CELL_METHODS_ATTR, None)
@@ -707,9 +717,10 @@ def _one_variable(
     # Everything the input stream declared travels with the column, plus where it came from.
     attrs: dict[str, object] = dict(stream[variable].attrs)
     attrs[INSTRUMENT_ATTR] = instrument
-    # `circular` may arrive as a bool, an int or a string (after a netCDF round
-    # trip), so it is read by its spelling rather than by truthiness.
-    circular = str(attrs.get("circular", 0)) not in ("0", "False", "None", "")
+    # A bool, an int, or a string after a netCDF round trip; the one predicate
+    # that reads all three lives in `core.naming` and is shared with the
+    # auxiliary interpolator, which has to make the same decision.
+    circular = is_circular(attrs)
     # Already on the target cells? Then pass through rather than average onto itself.
     already_here = _same_cells(readings, target)
     attrs[BINNED_ATTR] = int(not already_here)
@@ -760,10 +771,10 @@ def _one_variable(
 
     # Not on the target cells: average it, as a direction or as a number.
     if circular:
-        return _bin_circular(stream, variable, column, readings, target, attrs), "__binned__"
+        return _bin_circular(stream, variable, column, readings, target, attrs), _BINNED_HERE
     return _bin_scalar(
         stream, variable, column, readings, target, values, attrs, propagation_form
-    ), "__binned__"
+    ), _BINNED_HERE
 
 
 def _bin_circular(
