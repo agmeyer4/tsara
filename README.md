@@ -16,7 +16,7 @@ section there before it has a caller.
 
 ## Status
 
-**Alpha — phases 1–4 of the roadmap are complete.** The package is
+**Alpha — phases 1–4.5 of the roadmap are complete.** The package is
 built one phase per review cycle, and only what is listed as done below exists.
 
 | Phase | | |
@@ -26,6 +26,7 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 3 | Ingestion (reader registry, CSV / ICARTT / Parquet, crawler, QA/QC, units, uncertainty) | ✅ done |
 | 3.5 | Temporal support: every value carries the interval of air it describes | ✅ done |
 | 4 | Alignment & pairing (one joining operation, error propagation, circular stats, output grid) | ✅ done |
+| 4.5 | One atmosphere, realized once and sampled by every instrument; a variable's `field` | ✅ done |
 | 5 | Baselines + continuous rolling state | planned |
 | 6 | Plume detection + nested-event bookkeeping | planned |
 | 7 | Regression (OLS / York / ODR), combined UQ, stability cube | planned |
@@ -36,7 +37,9 @@ built one phase per review cycle, and only what is listed as done below exists.
 So today TSARA can **manufacture a campaign with a known answer key, read a
 real one into analysis-ready streams whose values each carry the time interval
 they describe, and put any set of those variables onto a common support with
-their uncertainty propagated through the same weights**. It cannot yet compute
+their uncertainty propagated through the same weights**. A manufactured campaign
+holds one atmosphere that every instrument samples, so any disagreement between
+two records of one gas is the instruments' own noise, rounding and support. It cannot yet compute
 baselines, ratios, or the stability cube; there is no CLI yet (phase 9).
 
 ## Install
