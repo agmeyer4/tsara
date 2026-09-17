@@ -109,6 +109,18 @@ BINNED_ATTR = "tsara_binned"
 PROPAGATION_FORM_ATTR = "tsara_propagation_form"
 SIGMA_AT_SUPPORT_ATTR = "tsara_sigma_at_support"
 
+#: What ``tsara_stage`` says on a dataset this package built by *joining*
+#: measurements, as opposed to one it read from an archive (``ingest``) or
+#: manufactured (``synthetic``).
+#:
+#: The list is deliberately of the three join stages rather than an allow-list
+#: of the two source stages. A later phase may well produce a native-rate
+#: product of its own — Phase 5's baselines are computed cell by cell over each
+#: stream's own cells, so every baseline value still stands for one reading —
+#: and binning that is honest. What is refused is joining something whose rows
+#: are already the *output* of a join (§11.2.3).
+JOINED_STAGES = frozenset({"binned", "paired", "gridded"})
+
 #: Sentinel standing where a variable's own ``cell_methods`` would be, saying
 #: that this call averaged it rather than passing it through.
 #:
@@ -265,16 +277,24 @@ def select_variables(
     list of tuple of (str, str)
         Instrument and variable name for each selection.
 
+    Raises
+    ------
+    TsaraAlignError
+        If a reference names nothing or names it ambiguously, or if a selected
+        dataset is a product of an earlier join (:func:`_refuse_a_joined_product`).
+
     Notes
     -----
     Companion columns are excluded from the default because they are not
     variables in their own right: each travels automatically with the value it
     describes, and selecting one directly would produce a column with no parent
-    and no meaning (:func:`~tsara.core.naming.is_companion_name`). That covers
-    the uncertainty components a stream arrives with *and* the counts, coverage
-    fractions and angular quality numbers this module itself adds, so a joined
-    product can be joined again — which is what Phase 5 does with a baseline —
-    without growing a ``coverage_coverage_ch4`` on every pass.
+    and no meaning (:func:`~tsara.core.naming.is_companion_name`). The
+    everyday case is the uncertainty components, which arrive on every stream
+    that declares a budget and must not be averaged as though they were data;
+    the counts, coverage fractions and angular quality numbers this module adds
+    are covered by the same predicate, so nothing that is handed a dataset of
+    TSARA's own making can bin a ``coverage_ch4`` into a
+    ``coverage_coverage_ch4``.
 
     The cell boundaries are excluded too. They are metadata describing the
     rows rather than a variable over them, and they are *usually* a coordinate
@@ -284,15 +304,60 @@ def select_variables(
     """
     if variables is not None:
         # An explicit selection: resolve each reference, refusing ambiguity.
-        return [resolve_variable(streams, reference) for reference in variables]
-    # The default: every value column in every stream, in stream order, skipping
-    # the companions (sigmas, counts, coverage, angular quality) and the bounds.
-    return [
-        (instrument, str(name))
-        for instrument, stream in streams.items()
-        for name in stream.data_vars
-        if not is_companion_name(str(name)) and str(name) != TIME_BOUNDS_VAR
-    ]
+        selection = [resolve_variable(streams, reference) for reference in variables]
+    else:
+        # The default: every value column in every stream, in stream order, skipping
+        # the companions (sigmas, counts, coverage, angular quality) and the bounds.
+        selection = [
+            (instrument, str(name))
+            for instrument, stream in streams.items()
+            for name in stream.data_vars
+            if not is_companion_name(str(name)) and str(name) != TIME_BOUNDS_VAR
+        ]
+    # Both routes end here, and so does every caller: the binner joins what this
+    # returns, and the grid checks its period against it (§11.2.3).
+    for instrument in dict.fromkeys(name for name, _ in selection):
+        _refuse_a_joined_product(streams[instrument], instrument)
+    return selection
+
+
+def _refuse_a_joined_product(stream: xr.Dataset, instrument: str) -> None:
+    """Raise if a dataset is itself the product of an earlier join.
+
+    A join reads three things from each input row: the value, the interval the
+    row describes, and how much of that interval holds data. On a *stream* all
+    three are properties of a measurement. On a product they are properties of
+    a **row**, and the second pass cannot tell the difference — it takes each
+    row as a measurement covering its whole cell, so a minute row holding one
+    15 s canister fill is weighted, counted and reported as a fully measured
+    minute.
+
+    Measured on a one-hour campaign of a 1 Hz analyzer with outages beside a
+    canister (§11.2.3): five-minute rows built from the campaign's 60 s rows
+    are up to 2.9 ppb from the same rows built from the streams, and report a
+    coverage of 1.000 for a row where the streams say 0.933. A *nested*
+    re-join can be made exact by weighting each input row by its own coverage
+    (1.6e-12 ppb in the same test); a non-nested one cannot be repaired at all,
+    since cutting a row assigns its mean to both sides and the air in the two
+    halves differs — 5.8 ppb apart, weighted or not. That is narrowing, and the
+    information is gone from the input rather than mishandled by the join.
+
+    So this is a refusal rather than a warning, on the precedent of the
+    antimeridian: refuse the case, do not model it. Nothing needs the
+    capability — every product can be rebuilt from the native streams, exactly,
+    and a sweep over grid period does precisely that.
+    """
+    stage = str(stream.attrs.get("tsara_stage", ""))
+    if stage not in JOINED_STAGES:
+        return
+    raise TsaraAlignError(
+        f"'{instrument}' is a product this package built (tsara_stage is '{stage}'), "
+        "and a product may not be joined again. Its rows are not readings: their "
+        "coverage, counts and overlap weights describe the rows of the first join "
+        "rather than the air, so a second pass would report a fully covered row over "
+        "an interval that was barely measured (METHODS §11.2.3). Build what you want "
+        "directly from the native streams, which is always possible and exact."
+    )
 
 
 def _output_names(selection: Sequence[tuple[str, str]]) -> dict[tuple[str, str], str]:

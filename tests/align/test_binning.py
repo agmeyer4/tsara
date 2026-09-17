@@ -16,7 +16,7 @@ import pytest
 import xarray as xr
 
 from tsara.align import TsaraAlignError, bin_streams_onto_cells, resolve_variable
-from tsara.align.binning import readings_behind, stream_cells
+from tsara.align.binning import readings_behind, select_variables, stream_cells
 from tsara.core.naming import sigma_rand_name
 from tsara.core.support import CellBounds
 from tsara.core.timebase import SECOND_NS as SECOND
@@ -576,30 +576,75 @@ def test_a_zero_width_target_cell_does_not_count_as_replication() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_joined_product_can_be_joined_again() -> None:
-    """Phase 5 will bin a baseline it computed from an already-binned product.
+def test_a_joined_product_is_refused_rather_than_joined_again() -> None:
+    """A product's rows are not readings, and the second pass cannot tell.
 
-    The default selection must therefore leave this stage's own bookkeeping
-    alone, or a second pass grows `coverage_coverage_ch4` and a third grows
-    another layer.
+    It would take each row as a measurement covering its whole cell, so
+    coverage, counts and weights would describe rows rather than air. Refused
+    on the antimeridian precedent: the information is gone from the input, so
+    nothing downstream could repair it (METHODS §11.2.3).
     """
     streams = {"a": make_stream(0.0, 1.0, 120, {"ch4": np.arange(120.0)})}
     once = bin_streams_onto_cells(streams, cells(0.0, 10.0, 12))
-    twice = bin_streams_onto_cells({"binned": once}, cells(0.0, 60.0, 2))
-    assert "ch4" in twice.data_vars
-    assert not [name for name in twice.data_vars if str(name).startswith("coverage_coverage")]
-    assert not [name for name in twice.data_vars if str(name).startswith("n_readings_n_readings")]
+    assert once.attrs["tsara_stage"] == "binned"
+    with pytest.raises(TsaraAlignError) as refused:
+        bin_streams_onto_cells({"binned": once}, cells(0.0, 60.0, 2))
+    # The message has to name which dataset and what it is, or a user holding a
+    # dict of ten streams cannot tell which one to replace.
+    assert "binned" in str(refused.value)
+    assert "tsara_stage" in str(refused.value)
+    assert "native streams" in str(refused.value)
 
 
-def test_angular_quality_columns_are_not_rebinned_either() -> None:
-    """A resultant length and a dispersion describe a cell, not the air in it."""
+def test_the_same_product_built_from_the_streams_is_what_the_refusal_asks_for() -> None:
+    """The escape route must exist, or the refusal is just a wall."""
+    streams = {"a": make_stream(0.0, 1.0, 120, {"ch4": np.arange(120.0)})}
+    direct = bin_streams_onto_cells(streams, cells(0.0, 60.0, 2))
+    assert np.isfinite(direct["ch4"].values).all()
+    assert direct["n_readings_ch4"].values.tolist() == [60, 60]
+
+
+def test_joining_leaves_the_input_stream_joinable() -> None:
+    """The stage travels with the *product*, never back onto its inputs.
+
+    Worth pinning because the check reads an attribute of the input: if a join
+    ever stamped its stage on what it consumed, a campaign would become
+    unusable after the first pairing, and every later call would fail with a
+    refusal about data the user never joined.
+    """
+    stream = make_stream(0.0, 1.0, 120, {"ch4": np.arange(120.0)})
+    stream.attrs["tsara_stage"] = "ingest"
+    bin_streams_onto_cells({"a": stream}, cells(0.0, 10.0, 12))
+    assert stream.attrs["tsara_stage"] == "ingest"
+    again = bin_streams_onto_cells({"a": stream}, cells(0.0, 20.0, 6))
+    assert again.sizes["time"] == 6
+
+
+@pytest.mark.parametrize("stage", ["ingest", "synthetic"])
+def test_a_stream_from_either_producer_is_joinable(stage: str) -> None:
+    """Both stream producers, and a bundle reloaded from either, carry these."""
+    stream = make_stream(0.0, 1.0, 60, {"ch4": np.arange(60.0)})
+    stream.attrs["tsara_stage"] = stage
+    joined = bin_streams_onto_cells({"a": stream}, cells(0.0, 10.0, 6))
+    assert joined.sizes["time"] == 6
+
+
+def test_angular_quality_columns_are_not_selected_as_variables() -> None:
+    """A resultant length and a dispersion describe a cell, not the air in it.
+
+    Checked through the selection rather than through a second join, which is
+    now refused: the rule is about which columns count as variables, and
+    `select_variables` is public and answers that for the grid as well.
+    """
     attrs: dict[str, dict[str, object]] = {"wind_dir": {"units": "degrees", "circular": 1}}
     met = make_stream(0.0, 1.0, 60, {"wind_dir": np.linspace(0.0, 50.0, 60)}, attrs=attrs)
     once = bin_streams_onto_cells({"met": met}, cells(0.0, 10.0, 6))
     assert "wind_dir_resultant_length" in once.data_vars
-    twice = bin_streams_onto_cells({"binned": once}, cells(0.0, 30.0, 2))
-    assert "wind_dir_resultant_length_resultant_length" not in twice.data_vars
-    assert "wind_dir_dispersion_dispersion" not in twice.data_vars
+    # The product's stage is what refuses a re-join; strip it and the selection
+    # rule alone is what is being measured here.
+    stripped = once.copy()
+    del stripped.attrs["tsara_stage"]
+    assert select_variables({"binned": stripped}) == [("binned", "wind_dir")]
 
 
 def test_cell_boundaries_carried_as_a_data_variable_are_not_selected() -> None:

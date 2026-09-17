@@ -25,7 +25,7 @@ attributes and this document, because each was once used for several:
 | Word | Means | Never means |
 |---|---|---|
 | **source** | an *emission* source: something emitting gases at a ratio (`SourceSpec`, a Source Complex) | the input of a join, where a number came from, or a file |
-| **reading** | one value an instrument wrote, with the cell of time it describes; the input side of any join (`n_readings_<name>`, `reading_index`) | a row of a product TSARA built — except that when a product is joined again, its rows are the inputs and `n_readings_<name>` counts them. Whether that re-join is honest is an open question (§11.2.2) |
+| **reading** | one value an instrument wrote, with the cell of time it describes; the input side of any join (`n_readings_<name>`, `reading_index`) | a row of a product TSARA built. A product may not be joined again, so a reading is always a measurement (§11.2.3) |
 | **target cell** / **row** | a cell a join puts values onto, and the line of a product that describes it | |
 | **pair** | a row where both species of a regression have a value (§1.3) | |
 | **provenance** | where a number or a fact came from: `declared`, `reported`, `inferred`, `assumed`, `empirical` … (`uncertainty_provenance`, `tsara_support_label_provenance`) | |
@@ -2747,11 +2747,17 @@ length and dispersion an angular variable carries instead of a sigma. The
 default selection excludes all four, through one predicate
 (`tsara.core.naming.is_companion_name`) rather than a list per caller.
 
-This is not tidiness. Three of the four families are produced *by this
-function*, so a joined product that is joined again — which is what §5 does
-with a baseline computed from one — would otherwise grow a
-`coverage_coverage_ch4` on every pass: a column with no parent, no meaning, and
-an arithmetic mean taken of a quantity whose own `cell_methods` says `sum`.
+This is not tidiness. The everyday case is the uncertainty components, which
+arrive on every stream that declares a budget: averaging `sigma_rand_ch4` as
+though it were data would report the mean of the sigmas where the sigma of the
+mean belongs, and those differ by exactly √N_eff (§3.4). The other three
+families are produced *by this function*, and the same predicate excludes them
+so that nothing handed a dataset of TSARA's own making can bin a `coverage_ch4`
+into a `coverage_coverage_ch4`: a column with no parent, no meaning, and an
+arithmetic mean taken of a quantity whose own `cell_methods` says `sum`.
+`select_variables` is public and answers this question for the grid as well as
+for the binner, so the rule has to hold for whatever it is handed.
+
 Asking about the name is the only test available, exactly as for the sigma
 companions, since nothing else in a stream marks them and a stream may have
 come from the generator, from ingestion, or from a file reloaded from disk.
@@ -2762,6 +2768,63 @@ invisible to a selection, but `stream_cells` deliberately accepts a stream that
 carries them as a data variable, so the selection accepts that shape too. Any
 variable that is not one value per cell is refused by name rather than reaching
 the weighting as a shape mismatch.
+
+#### 11.2.3 A product may not be joined again
+
+`bin_streams_onto_cells` refuses any input whose `tsara_stage` says this
+package built it by joining — `binned`, `paired` or `gridded`. Pairing and the
+output grid resolve their selection through the same function, so both refuse
+it too, at either entry point.
+
+**Why a second pass cannot be right.** A join reads three things from every
+input row: the value, the interval that row describes, and how much of that
+interval holds data. On a stream all three are properties of a *measurement*.
+On a product they are properties of a *row*, and the second pass cannot tell
+the difference — it takes each row as a measurement covering its whole cell, so
+a minute row holding one 15 s canister fill is weighted, counted and reported
+as a fully measured minute.
+
+Measured on a one-hour campaign of a 1 Hz analyzer with outages beside a
+canister filling for 15 s every 530 s: five-minute rows built from the
+campaign's 60 s rows, against the same rows built from the native streams. Of
+the 60 minute rows, 56 hold methane and 16 of those are partly covered, the
+thinnest at 0.150.
+
+| five-minute rows built from | worst methane error | worst coverage error |
+|---|---|---|
+| 60 s rows, each weighted by its cell | 2.940 ppb | 0.203 |
+| 60 s rows, each weighted by its cell × its coverage | 1.6 × 10⁻¹² ppb | none |
+| **270 s rows** (not a whole number of input rows), either weighting | 5.843 ppb | 0.263 |
+
+The worst methane row is a five-minute row holding an outage: from the streams
+it reads 1904.27 ppb at coverage 0.933, and from the 60 s rows 1901.33 ppb at
+coverage **1.000**. The canister column shows the same thing in its counts:
+summing `n_readings_benzene` over those rows gives 6 from the streams and 8
+from the 60 s rows, because a fill crossing a minute boundary arrives as two
+contributing cells; its median coverage reads 0.050 from the streams and 0.200
+from the rows, since the minute holding the fill counts as fully measured.
+
+**So it is refused rather than warned about**, on the precedent of the
+antimeridian (§11.6): where the information is gone from the input, refuse the
+case rather than model it. The middle row of the table shows that a *nested*
+re-join can be made exact by weighting each input row by its own coverage, and
+that option is recorded rather than built — it repairs values and coverage but
+not counts, since summing `n_readings` double counts a reading split across two
+input rows. The last row is why it is not enough: a non-nested re-join is
+**narrowing**, and no weighting repairs it. Cutting a row assigns the row's
+mean to both sides, and the air in the two halves differs. A guess worth
+recording as refuted: "a non-nested re-join is fine wherever every cut row is
+fully covered" is false, and those are exactly the cells that are wrong.
+
+Nothing needs the capability. Every product can be rebuilt from the native
+streams, exactly, and a sweep over grid period does precisely that.
+
+**What is not refused.** The list names the three join stages rather than
+allowing only the two source stages (`ingest`, `synthetic`), and the difference
+is for §5. A baseline is computed cell by cell over a stream's own cells, so
+every baseline value still stands for one reading; a native-rate product of
+that shape is joined like any stream, whatever stage it declares. What is
+refused is joining rows that are themselves the output of a join.
 
 ### 11.3 Propagation
 

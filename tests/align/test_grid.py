@@ -151,6 +151,35 @@ def test_excluding_the_slow_instrument_permits_a_finer_grid(
     assert len(finer) > len(fine)
 
 
+def test_a_grid_may_not_be_gridded_again(campaign: dict[str, xr.Dataset]) -> None:
+    """Re-gridding is the case METHODS §11.2.3 refuses, reached through the grid.
+
+    A coarser grid built from a finer one looks like an obvious shortcut and is
+    the one route by which a product's rows would be weighted as though they
+    were measurements. Both entry points refuse it, because both resolve their
+    selection through the same function.
+    """
+    fine = build_output_grid(campaign, OutputGridConfig(freq="60s"))
+    assert fine.attrs["tsara_stage"] == "gridded"
+    for call in (
+        lambda: build_output_grid({"grid": fine}, OutputGridConfig(freq="300s")),
+        lambda: grid_cells({"grid": fine}, OutputGridConfig(freq="300s")),
+    ):
+        with pytest.raises(TsaraAlignError) as refused:
+            call()
+        assert "gridded" in str(refused.value)
+        assert "native streams" in str(refused.value)
+
+
+def test_the_coarser_grid_the_refusal_asks_for_is_buildable(
+    campaign: dict[str, xr.Dataset],
+) -> None:
+    """A sweep over grid period rebuilds from the streams, which is exact."""
+    coarse = build_output_grid(campaign, OutputGridConfig(freq="300s"))
+    assert coarse.sizes["time"] == 2
+    assert coarse["ch4"].attrs["tsara_grid_readings"] == 600
+
+
 def test_a_period_exactly_equal_to_the_widest_cell_is_allowed(
     campaign: dict[str, xr.Dataset],
 ) -> None:

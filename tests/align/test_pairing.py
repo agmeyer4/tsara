@@ -221,6 +221,27 @@ def test_each_species_records_the_readings_behind_its_pairs(
     assert paired.dataset["co2"].attrs["tsara_pairing_readings"] == 2
 
 
+def test_a_paired_product_may_not_be_paired_again(two_rates: dict[str, xr.Dataset]) -> None:
+    """Pairing is the binner with a clock chosen, so it inherits the refusal.
+
+    The pairs of a first call are rows, not readings: each already averages
+    whatever fell in its cell, and pairing them against a third species would
+    weight those rows as measurements (METHODS §11.2.3).
+    """
+    paired = pair_species(two_rates, "ch4", "co2")
+    assert paired.dataset.attrs["tsara_stage"] == "paired"
+    # Named by instrument, because the product carries both species and a bare
+    # name would be refused as ambiguous before the stage was ever looked at.
+    with pytest.raises(TsaraAlignError) as refused:
+        pair_species(
+            {"pairs": paired.dataset, "fast": two_rates["fast"]},
+            ("pairs", "co2"),
+            ("fast", "ch4"),
+        )
+    assert "paired" in str(refused.value)
+    assert "native streams" in str(refused.value)
+
+
 def test_a_masked_sample_is_not_a_reading() -> None:
     fast = make_stream(0.0, 1.0, 4, {"ch4": np.array([1.0, np.nan, 3.0, 4.0])})
     slow = make_stream(0.0, 4.0, 1, {"co2": np.array([10.0])})
