@@ -1220,3 +1220,513 @@ def test_the_dataset_carries_the_atmosphere_it_sampled() -> None:
     assert dataset.atmosphere is not None
     assert set(dataset.atmosphere.fields) == {"ch4"}
     assert len(dataset.atmosphere.events) == len(dataset.ground_truth.event_ids)
+
+
+# ---------------------------------------------------------------------------
+# Is this instrument configured to sample this atmosphere faithfully?
+# ---------------------------------------------------------------------------
+#
+# Two warnings, both about a configuration that is valid and still
+# misrepresents the air. Each is tested at the boundary it is measured at, in
+# both directions, because a warning that fires for everything is noise and one
+# that fires for nothing is decoration.
+
+
+def _sampling_config(
+    *,
+    plume_sigma: str = "20s",
+    subsamples: int = 64,
+    cell: str = "60s",
+    method: str = "mean",
+    random_walk: float = 0.0,
+    truth_resolution: str = "1s",
+) -> SyntheticConfig:
+    """A one-source, one-instrument campaign with every relevant knob exposed."""
+    return SyntheticConfig.model_validate(
+        {
+            "name": "sampling",
+            "start": datetime(2026, 1, 1, tzinfo=UTC),
+            "duration": "20min",
+            "seed": 1,
+            "platform": SITE,
+            "atmosphere": {
+                "truth_resolution": truth_resolution,
+                "fields": {
+                    "ch4": {
+                        "role": "gas",
+                        "units": "ppb",
+                        "background": {
+                            "kind": "parametric",
+                            "offset": 1900.0,
+                            "random_walk_std": random_walk,
+                        },
+                    }
+                },
+                "sources": {
+                    "pad": {
+                        "rate_per_hour": 20.0,
+                        "reference_species": "ch4",
+                        "shape": {"kind": "gaussian", "sigma": plume_sigma},
+                        "amplitude": {"kind": "lognormal", "median": 50.0, "sigma_log": 0.4},
+                    }
+                },
+            },
+            "instruments": {
+                "analyzer": {
+                    "native_rate": cell,
+                    "measures": {"ch4": {}},
+                    "support": {"method": method, "label": "mid", "subsamples": subsamples},
+                }
+            },
+        }
+    )
+
+
+def _warnings(config: SyntheticConfig, caplog: pytest.LogCaptureFixture) -> str:
+    """Generate, and return whatever the generator warned about."""
+    import logging
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tsara.synthetic.generator"):
+        generate(config)
+    return caplog.text
+
+
+def test_subsamples_too_coarse_for_the_narrowest_plume_are_warned_about(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A 60 s cell at 16 subsamples samples every 3.75 s, inside a 5 s plume.
+
+    The cell means such an instrument reports are a quadrature error rather
+    than the average of that plume, and nothing in the output says so.
+    """
+    text = _warnings(_sampling_config(plume_sigma="5s", subsamples=16), caplog)
+    assert "averages the air at 3.75 s intervals" in text
+    assert "narrowest plume it can see is 5 s wide" in text
+    # The number of subsamples that would satisfy the rule, so the warning is
+    # actionable rather than merely disapproving.
+    assert "48 subsamples" in text
+
+
+def test_subsamples_fine_enough_for_the_plume_are_not_warned_about(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The same campaign one step past the threshold says nothing."""
+    assert "averages the air" not in _warnings(
+        _sampling_config(plume_sigma="5s", subsamples=48), caplog
+    )
+
+
+def test_the_subsample_warning_fires_exactly_at_the_measured_threshold(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Spacing equal to the fraction is fine; a hair coarser is not.
+
+    A 60 s cell and a 20 s plume: the rule allows a spacing of 5 s, so twelve
+    subsamples are enough and eleven are not.
+    """
+    assert "averages the air" not in _warnings(
+        _sampling_config(plume_sigma="20s", subsamples=12), caplog
+    )
+    assert "averages the air" in _warnings(
+        _sampling_config(plume_sigma="20s", subsamples=11), caplog
+    )
+
+
+def test_a_point_instrument_has_no_subsamples_to_warn_about(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`subsamples` is ignored for a point sampler, so the rule cannot apply."""
+    assert "averages the air" not in _warnings(
+        _sampling_config(plume_sigma="1s", subsamples=1, cell="1s", method="point"), caplog
+    )
+
+
+def test_the_narrowest_plume_counted_is_a_nested_child(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A nested child is meant to be much narrower, so it sets the requirement.
+
+    Counting only the parent's shape would pass an instrument that cannot
+    resolve any of the children riding inside it.
+    """
+    config = _sampling_config(plume_sigma="60s", subsamples=16)
+    parent = config.atmosphere.sources["pad"]
+    nested = config.model_copy(
+        update={
+            "atmosphere": config.atmosphere.model_copy(
+                update={
+                    "sources": {
+                        "pad": parent.model_copy(
+                            update={
+                                "nested": NestedSpec(
+                                    probability=1.0,
+                                    shape=GaussianShape(kind="gaussian", sigma="3s"),
+                                    amplitude_factor=0.5,
+                                )
+                            }
+                        )
+                    }
+                }
+            )
+        }
+    )
+    assert "averages the air" not in _warnings(config, caplog)
+    text = _warnings(nested, caplog)
+    assert "narrowest plume it can see is 3 s wide" in text
+    assert "pad's nested child" in text
+
+
+def test_cells_finer_than_a_wandering_background_are_warned_about(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Between its nodes a random walk is a straight line, and nothing says so.
+
+    An instrument reporting values every 0.5 s from an atmosphere defined at
+    1 s is reporting interpolation as measurement, for half its samples.
+    """
+    text = _warnings(
+        _sampling_config(cell="0.5s", method="point", random_walk=20.0, truth_resolution="1s"),
+        caplog,
+    )
+    assert "has 0.5 s cells, finer than the 1 s nodes" in text
+    assert "random walk on truth_resolution" in text
+
+
+def test_a_background_with_no_stochastic_term_has_no_node_spacing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An analytic background is smooth at every scale, so nothing is warned.
+
+    This is what keeps the warning off almost every configuration in the
+    repository: a background of an offset and a diurnal cycle has no nodes.
+    """
+    assert "finer than" not in _warnings(
+        _sampling_config(cell="0.5s", method="point", random_walk=0.0), caplog
+    )
+
+
+def test_cells_matching_the_node_spacing_are_not_warned_about(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Equal is fine: the instrument resolves exactly what the air has."""
+    assert "finer than" not in _warnings(
+        _sampling_config(cell="1s", method="point", random_walk=20.0, truth_resolution="1s"),
+        caplog,
+    )
+
+
+def test_a_finer_truth_resolution_is_what_the_warning_asks_for(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The fix the message names must actually silence it."""
+    assert "finer than" not in _warnings(
+        _sampling_config(cell="0.5s", method="point", random_walk=20.0, truth_resolution="0.5s"),
+        caplog,
+    )
+
+
+def test_a_bootstrap_background_is_measured_against_its_profiles_own_period(
+    white_noise_profile: RealDataProfile, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Bootstrap fluctuations are replayed at the profile's cadence, not the
+    atmosphere's, so that is the spacing an instrument is compared against.
+
+    The profile here samples at 1 s while the atmosphere's own nodes are 1 s
+    too, so the instrument is put at 0.5 s: under the atmosphere's resolution
+    alone there would be nothing to say, and the warning has to come from the
+    profile.
+    """
+    import logging
+
+    config = SyntheticConfig.model_validate(
+        {
+            "name": "boot",
+            "start": datetime(2026, 1, 1, tzinfo=UTC),
+            "duration": "10min",
+            "seed": 1,
+            "platform": SITE,
+            "atmosphere": {
+                "truth_resolution": "1s",
+                "fields": {
+                    "ch4": {
+                        "role": "gas",
+                        "units": "ppb",
+                        "background": {"kind": "bootstrap", "profile": "picarro", "scale": 1.0},
+                    }
+                },
+            },
+            "instruments": {
+                "fast": {"native_rate": "0.5s", "measures": {"ch4": {}}},
+            },
+        }
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tsara.synthetic.generator"):
+        generate(config, profiles={"picarro": white_noise_profile})
+    assert "nodes of the background" in caplog.text
+    assert "bootstrap profile 'picarro'" in caplog.text
+
+
+def test_a_nested_child_emitting_its_own_species_still_sets_the_requirement(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The landfill case: a child may name a species its parent never emits.
+
+    An instrument measuring only that species sees nothing but children, so
+    the child's kernel is the only one that can set its requirement — and
+    walking the parent's ratios alone would find no source at all.
+    """
+    config = SyntheticConfig.model_validate(
+        {
+            "name": "nested-only",
+            "start": datetime(2026, 1, 1, tzinfo=UTC),
+            "duration": "20min",
+            "seed": 1,
+            "platform": SITE,
+            "atmosphere": {
+                "fields": {
+                    "ch4": {"background": {"kind": "parametric", "offset": 1900.0}},
+                    "c2h6": {"background": {"kind": "parametric", "offset": 2.0}},
+                },
+                "sources": {
+                    "landfill": {
+                        "rate_per_hour": 20.0,
+                        "reference_species": "ch4",
+                        "shape": {"kind": "gaussian", "sigma": "90s"},
+                        "amplitude": {"kind": "lognormal", "median": 50.0, "sigma_log": 0.4},
+                        "nested": {
+                            "probability": 1.0,
+                            "shape": {"kind": "gaussian", "sigma": "2s"},
+                            "amplitude_factor": 0.5,
+                            "ratios": {"c2h6": {"mean": 0.05, "relative_spread": 0.1}},
+                        },
+                    }
+                },
+            },
+            # Measures the child's species only, on 60 s means at the default 64
+            # subsamples: 0.9375 s spacing, against the 0.5 s the 2 s child allows.
+            "instruments": {
+                "ethane": {
+                    "native_rate": "60s",
+                    "measures": {"c2h6": {}},
+                    "support": {"method": "mean", "label": "mid", "subsamples": 64},
+                }
+            },
+        }
+    )
+    text = _warnings(config, caplog)
+    assert "narrowest plume it can see is 2 s wide" in text
+    assert "landfill's nested child" in text
+
+
+def test_a_source_emitting_nothing_this_instrument_measures_is_ignored(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A wind vane is not held to the sharpness of a methane plume.
+
+    Two sources: a sharp one this instrument cannot see, and a broad one it
+    can. Only the second may set the requirement, and if the first leaked in,
+    every met instrument in a plume-dense campaign would be warned about.
+    """
+    config = SyntheticConfig.model_validate(
+        {
+            "name": "two-sources",
+            "start": datetime(2026, 1, 1, tzinfo=UTC),
+            "duration": "20min",
+            "seed": 1,
+            "platform": SITE,
+            "atmosphere": {
+                "fields": {
+                    "ch4": {"background": {"kind": "parametric", "offset": 1900.0}},
+                    "co2": {"background": {"kind": "parametric", "offset": 420.0}},
+                },
+                "sources": {
+                    "sharp_methane": {
+                        "rate_per_hour": 20.0,
+                        "reference_species": "ch4",
+                        "shape": {"kind": "gaussian", "sigma": "2s"},
+                        "amplitude": {"kind": "lognormal", "median": 50.0, "sigma_log": 0.4},
+                    },
+                    "broad_carbon": {
+                        "rate_per_hour": 10.0,
+                        "reference_species": "co2",
+                        "shape": {"kind": "gaussian", "sigma": "300s"},
+                        "amplitude": {"kind": "lognormal", "median": 5.0, "sigma_log": 0.4},
+                    },
+                },
+            },
+            "instruments": {
+                "carbon": {
+                    "native_rate": "60s",
+                    "measures": {"co2": {}},
+                    "support": {"method": "mean", "label": "mid", "subsamples": 64},
+                }
+            },
+        }
+    )
+    assert "averages the air" not in _warnings(config, caplog)
+
+
+@pytest.mark.parametrize("order", [("broad", "sharp"), ("sharp", "broad")])
+def test_the_narrowest_of_several_visible_sources_decides(
+    order: tuple[str, str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two sources both emitting the measured field: the sharper one binds.
+
+    Run in both declaration orders, because "the narrowest" must not mean
+    "whichever happened to be written last".
+    """
+    config = SyntheticConfig.model_validate(
+        {
+            "name": "narrowest-wins",
+            "start": datetime(2026, 1, 1, tzinfo=UTC),
+            "duration": "20min",
+            "seed": 1,
+            "platform": SITE,
+            "atmosphere": {
+                "fields": {"ch4": {"background": {"kind": "parametric", "offset": 1900.0}}},
+                "sources": {
+                    "broad": {
+                        "rate_per_hour": 10.0,
+                        "reference_species": "ch4",
+                        "shape": {"kind": "gaussian", "sigma": "300s"},
+                        "amplitude": {"kind": "lognormal", "median": 50.0, "sigma_log": 0.4},
+                    },
+                    "sharp": {
+                        "rate_per_hour": 10.0,
+                        "reference_species": "ch4",
+                        "shape": {"kind": "gaussian", "sigma": "2s"},
+                        "amplitude": {"kind": "lognormal", "median": 50.0, "sigma_log": 0.4},
+                    },
+                },
+            },
+            "instruments": {
+                "analyzer": {
+                    "native_rate": "60s",
+                    "measures": {"ch4": {}},
+                    "support": {"method": "mean", "label": "mid", "subsamples": 64},
+                }
+            },
+        }
+    )
+    sources = config.atmosphere.sources
+    reordered = config.model_copy(
+        update={
+            "atmosphere": config.atmosphere.model_copy(
+                update={"sources": {name: sources[name] for name in order}}
+            )
+        }
+    )
+    text = _warnings(reordered, caplog)
+    assert "narrowest plume it can see is 2 s wide (sharp)" in text
+
+
+def test_a_bootstrap_on_a_wandering_base_is_measured_against_the_coarser_nodes(
+    white_noise_profile: RealDataProfile, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Two stochastic terms with different node spacings, and the coarser binds.
+
+    The profile replays every 1 s while the base wanders on 10 s atmosphere
+    nodes. A 5 s instrument resolves the profile's cadence and not the base's,
+    so the base is what it turns into straight lines — and naming the finer
+    term would tell the user to fix something that is already fine.
+    """
+    import logging
+
+    config = SyntheticConfig.model_validate(
+        {
+            "name": "boot-base",
+            "start": datetime(2026, 1, 1, tzinfo=UTC),
+            "duration": "20min",
+            "seed": 1,
+            "platform": SITE,
+            "atmosphere": {
+                "truth_resolution": "10s",
+                "fields": {
+                    "ch4": {
+                        "background": {
+                            "kind": "bootstrap",
+                            "profile": "picarro",
+                            "scale": 1.0,
+                            "base": {
+                                "kind": "parametric",
+                                "offset": 1900.0,
+                                "random_walk_std": 20.0,
+                            },
+                        }
+                    }
+                },
+            },
+            "instruments": {"fast": {"native_rate": "5s", "measures": {"ch4": {}}}},
+        }
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tsara.synthetic.generator"):
+        generate(config, profiles={"picarro": white_noise_profile})
+    assert "5 s cells, finer than the 10 s nodes" in caplog.text
+    assert "random walk on truth_resolution" in caplog.text
+    assert "bootstrap profile" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("truth_resolution", "rate", "expect_nodes", "expect_named"),
+    [
+        # The walk is the coarser term, and it is listed second.
+        ("10s", "0.5s", "0.5 s cells, finer than the 10 s nodes", "random walk"),
+        # The profile is the coarser term, and it is listed first: the second
+        # term must not displace it just by being looked at later.
+        ("0.1s", "0.05s", "0.05 s cells, finer than the 1 s nodes", "bootstrap profile"),
+    ],
+)
+def test_the_coarsest_stochastic_term_of_a_field_is_the_one_named(
+    truth_resolution: str,
+    rate: str,
+    expect_nodes: str,
+    expect_named: str,
+    white_noise_profile: RealDataProfile,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One field, two stochastic terms, an instrument finer than both.
+
+    The coarsest is what the instrument turns into the longest straight lines,
+    so that is what the message names and what its suggested resolution has to
+    fix; naming the finer one would tell the user to change something that is
+    already fine. And two terms of one field are one affected *field*, which
+    is the easy thing to count wrongly.
+    """
+    import logging
+
+    config = SyntheticConfig.model_validate(
+        {
+            "name": "two-terms",
+            "start": datetime(2026, 1, 1, tzinfo=UTC),
+            "duration": "5min",
+            "seed": 1,
+            "platform": SITE,
+            "atmosphere": {
+                "truth_resolution": truth_resolution,
+                "fields": {
+                    "ch4": {
+                        "background": {
+                            "kind": "bootstrap",
+                            "profile": "picarro",
+                            "scale": 1.0,
+                            "base": {
+                                "kind": "parametric",
+                                "offset": 1900.0,
+                                "random_walk_std": 20.0,
+                            },
+                        }
+                    }
+                },
+            },
+            "instruments": {"fast": {"native_rate": rate, "measures": {"ch4": {}}}},
+        }
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tsara.synthetic.generator"):
+        generate(config, profiles={"picarro": white_noise_profile})
+    assert expect_nodes in caplog.text
+    assert expect_named in caplog.text
+    assert "other measured field" not in caplog.text

@@ -54,6 +54,7 @@ to obtain the pipeline-visible view.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,8 +84,11 @@ from tsara.synthetic.atmosphere import Atmosphere, CellGrid, realize_atmosphere
 from tsara.synthetic.background import TsaraSyntheticError
 from tsara.synthetic.config import (
     TRUTH_PREFIX,
+    FieldSpec,
     InstrumentSpec,
     MobileTrack,
+    PlumeShape,
+    SourceSpec,
     StationarySite,
     SyntheticConfig,
 )
@@ -261,6 +265,12 @@ def generate(
         len(config.atmosphere.sources),
     )
 
+    # 1b. Say so when an instrument is configured to sample that air more
+    #     finely than the air itself is defined, or too coarsely to follow the
+    #     plumes it will meet. Both are silent otherwise, and both produce data
+    #     that looks entirely reasonable (METHODS.md §8.1.2).
+    _warn_about_sampling(config, profiles)
+
     # 2. Platform. A mobile track becomes its own stream and a position
     #    lookup used to geolocate every event in the answer key.
     streams: dict[str, xr.Dataset] = {}
@@ -305,6 +315,196 @@ def generate(
     return SyntheticDataset(
         streams=streams, ground_truth=ground_truth, config=config, atmosphere=atmosphere
     )
+
+
+# ---------------------------------------------------------------------------
+# Is this instrument configured to sample this atmosphere faithfully?
+# ---------------------------------------------------------------------------
+#
+# Two ways a configuration can be internally valid and still manufacture data
+# that misrepresents the air it claims to sample. Neither is an error: both are
+# legitimate choices for a test that does not care, and both are mistakes in a
+# campaign built to check a ratio. So both are warnings, named and numbered,
+# with the value that would fix them.
+
+
+#: How fine a `mean` instrument's subsamples must be, as a fraction of the
+#: narrowest plume it could meet, before the quadrature error in its cell means
+#: stops mattering.
+#:
+#: Measured rather than chosen (METHODS.md §8.1.2). Over 56 combinations of
+#: kernel, cell width and subsample count, a spacing at or below a quarter of
+#: the kernel's width kept the worst cell-mean error at 0.66 % of the cell's
+#: own enhancement, while the first case above 1 % appears just past a half.
+#: A quarter also leaves every configuration in this repository silent.
+SUBSAMPLE_SPACING_FRACTION = 0.25
+
+
+def _kernel_scale_s(shape: PlumeShape) -> float:
+    """Return the narrowest timescale a plume shape resolves, in seconds.
+
+    The Gaussian width in both cases: an EMG is a Gaussian rise convolved with
+    an exponential tail, so its ``sigma`` is the sharpest feature it has and
+    its ``tau`` only stretches what follows.
+    """
+    import pandas as pd
+
+    return float(pd.Timedelta(shape.sigma).total_seconds())
+
+
+def _fields_of(source: SourceSpec) -> set[str]:
+    """Return every field a source's events can carry, children included.
+
+    A nested child may name species its parent never emits — the landfill with
+    a thermogenic blip inside it — so its ratios widen the set rather than
+    being a subset of the parent's.
+    """
+    fields = {source.reference_species, *source.ratios}
+    if source.nested is not None and source.nested.ratios is not None:
+        fields |= set(source.nested.ratios)
+    return fields
+
+
+def _narrowest_plume(config: SyntheticConfig, fields: set[str]) -> tuple[float, str] | None:
+    """Return the narrowest kernel among sources emitting any of ``fields``.
+
+    Returns the scale in seconds and a label naming the source, or ``None``
+    when no source emits anything this caller measures — a met-only instrument,
+    or a campaign with no sources at all.
+    """
+    best: tuple[float, str] | None = None
+    for name, source in config.atmosphere.sources.items():
+        if not _fields_of(source) & fields:
+            continue
+        candidates = [(_kernel_scale_s(source.shape), name)]
+        if source.nested is not None:
+            # The child is meant to be substantially narrower, so it usually
+            # sets the requirement.
+            candidates.append((_kernel_scale_s(source.nested.shape), f"{name}'s nested child"))
+        for scale_s, label in candidates:
+            if best is None or scale_s < best[0]:
+                best = (scale_s, label)
+    return best
+
+
+def _node_spacings_s(
+    field: FieldSpec,
+    config: SyntheticConfig,
+    profiles: Mapping[str, RealDataProfile] | None,
+) -> list[tuple[float, str]]:
+    """Return the node spacing of each stochastic term in a field's background.
+
+    A stochastic background is drawn on nodes and is linear between them, so
+    its node spacing is the finest structure it has. The analytic terms —
+    offset, diurnal, drift — are smooth functions with no such limit and are
+    not reported here.
+    """
+    import pandas as pd
+
+    truth_s = float(pd.Timedelta(config.atmosphere.truth_resolution).total_seconds())
+    background = field.background
+    spacings: list[tuple[float, str]] = []
+    if background.kind == "bootstrap":
+        # Indexed rather than guarded: this runs after the atmosphere has been
+        # realized, and realizing a bootstrap background without its profile
+        # raises. A guard here would be a branch no run can take.
+        assert profiles is not None  # narrowed by realize_atmosphere
+        spacings.append(
+            (
+                float(profiles[background.profile].sample_period_s),
+                f"bootstrap profile '{background.profile}'",
+            )
+        )
+        # A bootstrap may sit on a parametric base, which can wander in its own
+        # right, on the atmosphere's nodes rather than the profile's.
+        base = background.base
+        if base is not None and base.random_walk_std > 0.0:
+            spacings.append((truth_s, "random walk on truth_resolution"))
+    elif background.random_walk_std > 0.0:
+        spacings.append((truth_s, "random walk on truth_resolution"))
+    return spacings
+
+
+def _warn_about_sampling(
+    config: SyntheticConfig,
+    profiles: Mapping[str, RealDataProfile] | None,
+) -> None:
+    """Warn where an instrument and the atmosphere are configured at odds.
+
+    Called once per run, after the air exists and before anything measures it.
+    """
+    import pandas as pd
+
+    for name, instrument in config.instruments.items():
+        support = instrument.support
+        width_s = float(pd.Timedelta(support.width or instrument.native_rate).total_seconds())
+        measured = set(instrument.measures)
+
+        # (1) Too coarse to follow a plume. A `mean` instrument evaluates the
+        #     air at `subsamples` instants per cell; if those are further apart
+        #     than the narrowest plume it will meet, its cell means are a
+        #     quadrature error rather than an average of that plume.
+        narrowest = _narrowest_plume(config, measured) if support.method == "mean" else None
+        if narrowest is not None:
+            scale_s, source_label = narrowest
+            spacing_s = width_s / support.subsamples
+            if spacing_s > SUBSAMPLE_SPACING_FRACTION * scale_s:
+                needed = math.ceil(width_s / (SUBSAMPLE_SPACING_FRACTION * scale_s))
+                logger.warning(
+                    "Instrument '%s' averages the air at %.6g s intervals (%s cells / %d "
+                    "subsamples), but the narrowest plume it can see is %.6g s wide (%s). "
+                    "Its cell means then carry a quadrature error of their own instead of "
+                    "that plume's average; %d subsamples would bring the spacing within "
+                    "the measured rule of %g x the plume width (METHODS §8.1.2).",
+                    name,
+                    spacing_s,
+                    support.width or instrument.native_rate,
+                    support.subsamples,
+                    scale_s,
+                    source_label,
+                    needed,
+                    SUBSAMPLE_SPACING_FRACTION,
+                )
+
+        # (2) Finer than the air is defined. A stochastic background is linear
+        #     between its nodes, so an instrument whose cells are narrower than
+        #     that spacing reports straight lines and calls them measurements.
+        coarsest: tuple[float, str, str] | None = None
+        affected: set[str] = set()
+        # Sorted, because iterating a set of strings can order them differently
+        # in another process, and a warning that names a different field from
+        # one run to the next is not reproducible output.
+        for field_name in sorted(measured):
+            field = config.atmosphere.fields.get(field_name)
+            if field is None:  # pragma: no cover - the schema refuses this
+                continue
+            for spacing_s, label in _node_spacings_s(field, config, profiles):
+                if width_s >= spacing_s:
+                    continue
+                # Per field, not per term: one field's background can have
+                # two stochastic terms, and that is not two fields.
+                affected.add(field_name)
+                if coarsest is None or spacing_s > coarsest[0]:
+                    coarsest = (spacing_s, field_name, label)
+        if coarsest is not None:
+            spacing_s, field_name, label = coarsest
+            others = (
+                f" and {len(affected) - 1} other measured field(s)" if len(affected) > 1 else ""
+            )
+            logger.warning(
+                "Instrument '%s' has %.6g s cells, finer than the %.6g s nodes of the "
+                "background of '%s'%s (%s), so between nodes it samples a straight line "
+                "and reports it as a measurement. Set atmosphere.truth_resolution to "
+                "%.6g s or finer, or give the instrument cells no finer than the nodes "
+                "(METHODS §8.1.2).",
+                name,
+                width_s,
+                spacing_s,
+                field_name,
+                others,
+                label,
+                width_s,
+            )
 
 
 # ---------------------------------------------------------------------------

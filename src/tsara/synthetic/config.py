@@ -598,9 +598,16 @@ class TrueSupport(_StrictModel):
         description=(
             "Fine-grid points per cell used to average truth when "
             "method='mean'. Ignored for 'point'. The midpoint rule converges "
-            "as the inverse square of this number, so the default is already "
-            "far below the injected noise for any realistic plume; raise it "
-            "only when testing the quadrature itself."
+            "as the inverse square of this number, and what it has to resolve "
+            "is the narrowest plume the instrument can meet, not the cell: "
+            "measured, a spacing (cell width / subsamples) at or below a "
+            "quarter of the plume's width keeps the error under 0.7% of the "
+            "cell's own enhancement, while a spacing of twice that width "
+            "reached 54% (METHODS.md 8.1.2). The generator warns when a "
+            "configuration falls short, naming the count that would not. "
+            "Note this is an error in the cell MEAN, which is what a ratio is "
+            "built from; measured against the plume's peak the default looks "
+            "far safer than it is."
         ),
     )
 

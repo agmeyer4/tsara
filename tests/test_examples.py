@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from tsara import load_analysis, load_manifest, load_synthetic
 from tsara.config import analysis as analysis_schema
 from tsara.config import manifest as manifest_schema
+from tsara.synthetic.config import SyntheticConfig
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Callable, Iterator
@@ -154,6 +155,47 @@ def _spellings(model: type[BaseModel], name: str) -> set[str]:
     if alias is not None and hasattr(alias, "choices"):
         names |= {str(choice) for choice in alias.choices}
     return names
+
+
+def test_a_shipped_synthetic_example_generates_without_a_warning() -> None:
+    """An example that trips the package's own warnings is not a demonstration.
+
+    `examples/configs/synthetic_example.yaml` did exactly that the day the
+    sampling warnings were written: its 0.5 s analyzer sampled an atmosphere
+    defined only every second, so half of that instrument's methane was the
+    straight line between two truth nodes (METHODS §8.1.2). Nothing would have
+    caught it, because the file loads perfectly well.
+
+    Bootstrap examples are skipped rather than generated: they reference a
+    real-data profile that is supplied at call time and deliberately cannot
+    live in a config file.
+    """
+    import logging
+
+    from tsara.synthetic import generate
+
+    records: list[logging.LogRecord] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logger = logging.getLogger("tsara.synthetic")
+    handler = _Collect(level=logging.WARNING)
+    logger.addHandler(handler)
+    previous = logger.level
+    logger.setLevel(logging.WARNING)
+    try:
+        for path in _examples():
+            if not path.name.startswith("synthetic_") or "bootstrap" in path.name:
+                continue
+            config = load_synthetic(path)
+            assert isinstance(config, SyntheticConfig)
+            generate(config)
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+    assert [r.getMessage() for r in records] == []
 
 
 def test_schema_discovery_reaches_both_trees() -> None:

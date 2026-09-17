@@ -859,6 +859,63 @@ background averaged over that instrument's cells and interpolated at the peak,
 as `sampled_peak_amplitude` is the peak as those cells saw it; the atmosphere's
 own background at the peak instant is one query away.
 
+#### 8.1.2 Is this instrument configured to sample this atmosphere faithfully?
+
+Two ways a configuration can be internally valid, pass every schema check, and
+still manufacture data that misrepresents the air it claims to sample. Neither
+is an error — both are reasonable in a test that does not care about them — so
+both are warnings at generation time, each naming the value that would fix it.
+
+**A `mean` instrument too coarse to follow a plume.** Such an instrument
+evaluates the air at `subsamples` instants inside every cell and averages them
+(the midpoint rule, §8.1). If those instants are further apart than the
+narrowest plume the instrument can meet, its "cell mean" is a quadrature error
+rather than that plume's average — and the value looks entirely ordinary.
+
+Measured: one 100 ppb plume on a flat background, cells at 200 random phases,
+scored against the same cells evaluated at 16 384 subsamples, over cells whose
+true mean enhancement exceeds 1 ppb. 56 combinations of kernel (Gaussian σ from
+0.5 s to 30 s, EMG σ 1 s and 8 s), cell width (1, 15, 60, 120 s) and subsample
+count (64 to 1024):
+
+| subsample spacing | cases | worst error, relative to the cell's own enhancement |
+|---|---|---|
+| ≤ σ/8 | 36 | 0.199 % |
+| ≤ σ/4 | 43 | 0.661 % |
+| ≤ σ/2 | 48 | 1.713 % |
+| ≤ σ | 52 | 2.542 % |
+| the four coarsest | 4 | up to **54.3 %** (a 0.5 s plume, 120 s cells, 64 subsamples) |
+
+So the rule is **spacing ≤ σ/4**, the last line at which every measured case
+stays below 1 %. σ is the Gaussian width in both kernels: an EMG is a Gaussian
+rise convolved with an exponential tail, so σ is the sharpest feature it has
+and τ only stretches what follows. A nested child's shape counts, and usually
+decides, since a child is meant to be substantially narrower than its parent.
+
+Stated rather than rounded: the error is not a function of that ratio alone.
+It also grows with cell width ÷ σ, which is why a 0.5 s plume costs 0.272 % on
+60 s cells and 1.713 % on 15 s cells at the same spacing ratio. The rule is a
+floor that held across this grid, not a bound.
+
+**An instrument finer than the air is defined.** A random-walk background is
+drawn on nodes `atmosphere.truth_resolution` apart and is *linear between
+them*; a bootstrap background replays its blocks at the profile's own sampling
+period. An instrument whose cells are narrower than that spacing therefore
+reports a straight line between nodes and calls it a measurement — the
+generated record looks smooth in a way no instrument's record is. The warning
+compares each instrument's cell width against the node spacing of every
+stochastic term in the backgrounds of the fields it measures, and names the
+coarsest.
+
+The shipped `examples/configs/synthetic_example.yaml` tripped this the day it
+was written: its aeris samples every 0.5 s while its atmosphere was defined at
+1 s, so half of that instrument's methane was interpolation. The example now
+declares `truth_resolution: 0.5s`, which is the fix the warning names.
+
+**Neither fires on anything in this repository** — every shipped config, the
+test fixtures and all five notebook-04 campaign recipes are silent, which is
+the other half of what makes a warning worth having.
+
 ### 8.2 Plume shapes
 
 Two registered shapes. **Gaussian** (`sigma`) is the symmetric textbook case.

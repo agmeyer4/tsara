@@ -52,8 +52,12 @@ platform:
 # measures a field samples the same truth, random wander included.
 atmosphere:
   # Node spacing for random-walk backgrounds, which are drawn once on these
-  # nodes and are linear between them.
-  truth_resolution: 1s
+  # nodes and are linear between them. It must be no coarser than the finest
+  # instrument's cells, or that instrument reports a straight line between
+  # nodes and calls it a measurement -- the generator warns when it is
+  # (METHODS.md 8.1.2). The aeris below samples every 0.5 s, so the air is
+  # defined every 0.5 s.
+  truth_resolution: 0.5s
 
   fields:
     ch4:
