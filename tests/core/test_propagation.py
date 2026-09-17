@@ -287,6 +287,72 @@ def test_double_sum_and_neff_disagree_on_unequal_sigmas() -> None:
     assert exact.sigma != pytest.approx(fast.sigma, rel=1e-3)
 
 
+def test_the_cheap_form_is_not_always_conservative() -> None:
+    """Half the readings in a burst and half spread: `ar1_neff` understates σ.
+
+    METHODS §3.4 claimed the cheap form errs "on the safe side, bounded by how
+    badly a cell's readings clump". That is true of the ordinary clumping
+    patterns and false of this one, which is why the claim was withdrawn and
+    this case pinned.
+
+    The mechanism is the median. `ar1_neff` knows only a count and the median
+    gap; with fifteen readings inside 0.15 s and fifteen spread 100 s apart,
+    the median gap is the *large* one, so it treats thirty readings as thirty
+    nearly independent ones — while half of them are really a single effective
+    reading. Measured against exact AR(1) draws it reports about a third of the
+    true uncertainty; the pairwise form is right to within a per cent.
+    """
+    rng = np.random.default_rng(20260920)
+    tau_s, sigma_value, n_trials = 20.0, 2.0, 4000
+    times = np.concatenate([np.linspace(0.0, 0.15, 15), 100.0 * (1 + np.arange(15.0))])
+    sigmas = np.full(times.size, sigma_value)
+    weights = np.ones(times.size)
+
+    # The truth: exact AR(1) errors at these instants, averaged, many times.
+    lag = np.abs(times[:, None] - times[None, :])
+    covariance = sigma_value**2 * np.exp(-lag / tau_s)
+    draws = rng.multivariate_normal(
+        np.zeros(times.size), covariance, size=n_trials, method="cholesky"
+    )
+    observed = float(draws.mean(axis=1).std(ddof=1))
+
+    cheap = propagate_random(sigmas, weights, tau_s=tau_s, times_s=times, form="ar1_neff")
+    exact = propagate_random(sigmas, weights, tau_s=tau_s, times_s=times, form="ar1_double_sum")
+
+    # The pairwise form needs no tolerance argument: it evaluates the same
+    # covariance the draws came from. 4 % covers the sampling error of the
+    # standard deviation of 4000 means (about 1.1 %) with room to spare.
+    assert exact.sigma == pytest.approx(observed, rel=0.04)
+    # And the cheap one is wrong in the dangerous direction, by a lot.
+    assert cheap.sigma < 0.5 * observed
+
+
+def test_the_cheap_form_is_conservative_for_one_cadence_with_a_hole() -> None:
+    """The shape every real stream has, where the claim does hold.
+
+    Two blocks of fifteen a half-minute apart carry *more* information than a
+    single run, because the blocks have had time to decorrelate; the cheap
+    form cannot see that and overstates σ, which is the harmless direction.
+    """
+    rng = np.random.default_rng(20260921)
+    tau_s, sigma_value, n_trials = 20.0, 2.0, 4000
+    times = np.concatenate([np.arange(15.0), 30.0 + np.arange(15.0)])
+    sigmas = np.full(times.size, sigma_value)
+    weights = np.ones(times.size)
+
+    lag = np.abs(times[:, None] - times[None, :])
+    covariance = sigma_value**2 * np.exp(-lag / tau_s)
+    draws = rng.multivariate_normal(
+        np.zeros(times.size), covariance, size=n_trials, method="cholesky"
+    )
+    observed = float(draws.mean(axis=1).std(ddof=1))
+
+    cheap = propagate_random(sigmas, weights, tau_s=tau_s, times_s=times, form="ar1_neff")
+    exact = propagate_random(sigmas, weights, tau_s=tau_s, times_s=times, form="ar1_double_sum")
+    assert exact.sigma == pytest.approx(observed, rel=0.04)
+    assert cheap.sigma > observed
+
+
 def test_double_sum_reproduces_independence_when_tau_is_tiny() -> None:
     sigma = np.full(20, 3.0)
     times = np.arange(20.0)

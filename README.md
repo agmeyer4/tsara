@@ -87,8 +87,8 @@ save_streams(streams, "demo_bundle")
 
 ```
 ['aeris', 'gps', 'met', 'picarro'] 59 plume events
-[1971.651 1971.69  1971.715]
-aeris {'time': 42615, 'nv': 2} ['ch4', 'sigma_rand_ch4', 'sigma_sys_ch4', 'c2h6', 'sigma_rand_c2h6']
+[1971.651 1971.695 1971.69 ]
+aeris {'time': 42437, 'nv': 2} ['ch4', 'sigma_rand_ch4', 'sigma_sys_ch4', 'c2h6', 'sigma_rand_c2h6']
 picarro {'time': 10800, 'nv': 2} ['co2', 'sigma_rand_co2', 'sigma_sys_co2', 'ch4', 'sigma_rand_ch4', 'sigma_sys_ch4']
 met {'time': 2160, 'nv': 2} ['wind_dir', 'wind_speed']
 gps {'time': 21600, 'nv': 2} ['latitude', 'longitude']

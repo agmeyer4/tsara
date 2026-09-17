@@ -466,11 +466,39 @@ error with τ = 20 s, 20 000 realizations, arranged two ways:
 
 The same thirty samples carry *more* information when spread across the cell,
 because the two blocks have had time to decorrelate from each other. The cheap
-form does not know that and overstates σ by about a fifth. The error is in the
-conservative direction and is bounded by how badly a cell's samples clump,
-which `n_readings` and `coverage` already report — and `ar1_double_sum` is
-selectable wherever a form is selectable, which is what makes the reference
-form useful rather than decorative.
+form does not know that and overstates σ.
+
+**It is not always the conservative direction, and the claim that it was has
+been withdrawn.** `ar1_neff` summarises a cell by two numbers, its reading
+count and the *median* gap between them, so which way it errs depends on which
+arrangement that median describes. Thirty readings of an error with τ = 20 s,
+40 000 exact AR(1) draws each, equally weighted:
+
+| thirty readings arranged as | observed σ of the mean | `ar1_neff` | `ar1_double_sum` |
+|---|---|---|---|
+| one run, 1 s apart | 1.608 | 1.604 (0.997×) | 1.604 (0.997×) |
+| two blocks of 15, 30 s apart | 1.436 | 1.604 (1.117×) | 1.432 (0.998×) |
+| 15 tight pairs 0.01 s wide, pairs 50 s apart | 0.560 | 1.995 (3.560×) | 0.558 (0.995×) |
+| 20 in a 0.2 s burst, 10 spread 100 s apart | 1.341 | 1.995 (1.488×) | 1.348 (1.006×) |
+| **15 in a 0.15 s burst, 15 spread 100 s apart** | 1.035 | 0.368 (**0.355×**) | 1.032 (0.998×) |
+
+Clusters of two or more readings normally make the median gap tiny, so
+clumping usually *overstates* σ — the first four rows. The last row is the
+exception and it is not exotic: with about half the readings in one burst and
+the rest spread, the median gap jumps to the *large* one while half the
+information is really a single effective reading, and the cheap form divides by
+√30 instead of about √16. It reports a third of the true uncertainty.
+
+So the honest statement is: **`ar1_neff` is safe when a cell's readings are one
+regular cadence with holes, which is what every real stream in the target
+archive looks like, and can be badly optimistic when the gaps are strongly
+bimodal.** Reaching it needs both a declared decorrelation timescale, which no
+archive file has (§2.2), and a cadence *change* inside one cell — a rolling
+window spanning the join between a dense stretch and a sparse one would do it.
+`ar1_double_sum` is right in every row above and is selectable wherever a form
+is selectable, which is what makes the reference form useful rather than
+decorative; `n_readings` and `coverage` report how much of a cell was measured
+but cannot see this, because the arrangement, not the amount, is what does it.
 
 Limits: τ → 0 recovers §3.2, and τ → ∞ is properly handled by declaring the
 component systematic (§3.3) rather than by an enormous τ.
@@ -2711,6 +2739,18 @@ to this function with a chosen set of columns.
 * everything the input stream declared about itself, plus `tsara_instrument`
   saying where it came from and `tsara_binned` saying whether this stage
   averaged it at all.
+
+**The target cells are free-form, deliberately.** They need not tile, be
+sorted, or be disjoint: every row is the definition applied to that cell alone.
+That is what lets §5 roll overlapping windows and §6 evaluate nested event
+windows through this same function rather than a second implementation. Rows
+built from overlapping cells are each individually faithful and are *not*
+independent of one another, which is a property of the question asked rather
+than of the arithmetic; the counts that travel with every column are what a
+later stage reads to see it. Unsorted targets give a non-monotonic `time`
+coordinate and repeated targets give repeated `time` labels — both round-trip
+through netCDF and index with `.sel`, while `resample` and `interp` expect an
+ordered unique index and do not.
 
 **Three behaviours are not left to callers.** A variable declaring
 `circular: 1` is vector-averaged, never arithmetically (§11.5), and carries a

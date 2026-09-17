@@ -627,7 +627,15 @@ def bin_streams_onto_cells(
         A campaign's streams, e.g. a
         :class:`~tsara.ingest.campaign.StreamCollection`.
     target : CellBounds
-        The cells to bin onto — another stream's, or a uniform grid's.
+        The cells to bin onto — another stream's, a uniform grid's, or any
+        cells a caller builds. They need not tile, be sorted, or be disjoint:
+        each row is the definition applied to that cell alone, which is what
+        lets §5 roll overlapping windows and §6 evaluate nested event windows
+        without a second implementation. Two consequences worth knowing:
+        unsorted targets give a non-monotonic ``time`` coordinate, and
+        overlapping or repeated targets give repeated ``time`` labels. Both
+        save and reload and both index with ``.sel``; ``resample`` and
+        ``interp`` expect an ordered, unique index and do not.
     variables : sequence of str or (str, str), optional
         Which variables to include. ``None`` takes every non-sigma variable
         in every stream, which is the exploratory default; a receptor-model
