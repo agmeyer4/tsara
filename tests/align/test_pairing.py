@@ -26,6 +26,7 @@ import xarray as xr
 from tsara.align import PairedSpecies, TsaraAlignError, pair_species
 from tsara.core.naming import sigma_rand_name, sigma_sys_name
 from tsara.core.propagation import propagate_random, propagate_systematic
+from tsara.core.support import CellBounds
 from tsara.core.timebase import SECOND_NS as SECOND
 
 
@@ -913,3 +914,133 @@ def test_a_clock_cell_narrower_than_half_a_partner_reading_refuses_the_pair() ->
     assert paired.n_pairs == 3
     assert paired.dataset["ch4"].attrs["tsara_support_transform"] == "copied"
     assert paired.dataset["ch4"].attrs["tsara_width_ratio_max"] == pytest.approx(10 / 1.8)
+
+
+# ---------------------------------------------------------------------------
+# An explicit target (METHODS §11.4, §11.4.1)
+# ---------------------------------------------------------------------------
+
+
+def test_explicit_cells_put_both_species_on_them() -> None:
+    """Neither member is the clock: both are averaged, and the product says so."""
+    streams = half_phase_pair(sparse_every=1)
+    windows = CellBounds(
+        start_ns=np.arange(0, 40, 10, dtype=np.int64) * SECOND,
+        stop_ns=np.arange(10, 50, 10, dtype=np.int64) * SECOND,
+    )
+    paired = pair_species(streams, "noy", "co2", target=windows)
+    assert paired.clock == "explicit"
+    assert paired.n_pairs == 4
+    assert (
+        "explicit target cells (4 cells, median 10 s)"
+        in paired.dataset.attrs["tsara_pairing_clock_reason"]
+    )
+    assert paired.dataset["noy"].attrs["tsara_binned"] == 1
+    assert paired.dataset["co2"].attrs["tsara_binned"] == 1
+    # Ten readings of each behind each 10 s pair, forty in all.
+    assert paired.dataset["n_readings_co2"].values.tolist() == [10, 10, 10, 10]
+    assert paired.dataset["co2"].attrs["tsara_readings"] == 40
+    assert paired.dataset["noy"].attrs["tsara_readings"] == 40
+
+
+def test_a_period_target_is_a_grid_over_the_two_records() -> None:
+    """A string builds the cells through the grid builder: anchored, windowed, checked."""
+    streams = half_phase_pair(sparse_every=1)
+    paired = pair_species(streams, "noy", "co2", target="10s")
+    assert paired.clock == "explicit"
+    assert paired.dataset.attrs["tsara_pairing_clock_reason"] == "explicit target period 10s"
+    # 40.5 s of noy spans five epoch-anchored 10 s cells; the fifth holds half a
+    # noy reading and no co2, so it is a candidate that is dropped, not a pair.
+    assert paired.dataset.attrs["tsara_pairing_cells_considered"] == 5
+    assert paired.dataset.attrs["tsara_pairing_cells_dropped"] == 1
+    assert paired.n_pairs == 4
+    assert np.all(
+        paired.dataset["time_bnds"].values[:, 1] - paired.dataset["time_bnds"].values[:, 0]
+        == np.timedelta64(10, "s")
+    )
+
+
+def test_a_period_target_is_checked_by_the_copy_rule(two_rates: dict[str, xr.Dataset]) -> None:
+    """The 4 s member on a 1 s target would be copied: refused, as the grid refuses it."""
+    with pytest.raises(TsaraAlignError, match="too fine for 'slow'"):
+        pair_species(two_rates, "ch4", "co2", target="1s")
+    paired = pair_species(two_rates, "ch4", "co2", target="1s", finer_support="allow")
+    assert paired.dataset["co2"].attrs["tsara_support_transform"] == "copied"
+
+
+def test_a_target_that_is_neither_cells_nor_a_period_is_refused(
+    two_rates: dict[str, xr.Dataset],
+) -> None:
+    with pytest.raises(TsaraAlignError, match="period such as '10s'"):
+        pair_species(two_rates, "ch4", "co2", target="soon")
+    empty = CellBounds(start_ns=np.array([], dtype=np.int64), stop_ns=np.array([], dtype=np.int64))
+    with pytest.raises(TsaraAlignError, match="no cells"):
+        pair_species(two_rates, "ch4", "co2", target=empty)
+
+
+def test_an_interval_still_restricts_an_explicit_target() -> None:
+    streams = half_phase_pair(sparse_every=1)
+    window = (pd.Timestamp("1970-01-01T00:00:12"), pd.Timestamp("1970-01-01T00:00:28"))
+    paired = pair_species(streams, "noy", "co2", target="10s", interval=window)
+    assert paired.n_pairs == 2  # the cells overlapping 12-28 s: [10, 20) and [20, 30)
+
+
+def test_a_partner_half_a_cell_from_the_clock_is_warned_about_with_the_remedy(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The drive suite's shape: equal widths, half a cell apart, every reading shared.
+
+    No reading is used twice, so the readings count is silent; the borrowed
+    share is 0.50 and the warning names it and a coarser common clock.
+    """
+    streams = half_phase_pair(sparse_every=1)
+    with caplog.at_level("WARNING", logger="tsara.align.pairing"):
+        paired = pair_species(streams, "noy", "co2")
+    binned = "co2" if paired.clock == "lif" else "noy"
+    assert f"Every pair blends two readings of '{binned}'" in caplog.text
+    assert "offset by 0.5 s" in caplog.text
+    assert "borrowed share 0.50" in caplog.text
+    assert "target='10s'" in caplog.text
+
+
+def test_no_blend_warning_when_the_widths_differ(
+    caplog: pytest.LogCaptureFixture, two_rates: dict[str, xr.Dataset]
+) -> None:
+    with caplog.at_level("WARNING", logger="tsara.align.pairing"):
+        pair_species(two_rates, "ch4", "co2")
+    assert "blends two readings" not in caplog.text
+
+
+def test_no_blend_warning_when_the_partner_is_in_phase(caplog: pytest.LogCaptureFixture) -> None:
+    streams = half_phase_pair(sparse_every=1, dense_offset_s=0.0)
+    with caplog.at_level("WARNING", logger="tsara.align.pairing"):
+        pair_species(streams, "noy", "co2")
+    assert "blends two readings" not in caplog.text
+
+
+def test_the_remedy_the_blend_warning_names_removes_it(caplog: pytest.LogCaptureFixture) -> None:
+    """On the coarser common clock the warning names, neither member is half a cell off."""
+    streams = half_phase_pair(sparse_every=1)
+    with caplog.at_level("WARNING", logger="tsara.align.pairing"):
+        paired = pair_species(streams, "noy", "co2", target="10s")
+    assert "blends two readings" not in caplog.text
+    assert paired.dataset["noy"].attrs["tsara_borrowed_share"] == pytest.approx(0.05, abs=0.02)
+
+
+def test_a_caller_who_chose_offset_cells_is_not_warned_about_the_blend(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Explicit 1 s cells half a cell from the picarro: the blend is the caller's choice.
+
+    The record still says so (borrowed share 0.5 on the offset member); the
+    warning is for the case the clock rule chose without the caller seeing it.
+    """
+    streams = half_phase_pair(sparse_every=1)
+    offset_cells = CellBounds(
+        start_ns=(np.arange(38) * SECOND) + SECOND // 2,
+        stop_ns=(np.arange(38) * SECOND) + SECOND // 2 + SECOND,
+    )
+    with caplog.at_level("WARNING", logger="tsara.align.pairing"):
+        paired = pair_species(streams, "noy", "co2", target=offset_cells)
+    assert "blends two readings" not in caplog.text
+    assert paired.dataset["co2"].attrs["tsara_borrowed_share"] == pytest.approx(0.5)

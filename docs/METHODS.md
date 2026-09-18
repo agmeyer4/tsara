@@ -2964,7 +2964,9 @@ pairs the binner already has (`tsara.core.support.overlap_pairs`):
 **The rule.** A reading at or beyond `COPY_RATIO = 2` times the width of a
 target cell it touches is refused (the default, `finer_support: refuse`) or,
 on request (`finer_support: allow`), copied across rows with every affected
-column labelled `copied` and warned about. Everything below that line is
+column labelled `copied` and warned about. The policy's configuration home is
+`AlignmentConfig.finer_support` (`tsara.config.analysis`), beside the
+interpolation guard: the two knobs on how support may be changed. Everything below that line is
 allowed, recorded, and — where it narrows or shares — said aloud.
 
 Measured against the rule it replaced, which summed each reading's shared time
@@ -3090,6 +3092,20 @@ values where the two records overlap**, and if those tie too, the first
 instrument by name (§11.4.1). No step looks at argument order, so which
 species is numerator never changes which air is compared.
 
+**An explicit target** (`pair_species(..., target=)`) replaces the clock
+rule: explicit cells, or a period such as `'10s'` built as a uniform grid over
+the two records by `grid_cells`, under the same copy rule (§11.2.4). Both
+species are then averaged onto it, `tsara_pairing_clock` reads `explicit`,
+and every pair carries both members' counts, coverage and borrowed shares.
+The measured use is the dense half-cell blend of §11.4.1: on a common clock
+five to ten times coarser than the cells the naive standard error is honest
+again while the real scatter is unchanged (0.67× → 0.92× at 10 s, notebook 04
+§9). When the clock rule chose the cells and a binned member's cells are
+exactly as wide as the clock's but offset from them, the product warns,
+naming the borrowed share and a coarser period to pass — the same exact test
+the grid applies to its own cells (§11.9.1), through one function
+(`phase_offset_s`). A caller who supplied the cells is not warned twice.
+
 **Same-instrument species skip the binning entirely.** Several gases retrieved
 from one spectrum already share a clock, and that is the commonest pair there
 is. The fast path is not merely an optimization: averaging a cell onto itself
@@ -3126,7 +3142,7 @@ product is the output grid (§11.7). Its attributes:
 
 | attribute | meaning |
 |---|---|
-| `tsara_pairing_clock` | instrument whose cells the pairs sit on |
+| `tsara_pairing_clock` | instrument whose cells the pairs sit on, or `explicit` when the caller supplied `target=` |
 | `tsara_pairing_clock_reason` | why that one: both median cell widths, and on a tie both measured-value counts |
 | `tsara_pairing_min_coverage` | the guard applied (`PairingConfig.min_coverage`) |
 | `tsara_pairing_cells_considered` | candidate cells before dropping |
@@ -3410,6 +3426,18 @@ the wind becomes variable (median 1.2° where *R* > 0.9, 8.2° where
 variable belongs to which direction, and a direction binned alone is the
 case it must handle. A speed-weighted direction is recoverable by a caller
 who bins the wind components `u` and `v` as ordinary scalars.
+
+**A declared sigma on a direction is not propagated, and the join says so.**
+Ingestion resolves and stores a declared or reported uncertainty on a
+`circular` variable exactly as on any other (§9.6); both join paths drop it,
+because what a binned direction carries instead — *R* and the exact
+dispersion — describes the spread of its *readings*, not the instrument's
+precision, and the two are different quantities (§11.2.4 makes the same
+distinction for a scalar's within-cell spread). Until the Phase-4.6
+walkthrough the drop was silent; it now warns once per variable per join.
+Propagating a direction sigma properly (a small-angle or von Mises treatment
+of the vector mean) is deferred until a manifest declares one; none in the
+permitted archive does.
 
 **The pass-through path carries the same columns.** A direction whose stream
 already sits on the target cells is not re-averaged (§11.2), but it still

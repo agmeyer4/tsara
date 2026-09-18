@@ -98,20 +98,25 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+from pydantic import ValidationError
 
 from tsara.align.binning import (
     BINNED_ATTR,
+    BORROWED_ATTR,
     READINGS_ATTR,
     FinerSupport,
     TsaraAlignError,
     VariableRef,
     bin_streams_onto_cells,
     median_width_s,
+    phase_offset_s,
     readings_behind,
     resolve_variable,
     stream_cells,
     targets_overlap,
 )
+from tsara.align.grid import grid_cells
+from tsara.config.analysis import OutputGridConfig
 from tsara.core.naming import TIME_COORD, coverage_name
 from tsara.core.support import CellBounds
 
@@ -132,6 +137,9 @@ PAIRING_REASON_ATTR = "tsara_pairing_clock_reason"
 PAIRING_COVERAGE_ATTR = "tsara_pairing_min_coverage"
 PAIRING_DROPPED_ATTR = "tsara_pairing_cells_dropped"
 PAIRING_CANDIDATE_ATTR = "tsara_pairing_cells_considered"
+#: What ``tsara_pairing_clock`` and :attr:`PairedSpecies.clock` say when the
+#: caller supplied the cells rather than letting the clock rule choose.
+EXPLICIT_CLOCK = "explicit"
 
 
 @dataclass(frozen=True)
@@ -150,7 +158,8 @@ class PairedSpecies:
         Names of the two species as they appear in the dataset.
     clock : str
         Instrument whose cells were used: the wider-supported one, or on a
-        tie the one with fewer measured values.
+        tie the one with fewer measured values -- or ``'explicit'`` when the
+        caller supplied ``target=`` and both species were averaged onto it.
     n_pairs : int
         How many pairs survived.
     y_readings, x_readings : int
@@ -287,12 +296,85 @@ def _readings_behind(
     return readings_behind(stream, variable, readings, pairs)
 
 
+def _explicit_target(
+    streams: Mapping[str, xr.Dataset],
+    target: CellBounds | str,
+    selection: list[tuple[str, str]],
+    finer_support: FinerSupport,
+) -> tuple[CellBounds, str, str]:
+    """Return the cells a caller asked to pair on, and how to describe that choice.
+
+    Explicit cells are taken as given. A period string becomes a uniform grid
+    over the two records through the grid builder, so it is anchored,
+    windowed and checked against the copy rule exactly as a campaign grid is.
+    """
+    if isinstance(target, CellBounds):
+        if len(target) == 0:
+            raise TsaraAlignError("target has no cells to pair on.")
+        return (
+            target,
+            EXPLICIT_CLOCK,
+            f"explicit target cells ({len(target)} cells, median {median_width_s(target):.6g} s)",
+        )
+    try:
+        config = OutputGridConfig(freq=str(target))
+    except ValidationError as error:
+        raise TsaraAlignError(
+            f"target must be a CellBounds or a period such as '10s'; got {target!r}."
+        ) from error
+    return (
+        grid_cells(streams, config, selection, finer_support=finer_support),
+        EXPLICIT_CLOCK,
+        f"explicit target period {target}",
+    )
+
+
+def _warn_if_a_partner_blends(
+    joined: xr.Dataset,
+    y: tuple[str, CellBounds],
+    x: tuple[str, CellBounds],
+    clock_cells: CellBounds,
+) -> None:
+    """Say so when a binned member's cells are as wide as the clock's but offset from them.
+
+    The 2024 drive suite's shape on every pair (§11.4.1): each reading of the
+    averaged member lends half of itself to two neighbouring pairs, so
+    neighbouring pairs share an error and a fit treating them as independent
+    has a standard error too narrow by up to 1/sqrt(2). The readings count
+    cannot see it, since no reading is used twice; the borrowed share
+    records it (0.5 at half a cell); and the remedy is a coarser common
+    clock, which the message names. The same exact test the grid applies to
+    its own cells (:func:`~tsara.align.binning.phase_offset_s`).
+    """
+    for name, member_cells in (y, x):
+        if joined[name].attrs.get(BINNED_ATTR) != 1:
+            continue
+        offset_s = phase_offset_s(member_cells, clock_cells)
+        if offset_s is None:
+            continue
+        width_s = median_width_s(clock_cells)
+        logger.warning(
+            "Every pair blends two readings of '%s': its cells are as wide as the clock's "
+            "(%.6g s) but offset by %.6g s, so each reading lends part of itself to two "
+            "neighbouring pairs (borrowed share %.2f) and neighbouring pairs share an error. "
+            "A fit treating the pairs as independent has a standard error too narrow by up "
+            "to 1/sqrt(2) (METHODS §11.4.1). Pair both species on a coarser common clock "
+            "with target=, e.g. target='%gs'.",
+            name,
+            width_s,
+            offset_s,
+            float(joined[name].attrs[BORROWED_ATTR]),
+            10 * width_s,
+        )
+
+
 def pair_species(
     streams: Mapping[str, xr.Dataset],
     y: VariableRef,
     x: VariableRef,
     *,
     interval: tuple[pd.Timestamp, pd.Timestamp] | None = None,
+    target: CellBounds | str | None = None,
     min_coverage: float = 0.0,
     propagation_form: PropagationForm = "ar1_neff",
     finer_support: FinerSupport = "refuse",
@@ -309,6 +391,16 @@ def pair_species(
     interval : tuple of pandas.Timestamp, optional
         Restrict pairing to cells overlapping this window -- an event, in
         Phase 6. ``None`` pairs the whole record.
+    target : CellBounds or str, optional
+        Cells to pair on instead of the wider-supported member's own: explicit
+        cells, or a period such as ``'10s'`` for a uniform grid over the two
+        records (built by :func:`~tsara.align.grid.grid_cells`, under the same
+        copy rule). Both species are then averaged onto it. The measured use
+        (§11.4.1): two dense equal-width instruments half a cell apart share
+        every reading between neighbouring pairs, and a naive standard error
+        is up to 1/sqrt(2) too narrow on *either* clock; on a common clock five
+        to ten times coarser it is honest again while the real scatter is
+        unchanged. ``None`` uses the clock rule.
     min_coverage : float, optional
         Drop pairs whose cell was covered by less than this fraction of
         contributing data. Default 0.0 drops nothing; coverage is recorded
@@ -346,13 +438,23 @@ def pair_species(
             "a species to itself is 1 by construction."
         )
 
-    # Decision 1, which cells: the clock rule, and the target it selects.
+    # Decision 1, which cells: the clock rule and the target it selects, or
+    # the cells the caller asked for.
     y_cells = stream_cells(streams[y_instrument], y_instrument)
     x_cells = stream_cells(streams[x_instrument], x_instrument)
-    clock, reason = _choose_clock(
-        (y_instrument, y_variable, y_cells), (x_instrument, x_variable, x_cells), streams
-    )
-    target = y_cells if clock == y_instrument else x_cells
+    if target is None:
+        clock, reason = _choose_clock(
+            (y_instrument, y_variable, y_cells), (x_instrument, x_variable, x_cells), streams
+        )
+        cells = y_cells if clock == y_instrument else x_cells
+    else:
+        cells, clock, reason = _explicit_target(
+            streams,
+            target,
+            [(y_instrument, y_variable), (x_instrument, x_variable)],
+            finer_support,
+        )
+    target = cells
 
     # Decision 2, which stretch: optionally only the clock cells overlapping a window.
     if interval is not None:
@@ -405,6 +507,11 @@ def pair_species(
         > int(joined[name].attrs[READINGS_ATTR])
         for name in (y_name, x_name)
     }
+    if clock != EXPLICIT_CLOCK:
+        # The clock rule chose these cells, so the caller has not seen what a
+        # partner half a cell from them does; with an explicit target the
+        # caller chose, and a period target was already checked by the grid.
+        _warn_if_a_partner_blends(joined, (y_name, y_cells), (x_name, x_cells), target)
     dataset = joined.isel({TIME_COORD: surviving})
     # Count the readings behind the surviving pairs, per species, and warn when
     # fewer readings than pairs means some reading sits in more than one pair.

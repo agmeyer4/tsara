@@ -16,7 +16,13 @@ import pytest
 import xarray as xr
 
 from tsara.align import TsaraAlignError, bin_streams_onto_cells, resolve_variable
-from tsara.align.binning import readings_behind, select_variables, stream_cells, targets_overlap
+from tsara.align.binning import (
+    phase_offset_s,
+    readings_behind,
+    select_variables,
+    stream_cells,
+    targets_overlap,
+)
 from tsara.core.naming import sigma_rand_name
 from tsara.core.support import CellBounds
 from tsara.core.timebase import SECOND_NS as SECOND
@@ -1202,3 +1208,68 @@ def test_targets_overlap_is_exact_and_order_free() -> None:
     assert targets_overlap(one_ns)
     assert not targets_overlap(bounds([5, 0], [6, 5]))  # unsorted, abutting
     assert not targets_overlap(bounds([0], [1]))
+
+
+# ---------------------------------------------------------------------------
+# A declared sigma on a direction is dropped aloud (METHODS §11.5)
+# ---------------------------------------------------------------------------
+
+
+def _direction_with_sigma(n: int) -> xr.Dataset:
+    attrs: dict[str, dict[str, object]] = {"wind_dir": {"units": "degrees", "circular": 1}}
+    return make_stream(
+        0.0,
+        1.0,
+        n,
+        {"wind_dir": np.linspace(0.0, 40.0, n), sigma_rand_name("wind_dir"): np.full(n, 3.0)},
+        attrs=attrs,
+    )
+
+
+def test_a_dropped_direction_sigma_is_said_aloud_on_the_binned_path(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("WARNING", logger="tsara.align.binning"):
+        joined = bin_streams_onto_cells({"met": _direction_with_sigma(8)}, cells(0.0, 4.0, 2))
+    assert sigma_rand_name("wind_dir") not in joined.data_vars
+    assert "'wind_dir' on 'met' is circular and carries sigma_rand_wind_dir" in caplog.text
+    assert "not the instrument's precision" in caplog.text
+
+
+def test_a_dropped_direction_sigma_is_said_aloud_on_the_pass_through_path(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("WARNING", logger="tsara.align.binning"):
+        joined = bin_streams_onto_cells({"met": _direction_with_sigma(8)}, cells(0.0, 1.0, 8))
+    assert sigma_rand_name("wind_dir") not in joined.data_vars
+    assert "is circular and carries sigma_rand_wind_dir" in caplog.text
+
+
+def test_a_direction_without_a_sigma_is_not_warned_about(caplog: pytest.LogCaptureFixture) -> None:
+    attrs: dict[str, dict[str, object]] = {"wind_dir": {"units": "degrees", "circular": 1}}
+    met = make_stream(0.0, 1.0, 8, {"wind_dir": np.linspace(0.0, 40.0, 8)}, attrs=attrs)
+    with caplog.at_level("WARNING", logger="tsara.align.binning"):
+        bin_streams_onto_cells({"met": met}, cells(0.0, 4.0, 2))
+    assert "is circular and carries" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# The one exact blend test, shared by the grid and pairing (METHODS §11.9.1)
+# ---------------------------------------------------------------------------
+
+
+def test_phase_offset_is_reported_only_for_equal_widths_out_of_phase() -> None:
+    """Same width and offset: the offset. Anything else: None, and no tolerance anywhere."""
+    grid = spaced(0, 60, 10, 60)
+    assert phase_offset_s(spaced(30, 60, 9, 60), grid) == pytest.approx(30.0)
+    assert phase_offset_s(spaced(10, 60, 9, 60), grid) == pytest.approx(10.0)
+    assert phase_offset_s(spaced(0, 60, 10, 60), grid) is None  # in phase
+    assert phase_offset_s(spaced(0, 1.023, 400, 1.023), spaced(0, 1, 409, 1)) is None  # jitter
+    assert phase_offset_s(spaced(0, 1, 600, 1), grid) is None  # narrower readings
+    empty = CellBounds(start_ns=np.array([], dtype=np.int64), stop_ns=np.array([], dtype=np.int64))
+    assert phase_offset_s(empty, grid) is None
+    assert phase_offset_s(grid, empty) is None
+    # A degenerate target of zero width has no phase to be out of.
+    assert phase_offset_s(bounds([0, 5], [0, 5]), bounds([0, 5], [0, 5])) is None
+    # Mixed target widths: not a uniform tiling, so no phase question either.
+    assert phase_offset_s(spaced(0, 60, 4, 60), bounds([0, 60, 120], [60, 120, 150])) is None

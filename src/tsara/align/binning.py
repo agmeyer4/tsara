@@ -636,6 +636,49 @@ def _refuse_upsampling(
     )
 
 
+def phase_offset_s(readings: CellBounds, target: CellBounds) -> float | None:
+    """Return how far a same-width stream sits out of phase with the target, or ``None``.
+
+    The one blend that is both exact and actionable (§11.2.4, §11.9.1): when
+    every reading is as wide as every target cell and the two tilings are
+    offset, each target value blends two readings and each reading lends part
+    of itself to two rows -- the borrowed share says how much, ``2f(1 - f)``
+    -- and the remedy belongs to the caller, who can move the grid onto the
+    instrument's boundaries or pair on a coarser common clock. ``None`` when
+    the widths differ (cadence jitter included: a 1.023 s reading on a 1 s
+    cell is narrowed, and not a question of phase), when either side is
+    empty, or when the tilings coincide.
+
+    Parameters
+    ----------
+    readings : CellBounds
+        The stream's cells.
+    target : CellBounds
+        The cells it is being put on.
+
+    Returns
+    -------
+    float or None
+        The first non-zero offset of a reading's start from the target's
+        tiling, in seconds; ``None`` when the situation does not arise.
+    """
+    if len(readings) == 0 or len(target) == 0:
+        return None
+    period = int(target.width_ns[0])
+    if (
+        period <= 0
+        or not np.all(target.width_ns == period)
+        or not np.all(readings.width_ns == period)
+    ):
+        return None
+    # How far each reading starts past a target boundary; zero everywhere means in phase.
+    offsets = (readings.start_ns - int(target.start_ns.min())) % period
+    shifted = offsets[offsets != 0]
+    if shifted.size == 0:
+        return None
+    return float(shifted[0]) / NS_PER_S
+
+
 def targets_overlap(target: CellBounds) -> bool:
     """Say whether any two target cells overlap by a positive amount.
 
@@ -1032,6 +1075,8 @@ def _one_variable(
     # that reads all three lives in `core.naming` and is shared with the
     # auxiliary interpolator, which has to make the same decision.
     circular = is_circular(attrs)
+    if circular:
+        _warn_of_a_dropped_direction_sigma(stream, variable, instrument)
     # Already on the target cells (the caller found nothing to search)? Then
     # pass through rather than average onto itself.
     attrs[BINNED_ATTR] = int(pairs is not None)
@@ -1103,6 +1148,36 @@ def _one_variable(
     change = _summarize(pairs, ratios, weight, borrowed, columns[column][0])
     _record(attrs, change)
     return columns, _BINNED_HERE, change
+
+
+def _warn_of_a_dropped_direction_sigma(stream: xr.Dataset, variable: str, instrument: str) -> None:
+    """Say so when a direction carries a declared sigma that no join propagates.
+
+    Ingestion resolves and stores a declared uncertainty on a circular
+    variable exactly as on any other; both join paths then drop it, because a
+    direction's companions are the mean resultant length and the exact
+    dispersion, which describe the spread of its *readings* and are not the
+    instrument's precision (§11.5). Until the Phase-4.6 walkthrough that
+    happened without a word. Propagating a direction sigma properly is a
+    small-angle, von-Mises question that no real manifest has yet asked; what
+    is owed meanwhile is the sentence.
+    """
+    declared = [
+        name
+        for name in (sigma_rand_name(variable), sigma_sys_name(variable))
+        if name in stream.data_vars
+    ]
+    if not declared:
+        return
+    logger.warning(
+        "'%s' on '%s' is circular and carries %s, which no join propagates: a direction's "
+        "companions are its mean resultant length and exact dispersion, which describe the "
+        "spread of its readings, not the instrument's precision (METHODS §11.5). The "
+        "declared figure stays on the stream and is absent from this product.",
+        variable,
+        instrument,
+        " and ".join(declared),
+    )
 
 
 def _bin_circular(

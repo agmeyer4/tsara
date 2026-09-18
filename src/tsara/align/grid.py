@@ -89,6 +89,7 @@ from tsara.align.binning import (
     VariableRef,
     bin_streams_onto_cells,
     pair_width_ratios,
+    phase_offset_s,
     select_variables,
     stream_cells,
 )
@@ -187,11 +188,11 @@ def grid_cells(
             f"The requested grid window is empty: it starts at "
             f"{pd.Timestamp(start_ns)} and ends at {pd.Timestamp(stop_ns)}."
         )
-    _warn_if_out_of_phase(cells, start_ns, period_ns)
     # Abutting cells of exactly one period, enough to reach the end of the window.
     n_cells = int(np.ceil((stop_ns - start_ns) / period_ns))
     edges = start_ns + np.arange(n_cells + 1, dtype=np.int64) * period_ns
     target = CellBounds(start_ns=edges[:-1], stop_ns=edges[1:])
+    _warn_if_out_of_phase(cells, target)
     # The period rule, measured against these actual cells before anything is binned.
     _refuse_a_period_too_fine(cells, target, str(config.freq), finer_support)
     return target
@@ -235,7 +236,7 @@ def _refuse_a_period_too_fine(
     )
 
 
-def _warn_if_out_of_phase(cells: Mapping[str, CellBounds], start_ns: int, period_ns: int) -> None:
+def _warn_if_out_of_phase(cells: Mapping[str, CellBounds], target: CellBounds) -> None:
     """Note any stream whose cells are as wide as the grid but offset from it.
 
     A legitimate but easily-missed situation. When a stream's cells are the
@@ -251,31 +252,30 @@ def _warn_if_out_of_phase(cells: Mapping[str, CellBounds], start_ns: int, period
     ratio moves from 0.250000034 to 0.249940526. Aligning the grid start to
     that instrument's own boundaries removes it entirely.
 
-    The ``n_readings`` column already reports the blend, so this is a note
-    rather than a refusal: blending is sometimes unavoidable, and which
-    instrument the grid should be in phase with is the user's choice.
+    The ``n_readings`` and ``borrowed_`` columns already report the blend, so
+    this is a note rather than a refusal: blending is sometimes unavoidable,
+    and which instrument the grid should be in phase with is the user's
+    choice. The test itself is shared with pairing
+    (:func:`~tsara.align.binning.phase_offset_s`), which says the same thing
+    about a partner half a cell from the clock.
     """
     for instrument, bounds in cells.items():
-        widths = bounds.width_ns
-        # Only a stream whose cells are exactly one grid period wide can be in or out of phase.
-        if not np.all(widths == period_ns):
+        offset_s = phase_offset_s(bounds, target)
+        if offset_s is None:
             continue
-        # How far each cell starts past a grid boundary; zero everywhere means in phase.
-        offsets = (bounds.start_ns - start_ns) % period_ns
-        if np.any(offsets != 0):
-            # In seconds, not the raw nanoseconds the arithmetic runs in: a
-            # reader of the log is being asked to act on these two numbers by
-            # moving the grid start, and "60000000000 ns" is a period nobody
-            # recognises as one minute.
-            logger.warning(
-                "Stream '%s' has cells exactly as wide as the %.6g s grid period but "
-                "offset from it by %.6g s, so every grid value will blend two of its "
-                "cells (n_readings = 2) rather than reproduce one. Set the grid start "
-                "to one of its cell boundaries to avoid the smoothing.",
-                instrument,
-                period_ns / NS_PER_S,
-                int(offsets[0]) / NS_PER_S,
-            )
+        # In seconds, not the raw nanoseconds the arithmetic runs in: a
+        # reader of the log is being asked to act on these two numbers by
+        # moving the grid start, and "60000000000 ns" is a period nobody
+        # recognises as one minute.
+        logger.warning(
+            "Stream '%s' has cells exactly as wide as the %.6g s grid period but "
+            "offset from it by %.6g s, so every grid value will blend two of its "
+            "cells (n_readings = 2) rather than reproduce one. Set the grid start "
+            "to one of its cell boundaries to avoid the smoothing.",
+            instrument,
+            int(target.width_ns[0]) / NS_PER_S,
+            offset_s,
+        )
 
 
 def build_output_grid(
