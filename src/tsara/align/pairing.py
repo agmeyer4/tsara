@@ -32,7 +32,11 @@ what the interval model forbids; pairing on the mean's clock is admissible,
 and the coverage of 0.25 is what says how much to trust it.
 
 So the direction is always the same: a value may be averaged onto a wider
-support, never split onto a narrower one.
+support, never copied onto a narrower one. Where a reading must still be
+narrowed or shared -- a clock whose cells vary in width, a partner half a
+cell out of phase -- the product records how much of each value was borrowed
+from beyond its cell and says so (``docs/METHODS.md`` §11.2.4), and a caller
+who wants different cells altogether passes ``target=``.
 
 When the widths tie
 --------------------
@@ -86,8 +90,11 @@ A ceiling, not an estimate. Two *dense* instruments half a cell apart
 duplicate no reading on either clock, yet each reading of the averaged member
 is shared between two neighbouring pairs, and a naive standard error is then
 too narrow by up to 1/sqrt(2) whichever clock is chosen (§11.4.1). No count of
-readings can see a correlation between pairs; the regression, which can see
-the overlap weights, is where that has to be accounted for.
+readings can see a correlation between pairs; the borrowed share records it
+(0.5 at half a cell), the product warns with the remedy, and the remedy is
+``target=``: both members on a common clock five to ten times coarser, where
+the naive standard error is honest again at no cost in real scatter. Modelling
+the correlation from the overlap weights belongs to the regression.
 """
 
 from __future__ import annotations
@@ -245,7 +252,7 @@ def _choose_clock(
     # Rule 1: two gases from one instrument already share cells.
     if y_instrument == x_instrument:
         return y_instrument, "both species share one instrument"
-    # Rule 2: the wider cells, so nothing is split onto a finer support.
+    # Rule 2: the wider cells, so nothing is copied onto a finer support.
     y_width, x_width = median_width_s(y_cells), median_width_s(x_cells)
     if y_width != x_width:
         wider, narrower = (y_width, x_width) if y_width > x_width else (x_width, y_width)

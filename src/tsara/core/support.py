@@ -12,6 +12,12 @@ covers both:
     TSARA never evaluates a value on a finer support than it was
     delivered on.
 
+Phase 4.6 made the joining half of that a default with a record rather than
+an absolute (``docs/METHODS.md`` §11.2.4): a join measures, per reading, how
+far it bends the support -- :func:`borrowed_share` says how much of each cell's
+value rests on air outside the cell -- refuses a copy unless asked for by
+name, and says the rest aloud. The interpolation half has no knob.
+
 This module is the arithmetic that makes that principle checkable. A **cell**
 is one row of a stream: a value plus the time interval it describes. That
 interval is its **support**; its length is the **width**; the **label** says

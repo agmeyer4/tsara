@@ -44,8 +44,13 @@ class OutputGridConfig(_StrictModel):
     Construction is binning-only in both directions: gas species are *never*
     interpolated (a concentration inside a plume is not a smooth field), so
     a cell with zero native samples in its interval is NaN with
-    `n_readings_<name> = 0` — never papered over with a straight line. Aux-field interpolation
-    (GPS, met) is a separate concern, see :class:`AlignmentConfig`.
+    `n_readings_<name> = 0` — never papered over with a straight line. The
+    period is checked against the selected variables (METHODS.md §11.7): a
+    reading at least twice as wide as a grid cell it touches would be copied
+    across rows and is refused unless :class:`AlignmentConfig` says
+    ``finer_support: allow``; everything narrower is recorded per column
+    (§11.2.4). Aux-field interpolation (GPS, met) is the other knob on that
+    class.
 
     There is deliberately no choice of binning statistic. A ``median``
     option was specified in Phase 1 and removed in Phase 4 before it ever

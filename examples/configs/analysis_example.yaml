@@ -37,7 +37,8 @@ alignment:
 
 # --- Cross-species pairing -----------------------------------------------
 # Pairing has no free parameters of its own -- the clock is always the cells
-# of whichever stream has the WIDER support (METHODS.md §1.3). It does have a
+# of whichever stream has the WIDER support (METHODS.md §1.3), unless a call
+# passes target= to put both species on cells of its own choosing. It does have a
 # sufficiency question: a 15 s canister paired against a 60 s mean covers a
 # quarter of that cell, and the arithmetic cannot tell that from full
 # coverage. Coverage is always recorded; this decides whether to act on it.

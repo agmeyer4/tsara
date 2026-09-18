@@ -32,9 +32,13 @@ Automatically, so a caller cannot forget:
 
 * its **uncertainty components**, propagated through the *same* overlap
   weights that formed the value, random and systematic separately (§3);
-* **how many** readings contributed and **how much** of the target cell
-  they covered — the two numbers that separate a well-determined value from
-  a number that merely exists;
+* **how many** readings contributed, **how much** of the target cell they
+  covered, and **how much** of the value rests on air outside the cell — the
+  three numbers that separate a well-determined value from a number that
+  merely exists (§11.2.4);
+* per column, what the join did to the readings behind it and by how much:
+  ``tsara_support_transform``, ``tsara_width_ratio_max``,
+  ``tsara_borrowed_share`` and ``tsara_readings``;
 * everything the input stream declared about itself, plus where it came from.
 
 Three behaviours are not negotiable and are handled here rather than left to
@@ -43,6 +47,11 @@ arithmetically (§11.5). A stream whose cells already *are* the target passes
 through untouched, because averaging a cell onto itself is the identity
 mathematically and not in floating point. And a target cell with no
 contributing data stays ``nan``: gases are binned, never interpolated (§1.2).
+
+One behaviour is a policy. A reading at least :data:`COPY_RATIO` times as wide
+as a target cell it touches would be *copied* across rows, and is refused
+unless ``finer_support="allow"`` asks for it by name; everything narrower is
+allowed, recorded per column, and named in one warning per call (§11.2.4).
 """
 
 from __future__ import annotations
