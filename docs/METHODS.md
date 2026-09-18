@@ -3078,8 +3078,12 @@ wrong by 69 ppb RMS with the notebook's default plumes (p95 158 ppb, worst
 495 ppb, against a signal spread of 105 ppb), 58 ppb with 30 s-wide plumes,
 and 0.02 ppb with no plumes at all. The within-cell spread of a *faster*
 stream prices that error to within 3–11 % across the three regimes (RMS of
-error over spread 0.89, 0.95, 0.97); the narrowed stream's own
-neighbour-to-neighbour variability does not (0.28–1.32). So the only
+error over spread 0.89, 0.95, 0.97) — and it is a bound, not a fit: a
+part-mean's departure from the whole-cell mean is the between-part spread,
+which the partition of variance keeps at or below the within-cell spread. The
+bound is tight for quarter-minute cells and conservative for halves (notebook
+04 §4 reads about 0.73 at 30 s). The narrowed stream's own
+neighbour-to-neighbour variability is not a price at all (0.28–1.32). So the only
 calibrated price for narrowing needs a faster stream — and with a faster
 stream the honest operation is to bin *it*, not to narrow the slow one. When
 the price is available the operation is unnecessary; when the operation is the
@@ -3825,7 +3829,8 @@ neighbouring rows lower the independent information without lowering the
 count, which is what the borrowed share is for. Measured on the ten-drive
 15 s grid, the canisters' longest fills (20.1 s) make the column `narrowed`
 at a ratio of 1.34 with 520 rows from 261 readings — real narrowing that was
-allowed and silent before Phase 4.6.
+allowed and silent before Phase 4.6 — and on the 60 s grid `shared`, with a
+borrowed share of 0.10.
 
 **How the rule and the record are checked.** (As pinned in Phase 4; the rule
 itself was replaced in Phase 4.6 and its test is now §11.2.4's table.) The
@@ -3857,9 +3862,10 @@ separate drives puts every hour between them into the matrix. Measured on the
 Picarro CO₂, CH₄ and MetNav wind direction of the ten 2024 drive days: a 60 s
 grid spans 29.5 days in 42 443 rows, 7.9 % of them holding any data; a 1 s grid
 spans the same 29.5 days in **2 546 521 rows, 92.1 % empty**, built in 1.5 s
-but holding 285 MB for three variables — about 95 MB per variable once its
-count, coverage and angular columns are included, so a few dozen VOCs is
-several gigabytes of mostly `nan`. For a receptor-model matrix, grid each drive
+but holding 346 MB for three variables — about 115 MB per variable once its
+count, coverage, borrowed-share and angular columns are included (the
+borrowed-share columns Phase 4.6 added are 61 MB of it), so a few dozen VOCs
+is several gigabytes of mostly `nan`. For a receptor-model matrix, grid each drive
 with `start` and `end`; the uniform span is for the continuous state, which
 wants the gaps.
 
@@ -3912,10 +3918,13 @@ every value identical after reload:
 
 | level | file | write | load |
 |---|---|---|---|
-| none (default) | 285.2 MB | 1.5 s | 0.3 s |
-| 1 | 5.5 MB | 2.7 s | 0.9 s |
-| 4 | 3.7 MB | 3.0 s | 1.1 s |
-| 9 | 3.3 MB | 10.4 s | 1.1 s |
+| none (default) | 346.4 MB | 1.5 s | 0.4 s |
+| 1 | 5.9 MB | 2.4 s | 0.8 s |
+| 4 | 3.8 MB | 4.0 s | 1.6 s |
+| 9 | 3.4 MB | 11.0 s | 1.2 s |
+
+(Re-measured in Phase 4.6, when the `borrowed_<name>` columns joined the grid;
+the Phase-4 figures were 285.2 MB uncompressed and 3.7 MB at level 4.)
 
 The time axis matters: compressing only the data variables left the same file
 at 64 MB, because a regular time axis and its bounds, 24 bytes per row, are
