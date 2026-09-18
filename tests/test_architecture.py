@@ -218,10 +218,6 @@ def test_export_discovery_finds_more_than_the_packages() -> None:
 #: authors' own expectations guard is not much of a guard, so the rule is now
 #: enforced and every exception has to say why.
 UNREFERENCED: dict[str, str] = {
-    "bin_onto_cells": (
-        "The cross-rate pairing primitive. Phase 4 is its first caller; until "
-        "then it is reached only by its own tests."
-    ),
     "read_icartt": (
         "Reached by name through the reader registry (@register_reader), "
         "which is a lookup rather than a call site the parser can see."

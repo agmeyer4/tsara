@@ -660,3 +660,63 @@ def test_a_variable_that_is_not_one_value_per_cell_is_named_not_broadcast() -> N
     stream = make_stream(0.0, 1.0, 20, {"ch4": np.arange(20.0)}).reset_coords("time_bnds")
     with pytest.raises(TsaraAlignError, match="only one value per cell can be binned"):
         bin_streams_onto_cells({"a": stream}, cells(0.0, 5.0, 4), [("a", "time_bnds")])
+
+
+# ---------------------------------------------------------------------------
+# The overlap search runs once per instrument
+# ---------------------------------------------------------------------------
+
+
+def _count_overlap_searches(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Count every overlap search a join performs, wherever it is made.
+
+    Patched in all three modules that can search -- the binner, the scalar
+    arithmetic and the circular arithmetic -- because each imported the name
+    directly, and a search hidden inside one of the two arithmetic modules
+    would otherwise go uncounted while the binner's own count read one.
+    """
+    import tsara.align.binning as binning
+    import tsara.core.circular as circular
+    import tsara.core.support as support
+
+    calls: list[int] = []
+    real = support.overlap_pairs
+
+    def counting(readings: CellBounds, target: CellBounds) -> object:
+        calls.append(1)
+        return real(readings, target)
+
+    for module in (binning, circular, support):
+        monkeypatch.setattr(module, "overlap_pairs", counting)
+    return calls
+
+
+def test_overlaps_are_searched_once_per_instrument(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A spectral stream carries a thousand columns on one clock.
+
+    The search depends only on the cells, so three variables -- one with a
+    declared sigma to propagate, one a direction -- and the replication check
+    share a single search rather than one each.
+    """
+    calls = _count_overlap_searches(monkeypatch)
+    stream = make_stream(
+        0.0,
+        1.0,
+        60,
+        {"a": np.arange(60.0), "b": np.arange(60.0), "wind": np.linspace(0.0, 90.0, 60)},
+        attrs={"wind": {"units": "degrees", "circular": 1}},
+    )
+    stream[sigma_rand_name("a")] = ("time", np.full(60, 0.5))
+    joined = bin_streams_onto_cells({"x": stream}, cells(0.0, 10.0, 6))
+    assert len(calls) == 1
+    assert {"a", "b", "wind", sigma_rand_name("a")} <= set(joined.data_vars)
+
+
+def test_a_stream_already_on_the_target_cells_searches_no_overlaps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Identical cells pass through, and a reading that is its own target cannot replicate."""
+    calls = _count_overlap_searches(monkeypatch)
+    stream = make_stream(0.0, 1.0, 60, {"a": np.arange(60.0)})
+    bin_streams_onto_cells({"x": stream}, cells(0.0, 1.0, 60))
+    assert calls == []

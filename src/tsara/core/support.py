@@ -117,8 +117,11 @@ __all__ = [
     "TsaraSupportError",
     "attach_time_bounds",
     "bin_onto_cells",
+    "borrowed_share",
     "cell_methods_value",
     "check_bounds_intact",
+    "check_pairs_match",
+    "contributing_weights",
     "declared_bounds_name",
     "ensure_time_bounds",
     "nominal_cadence_ns",
@@ -453,12 +456,19 @@ class BinnedOntoCells:
         readings. The guard a later stage needs: a canister whose 15 s fill
         overlaps only 3 s of partner data is not comparable to one with full
         coverage, even though both produce a number.
+    borrowed : numpy.ndarray
+        Share of each target cell's value that rests on air *outside* the
+        cell (:func:`borrowed_share`); ``nan`` where nothing contributed.
+        The third qualifier beside the count and the coverage: how many
+        readings, how much of the cell, and how much of the value was
+        borrowed from beyond it.
     """
 
     values: npt.NDArray[np.float64]
     n_readings: npt.NDArray[np.int64]
     coverage: npt.NDArray[np.float64]
     n_overlapping: npt.NDArray[np.int64]
+    borrowed: npt.NDArray[np.float64]
 
 
 @dataclass(frozen=True, eq=False)
@@ -568,19 +578,162 @@ def overlap_pairs(readings: CellBounds, target: CellBounds) -> OverlapPairs:
     )
 
 
+def check_pairs_match(pairs: OverlapPairs, readings: CellBounds, target: CellBounds) -> None:
+    """Refuse overlap pairs that were found for other cells.
+
+    A caller may hand :func:`bin_onto_cells` or
+    :func:`~tsara.core.circular.bin_circular_onto_cells` pairs it found
+    earlier, so that an instrument carrying a thousand columns on one clock
+    is searched once rather than a thousand times. The saving is worth
+    having; the failure mode is not. Pairs found for a different target
+    index a different set of cells, and every aggregation below would then
+    be silently wrong in a way no output could reveal, since the numbers
+    would still be means of real readings over real intervals -- just not
+    the intervals the product claims. So the two cheap facts that would
+    expose the mismatch are checked on every call.
+
+    Parameters
+    ----------
+    pairs : OverlapPairs
+        Pairs a caller found earlier.
+    readings, target : CellBounds
+        The cells they must have been found for.
+
+    Raises
+    ------
+    TsaraSupportError
+        If the pairs are sized for a different target, or index a reading the
+        readings do not have.
+    """
+    if pairs.n_target != len(target):
+        raise TsaraSupportError(
+            f"The overlap pairs were found for {pairs.n_target} target cell(s), but "
+            f"{len(target)} were given. Pairs belong to the cells they were found for; "
+            "find them again for these."
+        )
+    if pairs.reading_index.size and int(pairs.reading_index.max()) >= len(readings):
+        raise TsaraSupportError(
+            f"The overlap pairs index reading {int(pairs.reading_index.max())}, but only "
+            f"{len(readings)} reading(s) were given. Pairs belong to the cells they were "
+            "found for; find them again for these."
+        )
+
+
+def contributing_weights(pairs: OverlapPairs, values: npt.ArrayLike) -> npt.NDArray[np.float64]:
+    """Return each pair's weight in an overlap-weighted mean: its overlap, or zero.
+
+    The one definition of "this reading contributes to this cell": the
+    reading holds a value, and the pair's overlap is what it weighs. A masked
+    reading weighs nothing, and a pair that touches only at a boundary
+    already carries an overlap of zero. Written once and shared by the
+    scalar mean, the circular mean, the borrowed share and the uncertainty
+    propagation, so that a cell's methane, its wind direction, its sigma and
+    its qualifiers are all formed from the same readings at the same
+    weights. Three private spellings of this line once existed; they agreed,
+    and nothing but a reader's patience guaranteed it.
+
+    Parameters
+    ----------
+    pairs : OverlapPairs
+        The overlapping pairs.
+    values : array-like
+        One value per reading, ``nan`` where masked.
+
+    Returns
+    -------
+    numpy.ndarray
+        One float64 weight per pair, in nanoseconds of overlap.
+    """
+    paired = np.asarray(values, dtype=np.float64)[pairs.reading_index]
+    return np.where(np.isfinite(paired), pairs.overlap_ns, 0).astype(np.float64)
+
+
+def borrowed_share(
+    pairs: OverlapPairs, readings: CellBounds, weight: npt.NDArray[np.float64]
+) -> npt.NDArray[np.float64]:
+    r"""Return, per target cell, how much of its value rests on air outside the cell.
+
+    An overlap-weighted mean uses each reading's value, which is that
+    reading's mean over its *own* cell, to describe only the part of that
+    cell lying inside the target. For the rest of the reading's cell the
+    formula silently assumes the air was the same as inside. This number
+    says how much of each target cell's value carries that assumption:
+
+    .. math::
+
+        b_T = \frac{\sum_i w_i \,(1 - w_i / |R_i|)}{\sum_i w_i},
+
+    the coverage-weighted mean over contributing readings of the fraction of
+    each reading's cell that lies outside the target (``docs/METHODS.md``
+    §11.2.4). It is exactly zero when every contributing reading sits wholly
+    inside its target, which is pure averaging and assumes nothing. For two
+    equal-width cells offset by a fraction ``f`` of a cell it is ``2f(1-f)``,
+    half at half a cell. For a narrower cell wholly inside a wider reading it
+    is ``1 - W/R``: three quarters of a 60 s mean stood on a 15 s cell is
+    borrowed from the other 45 s.
+
+    It is a magnitude, not a category. Measured, ordinary cadence jitter
+    (a 1.023 s analyzer on a 1 s grid) gives about 0.34, a half-phase blend
+    exactly 0.5 and allowed narrowing 0.41-0.56, so no threshold on it
+    separates the three; the width ratio of a reading to its target is what
+    says which case a join is. This says how much was borrowed.
+
+    Parameters
+    ----------
+    pairs : OverlapPairs
+        The overlapping pairs.
+    readings : CellBounds
+        The readings' cells, for their widths.
+    weight : numpy.ndarray
+        Each pair's contributing weight, from :func:`contributing_weights`.
+
+    Returns
+    -------
+    numpy.ndarray
+        One value per target cell in ``[0, 1]``; ``nan`` where nothing
+        contributed.
+    """
+    n_target = pairs.n_target
+    reading_width = readings.width_ns[pairs.reading_index].astype(np.float64)
+    # The share of each reading's own cell lying inside its target. A
+    # zero-width reading has no inside; its weight is zero too, so the
+    # guarded division changes nothing it contributes.
+    inside = np.divide(
+        pairs.overlap_ns.astype(np.float64),
+        reading_width,
+        out=np.zeros_like(reading_width),
+        where=reading_width > 0,
+    )
+    # An overlap equal to the reading's width divides to exactly 1.0, so a
+    # reading wholly inside its target borrows exactly nothing -- which is
+    # what lets "averaged" be an exact test rather than a tolerance.
+    outside = 1.0 - inside
+    weight_sum = np.bincount(pairs.target_index, weights=weight, minlength=n_target)
+    borrowed_sum = np.bincount(pairs.target_index, weights=weight * outside, minlength=n_target)
+    out = np.full(n_target, np.nan, dtype=np.float64)
+    filled = weight_sum > 0
+    out[filled] = borrowed_sum[filled] / weight_sum[filled]
+    return out
+
+
 def bin_onto_cells(
     readings: CellBounds,
     values: npt.NDArray[np.float64],
     target: CellBounds,
+    *,
+    pairs: OverlapPairs | None = None,
 ) -> BinnedOntoCells:
     """Average one stream onto another stream's cells, weighted by overlap.
 
-    The primitive behind cross-rate pairing and the output grid. Each target
-    cell receives the mean of the readings that overlap it, each
-    weighted by *how much* of the reading's cell falls inside the target cell.
-    That is the operation the interval model exists to make well defined:
-    a 60 s mean can only be compared with the mean of a faster stream over
-    the same 60 s, and "the same 60 s" is exactly what bounds say.
+    The arithmetic behind every join TSARA performs: cross-rate pairing, the
+    output grid, and whatever cells a later stage asks for, all through
+    :func:`tsara.align.binning.bin_streams_onto_cells`, which calls this for
+    each scalar variable. Each target cell receives the mean of the readings
+    that overlap it, each weighted by *how much* of the reading's cell falls
+    inside the target cell. That is the operation the interval model exists
+    to make well defined: a 60 s mean can only be compared with the mean of a
+    faster stream over the same 60 s, and "the same 60 s" is exactly what
+    bounds say.
 
     Gases are never interpolated here, only averaged, per METHODS §1.2. A
     target cell with no overlapping readings yields ``nan``.
@@ -596,17 +749,25 @@ def bin_onto_cells(
     target : CellBounds
         Cells to average onto, typically the wider-supported stream's own
         cells.
+    pairs : OverlapPairs, optional
+        The overlaps between ``readings`` and ``target``, if the caller has
+        found them already. The overlap search is the one cost that scales
+        with the record and it depends only on the cells, so an instrument
+        carrying many variables on one clock finds them once and passes them
+        to every call. They are checked against the cells
+        (:func:`check_pairs_match`) rather than trusted.
 
     Returns
     -------
     BinnedOntoCells
-        Values, contributing counts, and coverage fractions.
+        Values, contributing counts, coverage fractions and borrowed shares.
 
     Raises
     ------
     TsaraSupportError
-        If ``values`` does not have one entry per reading, or the readings
-        cells are not sorted by start time.
+        If ``values`` does not have one entry per reading, the readings
+        cells are not sorted by start time, or ``pairs`` were found for
+        other cells.
     """
     reading_values = np.asarray(values, dtype=np.float64)
     if reading_values.shape != (len(readings),):
@@ -619,14 +780,19 @@ def bin_onto_cells(
     out_counts = np.zeros(n_target, dtype=np.int64)
     out_coverage = np.zeros(n_target, dtype=np.float64)
     out_overlapping = np.zeros(n_target, dtype=np.int64)
+    out_borrowed = np.full(n_target, np.nan, dtype=np.float64)
 
-    pairs = overlap_pairs(readings, target)
+    if pairs is None:
+        pairs = overlap_pairs(readings, target)
+    else:
+        check_pairs_match(pairs, readings, target)
     if pairs.overlap_ns.size == 0:
         return BinnedOntoCells(
             values=out_values,
             n_readings=out_counts,
             coverage=out_coverage,
             n_overlapping=out_overlapping,
+            borrowed=out_borrowed,
         )
     target_index = pairs.target_index
     reading_index = pairs.reading_index
@@ -634,7 +800,7 @@ def bin_onto_cells(
 
     paired = reading_values[reading_index]
     finite = np.isfinite(paired)
-    weight = np.where(finite, overlap, 0).astype(np.float64)
+    weight = contributing_weights(pairs, reading_values)
     # NaN values are zeroed *before* multiplying: 0 * nan is nan, so relying
     # on the weight alone would poison the sum.
     contribution = weight * np.where(finite, paired, 0.0)
@@ -656,12 +822,19 @@ def bin_onto_cells(
     # than divided, since CellBounds permits width 0 (floor_width is how a
     # caller opts into fixing it) and this must not raise on it.
     wide = target_width > 0
+    # Coverage can exceed 1 slightly, and is left alone when it does.
+    # Fixed-width cells centred on jittered timestamps overlap each other, so
+    # their overlaps with one target cell can sum past its width (§10.2, where
+    # the effect is documented as benign: the value is a weighted MEAN, so the
+    # weights normalize). Clipping would hide a real property of the input
+    # record behind a tidier number.
     out_coverage[wide] = weight_sum[wide] / target_width[wide]
     return BinnedOntoCells(
         values=out_values,
         n_readings=out_counts,
         coverage=out_coverage,
         n_overlapping=out_overlapping,
+        borrowed=borrowed_share(pairs, readings, weight),
     )
 
 

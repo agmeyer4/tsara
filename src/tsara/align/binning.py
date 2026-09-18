@@ -77,11 +77,19 @@ from tsara.core.propagation import (
     propagate_systematic_binned,
     sigma_at_support,
 )
-from tsara.core.support import CellBounds, attach_time_bounds, overlap_pairs
+from tsara.core.support import (
+    CellBounds,
+    attach_time_bounds,
+    bin_onto_cells,
+    contributing_weights,
+    overlap_pairs,
+)
 from tsara.core.timebase import NS_PER_S
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Iterable, Mapping, Sequence
+
+    from tsara.core.support import OverlapPairs
 
 logger = logging.getLogger(__name__)
 
@@ -429,7 +437,9 @@ def _sigma_on_cells(
     return np.asarray(moved, dtype=np.float64), provenance
 
 
-def measure_replication(readings: CellBounds, target: CellBounds) -> tuple[bool, float, float]:
+def measure_replication(
+    readings: CellBounds, target: CellBounds, pairs: OverlapPairs | None = None
+) -> tuple[bool, float, float]:
     """Say whether any one reading would be spread over two target cells' worth of time.
 
     The test for the one direction this operation must not run in. Averaging a
@@ -464,6 +474,8 @@ def measure_replication(readings: CellBounds, target: CellBounds) -> tuple[bool,
         Cells being averaged.
     target : CellBounds
         Cells to average onto.
+    pairs : OverlapPairs, optional
+        Their overlaps, if the caller has found them already.
 
     Returns
     -------
@@ -474,7 +486,8 @@ def measure_replication(readings: CellBounds, target: CellBounds) -> tuple[bool,
         widest target cell that would *not* replicate it.
     """
     # Long form: one entry per overlapping (reading, target cell) pair.
-    pairs = overlap_pairs(readings, target)
+    if pairs is None:
+        pairs = overlap_pairs(readings, target)
     # The width of the target cell in each pair.
     target_width = target.width_ns[pairs.target_index]
     # A zero-width target cell overlaps nothing by a positive amount and would
@@ -563,7 +576,9 @@ def readings_behind(
     return int(np.count_nonzero(touched_readings(readings, target) & finite))
 
 
-def _refuse_upsampling(readings: CellBounds, target: CellBounds, instrument: str) -> None:
+def _refuse_upsampling(
+    readings: CellBounds, target: CellBounds, instrument: str, pairs: OverlapPairs | None = None
+) -> None:
     """Raise if binning onto ``target`` would replicate ``readings``.
 
     Both of this phase's products already prevent this by choosing their
@@ -577,7 +592,7 @@ def _refuse_upsampling(readings: CellBounds, target: CellBounds, instrument: str
     promises not to do, with ``coverage`` reporting 1.0 and nothing else to
     notice it by.
     """
-    replicated, multiple, covered_s = measure_replication(readings, target)
+    replicated, multiple, covered_s = measure_replication(readings, target, pairs)
     if not replicated:
         return
     raise TsaraAlignError(
@@ -673,11 +688,23 @@ def bin_streams_onto_cells(
         )
     # 2. Decide each output column's name (suffixed only on a collision).
     names = _output_names(selection)
-    # 3. Refuse the direction that would replicate readings (METHODS §11.2.1).
-    # Once per instrument rather than once per variable: the question is about
-    # cells, and a spectral stream can carry a thousand columns on one clock.
+    # 3. Each instrument's cells and their overlaps with the target, found
+    # ONCE per instrument rather than once per variable: the search depends
+    # only on the cells, and a spectral stream can carry a thousand columns
+    # on one clock. A stream already on the target cells passes through and
+    # needs no search at all -- nor the replication check, since a reading
+    # that *is* its target covers exactly one cell's worth of time. Every
+    # other stream is refused here if the join would replicate its readings
+    # (METHODS §11.2.1), before anything is averaged.
+    joins: dict[str, tuple[CellBounds, OverlapPairs | None]] = {}
     for instrument in dict.fromkeys(name for name, _ in selection):
-        _refuse_upsampling(stream_cells(streams[instrument], instrument), target, instrument)
+        readings = stream_cells(streams[instrument], instrument)
+        if _same_cells(readings, target):
+            joins[instrument] = (readings, None)
+            continue
+        found = overlap_pairs(readings, target)
+        _refuse_upsampling(readings, target, instrument, found)
+        joins[instrument] = (readings, found)
     # 4. Put each variable on the target cells: its value, its companions
     # (count, coverage, sigmas or angular quality), and its attributes.
     data_vars: dict[str, tuple[str, np.ndarray, dict[str, object]]] = {}
@@ -686,6 +713,7 @@ def bin_streams_onto_cells(
     native: dict[str, str | None] = {}
     for instrument, variable in selection:
         column = names[instrument, variable]
+        cells, pairs = joins[instrument]
         columns, declared_method = _one_variable(
             streams[instrument],
             instrument=instrument,
@@ -693,6 +721,8 @@ def bin_streams_onto_cells(
             column=column,
             target=target,
             propagation_form=propagation_form,
+            readings=cells,
+            pairs=pairs,
         )
         data_vars.update({name: (TIME_COORD, *rest) for name, rest in columns.items()})
         native[column] = declared_method
@@ -765,15 +795,20 @@ def _one_variable(
     column: str,
     target: CellBounds,
     propagation_form: PropagationForm,
+    readings: CellBounds,
+    pairs: OverlapPairs | None,
 ) -> tuple[dict[str, tuple[np.ndarray, dict[str, object]]], str | None]:
     """Return one variable's columns on the target cells.
+
+    ``readings`` are the variable's own cells, which its values describe, and
+    ``pairs`` their overlaps with the target — or ``None`` when the caller
+    found the stream already on the target cells, so that there is nothing to
+    search and the variable passes through.
 
     The second return value says whether the variable was already on the
     target support, and if so what cell method its own stream declared — the
     only thing the caller cannot re-derive from the columns themselves.
     """
-    # The variable's own cells, which its values describe.
-    readings = stream_cells(stream, instrument)
     if stream[variable].dims != (TIME_COORD,):
         # Named rather than broadcast against: without this the cell
         # boundaries, or any other array carrying a second dimension, reach
@@ -794,11 +829,11 @@ def _one_variable(
     # that reads all three lives in `core.naming` and is shared with the
     # auxiliary interpolator, which has to make the same decision.
     circular = is_circular(attrs)
-    # Already on the target cells? Then pass through rather than average onto itself.
-    already_here = _same_cells(readings, target)
-    attrs[BINNED_ATTR] = int(not already_here)
+    # Already on the target cells (the caller found nothing to search)? Then
+    # pass through rather than average onto itself.
+    attrs[BINNED_ATTR] = int(pairs is not None)
 
-    if already_here:
+    if pairs is None:
         # The companions below must be exactly what the binned path would
         # produce for one reading covering its target, so that a product's
         # columns and their meaning do not depend on whether a stream happened
@@ -844,9 +879,9 @@ def _one_variable(
 
     # Not on the target cells: average it, as a direction or as a number.
     if circular:
-        return _bin_circular(stream, variable, column, readings, target, attrs), _BINNED_HERE
+        return _bin_circular(stream, variable, column, readings, target, attrs, pairs), _BINNED_HERE
     return _bin_scalar(
-        stream, variable, column, readings, target, values, attrs, propagation_form
+        stream, variable, column, readings, target, values, attrs, propagation_form, pairs
     ), _BINNED_HERE
 
 
@@ -857,6 +892,7 @@ def _bin_circular(
     readings: CellBounds,
     target: CellBounds,
     attrs: dict[str, object],
+    pairs: OverlapPairs,
 ) -> dict[str, tuple[np.ndarray, dict[str, object]]]:
     """Vector-average an angular variable and carry its quality numbers.
 
@@ -865,9 +901,9 @@ def _bin_circular(
     how well determined the direction is, and the exact circular standard
     deviation derived from it (§11.5).
     """
-    # Same overlap search as a scalar, different arithmetic on the pairs.
+    # The same overlaps as a scalar, different arithmetic on the pairs.
     result = bin_circular_onto_cells(
-        readings, np.asarray(stream[variable].values, dtype=np.float64), target
+        readings, np.asarray(stream[variable].values, dtype=np.float64), target, pairs=pairs
     )
     units = str(attrs.get("units", "degrees"))
     return {
@@ -917,57 +953,31 @@ def _bin_scalar(
     values: np.ndarray,
     attrs: dict[str, object],
     propagation_form: PropagationForm,
+    pairs: OverlapPairs,
 ) -> dict[str, tuple[np.ndarray, dict[str, object]]]:
-    """Overlap-weighted mean of one scalar variable, with its uncertainty."""
-    # Long form: one entry per overlapping (reading, target cell) pair,
-    # with the overlap in nanoseconds. Everything below aggregates these pairs.
-    pairs = overlap_pairs(readings, target)
-    n_target = len(target)
-    # The reading's value in each pair.
-    paired = values[pairs.reading_index]
-    # A pair contributes when its reading holds a value and the overlap is positive.
-    contributes = np.isfinite(paired) & (pairs.overlap_ns > 0)
-    # Its weight is the overlap; a pair that does not contribute weighs nothing.
-    weight = np.where(contributes, pairs.overlap_ns, 0.0).astype(np.float64)
-    # Per target cell: the total contributing overlap (the denominator) ...
-    weight_sum = np.bincount(pairs.target_index, weights=weight, minlength=n_target)
-    # ... and the overlap-weighted sum of values (the numerator). A masked value
-    # is zeroed before multiplying, because 0 * nan is nan, not 0.
-    value_sum = np.bincount(
-        pairs.target_index,
-        weights=weight * np.where(contributes, paired, 0.0),
-        minlength=n_target,
-    )
-    # The weighted mean where anything contributed; nan everywhere else, never
-    # a value borrowed from a neighbour.
-    binned = np.full(n_target, np.nan, dtype=np.float64)
-    filled = weight_sum > 0
-    binned[filled] = value_sum[filled] / weight_sum[filled]
-    # n_readings: how many readings contributed to each target cell.
-    counts = np.bincount(
-        pairs.target_index, weights=contributes.astype(np.float64), minlength=n_target
-    ).astype(np.int64)
-    # Coverage can exceed 1 slightly, and is left alone when it does.
-    # Fixed-width cells centred on jittered timestamps overlap each other, so
-    # their overlaps with one target cell can sum past its width (§10.2, where
-    # the effect is documented as benign: the value is a weighted MEAN, so the
-    # weights normalize). Clipping would hide a real property of the input
-    # record behind a tidier number.
-    # coverage: the contributing overlap as a fraction of the target cell's width.
-    width = target.width_ns.astype(np.float64)
-    coverage = np.zeros(n_target, dtype=np.float64)
-    wide = width > 0
-    coverage[wide] = weight_sum[wide] / width[wide]
+    """Overlap-weighted mean of one scalar variable, with its uncertainty.
 
+    The mean, the count and the coverage are
+    :func:`~tsara.core.support.bin_onto_cells`, called with the overlaps the
+    caller found once for the whole instrument; this function used to carry
+    a second spelling of that arithmetic, and two implementations of one
+    idea is the shape the Phase-4 reframe rejected. What is added here is the
+    uncertainty, propagated through exactly the weights that formed the value.
+    """
+    n_target = len(target)
+    binned = bin_onto_cells(readings, values, target, pairs=pairs)
     columns: dict[str, tuple[np.ndarray, dict[str, object]]] = {
-        column: (binned, attrs),
-        n_readings_name(column): (counts, _count_attrs(column, native=False)),
-        coverage_name(column): (coverage, _coverage_attrs(column, native=False)),
+        column: (binned.values, attrs),
+        n_readings_name(column): (binned.n_readings, _count_attrs(column, native=False)),
+        coverage_name(column): (binned.coverage, _coverage_attrs(column, native=False)),
     }
     # Uncertainty, propagated through exactly the weights that formed the value
-    # (docs/METHODS.md §3). The declared timescale, if any, says how correlated
-    # the random errors of neighbouring readings are; without one they are
-    # independent, which is what declaring a component random means.
+    # (docs/METHODS.md §3): each pair's overlap, or zero where the reading is
+    # masked, from the one shared definition. The declared timescale, if any,
+    # says how correlated the random errors of neighbouring readings are;
+    # without one they are independent, which is what declaring a component
+    # random means.
+    weight = contributing_weights(pairs, values)
     tau = stream[variable].attrs.get("decorrelation_timescale")
     tau_s = float(pd.Timedelta(tau).total_seconds()) if tau is not None else None
     # How far apart readings are (for the correlated-error forms), and how wide
