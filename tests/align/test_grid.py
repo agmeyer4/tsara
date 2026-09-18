@@ -85,7 +85,7 @@ def test_a_period_too_fine_for_a_selected_instrument_is_refused(
         grid_cells(campaign, OutputGridConfig(freq="1s"))
     message = str(raised.value)
     assert "too fine for 'canister'" in message
-    assert "cover 60 grid cells' worth of time" in message
+    assert "is 60 times as wide as a grid cell" in message
     assert "longer than 30 s" in message
 
 
@@ -116,7 +116,7 @@ def test_a_two_second_record_is_refused_on_a_one_second_grid_at_any_phase() -> N
     """The phase hole the binner's former rule had, closed for the grid too."""
     for offset in (0.0, 0.3, 0.5):
         picarro = make_stream(cells(offset, 2.0, 100), {"co2": np.arange(100.0)})
-        with pytest.raises(TsaraAlignError, match="cover 2 grid cells' worth"):
+        with pytest.raises(TsaraAlignError, match="is 2 times as wide as a grid cell"):
             grid_cells({"picarro": picarro}, OutputGridConfig(freq="1s"))
 
 
@@ -177,7 +177,7 @@ def test_the_coarser_grid_the_refusal_asks_for_is_buildable(
     """A sweep over grid period rebuilds from the streams, which is exact."""
     coarse = build_output_grid(campaign, OutputGridConfig(freq="300s"))
     assert coarse.sizes["time"] == 2
-    assert coarse["ch4"].attrs["tsara_grid_readings"] == 600
+    assert coarse["ch4"].attrs["tsara_readings"] == 600
 
 
 def test_a_period_exactly_equal_to_the_widest_cell_is_allowed(
@@ -290,8 +290,8 @@ def test_the_grid_records_what_it_was_built_from(campaign: dict[str, xr.Dataset]
 def test_each_column_records_the_readings_behind_it(campaign: dict[str, xr.Dataset]) -> None:
     """Six hundred 1 s readings behind ten rows; ten 60 s readings behind ten."""
     grid = build_output_grid(campaign, OutputGridConfig(freq="60s"), ["ch4", "benzene"])
-    assert grid["ch4"].attrs["tsara_grid_readings"] == 600
-    assert grid["benzene"].attrs["tsara_grid_readings"] == 10
+    assert grid["ch4"].attrs["tsara_readings"] == 600
+    assert grid["benzene"].attrs["tsara_readings"] == 10
 
 
 def test_a_masked_reading_is_not_counted_behind_a_column() -> None:
@@ -300,7 +300,7 @@ def test_a_masked_reading_is_not_counted_behind_a_column() -> None:
     values[::12] = np.nan
     fast = make_stream(cells(0.0, 1.0, 120), {"ch4": values})
     grid = build_output_grid({"fast": fast}, OutputGridConfig(freq="60s"))
-    assert grid["ch4"].attrs["tsara_grid_readings"] == 110
+    assert grid["ch4"].attrs["tsara_readings"] == 110
 
 
 def test_the_widest_cell_attribute_is_the_widest_single_cell() -> None:
@@ -326,20 +326,21 @@ def test_a_fill_straddling_two_rows_is_counted_once_and_warned_about(
     fills = CellBounds(start_ns=starts, stop_ns=starts + 15 * SECOND)
     canister = make_stream(fills, {"benzene": np.array([1.0, 2.0])})
     fast = make_stream(cells(0.0, 1.0, 180), {"ch4": np.arange(180.0)})
-    with caplog.at_level("WARNING", logger="tsara.align.grid"):
+    with caplog.at_level("WARNING", logger="tsara.align"):
         grid = build_output_grid({"fast": fast, "iwas": canister}, OutputGridConfig(freq="60s"))
     assert int((grid["n_readings_benzene"].values > 0).sum()) == 3
-    assert grid["benzene"].attrs["tsara_grid_readings"] == 2
-    assert "1 grid column(s) hold values in more rows than they have readings" in caplog.text
-    assert "Worst: 'benzene', 3 rows from 2 readings" in caplog.text
+    assert grid["benzene"].attrs["tsara_readings"] == 2
+    assert "1 column(s) of this join rest on air" in caplog.text
+    assert "'benzene' (3 rows from 2 readings" in caplog.text
+    assert grid["benzene"].attrs["tsara_support_transform"] == "shared"
 
 
 def test_no_readings_warning_when_every_row_has_its_own_readings(
     caplog: pytest.LogCaptureFixture, campaign: dict[str, xr.Dataset]
 ) -> None:
-    with caplog.at_level("WARNING", logger="tsara.align.grid"):
+    with caplog.at_level("WARNING", logger="tsara.align"):
         build_output_grid(campaign, OutputGridConfig(freq="60s"))
-    assert "more rows than they have readings" not in caplog.text
+    assert "rest on air" not in caplog.text
 
 
 def test_a_readings_warning_lists_at_most_eight_columns(
@@ -351,11 +352,12 @@ def test_a_readings_warning_lists_at_most_eight_columns(
     many = {f"voc{k:02d}": np.array([float(k)]) for k in range(10)}
     canister = make_stream(fills, many)
     fast = make_stream(cells(0.0, 1.0, 120), {"ch4": np.arange(120.0)})
-    with caplog.at_level("WARNING", logger="tsara.align.grid"):
+    with caplog.at_level("WARNING", logger="tsara.align"):
         build_output_grid({"fast": fast, "iwas": canister}, OutputGridConfig(freq="60s"))
-    assert caplog.text.count("more rows than they have readings") == 1
-    assert "10 grid column(s)" in caplog.text
-    assert caplog.text.rstrip().endswith("...")
+    assert caplog.text.count("rest on air") == 1
+    assert "10 column(s) of this join" in caplog.text
+    assert caplog.text.count("'voc") == 8
+    assert " ..." in caplog.text
 
 
 def test_a_cell_with_no_data_stays_empty(campaign: dict[str, xr.Dataset]) -> None:
@@ -532,3 +534,45 @@ def test_a_compression_level_outside_one_to_nine_is_refused(
     grid = build_output_grid(campaign, OutputGridConfig(freq="60s"))
     with pytest.raises(TsaraBundleError, match="zlib level from 1 to 9"):
         save_grid(grid, tmp_path / "bundle", compression=level)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# The support record on a grid (METHODS §11.2.4)
+# ---------------------------------------------------------------------------
+
+
+def test_a_grid_too_fine_can_be_built_on_request_labelled_and_warned(
+    caplog: pytest.LogCaptureFixture, campaign: dict[str, xr.Dataset]
+) -> None:
+    """`finer_support="allow"` makes the copies the default refuses, and says so twice:
+
+    once naming the instrument before anything is built, once naming the column.
+    """
+    with caplog.at_level("WARNING", logger="tsara.align"):
+        grid = build_output_grid(
+            campaign, OutputGridConfig(freq="1s"), ["benzene"], finer_support="allow"
+        )
+    assert grid.sizes["time"] == 600
+    assert grid["benzene"].attrs["tsara_support_transform"] == "copied"
+    assert grid["benzene"].attrs["tsara_width_ratio_max"] == pytest.approx(60.0)
+    assert grid["benzene"].attrs["tsara_readings"] == 10
+    assert "finer_support='allow': readings of 'canister' up to 60 times" in caplog.text
+    assert "'benzene' (copied, readings up to 60x a cell; 600 rows from 10 readings" in caplog.text
+
+
+def test_the_support_record_survives_a_bundle_round_trip(
+    tmp_path: Path, campaign: dict[str, xr.Dataset]
+) -> None:
+    grid = build_output_grid(campaign, OutputGridConfig(freq="31s"), ["benzene", "ch4"])
+    save_grid(grid, tmp_path / "bundle")
+    reloaded = load_grid(tmp_path / "bundle")
+    assert reloaded["benzene"].attrs["tsara_support_transform"] == "narrowed"
+    assert reloaded["benzene"].attrs["tsara_width_ratio_max"] == pytest.approx(60 / 31)
+    assert reloaded["benzene"].attrs["tsara_borrowed_share"] == pytest.approx(
+        grid["benzene"].attrs["tsara_borrowed_share"]
+    )
+    assert reloaded["benzene"].attrs["tsara_readings"] == 10
+    assert np.array_equal(
+        reloaded["borrowed_benzene"].values, grid["borrowed_benzene"].values, equal_nan=True
+    )
+    assert "cell_methods" not in reloaded["borrowed_benzene"].attrs

@@ -165,7 +165,7 @@ def test_a_tie_in_width_goes_to_the_sparser_member_in_either_order() -> None:
         paired = pair_species(streams, y, x)
         assert paired.clock == "picarro"
         assert paired.n_pairs == 20
-        assert paired.dataset["co2"].attrs["tsara_pairing_readings"] == 20
+        assert paired.dataset["co2"].attrs["tsara_readings"] == 20
         reason = paired.dataset.attrs["tsara_pairing_clock_reason"]
         assert "fewer measured values where the records overlap (20 vs 40)" in reason
 
@@ -186,7 +186,7 @@ def test_sparseness_is_counted_where_the_two_records_overlap() -> None:
     }
     paired = pair_species(streams, "noy", "co2")
     assert paired.clock == "picarro"
-    assert paired.dataset["co2"].attrs["tsara_pairing_readings"] == paired.n_pairs
+    assert paired.dataset["co2"].attrs["tsara_readings"] == paired.n_pairs
 
 
 def test_a_full_tie_goes_to_the_first_instrument_by_name_in_either_order() -> None:
@@ -217,8 +217,8 @@ def test_each_species_records_the_readings_behind_its_pairs(
     """
     paired = pair_species(two_rates, "ch4", "co2")
     assert (paired.y_readings, paired.x_readings) == (8, 2)
-    assert paired.dataset["ch4"].attrs["tsara_pairing_readings"] == 8
-    assert paired.dataset["co2"].attrs["tsara_pairing_readings"] == 2
+    assert paired.dataset["ch4"].attrs["tsara_readings"] == 8
+    assert paired.dataset["co2"].attrs["tsara_readings"] == 2
 
 
 def test_a_paired_product_may_not_be_paired_again(two_rates: dict[str, xr.Dataset]) -> None:
@@ -310,12 +310,44 @@ def test_a_fill_straddling_two_cells_is_one_reading_and_is_warned_about(
         },
     )
     fills["time"].attrs["bounds"] = "time_bnds"
-    with caplog.at_level("WARNING", logger="tsara.align.pairing"):
+    with caplog.at_level("WARNING", logger="tsara.align"):
         paired = pair_species({"iwas": fills, "picarro": minute}, "benzene", "ch4")
     assert paired.clock == "picarro"
     assert paired.n_pairs == 3
     assert (paired.y_readings, paired.x_readings) == (2, 3)
-    assert "rest on only 2 distinct readings of benzene" in caplog.text
+    # Said once, by the binner over the candidate cells, and not repeated by
+    # pairing over the surviving ones (METHODS §11.2.4).
+    assert "'benzene' (3 rows from 2 readings" in caplog.text
+    assert "rest on only" not in caplog.text
+
+
+def test_pairing_speaks_where_dropping_rows_first_makes_readings_shared(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Rows outnumber readings only after the drop, so the binner had nothing to say.
+
+    Three minutes. One fill straddles the first boundary and sits in rows one
+    and two; two more fills sit together in row three, where the analyzer has
+    no value, so row three is dropped. Over the candidate cells three rows
+    rest on three readings; over the surviving pairs, two rows rest on one.
+    """
+    minute = make_stream(0.0, 60.0, 3, {"ch4": np.array([2000.0, 2010.0, np.nan])})
+    starts = (np.array([50.0, 130.0, 150.0]) * SECOND).astype(np.int64)
+    stops = (np.array([70.0, 140.0, 160.0]) * SECOND).astype(np.int64)
+    fills = xr.Dataset(
+        {"benzene": ("time", np.array([1.0, 2.0, 3.0]), {"units": "ppb"})},
+        coords={
+            "time": ((starts + stops) // 2).astype("datetime64[ns]"),
+            "time_bnds": (("time", "nv"), np.stack([starts, stops], 1).astype("datetime64[ns]")),
+        },
+    )
+    fills["time"].attrs["bounds"] = "time_bnds"
+    with caplog.at_level("WARNING", logger="tsara.align"):
+        paired = pair_species({"iwas": fills, "picarro": minute}, "benzene", "ch4")
+    assert paired.n_pairs == 2
+    assert paired.y_readings == 1
+    assert "rest on air" not in caplog.text
+    assert "rest on only 1 distinct readings of benzene" in caplog.text
 
 
 def test_no_warning_when_every_reading_is_one_pair(
@@ -847,3 +879,37 @@ def test_cells_that_all_start_together_have_no_cadence_to_measure() -> None:
     paired = pair_species({"iwas": nested, "picarro": means}, "benzene", "ch4")
     assert paired.n_pairs == 1
     assert np.isfinite(paired.dataset[sigma_rand_name("benzene")].values[0])
+
+
+# ---------------------------------------------------------------------------
+# A clock whose cells vary in width (METHODS §11.2.4)
+# ---------------------------------------------------------------------------
+
+
+def test_a_clock_cell_narrower_than_half_a_partner_reading_refuses_the_pair() -> None:
+    """Canister fills of 14, 15 and 1.8 s against a 10 s analyzer.
+
+    The canister is the wider-supported member by median, so it is the clock;
+    but a 10 s reading on its 1.8 s fill is five times as wide as the cell it
+    fills, which the per-pair rule refuses and the summed rule it replaced
+    let through. Allowed by name, the partner column reads 'copied'.
+    """
+    analyzer = make_stream(0.0, 10.0, 60, {"ch4": np.arange(60.0)})
+    starts = (np.array([20.0, 200.0, 400.0]) * SECOND).astype(np.int64)
+    stops = (np.array([34.0, 215.0, 401.8]) * SECOND).astype(np.int64)
+    fills = xr.Dataset(
+        {"benzene": ("time", np.array([1.0, 2.0, 3.0]), {"units": "ppb"})},
+        coords={
+            "time": ((starts + stops) // 2).astype("datetime64[ns]"),
+            "time_bnds": (("time", "nv"), np.stack([starts, stops], 1).astype("datetime64[ns]")),
+        },
+    )
+    fills["time"].attrs["bounds"] = "time_bnds"
+    streams = {"iwas": fills, "lgr": analyzer}
+    with pytest.raises(TsaraAlignError, match="times as wide as a cell it fills"):
+        pair_species(streams, "benzene", "ch4")
+    paired = pair_species(streams, "benzene", "ch4", finer_support="allow")
+    assert paired.clock == "iwas"
+    assert paired.n_pairs == 3
+    assert paired.dataset["ch4"].attrs["tsara_support_transform"] == "copied"
+    assert paired.dataset["ch4"].attrs["tsara_width_ratio_max"] == pytest.approx(10 / 1.8)

@@ -101,6 +101,8 @@ import pandas as pd
 
 from tsara.align.binning import (
     BINNED_ATTR,
+    READINGS_ATTR,
+    FinerSupport,
     TsaraAlignError,
     VariableRef,
     bin_streams_onto_cells,
@@ -108,6 +110,7 @@ from tsara.align.binning import (
     readings_behind,
     resolve_variable,
     stream_cells,
+    targets_overlap,
 )
 from tsara.core.naming import TIME_COORD, coverage_name
 from tsara.core.support import CellBounds
@@ -129,8 +132,6 @@ PAIRING_REASON_ATTR = "tsara_pairing_clock_reason"
 PAIRING_COVERAGE_ATTR = "tsara_pairing_min_coverage"
 PAIRING_DROPPED_ATTR = "tsara_pairing_cells_dropped"
 PAIRING_CANDIDATE_ATTR = "tsara_pairing_cells_considered"
-#: Per-variable: distinct readings of that species behind the surviving pairs.
-PAIRING_READINGS_ATTR = "tsara_pairing_readings"
 
 
 @dataclass(frozen=True)
@@ -294,6 +295,7 @@ def pair_species(
     interval: tuple[pd.Timestamp, pd.Timestamp] | None = None,
     min_coverage: float = 0.0,
     propagation_form: PropagationForm = "ar1_neff",
+    finer_support: FinerSupport = "refuse",
 ) -> PairedSpecies:
     """Put two species on one clock, dropping any pair that is not real.
 
@@ -313,6 +315,13 @@ def pair_species(
         either way (:class:`~tsara.config.analysis.PairingConfig`).
     propagation_form : {'ar1_neff', 'ar1_asymptotic', 'ar1_double_sum'}, optional
         Which registered form reduces a correlated random component (§3.4).
+    finer_support : {'refuse', 'allow'}, optional
+        The clock is the wider-supported member's cells, so its partner is
+        normally averaged, never copied. A clock whose cells vary in width --
+        a canister's fills run from 1.8 s to 20 s on the 2024 drives -- can
+        still hold one cell less than half as wide as a partner reading, and
+        that pair is then refused (the default) or copied, labelled and warned
+        about (``docs/METHODS.md`` §11.2.4).
 
     Returns
     -------
@@ -323,7 +332,8 @@ def pair_species(
     ------
     TsaraAlignError
         If a species cannot be resolved, a stream has no cells, the interval
-        selects nothing, or no cell holds a real measurement of both species.
+        selects nothing, no cell holds a real measurement of both species, or
+        a partner reading would be copied across clock cells.
     """
     # Resolve both references, refusing a species paired with itself.
     if not streams:
@@ -359,6 +369,7 @@ def pair_species(
         target,
         [(y_instrument, y_variable), (x_instrument, x_variable)],
         propagation_form=propagation_form,
+        finer_support=finer_support,
     )
     # The binner names a column after its variable, suffixing with the
     # instrument only when two selected streams claim the same name -- which
@@ -381,18 +392,34 @@ def pair_species(
             f"candidate cell(s) of '{clock}'. Either the records do not overlap, or "
             f"every candidate cell was masked or below min_coverage={min_coverage}."
         )
+    # The binner has already said, over every candidate cell, which columns
+    # hold values in more rows than they have readings (§11.2.4). Dropping
+    # rows can only lower both counts, but not always in step: keep the two
+    # rows a straddling reading fills and drop the row its neighbours shared,
+    # and rows outnumber readings where before they did not. So the question
+    # is asked again of the surviving pairs, and answered aloud only where the
+    # binner had nothing to say.
+    already_said = {
+        name: not targets_overlap(target)
+        and int(np.count_nonzero(np.isfinite(joined[name].values)))
+        > int(joined[name].attrs[READINGS_ATTR])
+        for name in (y_name, x_name)
+    }
     dataset = joined.isel({TIME_COORD: surviving})
     # Count the readings behind the surviving pairs, per species, and warn when
     # fewer readings than pairs means some reading sits in more than one pair.
     kept = CellBounds(start_ns=target.start_ns[surviving], stop_ns=target.stop_ns[surviving])
     y_readings = _readings_behind(dataset, y_name, streams[y_instrument], y_variable, y_cells, kept)
     x_readings = _readings_behind(dataset, x_name, streams[x_instrument], x_variable, x_cells, kept)
-    dataset[y_name].attrs[PAIRING_READINGS_ATTR] = y_readings
-    dataset[x_name].attrs[PAIRING_READINGS_ATTR] = x_readings
+    # The same attribute the binner wrote, now counted behind the rows that
+    # survived: one name, one meaning, on every product.
+    dataset[y_name].attrs[READINGS_ATTR] = y_readings
+    dataset[x_name].attrs[READINGS_ATTR] = x_readings
     if min(y_readings, x_readings) < surviving.size:
         sparse_name, sparse_count = (
             (y_name, y_readings) if y_readings <= x_readings else (x_name, x_readings)
         )
+    if min(y_readings, x_readings) < surviving.size and not already_said[sparse_name]:
         logger.warning(
             "%d pairs of %s vs %s rest on only %d distinct readings of %s, so some "
             "readings appear in more than one pair. A fit that treats the pairs as "

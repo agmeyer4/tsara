@@ -16,7 +16,7 @@ import pytest
 import xarray as xr
 
 from tsara.align import TsaraAlignError, bin_streams_onto_cells, resolve_variable
-from tsara.align.binning import readings_behind, select_variables, stream_cells
+from tsara.align.binning import readings_behind, select_variables, stream_cells, targets_overlap
 from tsara.core.naming import sigma_rand_name
 from tsara.core.support import CellBounds
 from tsara.core.timebase import SECOND_NS as SECOND
@@ -439,9 +439,9 @@ def test_the_refusal_names_the_stream_the_widths_and_the_damage() -> None:
     assert "'minute'" in message
     assert "60 s cells" in message
     assert "1 s" in message
-    # One 60 s reading would cover sixty 1 s cells' worth of time, and any
-    # cells wider than 30 s would not be replicated.
-    assert "cover 60 target cells' worth of time" in message
+    # One 60 s reading is sixty times as wide as a 1 s cell, and any cells
+    # wider than 30 s would not be copies of it.
+    assert "is 60 times as wide as a cell it fills" in message
     assert "wider than 30 s" in message
 
 
@@ -465,7 +465,7 @@ def test_a_duty_cycled_sampler_is_refused_onto_a_fine_grid() -> None:
         },
     )
     stream["time"].attrs["bounds"] = "time_bnds"
-    with pytest.raises(TsaraAlignError, match="cover 15 target cells' worth"):
+    with pytest.raises(TsaraAlignError, match="is 15 times as wide as a cell"):
         bin_streams_onto_cells({"canister": stream}, cells(0.0, 1.0, 360))
 
 
@@ -493,7 +493,7 @@ def test_a_reading_two_target_cells_wide_is_refused_at_any_phase(offset_s: float
     worth whatever the phase.
     """
     stream = make_stream(offset_s, 2.0, 50, {"ch4": np.arange(50.0)})
-    with pytest.raises(TsaraAlignError, match="cover 2 target cells' worth"):
+    with pytest.raises(TsaraAlignError, match="is 2 times as wide as a cell"):
         bin_streams_onto_cells({"picarro": stream}, cells(0.0, 1.0, 102))
 
 
@@ -509,21 +509,29 @@ def test_a_reading_just_under_two_target_cells_wide_is_allowed() -> None:
     assert np.isfinite(joined["ch4"].values).sum() > 50
 
 
-def test_the_rule_is_measured_against_the_widest_target_cell_touched() -> None:
-    """Non-uniform target cells: two cells' worth means of the widest one.
+def test_the_rule_is_measured_per_pair_not_summed_over_a_reading() -> None:
+    """Non-uniform target cells: each cell is judged against the reading on its own.
 
-    A 3 s reading across a 1 s cell and a 2 s cell covers one of the wider
-    cells and a half of the narrower, so it is not refused; the same reading
-    across three 1 s cells is.
+    A 3 s reading across a 1 s cell and a 2 s cell is three times as wide as
+    the narrow one, so the join is refused -- the summed rule this replaced
+    passed it, because one narrow cell never adds up to two cells' worth
+    (METHODS §11.2.4). Across two 2 s cells it is narrowed by half and
+    allowed, labelled.
     """
     stream = make_stream(0.0, 3.0, 1, {"ch4": np.array([1.0])})
     mixed = CellBounds(
         start_ns=np.array([0, SECOND], dtype=np.int64),
         stop_ns=np.array([SECOND, 3 * SECOND], dtype=np.int64),
     )
-    assert np.isfinite(bin_streams_onto_cells({"a": stream}, mixed)["ch4"].values).all()
-    with pytest.raises(TsaraAlignError):
-        bin_streams_onto_cells({"a": stream}, cells(0.0, 1.0, 3))
+    with pytest.raises(TsaraAlignError, match="is 3 times as wide as a cell"):
+        bin_streams_onto_cells({"a": stream}, mixed)
+    halves = CellBounds(
+        start_ns=np.array([0, 2 * SECOND], dtype=np.int64),
+        stop_ns=np.array([2 * SECOND, 4 * SECOND], dtype=np.int64),
+    )
+    joined = bin_streams_onto_cells({"a": stream}, halves)
+    assert joined["ch4"].attrs["tsara_support_transform"] == "narrowed"
+    assert joined["ch4"].attrs["tsara_width_ratio_max"] == pytest.approx(1.5)
 
 
 def test_a_zero_width_target_cell_makes_nothing_look_replicated() -> None:
@@ -652,7 +660,12 @@ def test_cell_boundaries_carried_as_a_data_variable_are_not_selected() -> None:
     stream = make_stream(0.0, 1.0, 20, {"ch4": np.arange(20.0)}).reset_coords("time_bnds")
     assert "time_bnds" in stream.data_vars
     joined = bin_streams_onto_cells({"a": stream}, cells(0.0, 5.0, 4))
-    assert sorted(map(str, joined.data_vars)) == ["ch4", "coverage_ch4", "n_readings_ch4"]
+    assert sorted(map(str, joined.data_vars)) == [
+        "borrowed_ch4",
+        "ch4",
+        "coverage_ch4",
+        "n_readings_ch4",
+    ]
 
 
 def test_a_variable_that_is_not_one_value_per_cell_is_named_not_broadcast() -> None:
@@ -720,3 +733,472 @@ def test_a_stream_already_on_the_target_cells_searches_no_overlaps(
     stream = make_stream(0.0, 1.0, 60, {"a": np.arange(60.0)})
     bin_streams_onto_cells({"x": stream}, cells(0.0, 1.0, 60))
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# What a target cell may be built from (METHODS §11.2.4)
+# ---------------------------------------------------------------------------
+
+
+def spaced(start_s: float, width_s: float, n: int, step_s: float) -> CellBounds:
+    """Return ``n`` cells of ``width_s`` whose starts are ``step_s`` apart."""
+    start = (np.arange(n, dtype=np.int64) * int(round(step_s * SECOND))) + int(
+        round(start_s * SECOND)
+    )
+    return CellBounds(start_ns=start, stop_ns=start + int(round(width_s * SECOND)))
+
+
+def bounds(start_s: list[float], stop_s: list[float]) -> CellBounds:
+    """Return cells from explicit starts and stops in seconds."""
+    return CellBounds(
+        start_ns=(np.array(start_s) * SECOND).astype(np.int64),
+        stop_ns=(np.array(stop_s) * SECOND).astype(np.int64),
+    )
+
+
+def stream_on(
+    readings: CellBounds,
+    variables: dict[str, np.ndarray],
+    attrs: dict[str, dict[str, object]] | None = None,
+) -> xr.Dataset:
+    """Build a stream on arbitrary cells."""
+    variable_attrs = attrs or {}
+    dataset = xr.Dataset(
+        {
+            name: ("time", values, dict(variable_attrs.get(name, {"units": "ppb"})))
+            for name, values in variables.items()
+        },
+        coords={
+            "time": readings.midpoint_ns.astype("datetime64[ns]"),
+            "time_bnds": (
+                ("time", "nv"),
+                np.stack([readings.start_ns, readings.stop_ns], axis=1).astype("datetime64[ns]"),
+            ),
+        },
+    )
+    dataset["time"].attrs["bounds"] = "time_bnds"
+    for name in variables:
+        dataset[name].attrs.setdefault("cell_methods", "time: point")
+    return dataset
+
+
+#: METHODS §11.2.4's table, as executed: the verdict under the default policy,
+#: then under ``finer_support="allow"`` the worst reading-to-cell ratio, the
+#: column's borrowed share (both to three decimals, as measured on
+#: 2026-09-18) and the label they imply.
+PROBE = [
+    (
+        "60 s -> 1 s (copy)",
+        spaced(0, 60, 10, 60),
+        spaced(0, 1, 600, 1),
+        "refuse",
+        60.0,
+        0.983,
+        "copied",
+    ),
+    (
+        "2 s -> 1 s, phase 0",
+        spaced(0, 2, 50, 2),
+        spaced(0, 1, 102, 1),
+        "refuse",
+        2.0,
+        0.500,
+        "copied",
+    ),
+    (
+        "2 s -> 1 s, phase 0.3",
+        spaced(0.3, 2, 50, 2),
+        spaced(0, 1, 102, 1),
+        "refuse",
+        2.0,
+        0.605,
+        "copied",
+    ),
+    (
+        "2 s -> 1 s, phase 0.5",
+        spaced(0.5, 2, 50, 2),
+        spaced(0, 1, 102, 1),
+        "refuse",
+        2.0,
+        0.625,
+        "copied",
+    ),
+    (
+        "1.9 s -> 1 s",
+        spaced(0.3, 1.9, 50, 1.9),
+        spaced(0, 1, 96, 1),
+        "allow",
+        1.9,
+        0.565,
+        "narrowed",
+    ),
+    (
+        "1.023 s -> 1 s (LANL jitter)",
+        spaced(0, 1.023, 400, 1.023),
+        spaced(0, 1, 409, 1),
+        "allow",
+        1.023,
+        0.337,
+        "narrowed",
+    ),
+    (
+        "0.993 s -> 1 s (WYO jitter)",
+        spaced(0, 0.993, 400, 0.993),
+        spaced(0, 1, 397, 1),
+        "allow",
+        0.993,
+        0.342,
+        "shared",
+    ),
+    (
+        "1 s -> 1 s half a cell out of phase",
+        spaced(0.5, 1, 400, 1),
+        spaced(0, 1, 401, 1),
+        "allow",
+        1.0,
+        0.500,
+        "shared",
+    ),
+    (
+        "15 s fills every 530 s -> 8 s grid",
+        spaced(0, 15, 20, 530),
+        spaced(0, 8, 1400, 8),
+        "allow",
+        1.875,
+        0.560,
+        "narrowed",
+    ),
+    (
+        "15 s fills every 530 s -> 7.5 s grid",
+        spaced(0, 15, 20, 530),
+        spaced(0, 7.5, 1500, 7.5),
+        "refuse",
+        2.0,
+        0.572,
+        "copied",
+    ),
+    (
+        "15 s fills every 530 s -> 15 s grid",
+        spaced(7, 15, 20, 530),
+        spaced(0, 15, 750, 15),
+        "allow",
+        1.0,
+        0.356,
+        "shared",
+    ),
+    (
+        "15 s fills every 530 s -> 60 s grid",
+        spaced(50, 15, 20, 530),
+        spaced(0, 60, 180, 60),
+        "allow",
+        0.25,
+        0.089,
+        "shared",
+    ),
+    ("60 s -> 30 s", spaced(0, 60, 10, 60), spaced(0, 30, 20, 30), "refuse", 2.0, 0.500, "copied"),
+    (
+        "60 s -> 30.5 s",
+        spaced(0, 60, 10, 60),
+        spaced(0, 30.5, 20, 30.5),
+        "allow",
+        1.967,
+        0.558,
+        "narrowed",
+    ),
+    (
+        "60 s -> 45 s",
+        spaced(0, 60, 10, 60),
+        spaced(0, 45, 14, 45),
+        "allow",
+        1.333,
+        0.4125,
+        "narrowed",
+    ),
+    (
+        "(4.8, 5) cell inside a 1 s reading",
+        spaced(0, 1, 5, 1),
+        bounds([0, 4.8], [1, 5]),
+        "refuse",
+        5.0,
+        0.133,
+        "copied",
+    ),
+    (
+        "60 s means -> 15 s canister fills",
+        spaced(0, 60, 100, 60),
+        spaced(50, 15, 11, 530),
+        "refuse",
+        4.0,
+        0.770,
+        "copied",
+    ),
+    (
+        "30 s -> sliding 60 s every 10 s",
+        spaced(0, 30, 20, 30),
+        spaced(0, 60, 55, 10),
+        "allow",
+        0.5,
+        0.145,
+        "shared",
+    ),
+    (
+        "60 s -> sliding 300 s every 30 s",
+        spaced(0, 60, 60, 60),
+        spaced(0, 300, 110, 30),
+        "allow",
+        0.2,
+        0.050,
+        "shared",
+    ),
+    (
+        "1 s -> sliding 60 s every 1 s",
+        spaced(0, 1, 600, 1),
+        spaced(0, 60, 540, 1),
+        "allow",
+        0.017,
+        0.000,
+        "averaged",
+    ),
+    (
+        "three copies of one 60 s target",
+        spaced(0, 1, 60, 1),
+        bounds([0, 0, 0], [60, 60, 60]),
+        "allow",
+        0.017,
+        0.000,
+        "averaged",
+    ),
+    (
+        "60 s -> 60 s in phase (passthrough)",
+        spaced(0, 60, 10, 60),
+        spaced(0, 60, 10, 60),
+        "allow",
+        1.0,
+        0.000,
+        "passthrough",
+    ),
+    (
+        "60 s -> 60 s offset 30 s (blend)",
+        spaced(0, 60, 10, 60),
+        spaced(30, 60, 9, 60),
+        "allow",
+        1.0,
+        0.500,
+        "shared",
+    ),
+    (
+        "60 s -> 60 s offset 10 s (blend)",
+        spaced(0, 60, 10, 60),
+        spaced(10, 60, 9, 60),
+        "allow",
+        1.0,
+        0.278,
+        "shared",
+    ),
+    (
+        "10 s LGR -> 1 s grid (copy)",
+        spaced(0, 10, 10, 10),
+        spaced(0, 1, 100, 1),
+        "refuse",
+        10.0,
+        0.900,
+        "copied",
+    ),
+    (
+        "1 s -> 60 s (average)",
+        spaced(0, 1, 600, 1),
+        spaced(0, 60, 10, 60),
+        "allow",
+        0.017,
+        0.000,
+        "averaged",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("readings", "target", "verdict", "ratio", "share", "label"),
+    [row[1:] for row in PROBE],
+    ids=[row[0] for row in PROBE],
+)
+def test_the_probe_table(
+    readings: CellBounds,
+    target: CellBounds,
+    verdict: str,
+    ratio: float,
+    share: float,
+    label: str,
+) -> None:
+    """Every case METHODS §11.2.4 tabulates, as verdict, worst ratio, share and label.
+
+    The two narrowing holes of the summed rule are refused here and the
+    sliding windows it wrongly refused are built; the numbers are the ones
+    measured before the rule was chosen, so a change in any of them is a
+    change in what the package does, not in what it says.
+    """
+    streams = {"x": stream_on(readings, {"v": np.ones(len(readings))})}
+    if verdict == "refuse":
+        with pytest.raises(TsaraAlignError, match="times as wide as a cell it fills"):
+            bin_streams_onto_cells(streams, target)
+    joined = bin_streams_onto_cells(streams, target, finer_support="allow")
+    assert joined["v"].attrs["tsara_width_ratio_max"] == pytest.approx(ratio, abs=5e-4)
+    assert joined["v"].attrs["tsara_borrowed_share"] == pytest.approx(share, abs=5e-4)
+    assert joined["v"].attrs["tsara_support_transform"] == label
+
+
+def test_copying_is_refused_by_default_and_allowed_loudly(caplog: pytest.LogCaptureFixture) -> None:
+    """The interpolation rule stays the default; the escape is by name, labelled and warned."""
+    minute = stream_on(spaced(0, 60, 10, 60), {"v": np.arange(10.0)})
+    with pytest.raises(TsaraAlignError, match="finer_support='allow'"):
+        bin_streams_onto_cells({"m": minute}, spaced(0, 1, 600, 1))
+    with caplog.at_level("WARNING", logger="tsara.align.binning"):
+        joined = bin_streams_onto_cells({"m": minute}, spaced(0, 1, 600, 1), finer_support="allow")
+    assert int(np.isfinite(joined["v"].values).sum()) == 600
+    assert joined["v"].attrs["tsara_support_transform"] == "copied"
+    assert joined["v"].attrs["tsara_readings"] == 10
+    assert "finer_support='allow': readings of 'm' up to 60 times as wide" in caplog.text
+    assert "'v' (copied, readings up to 60x a cell; 600 rows from 10 readings" in caplog.text
+
+
+def test_one_warning_names_the_narrowed_and_shared_columns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The LANL analyzer's shape: 1.023 s readings on a 1 s grid, beside a 0.5 s instrument.
+
+    The jittered column is narrowed by 2.3 % and holds 409 rows from 400
+    readings, so it is named with both numbers; the fast column sits wholly
+    inside every cell and is not mentioned. One warning for the call.
+    """
+    pico = stream_on(spaced(0, 1.023, 400, 1.023), {"v": np.ones(400)})
+    fast = stream_on(spaced(0, 0.5, 818, 0.5), {"v": np.ones(818)})
+    with caplog.at_level("WARNING", logger="tsara.align.binning"):
+        joined = bin_streams_onto_cells({"pico": pico, "fast": fast}, spaced(0, 1, 409, 1))
+    assert caplog.text.count("rest on air") == 1
+    assert "1 column(s) of this join" in caplog.text
+    assert (
+        "'v_pico' (narrowed, readings up to 1.02x a cell; 409 rows from 400 readings; "
+        "borrowed share 0.34)" in caplog.text
+    )
+    assert "v_fast" not in caplog.text
+    assert joined["v_fast"].attrs["tsara_support_transform"] == "averaged"
+    assert joined["v_fast"].attrs["tsara_borrowed_share"] == 0.0
+
+
+def test_a_blend_is_recorded_and_not_warned_about(caplog: pytest.LogCaptureFixture) -> None:
+    """Equal cells half a cell out of phase: every reading straddles, none is wider, none repeated.
+
+    Measured, no value of the borrowed share separates this 0.50 from ordinary
+    jitter's 0.34, so it is recorded rather than thresholded (METHODS §11.2.4).
+    """
+    stream = stream_on(spaced(0.5, 1, 400, 1), {"v": np.ones(400)})
+    with caplog.at_level("WARNING", logger="tsara.align.binning"):
+        joined = bin_streams_onto_cells({"a": stream}, spaced(1, 1, 399, 1))
+    assert "rest on air" not in caplog.text
+    assert joined["v"].attrs["tsara_support_transform"] == "shared"
+    assert joined["v"].attrs["tsara_borrowed_share"] == pytest.approx(0.5)
+    assert np.allclose(joined["borrowed_v"].values, 0.5)
+
+
+def test_overlapping_targets_share_readings_by_construction(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Sliding 60 s windows every 10 s over 30 s readings: built, recorded, not warned about.
+
+    Every reading feeds six windows because that is what was asked; rows
+    outnumbering readings is the question, not a defect. The summed rule this
+    replaced refused it as a copy.
+    """
+    stream = stream_on(spaced(0, 30, 20, 30), {"v": np.arange(20.0)})
+    windows = spaced(0, 60, 55, 10)
+    assert targets_overlap(windows)
+    with caplog.at_level("WARNING", logger="tsara.align.binning"):
+        joined = bin_streams_onto_cells({"a": stream}, windows)
+    assert "rest on air" not in caplog.text
+    assert int(np.isfinite(joined["v"].values).sum()) == 55
+    assert joined["v"].attrs["tsara_readings"] == 20
+    assert joined["v"].attrs["tsara_support_transform"] == "shared"
+
+
+def test_disjoint_targets_that_share_a_reading_are_warned_about(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A 15 s fill across a minute boundary: one reading in two rows of a 60 s grid."""
+    fills = stream_on(bounds([20, 112], [35, 127]), {"benzene": np.array([1.0, 2.0])})
+    with caplog.at_level("WARNING", logger="tsara.align.binning"):
+        joined = bin_streams_onto_cells({"iwas": fills}, spaced(0, 60, 3, 60))
+    assert "'benzene' (3 rows from 2 readings; borrowed share" in caplog.text
+    assert joined["benzene"].attrs["tsara_readings"] == 2
+    assert joined["benzene"].attrs["tsara_support_transform"] == "shared"
+
+
+def test_the_borrowed_companion_is_the_per_cell_share_and_is_not_a_variable() -> None:
+    """A third qualifier beside the count and the coverage, excluded from selection like them."""
+    stream = stream_on(spaced(0.3, 1.9, 50, 1.9), {"v": np.arange(50.0)})
+    target = spaced(0, 1, 96, 1)
+    joined = bin_streams_onto_cells({"a": stream}, target)
+    from tsara.core.support import bin_onto_cells
+
+    reference = bin_onto_cells(stream_cells(stream, "a"), np.arange(50.0), target)
+    assert np.array_equal(joined["borrowed_v"].values, reference.borrowed, equal_nan=True)
+    assert "cell_methods" not in joined["borrowed_v"].attrs
+    assert joined["borrowed_v"].attrs["units"] == "1"
+    # Not a variable: the default selection skips it, so it can never be binned again.
+    carrier = make_stream(0.0, 1.0, 5, {"a": np.ones(5), "borrowed_a": np.zeros(5)})
+    assert select_variables({"s": carrier}) == [("s", "a")]
+
+
+def test_a_passed_through_column_borrows_nothing_and_says_so() -> None:
+    """On its own cells a reading borrows nothing; a masked one has no share at all."""
+    values = np.array([1.0, np.nan, 3.0])
+    stream = make_stream(0.0, 1.0, 3, {"a": values})
+    joined = bin_streams_onto_cells({"s": stream}, cells(0.0, 1.0, 3))
+    assert joined["a"].attrs["tsara_support_transform"] == "passthrough"
+    assert joined["a"].attrs["tsara_width_ratio_max"] == 1.0
+    assert joined["a"].attrs["tsara_borrowed_share"] == 0.0
+    assert joined["a"].attrs["tsara_readings"] == 2
+    assert np.array_equal(joined["borrowed_a"].values, [0.0, np.nan, 0.0], equal_nan=True)
+
+
+def test_a_direction_carries_the_same_record_as_a_scalar() -> None:
+    """Same overlaps, same weights: the record does not depend on the kind of variable."""
+    stream = stream_on(
+        spaced(0, 1.023, 100, 1.023),
+        {"v": np.ones(100), "wind": np.linspace(0.0, 90.0, 100)},
+        attrs={"wind": {"units": "degrees", "circular": 1}},
+    )
+    joined = bin_streams_onto_cells({"a": stream}, spaced(0, 1, 103, 1))
+    for attr in (
+        "tsara_support_transform",
+        "tsara_width_ratio_max",
+        "tsara_borrowed_share",
+        "tsara_readings",
+    ):
+        assert joined["wind"].attrs[attr] == joined["v"].attrs[attr]
+    assert np.array_equal(
+        joined["borrowed_wind"].values, joined["borrowed_v"].values, equal_nan=True
+    )
+
+
+def test_a_column_with_nothing_behind_it_records_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    """All masked: no readings, no ratio, no share, no warning -- and no label but 'averaged'."""
+    stream = make_stream(0.0, 1.0, 60, {"a": np.full(60, np.nan)})
+    with caplog.at_level("WARNING", logger="tsara.align.binning"):
+        joined = bin_streams_onto_cells({"s": stream}, cells(0.0, 10.0, 6))
+    assert joined["a"].attrs["tsara_readings"] == 0
+    assert np.isnan(joined["a"].attrs["tsara_width_ratio_max"])
+    assert np.isnan(joined["a"].attrs["tsara_borrowed_share"])
+    assert joined["a"].attrs["tsara_support_transform"] == "averaged"
+    assert "rest on air" not in caplog.text
+
+
+def test_targets_overlap_is_exact_and_order_free() -> None:
+    assert not targets_overlap(spaced(0, 60, 5, 60))
+    assert targets_overlap(bounds([0, 1], [2, 3]))
+    # A single nanosecond of overlap counts; abutting cells do not.
+    one_ns = CellBounds(
+        start_ns=np.array([0, SECOND - 1], dtype=np.int64),
+        stop_ns=np.array([SECOND, 2 * SECOND], dtype=np.int64),
+    )
+    assert targets_overlap(one_ns)
+    assert not targets_overlap(bounds([5, 0], [6, 5]))  # unsorted, abutting
+    assert not targets_overlap(bounds([0], [1]))
