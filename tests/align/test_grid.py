@@ -177,7 +177,7 @@ def test_the_coarser_grid_the_refusal_asks_for_is_buildable(
     """A sweep over grid period rebuilds from the streams, which is exact."""
     coarse = build_output_grid(campaign, OutputGridConfig(freq="300s"))
     assert coarse.sizes["time"] == 2
-    assert coarse["ch4"].attrs["tsara_readings"] == 600
+    assert coarse["ch4"].attrs["tsara_n_readings"] == 600
 
 
 def test_a_period_exactly_equal_to_the_widest_cell_is_allowed(
@@ -290,8 +290,8 @@ def test_the_grid_records_what_it_was_built_from(campaign: dict[str, xr.Dataset]
 def test_each_column_records_the_readings_behind_it(campaign: dict[str, xr.Dataset]) -> None:
     """Six hundred 1 s readings behind ten rows; ten 60 s readings behind ten."""
     grid = build_output_grid(campaign, OutputGridConfig(freq="60s"), ["ch4", "benzene"])
-    assert grid["ch4"].attrs["tsara_readings"] == 600
-    assert grid["benzene"].attrs["tsara_readings"] == 10
+    assert grid["ch4"].attrs["tsara_n_readings"] == 600
+    assert grid["benzene"].attrs["tsara_n_readings"] == 10
 
 
 def test_a_masked_reading_is_not_counted_behind_a_column() -> None:
@@ -300,7 +300,7 @@ def test_a_masked_reading_is_not_counted_behind_a_column() -> None:
     values[::12] = np.nan
     fast = make_stream(cells(0.0, 1.0, 120), {"ch4": values})
     grid = build_output_grid({"fast": fast}, OutputGridConfig(freq="60s"))
-    assert grid["ch4"].attrs["tsara_readings"] == 110
+    assert grid["ch4"].attrs["tsara_n_readings"] == 110
 
 
 def test_the_widest_cell_attribute_is_the_widest_single_cell() -> None:
@@ -329,10 +329,10 @@ def test_a_fill_straddling_two_rows_is_counted_once_and_warned_about(
     with caplog.at_level("WARNING", logger="tsara.align"):
         grid = build_output_grid({"fast": fast, "iwas": canister}, OutputGridConfig(freq="60s"))
     assert int((grid["n_readings_benzene"].values > 0).sum()) == 3
-    assert grid["benzene"].attrs["tsara_readings"] == 2
+    assert grid["benzene"].attrs["tsara_n_readings"] == 2
     assert "1 column(s) of this join rest on air" in caplog.text
     assert "'benzene' (3 rows from 2 readings" in caplog.text
-    assert grid["benzene"].attrs["tsara_support_transform"] == "shared"
+    assert grid["benzene"].attrs["tsara_support_transform"] == "straddled"
 
 
 def test_no_readings_warning_when_every_row_has_its_own_readings(
@@ -555,7 +555,7 @@ def test_a_grid_too_fine_can_be_built_on_request_labelled_and_warned(
     assert grid.sizes["time"] == 600
     assert grid["benzene"].attrs["tsara_support_transform"] == "copied"
     assert grid["benzene"].attrs["tsara_width_ratio_max"] == pytest.approx(60.0)
-    assert grid["benzene"].attrs["tsara_readings"] == 10
+    assert grid["benzene"].attrs["tsara_n_readings"] == 10
     assert "finer_support='allow': readings of 'canister' up to 60 times" in caplog.text
     assert "'benzene' (copied, readings up to 60x a cell; 600 rows from 10 readings" in caplog.text
 
@@ -571,7 +571,7 @@ def test_the_support_record_survives_a_bundle_round_trip(
     assert reloaded["benzene"].attrs["tsara_borrowed_share"] == pytest.approx(
         grid["benzene"].attrs["tsara_borrowed_share"]
     )
-    assert reloaded["benzene"].attrs["tsara_readings"] == 10
+    assert reloaded["benzene"].attrs["tsara_n_readings"] == 10
     assert np.array_equal(
         reloaded["borrowed_benzene"].values, grid["borrowed_benzene"].values, equal_nan=True
     )

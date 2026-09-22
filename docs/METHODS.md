@@ -31,7 +31,8 @@ attributes and this document, because each was once used for several:
 | **provenance** | where a number or a fact came from: `declared`, `reported`, `inferred`, `assumed`, `empirical` … (`uncertainty_provenance`, `tsara_support_label_provenance`) | |
 | **field** | the physical quantity a variable measures (§1.6) | |
 | **borrowed** | the share of a joined value resting on air outside its own cell (`borrowed_<name>`, `tsara_borrowed_share`, §11.2.4) | an uncertainty; it is a magnitude, and no threshold on it separates a blend from jitter |
-| **averaged / shared / narrowed / copied** | what a join did to the readings behind a column (`tsara_support_transform`, §11.2.4): wholly inside their cells; straddling a boundary; wider than a cell they fill; at least twice as wide, which is refused unless asked for by name | |
+| **averaged / straddled / narrowed / copied** | what a join did to the readings behind a column (`tsara_support_transform`, §11.2.4): wholly inside their cells; lying across a boundary; wider than a cell they fill; at least twice as wide, which is refused unless asked for by name | |
+| **shared** | a reading that formed more than one row of a product, so those rows share its error (`tsara_shared_readings`, the sharing warnings, §11.4.1) | the support label: a straddled reading is shared only when both cells it lies across are rows of the product, which a sparse partner's are not |
 
 Bundles written before these names were settled are read and respelled on load
 (§10.2).
@@ -2763,7 +2764,7 @@ to this function with a chosen set of columns.
   a well-determined value from a number that merely exists (§11.2.4);
 * per column, what the join did to the readings behind it and by how much —
   `tsara_support_transform`, `tsara_width_ratio_max`, `tsara_borrowed_share`,
-  `tsara_readings` (§11.2.4);
+  `tsara_n_readings` (§11.2.4);
 * everything the input stream declared about itself, plus `tsara_instrument`
   saying where it came from and `tsara_binned` saying whether this stage
   averaged it at all.
@@ -2843,7 +2844,7 @@ whole family, the two numbers and the record are §11.2.4).
 | 2 s, any phase | 1 s | 2 | refused |
 | 1.9 s | 1 s | 1.9 | allowed, labelled `narrowed`; the sharing is counted |
 | 1.023 s | 1 s | 1.023 | allowed, labelled `narrowed`, ratio recorded |
-| 10 s, half a period out of phase | 10 s | 1 | allowed, labelled `shared`; lossy for another reason (§11.9.1) |
+| 10 s, half a period out of phase | 10 s | 1 | allowed, labelled `straddled`; lossy for another reason (§11.9.1) |
 | 60 s | one 15 s cell | 4 | refused — the hole the summed rule had |
 | 30 s | sliding 60 s windows every 10 s | 0.5 | allowed — refused by the summed rule |
 
@@ -2868,7 +2869,7 @@ The ratio per pair has neither hole.
 Below the copy line a reading can still be wider than a cell (narrowed) or
 feed two rows (shared) — a 1.9 s cell on a 1 s grid, a 15 s canister fill
 across a minute boundary — and that is not refused but recorded, in
-`tsara_width_ratio_max`, `tsara_borrowed_share` and `tsara_readings`, with one
+`tsara_width_ratio_max`, `tsara_borrowed_share` and `tsara_n_readings`, with one
 warning per join naming the columns (§11.2.4).
 
 The escape routes for the legitimate cases are two: a smooth non-gas field
@@ -3045,16 +3046,16 @@ recorded rather than thresholded, and its per-cell maximum is not used at all
 
 | attribute | meaning |
 |---|---|
-| `tsara_support_transform` | the worst thing the join did to any reading behind the column: `passthrough` (the stream's cells are the target), `averaged` (borrowed share exactly 0), `shared` (`r_max ≤ 1`, some share > 0), `narrowed` (`1 < r_max < 2`), `copied` (`r_max ≥ 2`, only under `allow`) |
+| `tsara_support_transform` | the worst thing the join did to any reading behind the column: `passthrough` (the stream's cells are the target), `averaged` (borrowed share exactly 0), `straddled` (`r_max ≤ 1`, some share > 0), `narrowed` (`1 < r_max < 2`), `copied` (`r_max ≥ 2`, only under `allow`) |
 | `tsara_width_ratio_max` | the largest reading-to-cell width ratio among the readings that formed a value |
 | `tsara_borrowed_share` | the column's borrowed share: every contributing pair's borrowed time over every contributing pair's time |
-| `tsara_readings` | distinct finite readings behind the column's rows; on a paired product, behind the surviving pairs |
+| `tsara_n_readings` | distinct finite readings behind the column's rows; on a paired product, behind the surviving pairs |
 
 and per cell, a third companion beside the count and the coverage:
 `borrowed_<name>`, the share above per target cell (`nan` where nothing
 contributed, 0 where a stream passed through). Its `cell_methods` is absent,
 as a coverage fraction's is: it is a property of the cell rather than a
-statistic of the data inside it. Most real joins read `shared`, because a
+statistic of the data inside it. Most real joins read `straddled`, because a
 mid-labelled instrument on any grid straddles at the edges; the label
 separates the two cases that matter and the numbers carry the magnitude. The
 LANL analyzer on a 1 s grid reads `narrowed` with a ratio of 1.024, which is
@@ -3101,7 +3102,7 @@ by median width, so its partner is normally averaged, never copied. A clock
 whose cells vary in width can still hold one cell less than half as wide as a
 partner reading — the canisters' fills run from 1.8 s to 20.1 s on the ten
 2024 drive days — and that pair is refused unless allowed. The pairing count
-in `tsara_readings` is asked again of the surviving pairs, and its warning
+in `tsara_n_readings` is asked again of the surviving pairs, and its warning
 speaks only where the binner's did not (dropping rows can leave rows
 outnumbering readings where before they did not).
 
@@ -3202,7 +3203,8 @@ and per variable:
 | `tsara_instrument` | which stream this species came from |
 | `tsara_binned` | 1 if averaged onto the clock, 0 if already on it |
 | `tsara_sigma_at_support` | how a declared σ was moved onto its own cells, or `unscaled` |
-| `tsara_readings` | distinct readings of this species behind the surviving pairs (§11.2.4, §11.4.1) |
+| `tsara_n_readings` | distinct readings of this species behind the surviving pairs (§11.2.4, §11.4.1) |
+| `tsara_shared_readings` | distinct readings of this species that formed more than one surviving pair, so that neighbouring pairs share their error; 0 for a species on the clock, by construction (§11.4.1) |
 
 and on each propagated σ companion, `tsara_propagation_form`: the registered
 form that produced *that* number, or `independent` when no decorrelation
@@ -3356,8 +3358,7 @@ member's error dominates. Phase 4.6 gave the case a remedy short of modelling
 it: `pair_species(target=)` puts both members on a coarser common clock, where
 the naive standard error is honest again — measured over 800 draws with a
 smooth truth, 0.67× the real scatter at 1 s, 0.89× at 5 s, 0.92× at 10 s, the
-real scatter unchanged at every width — and the product warns with that
-remedy whenever the clock rule lands on this shape (§11.4). This is not rare. On the same 2024-07-18 drive the
+real scatter unchanged at every width. This is not rare. On the same 2024-07-18 drive the
 iodide-CIMS species (finite in 92–97 % of rows) and the PTR-MS species (94–95 %)
 are dense, start-labelled and half a cell from the mid-labelled LIF. The
 tie rule still gives them a deterministic clock (the member with fewer finite
@@ -3366,6 +3367,44 @@ cannot flag them, because sharing a reading between two pairs is a
 *correlation* between pairs rather than a shortfall of readings. Accounting for
 it belongs to the regression, which can see the covariance the shared overlap
 weights imply; it is recorded as an open question for Phase 7.
+
+**Sparse and dense are the same geometry and not the same problem.** The
+warning that names the remedy was first written to fire on the geometry
+alone — equal widths, a non-zero phase offset — and to assert the consequence
+above. That consequence does not hold when the averaged member is *sparse*.
+Its pairs then sit two or three cells apart, each of its readings straddles
+one pair's cell and one dropped candidate, and no reading reaches two pairs:
+the borrowed share is 0.50 exactly as in the dense case, and the pairs are
+independent. The first table above already said so from the other side (the
+sparser member's clock, 1.02× and 1.03×), and the walkthrough of notebook 04
+§9 caught the warning contradicting it. So the product now counts the thing
+itself, per species, in `tsara_shared_readings`: the distinct readings that
+formed more than one surviving pair, on the same membership rule as every
+other count here (a positive overlap; a masked reading formed nothing). The
+warning is in two parts. The blend is said whenever the geometry holds,
+because it is real in both cases: each value is a mean of two readings
+straddling its cell and rests on air outside it by the borrowed share. The
+remedy is named only when that count is not zero. Measured on 2024-07-18:
+
+| pair | clock | pairs | averaged member | `tsara_n_readings` | `tsara_shared_readings` | remedy named |
+|---|---|---|---|---|---|---|
+| NOy vs CO₂ (43 % finite) | Picarro | 8,447 | NOy | 16,893 | **0** | no |
+| NOy vs O₃ (50 %) | ozone | 9,750 | NOy | 19,498 | **0** | no |
+| benzene (PTR, 95 %) vs NOy | PTR | 18,439 | NOy | 18,478 | **18,397** | yes |
+
+The same drive holds both shapes, and nothing but the count separates them:
+in every row the averaged member is labelled `straddled` with a borrowed
+share of 0.500. Notebook 04 §9's miniature of the drive gives the same
+answer (its sparse default 0 of 3,127 readings shared, its dense variant
+3,598 of 3,599). One more number belongs beside these, because the count
+alone would misread the remedy: on the 10 s common clock the NOy readings
+astride each cell boundary are shared too (1,949 of the 1,950 pairs), but at
+a borrowed share of 0.05 rather than 0.50, and that is why the naive standard
+error is honest there. The count says *whether* pairs share readings; the
+borrowed share says *how much* of each value is shared. A false alarm here
+is not harmless: it sends a user to a clock ten times coarser and throws
+away real resolution for nothing, and false alarms are what erode a loud
+product's credibility (§11.2.4).
 
 The same sharing moves a fitted slope, not only its error, when the signal
 itself has structure at the scale of a cell. On a synthetic campaign of two
@@ -3386,14 +3425,15 @@ empty: all 261 iWAS fills of the 2024 drive days, paired against the
 mobile lab's own 60 s ground Picarro (each with its file's stop column naming
 exact cells), yield **one** pair, because the ground record has no value while
 the lab is driving. It is therefore recorded rather than prevented. Each
-paired species carries `tsara_readings`, the number of distinct finite
+paired species carries `tsara_n_readings`, the number of distinct finite
 readings behind the surviving pairs (a species already on the clock has one
 per pair by construction), `PairedSpecies` exposes the same counts, and a
 warning names the species when either count falls below the number of pairs.
 That count, not the pair count, is a ceiling on a regression's N — a ceiling
 and not an estimate, since readings shared between neighbouring pairs, as in
 the dense case above, reduce the independent information without reducing the
-count.
+count. How many readings were shared that way is the separate count in
+`tsara_shared_readings`.
 
 ### 11.5 Circular statistics for angular variables
 
@@ -3818,7 +3858,7 @@ cells from `iWAS_Stop_UTC`): **68 of 261 fills** land in two rows, and **320
 rows** hold benzene from 261 fills. A fill crosses a boundary whenever it
 starts in the last fifteen seconds of a minute, so about a quarter do.
 
-Each gridded column therefore carries `tsara_readings`, the number of
+Each gridded column therefore carries `tsara_n_readings`, the number of
 distinct finite readings behind it, beside the rest of the support record,
 and one warning names the columns whose occupied rows outnumber their
 readings or whose readings are wider than a cell — at most eight, because a
@@ -3829,7 +3869,7 @@ neighbouring rows lower the independent information without lowering the
 count, which is what the borrowed share is for. Measured on the ten-drive
 15 s grid, the canisters' longest fills (20.1 s) make the column `narrowed`
 at a ratio of 1.34 with 520 rows from 261 readings — real narrowing that was
-allowed and silent before Phase 4.6 — and on the 60 s grid `shared`, with a
+allowed and silent before Phase 4.6 — and on the 60 s grid `straddled`, with a
 borrowed share of 0.10.
 
 **How the rule and the record are checked.** (As pinned in Phase 4; the rule
@@ -3886,7 +3926,7 @@ outputs compared at all.
 | `tsara_grid_widest_reading_cell_s` | the widest single selected cell, in seconds |
 | `tsara_grid_variables` | which variables were selected, instrument-qualified |
 
-and per variable the support record of §11.2.4, including `tsara_readings`:
+and per variable the support record of §11.2.4, including `tsara_n_readings`:
 the distinct finite readings behind the column's occupied rows.
 
 The last is recorded because a reader cannot tell from the columns alone
@@ -4172,7 +4212,7 @@ recovered ratio moves from **0.250000034** to **0.249940526**. Aligning the
 grid's start to that instrument's own cell boundaries restores it exactly.
 
 Nothing is silently wrong: `n_readings` reports 2 instead of 1,
-`borrowed_<name>` reads 0.5 and the column is labelled `shared`, and
+`borrowed_<name>` reads 0.5 and the column is labelled `straddled`, and
 `grid_cells` warns when it detects an input stream whose cells match the
 period but not its phase (`phase_offset_s`, the same exact test pairing applies
 to a partner half a cell from its clock, §11.4). It is a warning rather than a

@@ -20,6 +20,7 @@ from tsara.align.binning import (
     phase_offset_s,
     readings_behind,
     select_variables,
+    shared_readings,
     stream_cells,
     targets_overlap,
 )
@@ -550,6 +551,26 @@ def test_a_zero_width_target_cell_makes_nothing_look_replicated() -> None:
     assert np.isfinite(joined["ch4"].values[1])
 
 
+def test_shared_readings_counts_finite_readings_forming_two_cells_and_ignores_touching() -> None:
+    """A reading over two cells is shared; one the search visits at zero overlap is not.
+
+    Readings [0, 4) and [1, 1.5) against cells [1, 2) and [2, 3). The wide one
+    forms both cells. The nested one forms [1, 2) only, but the overlap search
+    still visits it for [2, 3) with an overlap of zero, which must count for
+    nothing -- the same membership rule as ``readings_behind``. Masking the wide
+    reading takes the count to zero: a masked reading formed nothing.
+    """
+    readings = CellBounds(
+        start_ns=np.array([0, SECOND], dtype=np.int64),
+        stop_ns=np.array([4 * SECOND, SECOND + SECOND // 2], dtype=np.int64),
+    )
+    target = cells(1.0, 1.0, 2)
+    stream = make_stream(0.0, 1.0, 2, {"v": np.array([1.0, 2.0])})
+    assert shared_readings(stream, "v", readings, target) == 1
+    masked = make_stream(0.0, 1.0, 2, {"v": np.array([np.nan, 2.0])})
+    assert shared_readings(masked, "v", readings, target) == 0
+
+
 def test_readings_behind_counts_distinct_finite_contributors() -> None:
     """Five readings, one masked, spread over three 2 s cells: four readings."""
     stream = make_stream(0.0, 1.0, 5, {"ch4": np.array([1.0, np.nan, 3.0, 4.0, 5.0])})
@@ -854,7 +875,7 @@ PROBE = [
         "allow",
         0.993,
         0.342,
-        "shared",
+        "straddled",
     ),
     (
         "1 s -> 1 s half a cell out of phase",
@@ -863,7 +884,7 @@ PROBE = [
         "allow",
         1.0,
         0.500,
-        "shared",
+        "straddled",
     ),
     (
         "15 s fills every 530 s -> 8 s grid",
@@ -890,7 +911,7 @@ PROBE = [
         "allow",
         1.0,
         0.356,
-        "shared",
+        "straddled",
     ),
     (
         "15 s fills every 530 s -> 60 s grid",
@@ -899,7 +920,7 @@ PROBE = [
         "allow",
         0.25,
         0.089,
-        "shared",
+        "straddled",
     ),
     ("60 s -> 30 s", spaced(0, 60, 10, 60), spaced(0, 30, 20, 30), "refuse", 2.0, 0.500, "copied"),
     (
@@ -945,7 +966,7 @@ PROBE = [
         "allow",
         0.5,
         0.145,
-        "shared",
+        "straddled",
     ),
     (
         "60 s -> sliding 300 s every 30 s",
@@ -954,7 +975,7 @@ PROBE = [
         "allow",
         0.2,
         0.050,
-        "shared",
+        "straddled",
     ),
     (
         "1 s -> sliding 60 s every 1 s",
@@ -990,7 +1011,7 @@ PROBE = [
         "allow",
         1.0,
         0.500,
-        "shared",
+        "straddled",
     ),
     (
         "60 s -> 60 s offset 10 s (blend)",
@@ -999,7 +1020,7 @@ PROBE = [
         "allow",
         1.0,
         0.278,
-        "shared",
+        "straddled",
     ),
     (
         "10 s LGR -> 1 s grid (copy)",
@@ -1061,7 +1082,7 @@ def test_copying_is_refused_by_default_and_allowed_loudly(caplog: pytest.LogCapt
         joined = bin_streams_onto_cells({"m": minute}, spaced(0, 1, 600, 1), finer_support="allow")
     assert int(np.isfinite(joined["v"].values).sum()) == 600
     assert joined["v"].attrs["tsara_support_transform"] == "copied"
-    assert joined["v"].attrs["tsara_readings"] == 10
+    assert joined["v"].attrs["tsara_n_readings"] == 10
     assert "finer_support='allow': readings of 'm' up to 60 times as wide" in caplog.text
     assert "'v' (copied, readings up to 60x a cell; 600 rows from 10 readings" in caplog.text
 
@@ -1100,7 +1121,7 @@ def test_a_blend_is_recorded_and_not_warned_about(caplog: pytest.LogCaptureFixtu
     with caplog.at_level("WARNING", logger="tsara.align.binning"):
         joined = bin_streams_onto_cells({"a": stream}, spaced(1, 1, 399, 1))
     assert "rest on air" not in caplog.text
-    assert joined["v"].attrs["tsara_support_transform"] == "shared"
+    assert joined["v"].attrs["tsara_support_transform"] == "straddled"
     assert joined["v"].attrs["tsara_borrowed_share"] == pytest.approx(0.5)
     assert np.allclose(joined["borrowed_v"].values, 0.5)
 
@@ -1121,8 +1142,8 @@ def test_overlapping_targets_share_readings_by_construction(
         joined = bin_streams_onto_cells({"a": stream}, windows)
     assert "rest on air" not in caplog.text
     assert int(np.isfinite(joined["v"].values).sum()) == 55
-    assert joined["v"].attrs["tsara_readings"] == 20
-    assert joined["v"].attrs["tsara_support_transform"] == "shared"
+    assert joined["v"].attrs["tsara_n_readings"] == 20
+    assert joined["v"].attrs["tsara_support_transform"] == "straddled"
 
 
 def test_disjoint_targets_that_share_a_reading_are_warned_about(
@@ -1133,8 +1154,8 @@ def test_disjoint_targets_that_share_a_reading_are_warned_about(
     with caplog.at_level("WARNING", logger="tsara.align.binning"):
         joined = bin_streams_onto_cells({"iwas": fills}, spaced(0, 60, 3, 60))
     assert "'benzene' (3 rows from 2 readings; borrowed share" in caplog.text
-    assert joined["benzene"].attrs["tsara_readings"] == 2
-    assert joined["benzene"].attrs["tsara_support_transform"] == "shared"
+    assert joined["benzene"].attrs["tsara_n_readings"] == 2
+    assert joined["benzene"].attrs["tsara_support_transform"] == "straddled"
 
 
 def test_the_borrowed_companion_is_the_per_cell_share_and_is_not_a_variable() -> None:
@@ -1161,7 +1182,7 @@ def test_a_passed_through_column_borrows_nothing_and_says_so() -> None:
     assert joined["a"].attrs["tsara_support_transform"] == "passthrough"
     assert joined["a"].attrs["tsara_width_ratio_max"] == 1.0
     assert joined["a"].attrs["tsara_borrowed_share"] == 0.0
-    assert joined["a"].attrs["tsara_readings"] == 2
+    assert joined["a"].attrs["tsara_n_readings"] == 2
     assert np.array_equal(joined["borrowed_a"].values, [0.0, np.nan, 0.0], equal_nan=True)
 
 
@@ -1177,7 +1198,7 @@ def test_a_direction_carries_the_same_record_as_a_scalar() -> None:
         "tsara_support_transform",
         "tsara_width_ratio_max",
         "tsara_borrowed_share",
-        "tsara_readings",
+        "tsara_n_readings",
     ):
         assert joined["wind"].attrs[attr] == joined["v"].attrs[attr]
     assert np.array_equal(
@@ -1190,7 +1211,7 @@ def test_a_column_with_nothing_behind_it_records_nothing(caplog: pytest.LogCaptu
     stream = make_stream(0.0, 1.0, 60, {"a": np.full(60, np.nan)})
     with caplog.at_level("WARNING", logger="tsara.align.binning"):
         joined = bin_streams_onto_cells({"s": stream}, cells(0.0, 10.0, 6))
-    assert joined["a"].attrs["tsara_readings"] == 0
+    assert joined["a"].attrs["tsara_n_readings"] == 0
     assert np.isnan(joined["a"].attrs["tsara_width_ratio_max"])
     assert np.isnan(joined["a"].attrs["tsara_borrowed_share"])
     assert joined["a"].attrs["tsara_support_transform"] == "averaged"

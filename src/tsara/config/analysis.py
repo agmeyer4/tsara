@@ -99,9 +99,10 @@ class AlignmentConfig(_StrictModel):
 
     Every join in TSARA averages readings onto target cells and records, per
     column, what that did to their support (METHODS.md §11.2.4): a reading
-    wholly inside its cell is *averaged*, one straddling a boundary is
-    *shared* between rows, one wider than the cell it fills is *narrowed*,
-    and one at least twice as wide would be *copied* across rows. All but the
+    wholly inside its cell is *averaged*, one lying across a boundary is
+    *straddled* (part of it in each of two rows), one wider than the cell it
+    fills is *narrowed*, and one at least twice as wide would be *copied*
+    across rows. All but the
     last are allowed, recorded and warned about; the last is what
     ``finer_support`` decides. Interpolation is the other way a value can be
     placed on a support it was not measured on, and TSARA performs it only
@@ -126,7 +127,7 @@ class AlignmentConfig(_StrictModel):
             "'allow' makes the copies, labels every affected column 'copied', "
             "records how much of each value was borrowed from beyond its "
             "cell, and warns (§11.2.4). Nothing narrower than that line is "
-            "governed here: narrowing and sharing are always allowed, always "
+            "governed here: narrowing and straddling are always allowed, always "
             "recorded, and named in the same warning."
         ),
     )

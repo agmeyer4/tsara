@@ -33,7 +33,7 @@ and the coverage of 0.25 is what says how much to trust it.
 
 So the direction is always the same: a value may be averaged onto a wider
 support, never copied onto a narrower one. Where a reading must still be
-narrowed or shared -- a clock whose cells vary in width, a partner half a
+narrowed or straddled -- a clock whose cells vary in width, a partner half a
 cell out of phase -- the product records how much of each value was borrowed
 from beyond its cell and says so (``docs/METHODS.md`` §11.2.4), and a caller
 who wants different cells altogether passes ``target=``.
@@ -89,9 +89,14 @@ themselves. That count, not the number of pairs, is a ceiling on a fit's N.
 A ceiling, not an estimate. Two *dense* instruments half a cell apart
 duplicate no reading on either clock, yet each reading of the averaged member
 is shared between two neighbouring pairs, and a naive standard error is then
-too narrow by up to 1/sqrt(2) whichever clock is chosen (§11.4.1). No count of
-readings can see a correlation between pairs; the borrowed share records it
-(0.5 at half a cell), the product warns with the remedy, and the remedy is
+too narrow by up to 1/sqrt(2) whichever clock is chosen (§11.4.1). Neither the
+readings count nor the borrowed share can see that. A *sparse* partner half a
+cell off blends the same way (borrowed share 0.5), but its pairs sit two or
+three cells apart, no reading reaches two of them, and the pairs are
+independent -- §11.4.1 has the measurement. So the product counts the thing
+itself, per species, in ``tsara_shared_readings``: the distinct readings that
+formed more than one surviving pair. The blend is always said aloud; the
+remedy is named only when that count is not zero, and the remedy is
 ``target=``: both members on a common clock five to ten times coarser, where
 the naive standard error is honest again at no cost in real scatter. Modelling
 the correlation from the overlap weights belongs to the regression.
@@ -119,6 +124,7 @@ from tsara.align.binning import (
     phase_offset_s,
     readings_behind,
     resolve_variable,
+    shared_readings,
     stream_cells,
     targets_overlap,
 )
@@ -144,6 +150,10 @@ PAIRING_REASON_ATTR = "tsara_pairing_clock_reason"
 PAIRING_COVERAGE_ATTR = "tsara_pairing_min_coverage"
 PAIRING_DROPPED_ATTR = "tsara_pairing_cells_dropped"
 PAIRING_CANDIDATE_ATTR = "tsara_pairing_cells_considered"
+#: Per species: how many distinct readings formed more than one surviving
+#: pair, so that neighbouring pairs share an error (§11.4.1). Zero for a
+#: member on the clock, by construction.
+SHARED_READINGS_ATTR = "tsara_shared_readings"
 #: What ``tsara_pairing_clock`` and :attr:`PairedSpecies.clock` say when the
 #: caller supplied the cells rather than letting the clock rule choose.
 EXPLICIT_CLOCK = "explicit"
@@ -175,7 +185,9 @@ class PairedSpecies:
         pair, so the smaller of these and ``n_pairs`` is a ceiling on the
         number of independent points a fit really has -- a ceiling only,
         since readings shared between neighbouring pairs lower the
-        independent information without lowering the count (§11.4.1).
+        independent information without lowering the count (§11.4.1). How
+        many readings were shared that way is counted separately, in each
+        species' ``tsara_shared_readings`` attribute.
     """
 
     dataset: xr.Dataset
@@ -303,6 +315,26 @@ def _readings_behind(
     return readings_behind(stream, variable, readings, pairs)
 
 
+def _shared_readings(
+    joined: xr.Dataset,
+    column: str,
+    stream: xr.Dataset,
+    variable: str,
+    readings: CellBounds,
+    pairs: CellBounds,
+) -> int:
+    """Return how many distinct readings of one species formed more than one pair.
+
+    A member already on the clock forms exactly one pair per reading by
+    construction, so none of its readings is shared. A binned member's count
+    comes from the same overlap search that counted the readings behind the
+    pairs, restricted to the pairs that survived.
+    """
+    if joined[column].attrs.get(BINNED_ATTR) == 0:
+        return 0
+    return shared_readings(stream, variable, readings, pairs)
+
+
 def _explicit_target(
     streams: Mapping[str, xr.Dataset],
     target: CellBounds | str,
@@ -337,41 +369,59 @@ def _explicit_target(
 
 
 def _warn_if_a_partner_blends(
-    joined: xr.Dataset,
-    y: tuple[str, CellBounds],
-    x: tuple[str, CellBounds],
+    dataset: xr.Dataset,
+    y: tuple[str, CellBounds, int],
+    x: tuple[str, CellBounds, int],
     clock_cells: CellBounds,
 ) -> None:
     """Say so when a binned member's cells are as wide as the clock's but offset from them.
 
-    The 2024 drive suite's shape on every pair (§11.4.1): each reading of the
-    averaged member lends half of itself to two neighbouring pairs, so
-    neighbouring pairs share an error and a fit treating them as independent
-    has a standard error too narrow by up to 1/sqrt(2). The readings count
-    cannot see it, since no reading is used twice; the borrowed share
-    records it (0.5 at half a cell); and the remedy is a coarser common
-    clock, which the message names. The same exact test the grid applies to
-    its own cells (:func:`~tsara.align.binning.phase_offset_s`).
+    The 2024 drive suite's shape on every pair (§11.4.1): each value of the
+    averaged member blends the two readings straddling its cell, so it rests
+    on air outside the cell by the borrowed share (0.5 at half a cell). That
+    much follows from the geometry alone -- the same exact test the grid
+    applies to its own cells (:func:`~tsara.align.binning.phase_offset_s`)
+    -- and is always said.
+
+    What does not follow from the geometry is whether the pairs are
+    independent. A *dense* member lends each reading to two neighbouring
+    pairs, so neighbouring pairs share an error and a fit treating them as
+    independent has a standard error too narrow by up to 1/sqrt(2); the
+    remedy is a coarser common clock, which the message then names. A
+    *sparse* member's pairs sit cells apart, no reading reaches two of them,
+    and naming the remedy would send the caller to throw away resolution for
+    nothing. So that clause is gated on the exact count of readings that
+    formed more than one surviving pair
+    (:func:`~tsara.align.binning.shared_readings`), never on the geometry.
     """
-    for name, member_cells in (y, x):
-        if joined[name].attrs.get(BINNED_ATTR) != 1:
+    for name, member_cells, shared in (y, x):
+        if dataset[name].attrs.get(BINNED_ATTR) != 1:
             continue
         offset_s = phase_offset_s(member_cells, clock_cells)
         if offset_s is None:
             continue
         width_s = median_width_s(clock_cells)
+        if shared > 0:
+            consequence = (
+                f"{shared} of its readings formed two neighbouring pairs, so neighbouring "
+                "pairs share an error and a fit treating the pairs as independent has a "
+                "standard error too narrow by up to 1/sqrt(2) (METHODS §11.4.1). Pair both "
+                f"species on a coarser common clock with target=, e.g. target='{10 * width_s:g}s'."
+            )
+        else:
+            consequence = (
+                f"No reading formed more than one of the {dataset.sizes[TIME_COORD]} pairs, so "
+                "the pairs are independent and no coarser clock is needed (METHODS §11.4.1)."
+            )
         logger.warning(
             "Every pair blends two readings of '%s': its cells are as wide as the clock's "
-            "(%.6g s) but offset by %.6g s, so each reading lends part of itself to two "
-            "neighbouring pairs (borrowed share %.2f) and neighbouring pairs share an error. "
-            "A fit treating the pairs as independent has a standard error too narrow by up "
-            "to 1/sqrt(2) (METHODS §11.4.1). Pair both species on a coarser common clock "
-            "with target=, e.g. target='%gs'.",
+            "(%.6g s) but offset by %.6g s, so each value blends the two readings straddling "
+            "its cell and rests on air outside it by the borrowed share (%.2f). %s",
             name,
             width_s,
             offset_s,
-            float(joined[name].attrs[BORROWED_ATTR]),
-            10 * width_s,
+            float(dataset[name].attrs[BORROWED_ATTR]),
+            consequence,
         )
 
 
@@ -514,11 +564,6 @@ def pair_species(
         > int(joined[name].attrs[READINGS_ATTR])
         for name in (y_name, x_name)
     }
-    if clock != EXPLICIT_CLOCK:
-        # The clock rule chose these cells, so the caller has not seen what a
-        # partner half a cell from them does; with an explicit target the
-        # caller chose, and a period target was already checked by the grid.
-        _warn_if_a_partner_blends(joined, (y_name, y_cells), (x_name, x_cells), target)
     dataset = joined.isel({TIME_COORD: surviving})
     # Count the readings behind the surviving pairs, per species, and warn when
     # fewer readings than pairs means some reading sits in more than one pair.
@@ -529,6 +574,22 @@ def pair_species(
     # survived: one name, one meaning, on every product.
     dataset[y_name].attrs[READINGS_ATTR] = y_readings
     dataset[x_name].attrs[READINGS_ATTR] = x_readings
+    # And the independence question, asked exactly: how many readings formed
+    # more than one surviving pair. It is what separates a dense partner half
+    # a cell off (every reading in two pairs) from a sparse one (pairs cells
+    # apart, no reading in two), which the borrowed share and the readings
+    # count cannot tell apart (§11.4.1).
+    y_shared = _shared_readings(dataset, y_name, streams[y_instrument], y_variable, y_cells, kept)
+    x_shared = _shared_readings(dataset, x_name, streams[x_instrument], x_variable, x_cells, kept)
+    dataset[y_name].attrs[SHARED_READINGS_ATTR] = y_shared
+    dataset[x_name].attrs[SHARED_READINGS_ATTR] = x_shared
+    if clock != EXPLICIT_CLOCK:
+        # The clock rule chose these cells, so the caller has not seen what a
+        # partner half a cell from them does; with an explicit target the
+        # caller chose, and a period target was already checked by the grid.
+        _warn_if_a_partner_blends(
+            dataset, (y_name, y_cells, y_shared), (x_name, x_cells, x_shared), target
+        )
     if min(y_readings, x_readings) < surviving.size:
         sparse_name, sparse_count = (
             (y_name, y_readings) if y_readings <= x_readings else (x_name, x_readings)

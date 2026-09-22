@@ -38,7 +38,7 @@ Automatically, so a caller cannot forget:
   merely exists (§11.2.4);
 * per column, what the join did to the readings behind it and by how much:
   ``tsara_support_transform``, ``tsara_width_ratio_max``,
-  ``tsara_borrowed_share`` and ``tsara_readings``;
+  ``tsara_borrowed_share`` and ``tsara_n_readings``;
 * everything the input stream declared about itself, plus where it came from.
 
 Three behaviours are not negotiable and are handled here rather than left to
@@ -141,7 +141,7 @@ SIGMA_AT_SUPPORT_ATTR = "tsara_sigma_at_support"
 TRANSFORM_ATTR = "tsara_support_transform"
 WIDTH_RATIO_ATTR = "tsara_width_ratio_max"
 BORROWED_ATTR = "tsara_borrowed_share"
-READINGS_ATTR = "tsara_readings"
+READINGS_ATTR = "tsara_n_readings"
 
 #: Reading width over target width at which a join is a *copy*: one reading
 #: filling two cells' worth of rows (§11.2.4). A named constant rather than a
@@ -160,10 +160,13 @@ FinerSupport = Literal["refuse", "allow"]
 #: the worst thing the join did to any reading behind it. Derived from two
 #: numbers without a tolerance: ``passthrough`` when the stream's cells are
 #: the target; ``averaged`` when every contributing reading sat wholly inside
-#: its cell (borrowed share exactly 0); ``shared`` when some reading straddled
-#: a cell boundary but none was wider than a cell it filled; ``narrowed`` when
-#: one was, by less than :data:`COPY_RATIO`; ``copied`` at or beyond it.
-SupportTransform = Literal["passthrough", "averaged", "shared", "narrowed", "copied"]
+#: its cell (borrowed share exactly 0); ``straddled`` when some reading lay
+#: across a cell boundary but none was wider than a cell it filled;
+#: ``narrowed`` when one was, by less than :data:`COPY_RATIO`; ``copied`` at
+#: or beyond it. The word *shared* is kept for a different fact, a reading
+#: that formed more than one row's value (:func:`shared_readings`, §11.4.1):
+#: a straddled reading in a product whose rows sit cells apart is not shared.
+SupportTransform = Literal["passthrough", "averaged", "straddled", "narrowed", "copied"]
 
 #: What ``tsara_stage`` says on a dataset this package built by *joining*
 #: measurements, as opposed to one it read from an archive (``ingest``) or
@@ -590,6 +593,47 @@ def readings_behind(
     return int(np.count_nonzero(touched_readings(readings, target) & finite))
 
 
+def shared_readings(
+    stream: xr.Dataset, variable: str, readings: CellBounds, target: CellBounds
+) -> int:
+    """Return how many distinct finite readings of a variable formed more than one target cell.
+
+    The independence question, asked exactly (§11.4.1). A reading that
+    overlaps two target cells by a positive amount contributed to both of
+    their values, so the two rows share its error and a fit treating them as
+    independent is too confident. Neither of the other two numbers can see
+    this. The borrowed share is 0.5 for a partner half a cell out of phase
+    whether its readings feed one pair each or two: a *sparse* partner's
+    pairs sit two or three cells apart, so no reading reaches two of them,
+    while a *dense* partner puts every reading into two. And
+    :func:`readings_behind` counts a reading once however many rows it
+    formed. Same membership rule as the binner, so a reading touching a cell
+    only at its boundary counts for nothing and a masked reading formed
+    nothing.
+
+    Parameters
+    ----------
+    stream : xarray.Dataset
+        The stream holding the variable.
+    variable : str
+        The variable's name in that stream.
+    readings : CellBounds
+        The stream's cells.
+    target : CellBounds
+        The cells whose values the readings formed.
+
+    Returns
+    -------
+    int
+        Distinct finite readings overlapping two or more target cells.
+    """
+    finite = np.isfinite(np.asarray(stream[variable].values, dtype=np.float64))
+    links = overlap_pairs(readings, target)
+    # How many cells each reading formed, counting only positive overlaps.
+    cells_formed = np.bincount(links.reading_index[links.overlap_ns > 0], minlength=len(readings))
+    return int(np.count_nonzero((cells_formed > 1) & finite))
+
+
 def _refuse_upsampling(
     readings: CellBounds,
     target: CellBounds,
@@ -742,7 +786,7 @@ def _label(ratio_max: float, borrowed_max: float) -> SupportTransform:
     if ratio_max > 1.0:
         return "narrowed"
     if borrowed_max > 0.0:
-        return "shared"
+        return "straddled"
     return "averaged"
 
 
@@ -831,7 +875,7 @@ def _warn_about_support_changes(changes: Mapping[str, _SupportChange], overlappi
         "readings means some reading sits in more than one row, which a fit or receptor "
         "model treating rows as independent counts more than once. Each column records "
         "tsara_support_transform, tsara_width_ratio_max, tsara_borrowed_share and "
-        "tsara_readings, and carries the share borrowed per cell in borrowed_<name>.",
+        "tsara_n_readings, and carries the share borrowed per cell in borrowed_<name>.",
         len(flagged),
         listed,
         " ..." if len(flagged) > 8 else "",
@@ -906,7 +950,7 @@ def bin_streams_onto_cells(
         ``<name>_resultant_length`` and ``<name>_dispersion`` instead of a
         sigma. Every column records ``tsara_support_transform``,
         ``tsara_width_ratio_max``, ``tsara_borrowed_share`` and
-        ``tsara_readings``. Cells are described by CF ``time_bnds``.
+        ``tsara_n_readings``. Cells are described by CF ``time_bnds``.
 
     Raises
     ------

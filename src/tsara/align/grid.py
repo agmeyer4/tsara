@@ -54,11 +54,11 @@ What the rule does not refuse is recorded instead
 --------------------------------------------------
 Below that line a reading may still be wider than a cell (narrowed: the
 canisters' longest fills reach 1.34 cells on a 15 s grid) or land in more
-than one row (shared: a 15 s fill crossing a minute boundary is one
+than one row (straddled: a 15 s fill crossing a minute boundary is one
 measurement in two rows of a 60 s grid, and on the ten 2024 drive days that
 happens to 68 of 261 fills). The binner records both on every column --
 ``tsara_support_transform``, ``tsara_width_ratio_max``,
-``tsara_borrowed_share``, ``tsara_readings`` and a ``borrowed_<name>`` column
+``tsara_borrowed_share``, ``tsara_n_readings`` and a ``borrowed_<name>`` column
 per cell -- and warns once per grid naming the columns affected, because a
 receptor model treating rows as independent observations counts a shared
 reading more than once and a narrowed value stands for time its instrument
