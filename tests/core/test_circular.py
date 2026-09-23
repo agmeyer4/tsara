@@ -21,7 +21,7 @@ from tsara.core.circular import (
     circular_mean,
     wrap_degrees,
 )
-from tsara.core.support import CellBounds
+from tsara.core.support import CellBounds, TsaraSupportError, bin_onto_cells, overlap_pairs
 from tsara.core.timebase import SECOND_NS as SECOND
 
 
@@ -451,3 +451,52 @@ def test_the_binned_path_has_the_same_guard_as_the_scalar_one() -> None:
     assert np.isnan(binned.mean_deg[0]) and np.isnan(scalar.mean_deg)
     assert binned.resultant_length[0] == scalar.resultant_length == 0.0
     assert np.isinf(binned.dispersion_deg[0]) and np.isinf(scalar.dispersion_deg)
+
+
+# ---------------------------------------------------------------------------
+# Shared weights: a direction's qualifiers agree with a scalar's
+# ---------------------------------------------------------------------------
+
+
+def test_a_binned_direction_borrows_exactly_what_a_scalar_would() -> None:
+    """Same overlaps, same weights, same qualifier -- cell by cell, masked reading included."""
+    readings = cells(0.0, 1.0, 30)
+    target = cells(0.5, 10.0, 2)
+    angles = np.linspace(0.0, 90.0, 30)
+    angles[4] = np.nan
+    direction = bin_circular_onto_cells(readings, angles, target)
+    scalar = bin_onto_cells(readings, angles, target)
+    assert np.array_equal(direction.borrowed, scalar.borrowed, equal_nan=True)
+    # The half-second offset straddles a reading at each edge of every cell.
+    assert direction.borrowed[0] > 0.0
+
+
+def test_precomputed_pairs_give_the_same_direction() -> None:
+    readings = cells(0.0, 1.0, 30)
+    target = cells(0.5, 10.0, 2)
+    angles = np.linspace(350.0, 370.0, 30) % 360.0
+    fresh = bin_circular_onto_cells(readings, angles, target)
+    reused = bin_circular_onto_cells(
+        readings, angles, target, pairs=overlap_pairs(readings, target)
+    )
+    for field in (
+        "mean_deg",
+        "resultant_length",
+        "dispersion_deg",
+        "n_readings",
+        "coverage",
+        "n_overlapping",
+        "borrowed",
+    ):
+        assert np.array_equal(getattr(fresh, field), getattr(reused, field), equal_nan=True)
+
+
+def test_pairs_found_for_other_cells_are_refused_for_directions_too() -> None:
+    readings = cells(0.0, 1.0, 30)
+    with pytest.raises(TsaraSupportError, match="found for 2 target cell"):
+        bin_circular_onto_cells(
+            readings,
+            np.ones(30),
+            cells(0.0, 10.0, 3),
+            pairs=overlap_pairs(readings, cells(0.0, 10.0, 2)),
+        )

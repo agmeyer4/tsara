@@ -44,8 +44,13 @@ class OutputGridConfig(_StrictModel):
     Construction is binning-only in both directions: gas species are *never*
     interpolated (a concentration inside a plume is not a smooth field), so
     a cell with zero native samples in its interval is NaN with
-    `n_readings_<name> = 0` — never papered over with a straight line. Aux-field interpolation
-    (GPS, met) is a separate concern, see :class:`AlignmentConfig`.
+    `n_readings_<name> = 0` — never papered over with a straight line. The
+    period is checked against the selected variables (METHODS.md §11.7): a
+    reading at least twice as wide as a grid cell it touches would be copied
+    across rows and is refused unless :class:`AlignmentConfig` says
+    ``finer_support: allow``; everything narrower is recorded per column
+    (§11.2.4). Aux-field interpolation (GPS, met) is the other knob on that
+    class.
 
     There is deliberately no choice of binning statistic. A ``median``
     option was specified in Phase 1 and removed in Phase 4 before it ever
@@ -90,18 +95,42 @@ class OutputGridConfig(_StrictModel):
 
 
 class AlignmentConfig(_StrictModel):
-    """Guard on interpolating smooth auxiliary fields onto gas timestamps.
+    """How support may be changed: the copy policy, and the interpolation guard.
 
-    Per METHODS.md §1.2: quantified species (gases) are never interpolated —
-    only bin-averaged — but smooth auxiliary fields (GPS position, met
-    variables) vary slowly enough that interpolating them onto gas
-    timestamps is physically justified, *as long as* the gap being bridged
-    isn't so long that the interpolation would be inventing data across a
-    real instrument dropout. This is unrelated to cross-species pairing for
-    regression (METHODS.md §1.3), which has no free parameters of its own —
-    it always uses the slower-of-the-pair's native clock.
+    Every join in TSARA averages readings onto target cells and records, per
+    column, what that did to their support (METHODS.md §11.2.4): a reading
+    wholly inside its cell is *averaged*, one lying across a boundary is
+    *straddled* (part of it in each of two rows), one wider than the cell it
+    fills is *narrowed*, and one at least twice as wide would be *copied*
+    across rows. All but the
+    last are allowed, recorded and warned about; the last is what
+    ``finer_support`` decides. Interpolation is the other way a value can be
+    placed on a support it was not measured on, and TSARA performs it only
+    on smooth auxiliary fields (GPS position, met) onto gas cells, under
+    ``max_interp_gap`` (§1.2, §11.6). Quantified species are never
+    interpolated.
+
+    Cross-species pairing (§1.3) reads neither knob by default: its clock is
+    the wider-supported member's own cells, so nothing is copied there, and
+    nothing is interpolated. It reads ``finer_support`` only for a clock
+    whose cells vary in width (§11.2.4).
     """
 
+    finer_support: Literal["refuse", "allow"] = Field(
+        default="refuse",
+        description=(
+            "What a join does with a reading at least twice as wide as a "
+            "target cell it touches, so that its value would be copied across "
+            "rows. 'refuse' (the default) raises: sixty rows from one 60 s "
+            "mean would enter a fit as sixty measurements, which is the "
+            "interpolation rule for a step function (METHODS.md §1.2). "
+            "'allow' makes the copies, labels every affected column 'copied', "
+            "records how much of each value was borrowed from beyond its "
+            "cell, and warns (§11.2.4). Nothing narrower than that line is "
+            "governed here: narrowing and straddling are always allowed, always "
+            "recorded, and named in the same warning."
+        ),
+    )
     max_interp_gap: str = Field(
         default="10s",
         description=(
@@ -493,7 +522,10 @@ class AnalysisConfig(_StrictModel):
     )
     alignment: AlignmentConfig = Field(
         default_factory=AlignmentConfig,
-        description="Auxiliary-field (GPS/met) interpolation guard (METHODS.md §1.2).",
+        description=(
+            "How support may be changed: the copy policy (METHODS.md §11.2.4) and "
+            "the auxiliary-field interpolation guard (§1.2)."
+        ),
     )
     pairing: PairingConfig = Field(
         default_factory=PairingConfig,

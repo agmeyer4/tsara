@@ -94,10 +94,18 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from tsara.core.exceptions import TsaraError
-from tsara.core.support import CellBounds, overlap_pairs
+from tsara.core.support import (
+    CellBounds,
+    borrowed_share,
+    check_pairs_match,
+    contributing_weights,
+    overlap_pairs,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt
+
+    from tsara.core.support import OverlapPairs
 
 __all__ = [
     "BinnedCircular",
@@ -183,6 +191,10 @@ class BinnedCircular:
     n_overlapping : numpy.ndarray
         Readings overlapping at all, masked ones included. The difference
         from ``n_readings`` separates "no data here" from "data rejected here".
+    borrowed : numpy.ndarray
+        Share of each cell's direction resting on air outside the cell
+        (:func:`tsara.core.support.borrowed_share`), formed from the same
+        weights as a scalar's so the two qualifiers agree cell by cell.
     """
 
     mean_deg: npt.NDArray[np.float64]
@@ -191,6 +203,7 @@ class BinnedCircular:
     n_readings: npt.NDArray[np.int64]
     coverage: npt.NDArray[np.float64]
     n_overlapping: npt.NDArray[np.int64]
+    borrowed: npt.NDArray[np.float64]
 
 
 def wrap_degrees(angles: npt.ArrayLike) -> npt.NDArray[np.float64]:
@@ -355,6 +368,8 @@ def bin_circular_onto_cells(
     readings: CellBounds,
     angles_deg: npt.NDArray[np.float64],
     target: CellBounds,
+    *,
+    pairs: OverlapPairs | None = None,
 ) -> BinnedCircular:
     """Vector-average an angular stream onto another stream's cells.
 
@@ -372,17 +387,23 @@ def bin_circular_onto_cells(
         nothing and reduces coverage, exactly as a masked scalar does.
     target : CellBounds
         Cells to average onto.
+    pairs : OverlapPairs, optional
+        The overlaps between ``readings`` and ``target``, if already found;
+        checked against the cells rather than trusted, as
+        :func:`~tsara.core.support.bin_onto_cells` does.
 
     Returns
     -------
     BinnedCircular
-        Per-cell mean direction, resultant length, dispersion, counts and
-        coverage.
+        Per-cell mean direction, resultant length, dispersion, counts,
+        coverage and borrowed share.
 
     Raises
     ------
     TsaraCircularError
         If ``angles_deg`` does not have one entry per reading.
+    TsaraSupportError
+        If ``pairs`` were found for other cells.
     """
     angles = np.asarray(angles_deg, dtype=np.float64)
     if angles.shape != (len(readings),):
@@ -397,8 +418,12 @@ def bin_circular_onto_cells(
     n_readings = np.zeros(n_target, dtype=np.int64)
     coverage = np.zeros(n_target, dtype=np.float64)
     n_overlapping = np.zeros(n_target, dtype=np.int64)
+    borrowed = np.full(n_target, np.nan, dtype=np.float64)
 
-    pairs = overlap_pairs(readings, target)
+    if pairs is None:
+        pairs = overlap_pairs(readings, target)
+    else:
+        check_pairs_match(pairs, readings, target)
     if pairs.overlap_ns.size == 0:
         return BinnedCircular(
             mean_deg=mean_deg,
@@ -407,11 +432,13 @@ def bin_circular_onto_cells(
             n_readings=n_readings,
             coverage=coverage,
             n_overlapping=n_overlapping,
+            borrowed=borrowed,
         )
 
     paired = angles[pairs.reading_index]
     finite = np.isfinite(paired)
-    weight = np.where(finite, pairs.overlap_ns, 0).astype(np.float64)
+    # The same weights a scalar gets, from the one shared definition.
+    weight = contributing_weights(pairs, angles)
     # Zero the angle before taking sine and cosine: sin(nan) is nan, so a
     # zero weight alone would not keep a masked sample out of the sum.
     radians = np.radians(np.where(finite, paired, 0.0))
@@ -457,4 +484,5 @@ def bin_circular_onto_cells(
         n_readings=n_readings,
         coverage=coverage,
         n_overlapping=n_overlapping,
+        borrowed=borrowed_share(pairs, readings, weight),
     )

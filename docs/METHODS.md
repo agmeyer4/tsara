@@ -30,6 +30,9 @@ attributes and this document, because each was once used for several:
 | **pair** | a row where both species of a regression have a value (§1.3) | |
 | **provenance** | where a number or a fact came from: `declared`, `reported`, `inferred`, `assumed`, `empirical` … (`uncertainty_provenance`, `tsara_support_label_provenance`) | |
 | **field** | the physical quantity a variable measures (§1.6) | |
+| **borrowed** | the share of a joined value resting on air outside its own cell (`borrowed_<name>`, `tsara_borrowed_share`, §11.2.4) | an uncertainty; it is a magnitude, and no threshold on it separates a blend from jitter |
+| **averaged / straddled / narrowed / copied** | what a join did to the readings behind a column (`tsara_support_transform`, §11.2.4): wholly inside their cells; lying across a boundary; wider than a cell they fill; at least twice as wide, which is refused unless asked for by name | |
+| **shared** | a reading that formed more than one row of a product, so those rows share its error (`tsara_shared_readings`, the sharing warnings, §11.4.1) | the support label: a straddled reading is shared only when both cells it lies across are rows of the product, which a sparse partner's are not |
 
 Bundles written before these names were settled are read and respelled on load
 (§10.2).
@@ -84,6 +87,15 @@ evaluates a value on a finer support than it was delivered on** (§10).
 Interpolating a gas is one way to break that; treating a 1-minute mean as an
 instant is another, and the archive is full of the second.
 
+Phase 4.6 made the joining half of that rule a *default with a record* rather
+than an absolute (§11.2.4). Every join measures, per reading, how far it bent
+the support: a reading wider than the cell it fills is **narrowed**, one at
+least twice as wide would be **copied** across rows. The copy is refused
+unless `AlignmentConfig.finer_support: allow` asks for it by name; everything
+narrower is allowed, and every column records what happened and how much of
+each value was borrowed from beyond its cell. The interpolation half has no
+knob: gases are still never interpolated.
+
 A concentration inside a plume is not a smooth field; linearly interpolating
 it invents structure exactly where the science happens. Platform position and
 ambient met vary smoothly on sampling timescales, so interpolation onto gas
@@ -107,7 +119,10 @@ when they come from instruments with different rates:
    split a 60 s mean onto 15 s, which the interval model forbids; pairing on
    the mean's clock is admissible, and the coverage of 0.25 is what says how
    much to trust it. When the two widths are equal, the member with fewer
-   measured values where the records overlap is the clock (§11.4.1).
+   measured values where the records overlap is the clock (§11.4.1). A
+   caller may instead supply the cells (`pair_species(target=)`), which is
+   the remedy for the one shape no choice of clock makes honest: two dense
+   equal-width instruments half a cell apart (§11.4.1).
 2. The faster stream is averaged onto those cells **weighted by overlap**
    (`tsara.align.binning.bin_streams_onto_cells`), with uncertainty propagated per §3,
    the count of contributing samples recorded, and the fraction of each cell
@@ -144,10 +159,12 @@ overlap-weighted mean and no other statistic (§11.7), with per-cell
 propagated uncertainties and `n_readings_<name>` counts carried alongside values. Grid cells carry CF boundaries like any
 other stream, and `cell_methods = "time: mean (interval: <native>)"` records
 the resolution of the data that went into them (§10.2). Validation refuses a
-period so fine that one selected reading would cover **two grid cells' worth of
-time**, the post-Phase-3.5 form of "≥ the slowest stream's native period"
-(§11.7; §1.3 makes the same correction for pairing); cells with no native samples are NaN with `n_readings_<name> = 0`, never
-interpolated. Config: `OutputGridConfig`
+period at which a selected reading would be **at least twice as wide as a grid
+cell it touches** — copied across rows — unless `finer_support: allow` asks
+for it (§11.2.4, §11.7; the post-Phase-3.5 form of "≥ the slowest stream's
+native period"); everything narrower is recorded per column and named in one
+warning; cells with no native samples are NaN with `n_readings_<name> = 0`,
+never interpolated. Config: `OutputGridConfig`
 (`tsara.config.analysis`) — deliberately not named "the grid" or paired with
 the aux-interpolation guard, since neither streams nor cross-species pairing
 (§1.3) use it; it exists solely for this output boundary.
@@ -434,6 +451,12 @@ $(\sum w)^2 / \sum w^2$, which is exact for equal weights and an
 approximation otherwise; `ar1_double_sum` is how to find out what that
 approximation costs on a given cell.
 
+`ar1_double_sum` builds an $N \times N$ float64 correlation matrix — 200 MB
+at 5 000 readings, 3.2 GB at 20 000 — so it refuses a cell above
+`DOUBLE_SUM_MAX_POINTS = 5000` readings with a `TsaraPropagationError` naming
+`ar1_neff`, rather than a MemoryError naming nothing. A rolling stage pays
+whichever form it chooses once per window.
+
 `ar1_asymptotic` is the large-$N$ limit, $N_{\mathrm{eff}} = N(1-\rho_1)/(1+\rho_1)$.
 It is the form this document specified before the finite-$N$ version existed,
 and it is kept because reproducing its error is worth being able to do:
@@ -572,6 +595,11 @@ Therefore:
   - *scale-type* systematics propagate directly: a relative scale uncertainty
     $s$ on either axis contributes relative uncertainty $s$ to the slope,
     added in quadrature at the event level.
+- **In neither component yet: the support error of §11.2.4.** A point built
+  by a straddled or narrowed join carries a σ that omits the error that join
+  made, so weighting by σ alone over-trusts it. Whether the recorded borrowed
+  share enters these weights is to be decided before this section is built,
+  not after.
 
 ### 4.4 `odr` — scipy.odr
 
@@ -2637,14 +2665,16 @@ row, in the direction that overlaps its neighbour.
 
 ## 11. Alignment and pairing (Phase 4)
 
-The stage that first *combines* values across time. Three operations live
+The stage that first *combines* values across time. Four operations live
 here, and they need different amounts of trust — the test being whether an
 operation needs a **model** or only a **declaration** (§10.8):
 
 | operation | needs | where |
 |---|---|---|
 | averaging a fast stream onto a slow stream's cells | only the cells, which are already declared | §1.3, §11.2 |
-| interpolating GPS and met onto another clock | a smoothness model, guarded by `max_interp_gap` | §1.2, §11.4 |
+| narrowing or sharing a reading across cells (allowed, recorded, said aloud) | the assumption that a reading's air was uniform across its cell, measured per row as the borrowed share | §11.2.4 |
+| copying a reading across rows (`finer_support: allow`) | information the reading does not hold; refused by default, labelled when allowed | §11.2.4 |
+| interpolating GPS and met onto another clock | a smoothness model, guarded by `max_interp_gap` | §1.2, §11.6 |
 | moving a σ from its quoted interval onto a cell | τ and an AR(1) model | §3.4, §10.8 |
 
 Nothing here detects events, computes a baseline or fits a slope; it hands
@@ -2692,16 +2722,26 @@ So the finite-*N* form is not merely the tidier algebra: it is the one that
 matches what happens. The last two rows are the cost of the alternatives, and
 the naive √N row is why §10.8 refuses to apply it when no τ is declared.
 
+A sixth kind decided §11.2.4: what a transform **costs** against known truth.
+The generator's atmosphere gives the true mean over any cell, so the error of
+standing a 60 s mean on a 15 s cell, or of blending two readings half a cell
+apart, is a number rather than an argument — and that number is what settled
+that narrowing is recorded rather than priced.
+
 **The archive numbers re-run from the repository.** Real data has no answer
 key, so the real-data results in this section are evidence of a different kind:
 a loop reimplementation agreeing with TSARA on the files, and numbers that can
 be measured again. `examples/notebooks/04b_alignment_real_data.ipynb` does the
 second. It reads the permitted archive through manifests, runs this section's
-operations, and ends in a ledger setting 83 numbers from §9.2.3 and §11.4–§11.7.1
-beside the values printed here; at the close of the Phase-4 walkthrough all 83
-agreed. It is committed without outputs and needs `TSARA_ARCHIVE`. Not re-run
-there: the archive-wide census in §11.4.1, the Yamartino comparison in §11.5,
-the midpoint-against-mean table in §11.6, and the compression timings in §11.7.
+operations, and ends in a ledger setting 90 numbers from §9.2.3, §11.2.4 and
+§11.4–§11.7.1 beside the values printed here. At the close of the Phase-4
+walkthrough all 83 rows it then had agreed; the ledger has since gained rows for
+§11.2.4's archive joins and §11.4.1's shared-readings counts, and at the close
+of Phase 4.6 all 90 agree. It is committed without outputs and needs
+`TSARA_ARCHIVE`; `tests/test_notebooks.py` executes it under that variable and
+fails on any ledger row that differs. Not re-run there: the archive-wide census
+in §11.4.1, the Yamartino comparison in §11.5, the midpoint-against-mean table
+in §11.6, and the compression timings in §11.7.
 
 ### 11.2 The joining operation
 
@@ -2733,9 +2773,13 @@ to this function with a chosen set of columns.
 
 * its uncertainty components, propagated through the *same* overlap weights
   that formed the value, random and systematic separately (§3);
-* `n_readings_<name>` and `coverage_<name>` — how many readings contributed
-  and how much of the target cell they covered, the two numbers that separate
-  a well-determined value from a number that merely exists;
+* `n_readings_<name>`, `coverage_<name>` and `borrowed_<name>` — how many
+  readings contributed, how much of the target cell they covered, and how much
+  of the value rests on air outside the cell: the three numbers that separate
+  a well-determined value from a number that merely exists (§11.2.4);
+* per column, what the join did to the readings behind it and by how much —
+  `tsara_support_transform`, `tsara_width_ratio_max`, `tsara_borrowed_share`,
+  `tsara_n_readings` (§11.2.4);
 * everything the input stream declared about itself, plus `tsara_instrument`
   saying where it came from and `tsara_binned` saying whether this stage
   averaged it at all.
@@ -2795,59 +2839,73 @@ Neither `coverage` nor `n_readings` would have flagged it: a replicated row
 reports coverage 1.0 and one contributing reading, which is also what a
 legitimately sparse canister measurement reports.
 
-**The test is measured on the overlaps, not on a comparison of widths**, and
-that choice is load-bearing. A width comparison needs a tolerance, because real
-instruments disagree about their own nominal rate — the median cell widths of
-the 2026 archive's three Aeris analyzers are 0.992 s, 0.993 s and 1.024 s
-against a nominal 1 s — and a strict median-width rule refuses binning one onto
-another over a difference that replicates nothing.
+**The rule is measured per pair, on the overlaps, not on a comparison of
+widths** — and both halves of that are load-bearing. A width comparison needs
+a tolerance, because real instruments disagree about their own nominal rate:
+the median cell widths of the 2026 archive's three Aeris analyzers are
+0.992 s, 0.993 s and 1.024 s against a nominal 1 s, and a strict median-width
+rule refuses binning one onto another over a difference that replicates
+nothing. A per-pair rule needs none, because integer-nanosecond widths divide
+exactly and archive jitter tops out at 1.024 against a refusal at 2.
 
-**The rule: a reading is replicated when the time it shares with the target
-cells adds up to at least twice the width of the widest target cell it
-touches** (`tsara.align.binning.measure_replication`).
+**The rule: a reading at least twice as wide as a target cell it touches
+would be copied across rows, and is refused** unless `finer_support: allow`
+asks for it (`tsara.align.binning.pair_width_ratios`, `COPY_RATIO`; the
+whole family, the two numbers and the record are §11.2.4).
 
-| reading cells | target cells | two cells' worth? | outcome |
+| reading cells | target cells | width ratio | outcome |
 |---|---|---|---|
-| 60 s | 1 s | sixty | refused |
-| 2 s, any phase | 1 s | two | refused |
-| 1.9 s | 1 s | no | allowed; the sharing is counted (§11.7) |
-| 1.023 s | 1 s | no | allowed |
-| 10 s, half a period out of phase | 10 s | no | allowed; lossy for another reason (§11.9.1) |
+| 60 s | 1 s | 60 | refused |
+| 2 s, any phase | 1 s | 2 | refused |
+| 1.9 s | 1 s | 1.9 | allowed, labelled `narrowed`; the sharing is counted |
+| 1.023 s | 1 s | 1.023 | allowed, labelled `narrowed`, ratio recorded |
+| 10 s, half a period out of phase | 10 s | 1 | allowed, labelled `straddled`; lossy for another reason (§11.9.1) |
+| 60 s | one 15 s cell | 4 | refused — the hole the summed rule had |
+| 30 s | sliding 60 s windows every 10 s | 0.5 | allowed — refused by the summed rule |
 
-**It replaced a rule with a phase hole.** Until the Phase-4 walkthrough the
-test counted target cells lying *wholly* inside one reading and refused at
-two. It agreed with the table on every row but one: a perfectly regular 2 s
-record offset from a 1 s grid by 0.3 s or 0.5 s wholly contains only one 1 s
-cell, so it passed, and each of its readings fed two or three rows — while the
-same record exactly in phase was refused. No stream in the permitted archive
-reached it (the 2 s Wyoming Picarro sits exactly on whole seconds, and every
-2026 lag correction is a whole number of seconds), but a fractional
-`time_shift` would have. Twice a width is twice a width whatever the phase, so
-the rule that replaced it has no such case, and it still needs no tolerance:
-the sums are integer nanoseconds.
+**Two rules preceded it, each right about the case that motivated it and
+wrong about one it did not see.** Until the Phase-4 walkthrough the test
+counted target cells lying *wholly* inside one reading and refused at two. A
+perfectly regular 2 s record offset from a 1 s grid by 0.3 s or 0.5 s wholly
+contains only one 1 s cell, so it passed, and each of its readings fed two or
+three rows — while the same record exactly in phase was refused. No stream in
+the permitted archive reached it (the 2 s Wyoming Picarro sits exactly on
+whole seconds, and every 2026 lag correction is a whole number of seconds),
+but a fractional `time_shift` would have. The walkthrough replaced it with a
+sum: a reading is replicated when the time it shares with the target cells
+adds up to twice the widest cell it touches. Twice a width is twice a width
+whatever the phase, so that closed the hole — and assumed the target cells do
+not overlap. Measured in the notebook-04 walkthrough (§11.2.4): sliding 60 s
+windows every 10 s share every 30 s reading with six of them and were refused
+as a copy, while a 60 s mean stood on a single 15 s cell, or a 0.2 s cell
+inside a 1 s reading, passed, because one narrow cell never adds up to two.
+The ratio per pair has neither hole.
 
-Below that line a reading can still feed two rows — a 1.9 s cell on a 1 s grid,
-a 15 s canister fill across a minute boundary — and that is not refused but
-counted, in `tsara_pairing_readings` (§11.4.1) and `tsara_grid_readings`
-(§11.7), each with a warning when rows outnumber the readings behind them.
+Below the copy line a reading can still be wider than a cell (narrowed) or
+feed two rows (shared) — a 1.9 s cell on a 1 s grid, a 15 s canister fill
+across a minute boundary — and that is not refused but recorded, in
+`tsara_width_ratio_max`, `tsara_borrowed_share` and `tsara_n_readings`, with one
+warning per join naming the columns (§11.2.4).
 
-The escape route for the legitimate case is the one that already exists: a
-smooth non-gas field wanted on a finer clock is *interpolated* under a gap
-guard by `tsara.align.auxiliary` (§11.6), which refuses a variable declaring
-`role: gas`.
+The escape routes for the legitimate cases are two: a smooth non-gas field
+wanted on a finer clock is *interpolated* under a gap guard by
+`tsara.align.auxiliary` (§11.6), which refuses a variable declaring
+`role: gas`; and a copy that is genuinely wanted — a slow value held on a
+fast grid for display, or for a consumer that will weight rows by their
+readings — is made by name with `finer_support: allow`, labelled `copied`.
 
 #### 11.2.2 A companion column is not a variable
 
-Four families of column exist only to qualify the column they are named after:
-the two uncertainty components, `n_readings_*`, `coverage_*`, and the resultant
-length and dispersion an angular variable carries instead of a sigma. The
-default selection excludes all four, through one predicate
+Five families of column exist only to qualify the column they are named after:
+the two uncertainty components, `n_readings_*`, `coverage_*`, `borrowed_*`
+(§11.2.4), and the resultant length and dispersion an angular variable carries
+instead of a sigma. The default selection excludes all five, through one predicate
 (`tsara.core.naming.is_companion_name`) rather than a list per caller.
 
 This is not tidiness. The everyday case is the uncertainty components, which
 arrive on every stream that declares a budget: averaging `sigma_rand_ch4` as
 though it were data would report the mean of the sigmas where the sigma of the
-mean belongs, and those differ by exactly √N_eff (§3.4). The other three
+mean belongs, and those differ by exactly √N_eff (§3.4). The other four
 families are produced *by this function*, and the same predicate excludes them
 so that nothing handed a dataset of TSARA's own making can bin a `coverage_ch4`
 into a `coverage_coverage_ch4`: a column with no parent, no meaning, and an
@@ -2916,12 +2974,193 @@ fully covered" is false, and those are exactly the cells that are wrong.
 Nothing needs the capability. Every product can be rebuilt from the native
 streams, exactly, and a sweep over grid period does precisely that.
 
+**Two refusals, two kinds of argument.** This refusal and the copy refusal of
+§11.2.4 share a mechanism and not a justification. The copy rule at
+`COPY_RATIO = 2` is a theorem: two disjoint cells of width *W* occupy 2*W* of
+distinct time, so a reading narrower than 2*W* cannot be the whole content of
+two rows, and no consumer can change that. This refusal rests on the middle
+row of the table above and on the paragraph before this one: a *nested*
+re-join is repairable to 1.6 × 10⁻¹² ppb by coverage weighting, so what
+refuses it is that nothing needs it and that everything it would give can be
+had exactly from the streams. A later phase that does need a nested re-join
+is therefore arguing against a consumer argument, not against a proof, and
+should expect to win by building the coverage-weighted form (values and
+coverage exact, counts still double counted). The non-nested case stays
+refused on the last row's evidence, which is narrowing, and no weighting
+repairs it.
+
 **What is not refused.** The list names the three join stages rather than
 allowing only the two source stages (`ingest`, `synthetic`), and the difference
 is for §5. A baseline is computed cell by cell over a stream's own cells, so
 every baseline value still stands for one reading; a native-rate product of
 that shape is joined like any stream, whatever stage it declares. What is
 refused is joining rows that are themselves the output of a join.
+
+#### 11.2.4 What a target cell may be built from: two numbers, one rule, one voice
+
+Every joined value is the overlap-weighted mean of the readings touching its
+cell, and each reading's value is that reading's mean over its *own* cell. The
+formula therefore treats the part of a reading lying *outside* the target as
+if the air there were the same as inside. That single assumption is the whole
+family of things a join can do to support:
+
+| what happens to a reading | the assumption it makes |
+|---|---|
+| it sits wholly inside its target (**averaged**) | none |
+| it straddles a target boundary, no wider than the cell (**straddled**) | its air was uniform across the straddle; the value it helps form describes a wider interval than the row states |
+| it is wider than a cell it fills (**narrowed**) | its whole-cell mean stands for a shorter interval than it measured |
+| it is at least twice as wide as a cell it fills (**copied**) | one reading fills two rows' worth: the interpolation rule (§1.2) for a step function |
+
+Two numbers describe every row of every case, both computed from the overlap
+pairs the binner already has (`tsara.core.support.overlap_pairs`):
+
+* **The width ratio, per pair**, `r = |R| / |T|`, reading width over target
+  width (`tsara.align.binning.pair_width_ratios`). The *category*: `r ≤ 1`
+  averaged or straddled, `1 < r < 2` narrowed, `r ≥ 2` copied. The line sits
+  at exactly 2 by counting, not by taste: two disjoint cells of width *W*
+  occupy 2*W* of distinct time, so one reading of width *R* can be the entire
+  content of two rows only when *R* ≥ 2*W*, and below that any second row it
+  touches must reach past it onto a neighbouring reading. Exact in integer
+  nanoseconds, so no tolerance is needed anywhere: cadence jitter on the
+  archive tops out at `r = 1.024` (the 2026 LANL Aeris on a 1 s grid) against
+  a refusal at 2 (`COPY_RATIO`).
+* **The borrowed share, per target cell** (`tsara.core.support.borrowed_share`),
+
+  $$ b_T = \frac{\sum_i w_i \,(1 - w_i/|R_i|)}{\sum_i w_i}, $$
+
+  the coverage-weighted mean over contributing readings of the fraction of
+  each reading's own cell lying outside the target: how much of the cell's
+  value rests on the uniformity assumption. The *magnitude*. Exactly 0 for
+  pure averaging (an overlap equal to the reading's width divides to exactly
+  1.0, which is what makes "averaged" an exact test); `2f(1 − f)` for two
+  equal cells offset by a fraction `f` of a cell, so 0.5 at half a cell;
+  `1 − W/R` for a narrower cell wholly inside a wider reading, so 0.75 for a
+  60 s mean stood on a 15 s cell.
+
+**The rule.** A reading at or beyond `COPY_RATIO = 2` times the width of a
+target cell it touches is refused (the default, `finer_support: refuse`) or,
+on request (`finer_support: allow`), copied across rows with every affected
+column labelled `copied` and warned about. The policy's configuration home is
+`AlignmentConfig.finer_support` (`tsara.config.analysis`), beside the
+interpolation guard: the two knobs on how support may be changed. Everything below that line is
+allowed, recorded, and — where it narrows or shares — said aloud.
+
+Measured against the rule it replaced, which summed each reading's shared time
+over *all* target cells and refused at twice the widest (§11.2.1):
+
+| case | summed rule | per-pair rule | `r_max` | borrowed share |
+|---|---|---|---|---|
+| 60 s → 1 s (copy) | refuse | refuse | 60.0 | 0.983 |
+| 2 s → 1 s, any phase | refuse | refuse | 2.0 | 0.50–0.63 |
+| 1.9 s → 1 s | allow | allow | 1.9 | 0.565 |
+| 1.023 s → 1 s (LANL jitter) | allow | allow | 1.023 | 0.337 |
+| 1 s → 1 s, half a cell out of phase | allow | allow | 1.0 | 0.500 |
+| 15 s fills → 8 s / 7.5 s grid | allow / refuse | allow / refuse | 1.875 / 2.0 | 0.560 / 0.572 |
+| 60 s → 30 s / 30.5 s / 45 s | refuse / allow / allow | same | 2.0 / 1.97 / 1.33 | 0.50 / 0.56 / 0.41 |
+| **a (4.8, 5) s cell inside a 1 s reading** | allow | **refuse** | 5.0 | 0.133 |
+| **60 s means → 15 s canister fills** | allow | **refuse** | 4.0 | 0.770 |
+| **30 s → sliding 60 s windows every 10 s** | refuse | **allow** | 0.5 | 0.145 |
+| **60 s → sliding 300 s every 30 s** | refuse | **allow** | 0.2 | 0.050 |
+| 1 s → 60 s (average) | allow | allow | 0.017 | 0.000 |
+
+The per-pair rule reproduces every verdict the summed rule gave where it was
+right, refuses the two narrowing holes it had (one narrow cell never adds up
+to two cells' worth), and admits the overlapping targets §5 and §6 use, which
+the summed rule mistook for a copy because every window shares every reading.
+
+**The borrowed share is a magnitude, not a classifier**, and this was measured
+before it was decided: jitter gives 0.34, a half-phase blend exactly 0.50,
+allowed narrowing 0.41–0.56, and a canister fill straddling a minute boundary
+0.09 over the column but 0.67 on the sliver row. No threshold on it separates
+the cases without a taste. So the ratio carries the category, the share is
+recorded rather than thresholded, and its per-cell maximum is not used at all
+(a sliver overlap gives 0.99 on any real join).
+
+**What every product records**, per column, in attributes:
+
+| attribute | meaning |
+|---|---|
+| `tsara_support_transform` | the worst thing the join did to any reading behind the column: `passthrough` (the stream's cells are the target), `averaged` (borrowed share exactly 0), `straddled` (`r_max ≤ 1`, some share > 0), `narrowed` (`1 < r_max < 2`), `copied` (`r_max ≥ 2`, only under `allow`) |
+| `tsara_width_ratio_max` | the largest reading-to-cell width ratio among the readings that formed a value |
+| `tsara_borrowed_share` | the column's borrowed share: every contributing pair's borrowed time over every contributing pair's time |
+| `tsara_n_readings` | distinct finite readings behind the column's rows; on a paired product, behind the surviving pairs |
+
+and per cell, a third companion beside the count and the coverage:
+`borrowed_<name>`, the share above per target cell (`nan` where nothing
+contributed, 0 where a stream passed through). Its `cell_methods` is absent,
+as a coverage fraction's is: it is a property of the cell rather than a
+statistic of the data inside it. Most real joins read `straddled`, because a
+mid-labelled instrument on any grid straddles at the edges; the label
+separates the two cases that matter and the numbers carry the magnitude. The
+LANL analyzer on a 1 s grid reads `narrowed` with a ratio of 1.024, which is
+true.
+
+**One warning per join**, naming at most eight columns, on two tolerance-free
+conditions: a column is narrowed or copied (`r_max > 1`), or its rows
+outnumber the readings behind them — the latter asked only when the target
+cells are disjoint (`targets_overlap`), since sliding and nested windows share
+every reading by construction (measured: 100 % of readings feed two or more
+rows under a 60 s window stepped every 10 s). Blending as such is recorded in
+the share and not warned about, for the reason above. The grid's warning that
+a same-width instrument sits out of phase with its cells is kept, because that
+condition is exact and actionable (§11.9.1). Cadence jitter is listed with its
+1.02 rather than hidden behind a threshold chosen by taste.
+
+**What is deliberately not done: pricing the assumption in the uncertainty.**
+Measured on the atmosphere's true cell means (notebook 04's minute campaign,
+noise and dropouts off, 8 h × 4 seeds): standing a 60 s mean on 15 s cells is
+wrong by 69 ppb RMS with the notebook's default plumes (p95 158 ppb, worst
+495 ppb, against a signal spread of 105 ppb), 58 ppb with 30 s-wide plumes,
+and 0.02 ppb with no plumes at all. The within-cell spread of a *faster*
+stream prices that error to within 3–11 % across the three regimes (RMS of
+error over spread 0.89, 0.95, 0.97) — and it is a bound, not a fit: a
+part-mean's departure from the whole-cell mean is the between-part spread,
+which the partition of variance keeps at or below the within-cell spread. The
+bound is tight for quarter-minute cells and conservative for halves (notebook
+04 §4 reads about 0.73 at 30 s). The narrowed stream's own
+neighbour-to-neighbour variability is not a price at all (0.28–1.32). So the only
+calibrated price for narrowing needs a faster stream — and with a faster
+stream the honest operation is to bin *it*, not to narrow the slow one. When
+the price is available the operation is unnecessary; when the operation is the
+only option the price does not exist. Hence: refuse by default, allow on
+request with the label and the share, never priced. A same-width blend at half
+a cell costs 41 ppb RMS at 60 s under the same plumes; at 1 s it costs 0.1 ppb
+for 6 s plumes but 1.5 ppb RMS and 33 ppb worst for 1 s plumes, the shape a
+quarter of the real drives' enhancement events have (§9.5). The covariance a
+blend induces between neighbouring rows is `W diag(σ²) Wᵀ` from the overlap
+weights and needs carrying, not estimating — §11.4.1's open question for the
+regression phase.
+
+**A named limitation, put in front of the regression phase.** The error above
+is absent from the uncertainty budget by decision, so a value labelled
+`straddled` or `narrowed` carries the same σ as one labelled `averaged` and is
+wrong by an amount its σ does not describe. A fit that weights points by their
+uncertainty (§4.3), or a receptor model that weights rows the same way, then
+over-trusts exactly the rows that deserve it least: they get no less weight
+than clean rows. Everything needed to price it is already recorded per cell
+(`borrowed_<name>`, `coverage_<name>`, `n_readings_<name>`,
+`tsara_width_ratio_max`) and nothing reads it. Whether the borrowed share
+enters the weights is a decision the regression phase has to make *before* it
+designs them, because past that point the omission is baked into every ratio;
+the within-cell spread of a faster stream, measured above as a calibrated
+price, is the companion that would carry it if the answer is yes.
+
+**A consequence for pairing.** The clock is the wider-supported member's cells
+by median width, so its partner is normally averaged, never copied. A clock
+whose cells vary in width can still hold one cell less than half as wide as a
+partner reading — the canisters' fills run from 1.8 s to 20.1 s on the ten
+2024 drive days — and that pair is refused unless allowed. The pairing count
+in `tsara_n_readings` is asked again of the surviving pairs, and its warning
+speaks only where the binner's did not (dropping rows can leave rows
+outnumbering readings where before they did not).
+
+**How it is checked** (§11.1): the closed forms above as tests (0 exactly,
+`2f(1 − f)` at three offsets, `1 − W/R` for the (4.8, 5) s cell and a 15 s
+cell in a minute); the table above as one parametrized test of verdict, ratio
+and share; sliding windows built and not warned about; the `allow` path
+labelled and warned; a direction's borrowed share equal to a scalar's cell by
+cell; the record surviving a bundle round trip; and mutation, recorded in the
+stage's commit.
 
 ### 11.3 Propagation
 
@@ -2935,8 +3174,10 @@ Implemented in `tsara.align.pairing`, specified in §1.3. Two species, one
 clock, real pairs only.
 
 **Which clock.** The cells of whichever stream has the **wider support**, and
-the other is averaged onto them by overlap. Never the reverse: a value may be
-averaged onto a wider support, never split onto a narrower one. §1.3 records
+the other is averaged onto them by overlap. Never the reverse by choice: a
+value may be averaged onto a wider support, never copied onto a narrower one,
+and where a clock's varying cells still narrow a partner reading the product
+says by how much (§11.2.4). §1.3 records
 why this stopped being "the slower instrument" — measured, the iWAS canisters
 are about nine times slower than a 60 s stationary mean by rate (530 s against
 60 s) and four times *narrower* by support (14.9 s against 60 s; medians over
@@ -2946,6 +3187,20 @@ When the widths are equal, the clock is the member with **fewer measured
 values where the two records overlap**, and if those tie too, the first
 instrument by name (§11.4.1). No step looks at argument order, so which
 species is numerator never changes which air is compared.
+
+**An explicit target** (`pair_species(..., target=)`) replaces the clock
+rule: explicit cells, or a period such as `'10s'` built as a uniform grid over
+the two records by `grid_cells`, under the same copy rule (§11.2.4). Both
+species are then averaged onto it, `tsara_pairing_clock` reads `explicit`,
+and every pair carries both members' counts, coverage and borrowed shares.
+The measured use is the dense half-cell blend of §11.4.1: on a common clock
+five to ten times coarser than the cells the naive standard error is honest
+again while the real scatter is unchanged (0.67× → 0.92× at 10 s, notebook 04
+§9). When the clock rule chose the cells and a binned member's cells are
+exactly as wide as the clock's but offset from them, the product warns,
+naming the borrowed share and a coarser period to pass — the same exact test
+the grid applies to its own cells (§11.9.1), through one function
+(`phase_offset_s`). A caller who supplied the cells is not warned twice.
 
 **Same-instrument species skip the binning entirely.** Several gases retrieved
 from one spectrum already share a clock, and that is the commonest pair there
@@ -2983,7 +3238,7 @@ product is the output grid (§11.7). Its attributes:
 
 | attribute | meaning |
 |---|---|
-| `tsara_pairing_clock` | instrument whose cells the pairs sit on |
+| `tsara_pairing_clock` | instrument whose cells the pairs sit on, or `explicit` when the caller supplied `target=` |
 | `tsara_pairing_clock_reason` | why that one: both median cell widths, and on a tie both measured-value counts |
 | `tsara_pairing_min_coverage` | the guard applied (`PairingConfig.min_coverage`) |
 | `tsara_pairing_cells_considered` | candidate cells before dropping |
@@ -2996,7 +3251,8 @@ and per variable:
 | `tsara_instrument` | which stream this species came from |
 | `tsara_binned` | 1 if averaged onto the clock, 0 if already on it |
 | `tsara_sigma_at_support` | how a declared σ was moved onto its own cells, or `unscaled` |
-| `tsara_pairing_readings` | distinct readings of this species behind the surviving pairs (§11.4.1) |
+| `tsara_n_readings` | distinct readings of this species behind the surviving pairs (§11.2.4, §11.4.1) |
+| `tsara_shared_readings` | distinct readings of this species that formed more than one surviving pair, so that neighbouring pairs share their error; 0 for a species on the clock, by construction (§11.4.1) |
 
 and on each propagated σ companion, `tsara_propagation_form`: the registered
 form that produced *that* number, or `independent` when no decorrelation
@@ -3146,7 +3402,11 @@ Both tables are the executed output of `examples/notebooks/04_alignment_walkthro
 
 No choice of clock is honest in general: whichever member is averaged carries
 the shared error, and the standard error is too narrow by up to 1/√2 when that
-member's error dominates. This is not rare. On the same 2024-07-18 drive the
+member's error dominates. Phase 4.6 gave the case a remedy short of modelling
+it: `pair_species(target=)` puts both members on a coarser common clock, where
+the naive standard error is honest again — measured over 800 draws with a
+smooth truth, 0.67× the real scatter at 1 s, 0.89× at 5 s, 0.92× at 10 s, the
+real scatter unchanged at every width. This is not rare. On the same 2024-07-18 drive the
 iodide-CIMS species (finite in 92–97 % of rows) and the PTR-MS species (94–95 %)
 are dense, start-labelled and half a cell from the mid-labelled LIF. The
 tie rule still gives them a deterministic clock (the member with fewer finite
@@ -3155,6 +3415,44 @@ cannot flag them, because sharing a reading between two pairs is a
 *correlation* between pairs rather than a shortfall of readings. Accounting for
 it belongs to the regression, which can see the covariance the shared overlap
 weights imply; it is recorded as an open question for Phase 7.
+
+**Sparse and dense are the same geometry and not the same problem.** The
+warning that names the remedy was first written to fire on the geometry
+alone — equal widths, a non-zero phase offset — and to assert the consequence
+above. That consequence does not hold when the averaged member is *sparse*.
+Its pairs then sit two or three cells apart, each of its readings straddles
+one pair's cell and one dropped candidate, and no reading reaches two pairs:
+the borrowed share is 0.50 exactly as in the dense case, and the pairs are
+independent. The first table above already said so from the other side (the
+sparser member's clock, 1.02× and 1.03×), and the walkthrough of notebook 04
+§9 caught the warning contradicting it. So the product now counts the thing
+itself, per species, in `tsara_shared_readings`: the distinct readings that
+formed more than one surviving pair, on the same membership rule as every
+other count here (a positive overlap; a masked reading formed nothing). The
+warning is in two parts. The blend is said whenever the geometry holds,
+because it is real in both cases: each value is a mean of two readings
+straddling its cell and rests on air outside it by the borrowed share. The
+remedy is named only when that count is not zero. Measured on 2024-07-18:
+
+| pair | clock | pairs | averaged member | `tsara_n_readings` | `tsara_shared_readings` | remedy named |
+|---|---|---|---|---|---|---|
+| NOy vs CO₂ (43 % finite) | Picarro | 8,447 | NOy | 16,893 | **0** | no |
+| NOy vs O₃ (50 %) | ozone | 9,750 | NOy | 19,498 | **0** | no |
+| benzene (PTR, 95 %) vs NOy | PTR | 18,439 | NOy | 18,478 | **18,397** | yes |
+
+The same drive holds both shapes, and nothing but the count separates them:
+in every row the averaged member is labelled `straddled` with a borrowed
+share of 0.500. Notebook 04 §9's miniature of the drive gives the same
+answer (its sparse default 0 of 3,127 readings shared, its dense variant
+3,598 of 3,599). One more number belongs beside these, because the count
+alone would misread the remedy: on the 10 s common clock the NOy readings
+astride each cell boundary are shared too (1,949 of the 1,950 pairs), but at
+a borrowed share of 0.05 rather than 0.50, and that is why the naive standard
+error is honest there. The count says *whether* pairs share readings; the
+borrowed share says *how much* of each value is shared. A false alarm here
+is not harmless: it sends a user to a clock ten times coarser and throws
+away real resolution for nothing, and false alarms are what erode a loud
+product's credibility (§11.2.4).
 
 The same sharing moves a fitted slope, not only its error, when the signal
 itself has structure at the scale of a cell. On a synthetic campaign of two
@@ -3175,14 +3473,15 @@ empty: all 261 iWAS fills of the 2024 drive days, paired against the
 mobile lab's own 60 s ground Picarro (each with its file's stop column naming
 exact cells), yield **one** pair, because the ground record has no value while
 the lab is driving. It is therefore recorded rather than prevented. Each
-paired species carries `tsara_pairing_readings`, the number of distinct finite
+paired species carries `tsara_n_readings`, the number of distinct finite
 readings behind the surviving pairs (a species already on the clock has one
 per pair by construction), `PairedSpecies` exposes the same counts, and a
 warning names the species when either count falls below the number of pairs.
 That count, not the pair count, is a ceiling on a regression's N — a ceiling
 and not an estimate, since readings shared between neighbouring pairs, as in
 the dense case above, reduce the independent information without reducing the
-count.
+count. How many readings were shared that way is the separate count in
+`tsara_shared_readings`.
 
 ### 11.5 Circular statistics for angular variables
 
@@ -3267,6 +3566,18 @@ the wind becomes variable (median 1.2° where *R* > 0.9, 8.2° where
 variable belongs to which direction, and a direction binned alone is the
 case it must handle. A speed-weighted direction is recoverable by a caller
 who bins the wind components `u` and `v` as ordinary scalars.
+
+**A declared sigma on a direction is not propagated, and the join says so.**
+Ingestion resolves and stores a declared or reported uncertainty on a
+`circular` variable exactly as on any other (§9.6); both join paths drop it,
+because what a binned direction carries instead — *R* and the exact
+dispersion — describes the spread of its *readings*, not the instrument's
+precision, and the two are different quantities (§11.2.4 makes the same
+distinction for a scalar's within-cell spread). Until the Phase-4.6
+walkthrough the drop was silent; it now warns once per variable per join.
+Propagating a direction sigma properly (a small-angle or von Mises treatment
+of the vector mean) is deferred until a manifest declares one; none in the
+permitted archive does.
 
 **The pass-through path carries the same columns.** A direction whose stream
 already sits on the target cells is not re-averaged (§11.2), but it still
@@ -3514,12 +3825,21 @@ convention everywhere else.
 
 Implemented in `tsara.align.grid`, specified in §1.4. A single uniform
 `(time × variable)` cube, built **only** for the products that inherently need
-one: the continuous rolling state, and the matrix a receptor model such as PMF
-consumes. Baselines, detection and cross-species regression all run at native
-rate and never see it (§1.1).
+one. Which products those are — the continuous rolling state, the matrix a
+receptor model such as PMF consumes, or neither as a uniform cube — is
+deliberately not settled here. The two candidates want opposite things (the
+rolling state a uniform span, gaps and all; a receptor matrix dense rows, one
+drive at a time with `start` and `end` — measured below), and how a grid
+meets rolling baselines, plume windows and mixed cadences is one argument to
+be made in full before Phase 5, not in pieces (owner decision, 2026-09-23).
+This section records what the grid does and what it was measured to cost, not
+what it is for. Baselines, detection and cross-species regression all run at
+native rate and never see it (§1.1).
 
 It is a thin layer over §11.2 — the only things it adds are *which cells* and
-the rule that the period must respect the data going into it.
+the rule that the period must respect the data going into it. `grid_cells`
+already has a second caller: `pair_species(target=)` builds an explicit
+pairing clock through it, under the same rule (§11.4.1).
 
 **There is deliberately no "PMF matrix" object.** A receptor-model matrix is
 this function called with a chosen set of columns. Which columns is a
@@ -3529,25 +3849,29 @@ would make the block need editing every time that decision changed.
 
 #### The period rule
 
-**A grid may not be so fine that one selected reading would cover two of its
-cells.** A 60 s mean evaluated on 1 s cells is the same value repeated sixty
+**No selected reading may be at least twice as wide as a grid cell it
+touches.** A 60 s mean evaluated on 1 s cells is the same value repeated sixty
 times: resolution the instrument never had, and sixty points where there is one
 measurement. Every count downstream would then believe there were sixty. That
 is the prohibition the interval model exists to enforce (§10), so it is an
 error naming the offending instrument and a period that would work — longer
-than half its widest reading — not a warning. The test is the binner's own
+than half its widest reading — not a warning, unless `finer_support: allow`
+asks for the copies by name (§11.2.4). The test is the binner's own
 (§11.2.1), run against the grid's actual cells inside the requested window
 before anything is binned, so the grid and the operation it calls cannot
 disagree about the same data.
 
-**It replaced a comparison of median widths**, found wanting in the Phase-4
-walkthrough: "the period must be at least the widest selected cell". On a real
-2026-01-19 LANL record the Aeris pico measures its cells at 1.023 s, so that
-rule refused a one-second grid and said one measurement would be repeated
-across several cells — while the binner accepted the same one-second cells
-with 2.6 % more occupied rows than readings, and the next round period the
-grid allowed was two seconds. The old rule also offered no protection the
-overlap rule lacks.
+**It replaced two rules.** A comparison of median widths, found wanting in the
+Phase-4 walkthrough: "the period must be at least the widest selected cell".
+On a real 2026-01-19 LANL record the Aeris pico measures its cells at 1.023 s,
+so that rule refused a one-second grid and said one measurement would be
+repeated across several cells — while the binner accepted the same one-second
+cells with 2.6 % more occupied rows than readings, and the next round period
+the grid allowed was two seconds. Then the walkthrough's sum of shared time,
+right for a uniform grid and wrong for the overlapping targets §5 and §6 use
+(§11.2.1). On that same LANL record the per-pair rule builds the one-second
+grid and labels both analyzers `narrowed` with a ratio of 1.024 and a borrowed
+share of 0.34, which is what a 1.023 s reading on a 1 s cell is.
 
 Checked against the *selection* rather than against every stream the campaign
 contains, and that is a real lever rather than a formality. Measured on the
@@ -3581,7 +3905,8 @@ interpolated `_i` columns (§9.2.3).
 
 #### Readings that land in more than one row
 
-What the period rule does not refuse, the grid records. A 15 s canister fill
+What the period rule does not refuse, the binner records on every column and
+names in one warning per grid (§11.2.4). A 15 s canister fill
 that crosses a minute boundary contributes to both minutes, and each row
 reports that fill's value, so the matrix holds one measurement in two rows and
 a receptor model treating rows as independent observations counts it twice.
@@ -3590,17 +3915,23 @@ cells from `iWAS_Stop_UTC`): **68 of 261 fills** land in two rows, and **320
 rows** hold benzene from 261 fills. A fill crosses a boundary whenever it
 starts in the last fifteen seconds of a minute, so about a quarter do.
 
-Each gridded column therefore carries `tsara_grid_readings`, the number of
-distinct finite readings behind it, and one warning names the columns whose
-occupied rows outnumber their readings, worst first. One warning for the
-whole grid rather than one per column, because a canister's VOCs share a
-sampling pattern and would otherwise repeat the same sentence fifty times.
-Like the pairing count (§11.4.1) it is a ceiling on independent rows, not an
-estimate: readings shared at small weight between neighbouring rows lower the
-independent information without lowering the count.
+Each gridded column therefore carries `tsara_n_readings`, the number of
+distinct finite readings behind it, beside the rest of the support record,
+and one warning names the columns whose occupied rows outnumber their
+readings or whose readings are wider than a cell — at most eight, because a
+canister's VOCs share a sampling pattern and would otherwise repeat the same
+sentence fifty times. Like the pairing count (§11.4.1) it is a ceiling on
+independent rows, not an estimate: readings shared at small weight between
+neighbouring rows lower the independent information without lowering the
+count, which is what the borrowed share is for. Measured on the ten-drive
+15 s grid, the canisters' longest fills (20.1 s) make the column `narrowed`
+at a ratio of 1.34 with 520 rows from 261 readings — real narrowing that was
+allowed and silent before Phase 4.6 — and on the 60 s grid `straddled`, with a
+borrowed share of 0.10.
 
-**How the rule and the record are checked.** The rule is pinned where it bites
-hardest: a 2 s record refused on a 1 s grid at phases 0, 0.3 s and 0.5 s
+**How the rule and the record are checked.** (As pinned in Phase 4; the rule
+itself was replaced in Phase 4.6 and its test is now §11.2.4's table.) The
+rule is pinned where it bites hardest: a 2 s record refused on a 1 s grid at phases 0, 0.3 s and 0.5 s
 (the case the old rule passed), a 1.9 s record allowed, mixed target widths
 measured against the widest touched, a zero-width target cell ignored, and on
 the grid a 1.023 s record accepted, a 60 s record refused at 30 s and accepted
@@ -3628,9 +3959,10 @@ separate drives puts every hour between them into the matrix. Measured on the
 Picarro CO₂, CH₄ and MetNav wind direction of the ten 2024 drive days: a 60 s
 grid spans 29.5 days in 42 443 rows, 7.9 % of them holding any data; a 1 s grid
 spans the same 29.5 days in **2 546 521 rows, 92.1 % empty**, built in 1.5 s
-but holding 285 MB for three variables — about 95 MB per variable once its
-count, coverage and angular columns are included, so a few dozen VOCs is
-several gigabytes of mostly `nan`. For a receptor-model matrix, grid each drive
+but holding 346 MB for three variables — about 115 MB per variable once its
+count, coverage, borrowed-share and angular columns are included (the
+borrowed-share columns Phase 4.6 added are 61 MB of it), so a few dozen VOCs
+is several gigabytes of mostly `nan`. For a receptor-model matrix, grid each drive
 with `start` and `end`; the uniform span is for the continuous state, which
 wants the gaps.
 
@@ -3651,8 +3983,8 @@ outputs compared at all.
 | `tsara_grid_widest_reading_cell_s` | the widest single selected cell, in seconds |
 | `tsara_grid_variables` | which variables were selected, instrument-qualified |
 
-and per variable, `tsara_grid_readings`: the distinct finite readings behind
-the column's occupied rows.
+and per variable the support record of §11.2.4, including `tsara_n_readings`:
+the distinct finite readings behind the column's occupied rows.
 
 The last is recorded because a reader cannot tell from the columns alone
 whether a variable is absent because it was excluded or because it had no
@@ -3683,10 +4015,13 @@ every value identical after reload:
 
 | level | file | write | load |
 |---|---|---|---|
-| none (default) | 285.2 MB | 1.5 s | 0.3 s |
-| 1 | 5.5 MB | 2.7 s | 0.9 s |
-| 4 | 3.7 MB | 3.0 s | 1.1 s |
-| 9 | 3.3 MB | 10.4 s | 1.1 s |
+| none (default) | 346.4 MB | 1.5 s | 0.4 s |
+| 1 | 5.9 MB | 2.4 s | 0.8 s |
+| 4 | 3.8 MB | 4.0 s | 1.6 s |
+| 9 | 3.4 MB | 11.0 s | 1.2 s |
+
+(Re-measured in Phase 4.6, when the `borrowed_<name>` columns joined the grid;
+the Phase-4 figures were 285.2 MB uncompressed and 3.7 MB at level 4.)
 
 The time axis matters: compressing only the data variables left the same file
 at 64 MB, because a regular time axis and its bounds, 24 bytes per row, are
@@ -3933,11 +4268,13 @@ adjacent readings — an honest average, but a smoothed one — and the
 recovered ratio moves from **0.250000034** to **0.249940526**. Aligning the
 grid's start to that instrument's own cell boundaries restores it exactly.
 
-Nothing is silently wrong: `n_readings` reports 2 instead of 1, and `grid_cells`
-warns when it detects an input stream whose cells match the period but not its phase.
-It is a warning rather than a refusal because blending is sometimes
-unavoidable, and which instrument a grid should be in phase with is the user's
-choice, not TSARA's.
+Nothing is silently wrong: `n_readings` reports 2 instead of 1,
+`borrowed_<name>` reads 0.5 and the column is labelled `straddled`, and
+`grid_cells` warns when it detects an input stream whose cells match the
+period but not its phase (`phase_offset_s`, the same exact test pairing applies
+to a partner half a cell from its clock, §11.4). It is a warning rather than a
+refusal because blending is sometimes unavoidable, and which instrument a grid
+should be in phase with is the user's choice, not TSARA's.
 
 ---
 

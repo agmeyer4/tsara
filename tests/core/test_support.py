@@ -35,6 +35,7 @@ from tsara.core.support import (
     bin_onto_cells,
     cell_methods_value,
     check_bounds_intact,
+    contributing_weights,
     declared_bounds_name,
     ensure_time_bounds,
     nominal_cadence_ns,
@@ -391,6 +392,119 @@ def test_binning_a_canister_against_one_hertz_data() -> None:
     out = bin_onto_cells(readings, values, canister)
     assert out.values[0] == pytest.approx(10.0)
     assert out.n_readings[0] == 15
+
+
+# ---------------------------------------------------------------------------
+# borrowed_share: how much of a value rests on air outside its cell
+# ---------------------------------------------------------------------------
+
+
+def _bounds(start_ns: list[int], stop_ns: list[int]) -> CellBounds:
+    return CellBounds(
+        start_ns=np.array(start_ns, dtype=np.int64), stop_ns=np.array(stop_ns, dtype=np.int64)
+    )
+
+
+def test_readings_wholly_inside_their_target_borrow_exactly_nothing() -> None:
+    """Pure averaging assumes nothing, and the test is exact rather than approximate:
+
+    an overlap equal to the reading's own width divides to exactly 1.0, which
+    is what lets a later stage call a column 'averaged' without a tolerance.
+    """
+    readings = CellBounds.from_label(_times(0, SECOND, 60), SECOND, "start")
+    out = bin_onto_cells(readings, np.arange(60.0), _bounds([0], [60 * SECOND]))
+    assert out.borrowed[0] == 0.0
+
+
+@pytest.mark.parametrize("offset", [0.1, 0.25, 0.5])
+def test_a_same_width_blend_borrows_the_closed_form(offset: float) -> None:
+    """Equal cells offset by a fraction f of a cell: b = 2f(1 - f) (METHODS §11.2.4).
+
+    Half at half a cell -- the shape every 2024 drive-suite pair has -- and
+    0.375 at a quarter, which is also what tells a coverage-weighted mean
+    from an unweighted one (the latter reads 0.5 at any offset).
+    """
+    readings = CellBounds.from_label(_times(0, 10 * SECOND, 6), 10 * SECOND, "start")
+    shift = int(offset * 10 * SECOND)
+    target = _bounds([shift + 10 * SECOND], [shift + 20 * SECOND])
+    out = bin_onto_cells(readings, np.arange(6.0), target)
+    assert out.borrowed[0] == pytest.approx(2 * offset * (1 - offset))
+
+
+def test_a_narrower_cell_inside_a_wide_reading_borrows_one_minus_the_width_ratio() -> None:
+    """A (4.8, 5) s cell inside a 1 s reading rests four fifths on air outside it;
+
+    a 15 s cell inside a 60 s mean three quarters. Both are narrowing, and
+    the number says how much of the value the instrument never resolved.
+    """
+    readings = CellBounds.from_label(_times(0, SECOND, 5), SECOND, "start")
+    sliver = _bounds([int(4.8 * SECOND)], [5 * SECOND])
+    assert bin_onto_cells(readings, np.arange(5.0), sliver).borrowed[0] == pytest.approx(0.8)
+    minute = CellBounds.from_label(np.array([0], dtype=np.int64), 60 * SECOND, "start")
+    quarter = _bounds([15 * SECOND], [30 * SECOND])
+    assert bin_onto_cells(minute, np.array([1.0]), quarter).borrowed[0] == pytest.approx(0.75)
+
+
+def test_a_masked_reading_neither_borrows_nor_weighs() -> None:
+    """Two 10 s readings, a target over the last half of one and all of the other.
+
+    With both present the cell borrows 5/15 * 0.5 = 1/6; with the wholly-inside
+    reading masked, the straddling one carries the cell alone and it borrows
+    half. A masked reading counted at its overlap would leave the answer at 1/6.
+    """
+    readings = CellBounds.from_label(_times(0, 10 * SECOND, 2), 10 * SECOND, "start")
+    target = _bounds([5 * SECOND], [20 * SECOND])
+    both = bin_onto_cells(readings, np.array([1.0, 2.0]), target).borrowed[0]
+    one = bin_onto_cells(readings, np.array([1.0, np.nan]), target).borrowed[0]
+    assert both == pytest.approx(1 / 6)
+    assert one == pytest.approx(0.5)
+
+
+def test_borrowed_share_is_nan_where_nothing_contributed() -> None:
+    readings = CellBounds.from_label(_times(0, SECOND, 5), SECOND, "start")
+    far = _bounds([100 * SECOND], [101 * SECOND])
+    assert np.isnan(bin_onto_cells(readings, np.ones(5), far).borrowed[0])
+
+
+def test_a_zero_width_reading_borrows_nothing() -> None:
+    """Width 0 means overlap 0 and weight 0: the guarded division must neither raise nor poison."""
+    readings = _bounds([0, 5 * SECOND], [5 * SECOND, 5 * SECOND])
+    out = bin_onto_cells(readings, np.array([1.0, 2.0]), _bounds([0], [10 * SECOND]))
+    assert out.borrowed[0] == 0.0
+    assert out.values[0] == 1.0
+
+
+def test_precomputed_pairs_give_the_same_result() -> None:
+    """An instrument with many columns on one clock is searched once; the results must not know."""
+    readings = CellBounds.from_label(_times(0, SECOND, 30), SECOND, "start")
+    values = np.arange(30.0)
+    values[7] = np.nan
+    target = CellBounds.from_label(
+        np.array([2 * SECOND, 17 * SECOND], dtype=np.int64), 10 * SECOND, "start"
+    )
+    fresh = bin_onto_cells(readings, values, target)
+    reused = bin_onto_cells(readings, values, target, pairs=overlap_pairs(readings, target))
+    for field in ("values", "n_readings", "coverage", "n_overlapping", "borrowed"):
+        assert np.array_equal(getattr(fresh, field), getattr(reused, field), equal_nan=True)
+
+
+def test_pairs_found_for_other_cells_are_refused() -> None:
+    """Pairs for a different target would give means of real readings over the wrong intervals."""
+    readings = CellBounds.from_label(_times(0, SECOND, 30), SECOND, "start")
+    target = CellBounds.from_label(np.array([0, 10 * SECOND], dtype=np.int64), 10 * SECOND, "start")
+    other = CellBounds.from_label(np.array([0], dtype=np.int64), 10 * SECOND, "start")
+    with pytest.raises(TsaraSupportError, match="found for 1 target cell"):
+        bin_onto_cells(readings, np.ones(30), target, pairs=overlap_pairs(readings, other))
+    fewer = CellBounds.from_label(_times(0, SECOND, 3), SECOND, "start")
+    with pytest.raises(TsaraSupportError, match="only 3 reading"):
+        bin_onto_cells(fewer, np.ones(3), target, pairs=overlap_pairs(readings, target))
+
+
+def test_contributing_weights_are_the_overlap_or_zero() -> None:
+    readings = _bounds([0, 10], [10, 30])
+    pairs = overlap_pairs(readings, _bounds([0], [20]))
+    assert list(contributing_weights(pairs, np.array([1.0, 2.0]))) == [10.0, 10.0]
+    assert list(contributing_weights(pairs, np.array([1.0, np.nan]))) == [10.0, 0.0]
 
 
 # ---------------------------------------------------------------------------

@@ -30,6 +30,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 __all__ = [
     "ALTITUDE_COORD",
+    "BORROWED_PREFIX",
     "BOUNDS_ATTR",
     "BOUNDS_DIM",
     "CELL_METHODS_ATTR",
@@ -57,6 +58,7 @@ __all__ = [
     "TIME_BOUNDS_VAR",
     "TIME_COORD",
     "TIME_SHIFT_ATTR",
+    "borrowed_name",
     "coverage_name",
     "is_circular",
     "is_companion_name",
@@ -282,10 +284,12 @@ def sigma_sys_name(variable: str) -> str:
 
 
 #: Columns the joining operation adds beside every value it puts on new cells
-#: (``docs/METHODS.md`` §11.2): how many readings contributed, and how much
-#: of the target cell they covered.
+#: (``docs/METHODS.md`` §11.2, §11.2.4): how many readings contributed, how
+#: much of the target cell they covered, and how much of the value rests on
+#: air outside the cell.
 N_READINGS_PREFIX = "n_readings_"
 COVERAGE_PREFIX = "coverage_"
+BORROWED_PREFIX = "borrowed_"
 
 #: What an angular variable gets instead of a sigma, since a direction has no
 #: meaningful arithmetic spread (§11.5).
@@ -325,14 +329,30 @@ def coverage_name(variable: str) -> str:
     return f"{COVERAGE_PREFIX}{variable}"
 
 
+def borrowed_name(variable: str) -> str:
+    """Return the name of a variable's per-cell borrowed share.
+
+    Parameters
+    ----------
+    variable : str
+        Column name as it appears in the joined product, e.g. ``'ch4'``.
+
+    Returns
+    -------
+    str
+        e.g. ``'borrowed_ch4'``.
+    """
+    return f"{BORROWED_PREFIX}{variable}"
+
+
 def is_companion_name(name: str) -> bool:
     """Return whether a name describes another variable rather than being one.
 
-    Four families of column exist only to qualify the column they are named
+    Five families of column exist only to qualify the column they are named
     after: the two uncertainty components, the contributing-cell count, the
-    coverage fraction, and the two an angular variable carries instead of a
-    sigma. None is a measurement in its own right, and each is produced
-    automatically alongside its parent.
+    coverage fraction, the borrowed share, and the two an angular variable
+    carries instead of a sigma. None is a measurement in its own right, and
+    each is produced automatically alongside its parent.
 
     The distinction is load-bearing rather than tidy. A stage that selects
     "every variable" and gets these too will bin a coverage fraction as though
@@ -350,11 +370,11 @@ def is_companion_name(name: str) -> bool:
     Returns
     -------
     bool
-        True for a companion of any of the four families.
+        True for a companion of any of the five families.
     """
     return (
         is_sigma_name(name)
-        or name.startswith((N_READINGS_PREFIX, COVERAGE_PREFIX))
+        or name.startswith((N_READINGS_PREFIX, COVERAGE_PREFIX, BORROWED_PREFIX))
         or name.endswith((RESULTANT_LENGTH_SUFFIX, DISPERSION_SUFFIX))
     )
 

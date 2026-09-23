@@ -221,3 +221,24 @@ def test_unknown_key_rejected(analysis_dict: dict[str, Any]) -> None:
     bad["baselines"] = bad.pop("baseline")  # plural typo
     with pytest.raises(ValidationError):
         AnalysisConfig.model_validate(bad)
+
+
+# ---------------------------------------------------------------------------
+# Alignment: the copy policy (METHODS §11.2.4)
+# ---------------------------------------------------------------------------
+
+
+def test_finer_support_defaults_to_refuse(analysis_dict: dict[str, Any]) -> None:
+    """The interpolation rule's guarantee for a step function is the default."""
+    config = AnalysisConfig.model_validate(analysis_dict)
+    assert config.alignment.finer_support == "refuse"
+
+
+def test_finer_support_may_be_allowed_by_name() -> None:
+    assert AlignmentConfig(finer_support="allow").finer_support == "allow"
+
+
+def test_finer_support_has_no_third_value() -> None:
+    """A copy is refused or made; there is no 'warn' that makes it silently."""
+    with pytest.raises(ValidationError, match="finer_support"):
+        AlignmentConfig(finer_support="warn")  # type: ignore[arg-type]

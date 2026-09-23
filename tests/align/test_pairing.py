@@ -26,6 +26,7 @@ import xarray as xr
 from tsara.align import PairedSpecies, TsaraAlignError, pair_species
 from tsara.core.naming import sigma_rand_name, sigma_sys_name
 from tsara.core.propagation import propagate_random, propagate_systematic
+from tsara.core.support import CellBounds
 from tsara.core.timebase import SECOND_NS as SECOND
 
 
@@ -165,7 +166,7 @@ def test_a_tie_in_width_goes_to_the_sparser_member_in_either_order() -> None:
         paired = pair_species(streams, y, x)
         assert paired.clock == "picarro"
         assert paired.n_pairs == 20
-        assert paired.dataset["co2"].attrs["tsara_pairing_readings"] == 20
+        assert paired.dataset["co2"].attrs["tsara_n_readings"] == 20
         reason = paired.dataset.attrs["tsara_pairing_clock_reason"]
         assert "fewer measured values where the records overlap (20 vs 40)" in reason
 
@@ -186,7 +187,7 @@ def test_sparseness_is_counted_where_the_two_records_overlap() -> None:
     }
     paired = pair_species(streams, "noy", "co2")
     assert paired.clock == "picarro"
-    assert paired.dataset["co2"].attrs["tsara_pairing_readings"] == paired.n_pairs
+    assert paired.dataset["co2"].attrs["tsara_n_readings"] == paired.n_pairs
 
 
 def test_a_full_tie_goes_to_the_first_instrument_by_name_in_either_order() -> None:
@@ -217,8 +218,8 @@ def test_each_species_records_the_readings_behind_its_pairs(
     """
     paired = pair_species(two_rates, "ch4", "co2")
     assert (paired.y_readings, paired.x_readings) == (8, 2)
-    assert paired.dataset["ch4"].attrs["tsara_pairing_readings"] == 8
-    assert paired.dataset["co2"].attrs["tsara_pairing_readings"] == 2
+    assert paired.dataset["ch4"].attrs["tsara_n_readings"] == 8
+    assert paired.dataset["co2"].attrs["tsara_n_readings"] == 2
 
 
 def test_a_paired_product_may_not_be_paired_again(two_rates: dict[str, xr.Dataset]) -> None:
@@ -310,12 +311,44 @@ def test_a_fill_straddling_two_cells_is_one_reading_and_is_warned_about(
         },
     )
     fills["time"].attrs["bounds"] = "time_bnds"
-    with caplog.at_level("WARNING", logger="tsara.align.pairing"):
+    with caplog.at_level("WARNING", logger="tsara.align"):
         paired = pair_species({"iwas": fills, "picarro": minute}, "benzene", "ch4")
     assert paired.clock == "picarro"
     assert paired.n_pairs == 3
     assert (paired.y_readings, paired.x_readings) == (2, 3)
-    assert "rest on only 2 distinct readings of benzene" in caplog.text
+    # Said once, by the binner over the candidate cells, and not repeated by
+    # pairing over the surviving ones (METHODS §11.2.4).
+    assert "'benzene' (3 rows from 2 readings" in caplog.text
+    assert "rest on only" not in caplog.text
+
+
+def test_pairing_speaks_where_dropping_rows_first_makes_readings_shared(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Rows outnumber readings only after the drop, so the binner had nothing to say.
+
+    Three minutes. One fill straddles the first boundary and sits in rows one
+    and two; two more fills sit together in row three, where the analyzer has
+    no value, so row three is dropped. Over the candidate cells three rows
+    rest on three readings; over the surviving pairs, two rows rest on one.
+    """
+    minute = make_stream(0.0, 60.0, 3, {"ch4": np.array([2000.0, 2010.0, np.nan])})
+    starts = (np.array([50.0, 130.0, 150.0]) * SECOND).astype(np.int64)
+    stops = (np.array([70.0, 140.0, 160.0]) * SECOND).astype(np.int64)
+    fills = xr.Dataset(
+        {"benzene": ("time", np.array([1.0, 2.0, 3.0]), {"units": "ppb"})},
+        coords={
+            "time": ((starts + stops) // 2).astype("datetime64[ns]"),
+            "time_bnds": (("time", "nv"), np.stack([starts, stops], 1).astype("datetime64[ns]")),
+        },
+    )
+    fills["time"].attrs["bounds"] = "time_bnds"
+    with caplog.at_level("WARNING", logger="tsara.align"):
+        paired = pair_species({"iwas": fills, "picarro": minute}, "benzene", "ch4")
+    assert paired.n_pairs == 2
+    assert paired.y_readings == 1
+    assert "rest on air" not in caplog.text
+    assert "rest on only 1 distinct readings of benzene" in caplog.text
 
 
 def test_no_warning_when_every_reading_is_one_pair(
@@ -847,3 +880,248 @@ def test_cells_that_all_start_together_have_no_cadence_to_measure() -> None:
     paired = pair_species({"iwas": nested, "picarro": means}, "benzene", "ch4")
     assert paired.n_pairs == 1
     assert np.isfinite(paired.dataset[sigma_rand_name("benzene")].values[0])
+
+
+# ---------------------------------------------------------------------------
+# A clock whose cells vary in width (METHODS §11.2.4)
+# ---------------------------------------------------------------------------
+
+
+def test_a_clock_cell_narrower_than_half_a_partner_reading_refuses_the_pair() -> None:
+    """Canister fills of 14, 15 and 1.8 s against a 10 s analyzer.
+
+    The canister is the wider-supported member by median, so it is the clock;
+    but a 10 s reading on its 1.8 s fill is five times as wide as the cell it
+    fills, which the per-pair rule refuses and the summed rule it replaced
+    let through. Allowed by name, the partner column reads 'copied'.
+    """
+    analyzer = make_stream(0.0, 10.0, 60, {"ch4": np.arange(60.0)})
+    starts = (np.array([20.0, 200.0, 400.0]) * SECOND).astype(np.int64)
+    stops = (np.array([34.0, 215.0, 401.8]) * SECOND).astype(np.int64)
+    fills = xr.Dataset(
+        {"benzene": ("time", np.array([1.0, 2.0, 3.0]), {"units": "ppb"})},
+        coords={
+            "time": ((starts + stops) // 2).astype("datetime64[ns]"),
+            "time_bnds": (("time", "nv"), np.stack([starts, stops], 1).astype("datetime64[ns]")),
+        },
+    )
+    fills["time"].attrs["bounds"] = "time_bnds"
+    streams = {"iwas": fills, "lgr": analyzer}
+    with pytest.raises(TsaraAlignError, match="times as wide as a cell it fills"):
+        pair_species(streams, "benzene", "ch4")
+    paired = pair_species(streams, "benzene", "ch4", finer_support="allow")
+    assert paired.clock == "iwas"
+    assert paired.n_pairs == 3
+    assert paired.dataset["ch4"].attrs["tsara_support_transform"] == "copied"
+    assert paired.dataset["ch4"].attrs["tsara_width_ratio_max"] == pytest.approx(10 / 1.8)
+
+
+# ---------------------------------------------------------------------------
+# An explicit target (METHODS §11.4, §11.4.1)
+# ---------------------------------------------------------------------------
+
+
+def test_explicit_cells_put_both_species_on_them() -> None:
+    """Neither member is the clock: both are averaged, and the product says so."""
+    streams = half_phase_pair(sparse_every=1)
+    windows = CellBounds(
+        start_ns=np.arange(0, 40, 10, dtype=np.int64) * SECOND,
+        stop_ns=np.arange(10, 50, 10, dtype=np.int64) * SECOND,
+    )
+    paired = pair_species(streams, "noy", "co2", target=windows)
+    assert paired.clock == "explicit"
+    assert paired.n_pairs == 4
+    assert (
+        "explicit target cells (4 cells, median 10 s)"
+        in paired.dataset.attrs["tsara_pairing_clock_reason"]
+    )
+    assert paired.dataset["noy"].attrs["tsara_binned"] == 1
+    assert paired.dataset["co2"].attrs["tsara_binned"] == 1
+    # Ten readings of each behind each 10 s pair, forty in all.
+    assert paired.dataset["n_readings_co2"].values.tolist() == [10, 10, 10, 10]
+    assert paired.dataset["co2"].attrs["tsara_n_readings"] == 40
+    assert paired.dataset["noy"].attrs["tsara_n_readings"] == 40
+
+
+def test_a_period_target_is_a_grid_over_the_two_records() -> None:
+    """A string builds the cells through the grid builder: anchored, windowed, checked."""
+    streams = half_phase_pair(sparse_every=1)
+    paired = pair_species(streams, "noy", "co2", target="10s")
+    assert paired.clock == "explicit"
+    assert paired.dataset.attrs["tsara_pairing_clock_reason"] == "explicit target period 10s"
+    # 40.5 s of noy spans five epoch-anchored 10 s cells; the fifth holds half a
+    # noy reading and no co2, so it is a candidate that is dropped, not a pair.
+    assert paired.dataset.attrs["tsara_pairing_cells_considered"] == 5
+    assert paired.dataset.attrs["tsara_pairing_cells_dropped"] == 1
+    assert paired.n_pairs == 4
+    assert np.all(
+        paired.dataset["time_bnds"].values[:, 1] - paired.dataset["time_bnds"].values[:, 0]
+        == np.timedelta64(10, "s")
+    )
+
+
+def test_a_period_target_is_checked_by_the_copy_rule(two_rates: dict[str, xr.Dataset]) -> None:
+    """The 4 s member on a 1 s target would be copied: refused, as the grid refuses it."""
+    with pytest.raises(TsaraAlignError, match="too fine for 'slow'"):
+        pair_species(two_rates, "ch4", "co2", target="1s")
+    paired = pair_species(two_rates, "ch4", "co2", target="1s", finer_support="allow")
+    assert paired.dataset["co2"].attrs["tsara_support_transform"] == "copied"
+
+
+def test_a_target_that_is_neither_cells_nor_a_period_is_refused(
+    two_rates: dict[str, xr.Dataset],
+) -> None:
+    with pytest.raises(TsaraAlignError, match="period such as '10s'"):
+        pair_species(two_rates, "ch4", "co2", target="soon")
+    empty = CellBounds(start_ns=np.array([], dtype=np.int64), stop_ns=np.array([], dtype=np.int64))
+    with pytest.raises(TsaraAlignError, match="no cells"):
+        pair_species(two_rates, "ch4", "co2", target=empty)
+
+
+def test_an_interval_still_restricts_an_explicit_target() -> None:
+    streams = half_phase_pair(sparse_every=1)
+    window = (pd.Timestamp("1970-01-01T00:00:12"), pd.Timestamp("1970-01-01T00:00:28"))
+    paired = pair_species(streams, "noy", "co2", target="10s", interval=window)
+    assert paired.n_pairs == 2  # the cells overlapping 12-28 s: [10, 20) and [20, 30)
+
+
+def test_a_dense_partner_half_a_cell_from_the_clock_is_warned_about_with_the_remedy(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The drive suite's dense shape: equal widths, half a cell apart, every reading in two pairs.
+
+    No reading is used twice, so the readings count is silent; the borrowed
+    share is 0.50; and 39 of the 40 readings of the averaged member formed two
+    neighbouring pairs (the first overlaps only the first pair), so the
+    warning names the consequence and a coarser common clock.
+    """
+    streams = half_phase_pair(sparse_every=1)
+    with caplog.at_level("WARNING", logger="tsara.align.pairing"):
+        paired = pair_species(streams, "noy", "co2")
+    binned, on_clock = ("co2", "noy") if paired.clock == "lif" else ("noy", "co2")
+    assert f"Every pair blends two readings of '{binned}'" in caplog.text
+    assert "offset by 0.5 s" in caplog.text
+    assert "borrowed share (0.50)" in caplog.text
+    assert paired.n_pairs == 40
+    assert paired.dataset[binned].attrs["tsara_shared_readings"] == 39
+    assert paired.dataset[on_clock].attrs["tsara_shared_readings"] == 0
+    assert "39 of its readings formed two neighbouring pairs" in caplog.text
+    assert "1/sqrt(2)" in caplog.text
+    assert "target='10s'" in caplog.text
+
+
+def test_a_sparse_partner_half_a_cell_off_blends_but_shares_no_reading_between_pairs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The 2024-07-18 drive's real shape: the blend is said, the remedy is not.
+
+    CO2 in every second row puts the pairs two cells apart, so each NOy
+    reading straddles one pair's cell and no pair shares a reading with its
+    neighbour. The borrowed share is 0.50 exactly as in the dense case -- the
+    geometry is the same -- but the pairs are independent, and a warning
+    naming ``target=`` here would send the caller to trade real resolution
+    for nothing (§11.4.1). Before Phase 4.6's walkthrough it did.
+    """
+    streams = half_phase_pair(sparse_every=2)
+    with caplog.at_level("WARNING", logger="tsara.align.pairing"):
+        paired = pair_species(streams, "noy", "co2")
+    assert paired.clock == "picarro"
+    assert "Every pair blends two readings of 'noy'" in caplog.text
+    assert "borrowed share (0.50)" in caplog.text
+    assert paired.n_pairs == 20
+    assert paired.dataset["noy"].attrs["tsara_shared_readings"] == 0
+    assert paired.dataset["co2"].attrs["tsara_shared_readings"] == 0
+    assert "No reading formed more than one of the 20 pairs" in caplog.text
+    assert "1/sqrt(2)" not in caplog.text
+    assert "target=" not in caplog.text
+
+
+def test_shared_readings_are_counted_over_surviving_pairs_and_finite_readings(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pencil case: two adjacent pairs among sparse ones share exactly two readings.
+
+    CO2 in every second row plus one extra value in row 11, so rows 10, 11 and
+    12 are three consecutive pairs. The NOy readings on [10.5, 11.5) and
+    [11.5, 12.5) each straddle two of them; every other reading straddles one
+    surviving pair and one dropped candidate. Counted over the clock's
+    candidate cells instead, every reading would look shared (39); counted
+    with ``>= 1`` instead of ``> 1``, all 40 would. Masking the reading on
+    [10.5, 11.5) takes the count to one: a masked reading formed nothing.
+    """
+    co2 = np.full(40, np.nan)
+    co2[::2] = 420.0 + np.arange(40)[::2]
+    co2[11] = 431.0
+    noy = 2.0 + np.arange(40) * 0.1
+    streams = {
+        "picarro": make_stream(0.0, 1.0, 40, {"co2": co2}),
+        "lif": make_stream(0.5, 1.0, 40, {"noy": noy}),
+    }
+    with caplog.at_level("WARNING", logger="tsara.align.pairing"):
+        paired = pair_species(streams, "noy", "co2")
+    assert paired.n_pairs == 21
+    assert paired.dataset["noy"].attrs["tsara_shared_readings"] == 2
+    assert "2 of its readings formed two neighbouring pairs" in caplog.text
+    assert "target='10s'" in caplog.text
+
+    noy_masked = noy.copy()
+    noy_masked[10] = np.nan
+    streams["lif"] = make_stream(0.5, 1.0, 40, {"noy": noy_masked})
+    paired = pair_species(streams, "noy", "co2")
+    assert paired.n_pairs == 21
+    assert paired.dataset["noy"].attrs["tsara_shared_readings"] == 1
+
+
+def test_an_explicit_target_records_shared_readings_without_the_blend_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """On 10 s cells the three NOy readings astride 10, 20 and 30 s are shared; CO2's never are."""
+    streams = half_phase_pair(sparse_every=1)
+    with caplog.at_level("WARNING", logger="tsara.align.pairing"):
+        paired = pair_species(streams, "noy", "co2", target="10s")
+    assert "blends two readings" not in caplog.text
+    assert paired.dataset["noy"].attrs["tsara_shared_readings"] == 3
+    assert paired.dataset["co2"].attrs["tsara_shared_readings"] == 0
+
+
+def test_no_blend_warning_when_the_widths_differ(
+    caplog: pytest.LogCaptureFixture, two_rates: dict[str, xr.Dataset]
+) -> None:
+    with caplog.at_level("WARNING", logger="tsara.align.pairing"):
+        pair_species(two_rates, "ch4", "co2")
+    assert "blends two readings" not in caplog.text
+
+
+def test_no_blend_warning_when_the_partner_is_in_phase(caplog: pytest.LogCaptureFixture) -> None:
+    streams = half_phase_pair(sparse_every=1, dense_offset_s=0.0)
+    with caplog.at_level("WARNING", logger="tsara.align.pairing"):
+        pair_species(streams, "noy", "co2")
+    assert "blends two readings" not in caplog.text
+
+
+def test_the_remedy_the_blend_warning_names_removes_it(caplog: pytest.LogCaptureFixture) -> None:
+    """On the coarser common clock the warning names, neither member is half a cell off."""
+    streams = half_phase_pair(sparse_every=1)
+    with caplog.at_level("WARNING", logger="tsara.align.pairing"):
+        paired = pair_species(streams, "noy", "co2", target="10s")
+    assert "blends two readings" not in caplog.text
+    assert paired.dataset["noy"].attrs["tsara_borrowed_share"] == pytest.approx(0.05, abs=0.02)
+
+
+def test_a_caller_who_chose_offset_cells_is_not_warned_about_the_blend(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Explicit 1 s cells half a cell from the picarro: the blend is the caller's choice.
+
+    The record still says so (borrowed share 0.5 on the offset member); the
+    warning is for the case the clock rule chose without the caller seeing it.
+    """
+    streams = half_phase_pair(sparse_every=1)
+    offset_cells = CellBounds(
+        start_ns=(np.arange(38) * SECOND) + SECOND // 2,
+        stop_ns=(np.arange(38) * SECOND) + SECOND // 2 + SECOND,
+    )
+    with caplog.at_level("WARNING", logger="tsara.align.pairing"):
+        paired = pair_species(streams, "noy", "co2", target=offset_cells)
+    assert "blends two readings" not in caplog.text
+    assert paired.dataset["co2"].attrs["tsara_borrowed_share"] == pytest.approx(0.5)

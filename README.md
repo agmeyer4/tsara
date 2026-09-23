@@ -16,7 +16,7 @@ section there before it has a caller.
 
 ## Status
 
-**Alpha — phases 1–4.5 of the roadmap are complete.** The package is
+**Alpha — phases 1–4.6 of the roadmap are complete.** The package is
 built one phase per review cycle, and only what is listed as done below exists.
 
 | Phase | | |
@@ -27,6 +27,7 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 3.5 | Temporal support: every value carries the interval of air it describes | ✅ done |
 | 4 | Alignment & pairing (one joining operation, error propagation, circular stats, output grid) | ✅ done |
 | 4.5 | One atmosphere, realized once and sampled by every instrument; a variable's `field` | ✅ done |
+| 4.6 | How support may be changed at all: one per-pair rule, a record on every column of what the join did, the borrowed share | ✅ done |
 | 5 | Baselines + continuous rolling state | planned |
 | 6 | Plume detection + nested-event bookkeeping | planned |
 | 7 | Regression (OLS / York / ODR), combined UQ, stability cube | planned |
@@ -158,8 +159,13 @@ clock other than its own got there the same way: averaged onto target cells,
 weighted by overlap, carrying its uncertainty, its contributing count and its
 cell coverage. A species pair for a regression and a campaign-wide matrix for a
 receptor model differ only in *which cells* — so there is no "PMF matrix"
-object, only that function called with a chosen set of columns. (`METHODS.md`
-§11.2)
+object, only that function called with a chosen set of columns. What a join may
+do to a reading's support is one rule: a reading at least twice as wide as a
+cell it touches is refused, since its value would be copied across rows, unless
+asked for by name; everything narrower is allowed, and every column records what
+happened to its readings (averaged, straddled, narrowed, copied), how much of
+each value rests on air outside its cell, and how many distinct readings stand
+behind it. (`METHODS.md` §11.2)
 
 **Uncertainty is first class, and never assumed.** Every variable can declare a
 two-component budget: a `random` part that averages down and a `systematic` part
@@ -231,8 +237,10 @@ without being run, and none needs any real data:
   stream onto another's cells.
 - [`04_alignment_walkthrough.ipynb`](examples/notebooks/04_alignment_walkthrough.ipynb)
   — combining measurements without inventing any: overlap-weighted binning,
-  uncertainty checked against Monte Carlo, pairing and its clock, circular
-  statistics, the one interpolation and its cost, and the campaign grid. Built
+  uncertainty checked against Monte Carlo, what a join may do to a reading's
+  support and what that costs against the true atmosphere, pairing and its
+  clock, circular statistics, the one interpolation and its cost, and the
+  campaign grid. Built
   to be changed: every section is self-contained, opens with a parameters cell,
   prints ✔ checks comparing TSARA with a calculation written independently from
   the definition, and ends with "Try it" changes whose outcomes were run. A
@@ -256,6 +264,9 @@ committed **without** outputs:
 pytest                      # suite; the 100% line+branch floor is enforced in config
 ruff check . && ruff format --check .
 mypy --strict src tests
+TSARA_ARCHIVE=/path/to/Data TSARA_NOTEBOOKS=1 pytest tests/test_notebooks.py
+                            # opt-in: executes notebooks 04b (against the archive)
+                            # and 04, and requires every check and ledger row to hold
 ```
 
 A few house rules worth knowing before contributing: every algorithm gets a

@@ -32,9 +32,13 @@ Automatically, so a caller cannot forget:
 
 * its **uncertainty components**, propagated through the *same* overlap
   weights that formed the value, random and systematic separately (§3);
-* **how many** readings contributed and **how much** of the target cell
-  they covered — the two numbers that separate a well-determined value from
-  a number that merely exists;
+* **how many** readings contributed, **how much** of the target cell they
+  covered, and **how much** of the value rests on air outside the cell — the
+  three numbers that separate a well-determined value from a number that
+  merely exists (§11.2.4);
+* per column, what the join did to the readings behind it and by how much:
+  ``tsara_support_transform``, ``tsara_width_ratio_max``,
+  ``tsara_borrowed_share`` and ``tsara_n_readings``;
 * everything the input stream declared about itself, plus where it came from.
 
 Three behaviours are not negotiable and are handled here rather than left to
@@ -43,12 +47,18 @@ arithmetically (§11.5). A stream whose cells already *are* the target passes
 through untouched, because averaging a cell onto itself is the identity
 mathematically and not in floating point. And a target cell with no
 contributing data stays ``nan``: gases are binned, never interpolated (§1.2).
+
+One behaviour is a policy. A reading at least :data:`COPY_RATIO` times as wide
+as a target cell it touches would be *copied* across rows, and is refused
+unless ``finer_support="allow"`` asks for it by name; everything narrower is
+allowed, recorded per column, and named in one warning per call (§11.2.4).
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, TypeAlias
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import numpy as np
 import pandas as pd
@@ -64,6 +74,7 @@ from tsara.core.naming import (
     RESULTANT_LENGTH_SUFFIX,
     TIME_BOUNDS_VAR,
     TIME_COORD,
+    borrowed_name,
     coverage_name,
     is_circular,
     is_companion_name,
@@ -77,20 +88,32 @@ from tsara.core.propagation import (
     propagate_systematic_binned,
     sigma_at_support,
 )
-from tsara.core.support import CellBounds, attach_time_bounds, overlap_pairs
+from tsara.core.support import (
+    CellBounds,
+    attach_time_bounds,
+    bin_onto_cells,
+    contributing_weights,
+    overlap_pairs,
+)
 from tsara.core.timebase import NS_PER_S
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Iterable, Mapping, Sequence
 
+    from tsara.core.support import OverlapPairs
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "COPY_RATIO",
+    "FinerSupport",
+    "SupportTransform",
     "TsaraAlignError",
     "VariableRef",
     "bin_streams_onto_cells",
     "resolve_variable",
     "select_variables",
+    "targets_overlap",
 ]
 
 #: How a caller names a variable: by its canonical name, or by the instrument
@@ -108,6 +131,42 @@ INSTRUMENT_ATTR = "tsara_instrument"
 BINNED_ATTR = "tsara_binned"
 PROPAGATION_FORM_ATTR = "tsara_propagation_form"
 SIGMA_AT_SUPPORT_ATTR = "tsara_sigma_at_support"
+
+#: Per-column attrs recording how a join changed the support of what it holds
+#: (``docs/METHODS.md`` §11.2.4): the worst thing that happened to any reading
+#: behind the column, in a word; the largest reading-to-cell width ratio among
+#: the readings that formed a value; the share of the column's covered time
+#: whose value rests on air outside its cell; and how many distinct readings
+#: stand behind the column's rows.
+TRANSFORM_ATTR = "tsara_support_transform"
+WIDTH_RATIO_ATTR = "tsara_width_ratio_max"
+BORROWED_ATTR = "tsara_borrowed_share"
+READINGS_ATTR = "tsara_n_readings"
+
+#: Reading width over target width at which a join is a *copy*: one reading
+#: filling two cells' worth of rows (§11.2.4). A named constant rather than a
+#: knob. It is the line at which a reading holds less than one row's worth of
+#: information, and it needs no tolerance: cadence jitter on the archive tops
+#: out at 1.024 against a refusal at 2.
+COPY_RATIO = 2.0
+
+#: What a join may do with a reading at or beyond :data:`COPY_RATIO`.
+#: ``refuse`` is the default and the interpolation rule's guarantee (§1.2);
+#: ``allow`` copies the reading across rows, labels every affected column
+#: ``copied``, records how much of each value was borrowed, and warns.
+FinerSupport = Literal["refuse", "allow"]
+
+#: The vocabulary of ``tsara_support_transform``, one word per column naming
+#: the worst thing the join did to any reading behind it. Derived from two
+#: numbers without a tolerance: ``passthrough`` when the stream's cells are
+#: the target; ``averaged`` when every contributing reading sat wholly inside
+#: its cell (borrowed share exactly 0); ``straddled`` when some reading lay
+#: across a cell boundary but none was wider than a cell it filled;
+#: ``narrowed`` when one was, by less than :data:`COPY_RATIO`; ``copied`` at
+#: or beyond it. The word *shared* is kept for a different fact, a reading
+#: that formed more than one row's value (:func:`shared_readings`, §11.4.1):
+#: a straddled reading in a product whose rows sit cells apart is not shared.
+SupportTransform = Literal["passthrough", "averaged", "straddled", "narrowed", "copied"]
 
 #: What ``tsara_stage`` says on a dataset this package built by *joining*
 #: measurements, as opposed to one it read from an archive (``ingest``) or
@@ -429,34 +488,28 @@ def _sigma_on_cells(
     return np.asarray(moved, dtype=np.float64), provenance
 
 
-def measure_replication(readings: CellBounds, target: CellBounds) -> tuple[bool, float, float]:
-    """Say whether any one reading would be spread over two target cells' worth of time.
+def pair_width_ratios(readings: CellBounds, target: CellBounds, pairs: OverlapPairs) -> np.ndarray:
+    """Return reading width over target width for every overlapping pair.
 
-    The test for the one direction this operation must not run in. Averaging a
-    fast stream onto slow cells discards resolution the slow instrument never
-    had, which is honest; evaluating a slow value on fast cells hands back rows
-    the instrument never reported, which is the interpolation rule (§1.2)
-    restated for a step function.
+    The one number that says which kind of join a pair is (§11.2.4). At or
+    below 1 the reading fits inside its target and is averaged, or straddles
+    a boundary and is shared between rows. Above 1 the reading is wider than
+    the cell it fills, so its value -- a mean over the whole reading -- stands
+    for a shorter interval than it measured: the join *narrows* it. At
+    :data:`COPY_RATIO` and beyond one reading fills two cells' worth of rows,
+    which is the interpolation rule (§1.2) restated for a step function, and
+    is refused unless a caller asks for it by name.
 
-    **The rule: a reading is replicated when the time it shares with the
-    target cells adds up to at least twice the width of the widest target cell
-    it touches.** Measured on the overlaps, as the rule it replaces was, and
-    for the same reason — a comparison of median widths needs a tolerance,
-    because real analyzers disagree about their own nominal rate (1.023 s
-    against a nominal 1 s in the 2026 archive), and this needs none:
-
-    * 60 s onto 1 s is sixty cells' worth, refused;
-    * 2 s onto 1 s is two cells' worth at *any* phase, refused;
-    * 1.023 s onto 1 s is a hair over one, allowed;
-    * equal widths half a period apart are one cell's worth, allowed.
-
-    The rule this replaced counted target cells lying *wholly* inside one
-    reading, refusing at two. It agreed on every case above except one: a
-    perfectly regular 2 s record offset from a 1 s grid by anything but zero
-    wholly contains only one target cell, so it passed, and each of its
-    readings fed two or three rows (§11.2.1). What remains below the line —
-    a reading partly shared between neighbouring rows — is not refused but
-    counted, by :func:`readings_behind`.
+    Measured per pair rather than summed over a reading's rows, and that is
+    load-bearing. The rule this replaced added up the time a reading shared
+    with *all* target cells and refused at twice the widest, which assumed the
+    targets do not overlap: sliding windows sixty seconds wide every ten
+    seconds share every 30 s reading with six of them and were refused as a
+    copy, while a 60 s mean stood on a single 15 s cell -- four times as wide
+    as the cell it fills -- passed, because one narrow cell never adds up to
+    two. A ratio per pair has neither hole, needs no tolerance (real jitter
+    tops out at 1.024 on the archive against a refusal at 2), and reproduces
+    every verdict the summed rule gave where that rule was right.
 
     Parameters
     ----------
@@ -464,43 +517,20 @@ def measure_replication(readings: CellBounds, target: CellBounds) -> tuple[bool,
         Cells being averaged.
     target : CellBounds
         Cells to average onto.
+    pairs : OverlapPairs
+        Their overlaps, from :func:`~tsara.core.support.overlap_pairs`.
 
     Returns
     -------
-    tuple of (bool, float, float)
-        Whether any reading is replicated; the largest multiple of a
-        touched target cell's width that any one reading covers; and that
-        reading's total covered time in seconds, half of which is the
-        widest target cell that would *not* replicate it.
+    numpy.ndarray
+        One ratio per pair; zero for a pair whose target cell has no width,
+        which overlaps nothing by a positive amount and weighs nothing.
     """
-    # Long form: one entry per overlapping (reading, target cell) pair.
-    pairs = overlap_pairs(readings, target)
-    # The width of the target cell in each pair.
-    target_width = target.width_ns[pairs.target_index]
-    # A zero-width target cell overlaps nothing by a positive amount and would
-    # otherwise make a degenerate grid look infinitely replicated.
-    touching = (pairs.overlap_ns > 0) & (target_width > 0)
-    if not touching.any():
-        return False, 0.0, 0.0
-    # Which reading each touching pair belongs to.
-    owner = pairs.reading_index[touching]
-    # Integer nanoseconds summed in float64 are exact below 2**53 ns, about
-    # 104 days of overlap for a single reading, so the comparison with
-    # twice a width is exact for any cell this operation will meet.
-    # Total time each reading shares with the target cells.
-    covered = np.bincount(owner, weights=pairs.overlap_ns[touching], minlength=len(readings))
-    # The widest target cell each reading touches.
-    widest = np.zeros(len(readings), dtype=np.int64)
-    np.maximum.at(widest, owner, target_width[touching])
-    # Readings that touch at least one target cell.
-    used = widest > 0
-    # "How many target cells' worth of time" each reading covers; the worst
-    # one is reported, so the refusal can name a width that would work.
-    multiples = covered[used] / widest[used]
-    worst = int(np.argmax(multiples))
-    # The rule itself: two cells' worth or more is replication.
-    replicated = bool(np.any(covered[used] >= 2.0 * widest[used]))
-    return replicated, float(multiples[worst]), float(covered[used][worst]) / NS_PER_S
+    reading_width = readings.width_ns[pairs.reading_index].astype(np.float64)
+    target_width = target.width_ns[pairs.target_index].astype(np.float64)
+    return np.divide(
+        reading_width, target_width, out=np.zeros_like(reading_width), where=target_width > 0
+    )
 
 
 def touched_readings(readings: CellBounds, target: CellBounds) -> np.ndarray:
@@ -563,31 +593,292 @@ def readings_behind(
     return int(np.count_nonzero(touched_readings(readings, target) & finite))
 
 
-def _refuse_upsampling(readings: CellBounds, target: CellBounds, instrument: str) -> None:
-    """Raise if binning onto ``target`` would replicate ``readings``.
+def shared_readings(
+    stream: xr.Dataset, variable: str, readings: CellBounds, target: CellBounds
+) -> int:
+    """Return how many distinct finite readings of a variable formed more than one target cell.
+
+    The independence question, asked exactly (§11.4.1). A reading that
+    overlaps two target cells by a positive amount contributed to both of
+    their values, so the two rows share its error and a fit treating them as
+    independent is too confident. Neither of the other two numbers can see
+    this. The borrowed share is 0.5 for a partner half a cell out of phase
+    whether its readings feed one pair each or two: a *sparse* partner's
+    pairs sit two or three cells apart, so no reading reaches two of them,
+    while a *dense* partner puts every reading into two. And
+    :func:`readings_behind` counts a reading once however many rows it
+    formed. Same membership rule as the binner, so a reading touching a cell
+    only at its boundary counts for nothing and a masked reading formed
+    nothing.
+
+    Parameters
+    ----------
+    stream : xarray.Dataset
+        The stream holding the variable.
+    variable : str
+        The variable's name in that stream.
+    readings : CellBounds
+        The stream's cells.
+    target : CellBounds
+        The cells whose values the readings formed.
+
+    Returns
+    -------
+    int
+        Distinct finite readings overlapping two or more target cells.
+    """
+    finite = np.isfinite(np.asarray(stream[variable].values, dtype=np.float64))
+    links = overlap_pairs(readings, target)
+    # How many cells each reading formed, counting only positive overlaps.
+    cells_formed = np.bincount(links.reading_index[links.overlap_ns > 0], minlength=len(readings))
+    return int(np.count_nonzero((cells_formed > 1) & finite))
+
+
+def _refuse_upsampling(
+    readings: CellBounds,
+    target: CellBounds,
+    instrument: str,
+    pairs: OverlapPairs,
+    ratios: np.ndarray,
+    finer_support: FinerSupport,
+) -> None:
+    """Refuse, or loudly allow, a join that would copy a reading across rows.
 
     Both of this phase's products already prevent this by choosing their
-    target: :func:`~tsara.align.pairing.pair_species` pairs on the
-    wider-supported member, and
-    :func:`~tsara.align.grid.build_output_grid` checks its period with this
-    same rule before building anything. The primitive they share has to refuse
-    it too, because it is public and is the documented way to build a
-    receptor-model matrix from a chosen set of columns — a caller supplying
-    their own target cells would otherwise get the one thing this package
-    promises not to do, with ``coverage`` reporting 1.0 and nothing else to
-    notice it by.
+    target: pairing takes the wider-supported member's cells, and the grid
+    checks its period with this same ratio before building anything. The
+    primitive they share has to refuse it too, because it is public and is
+    the documented way to build a receptor-model matrix from a chosen set of
+    columns -- a caller supplying their own target cells would otherwise get
+    the one thing this package promises not to do by default, with
+    ``coverage`` reporting 1.0 and nothing else to notice it by.
+
+    Asked of the cells alone, before any value is looked at: what is refused
+    is the operation requested for this instrument, not the readings that
+    happen to be finite today.
     """
-    replicated, multiple, covered_s = measure_replication(readings, target)
-    if not replicated:
+    touching = pairs.overlap_ns > 0
+    if not touching.any():
+        return
+    worst = int(np.argmax(np.where(touching, ratios, -np.inf)))
+    ratio = float(ratios[worst])
+    if ratio < COPY_RATIO:
+        return
+    # Any cell wider than half the widest reading would not be a copy of it.
+    widest_s = float(readings.width_ns[pairs.reading_index[touching]].max()) / NS_PER_S
+    if finer_support == "allow":
+        logger.warning(
+            "finer_support='allow': readings of '%s' up to %.3g times as wide as the cells "
+            "they fill will be copied across rows, resolution the instrument never had. "
+            "Every affected column is labelled 'copied' and carries how much of each value "
+            "was borrowed (METHODS §11.2.4); a fit or receptor model must not treat its rows "
+            "as independent measurements.",
+            instrument,
+            ratio,
+        )
         return
     raise TsaraAlignError(
         f"Stream '{instrument}' has {median_width_s(readings):.6g} s cells and the target "
-        f"cells are {median_width_s(target):.6g} s, so one of its measurements would cover "
-        f"{multiple:.3g} target cells' worth of time on its own. Evaluating it on a shorter "
-        "support is resolution the instrument never had (METHODS §11.2.1), and the "
-        "replicated rows would enter a fit as independent measurements. Bin onto cells "
-        f"wider than {covered_s / 2:.6g} s, pair on the wider-supported stream, or — for a "
-        "smooth non-gas field — interpolate it with tsara.align.auxiliary (§11.6)."
+        f"cells are {median_width_s(target):.6g} s, so one of its readings is {ratio:.3g} "
+        "times as wide as a cell it fills. That reading would be copied across rows, which "
+        "is resolution the instrument never had (METHODS §11.2.4), and the copies would "
+        f"enter a fit as independent measurements. Bin onto cells wider than "
+        f"{widest_s / COPY_RATIO:.6g} s, pair on the wider-supported stream, interpolate a "
+        "smooth non-gas field with tsara.align.auxiliary (§11.6), or pass "
+        "finer_support='allow' to copy it, labelled."
+    )
+
+
+def phase_offset_s(readings: CellBounds, target: CellBounds) -> float | None:
+    """Return how far a same-width stream sits out of phase with the target, or ``None``.
+
+    The one blend that is both exact and actionable (§11.2.4, §11.9.1): when
+    every reading is as wide as every target cell and the two tilings are
+    offset, each target value blends two readings and each reading lends part
+    of itself to two rows -- the borrowed share says how much, ``2f(1 - f)``
+    -- and the remedy belongs to the caller, who can move the grid onto the
+    instrument's boundaries or pair on a coarser common clock. ``None`` when
+    the widths differ (cadence jitter included: a 1.023 s reading on a 1 s
+    cell is narrowed, and not a question of phase), when either side is
+    empty, or when the tilings coincide.
+
+    Parameters
+    ----------
+    readings : CellBounds
+        The stream's cells.
+    target : CellBounds
+        The cells it is being put on.
+
+    Returns
+    -------
+    float or None
+        The first non-zero offset of a reading's start from the target's
+        tiling, in seconds; ``None`` when the situation does not arise.
+    """
+    if len(readings) == 0 or len(target) == 0:
+        return None
+    period = int(target.width_ns[0])
+    if (
+        period <= 0
+        or not np.all(target.width_ns == period)
+        or not np.all(readings.width_ns == period)
+    ):
+        return None
+    # How far each reading starts past a target boundary; zero everywhere means in phase.
+    offsets = (readings.start_ns - int(target.start_ns.min())) % period
+    shifted = offsets[offsets != 0]
+    if shifted.size == 0:
+        return None
+    return float(shifted[0]) / NS_PER_S
+
+
+def targets_overlap(target: CellBounds) -> bool:
+    """Say whether any two target cells overlap by a positive amount.
+
+    Overlapping targets -- sliding windows, nested event windows -- share
+    their readings by construction, so rows outnumbering readings is the
+    question asked rather than a defect to warn about (§11.2.4). Exact in
+    integer nanoseconds, no tolerance: a stream whose fixed-width cells
+    overlap by jitter counts as overlapping too, and a join onto its cells
+    keeps its per-column record while forgoing the sharing warning, which
+    pairing asks again of its surviving rows.
+
+    Parameters
+    ----------
+    target : CellBounds
+        The cells.
+
+    Returns
+    -------
+    bool
+        True if some cell starts before an earlier cell stops.
+    """
+    if len(target) < 2:
+        return False
+    order = np.argsort(target.start_ns, kind="stable")
+    start, stop = target.start_ns[order], target.stop_ns[order]
+    return bool(np.any(start[1:] < np.maximum.accumulate(stop)[:-1]))
+
+
+@dataclass(frozen=True)
+class _SupportChange:
+    """How a join changed one column's support: its four attrs, and the warning's input."""
+
+    transform: SupportTransform
+    width_ratio_max: float
+    borrowed_share: float
+    rows: int
+    readings: int
+
+
+def _label(ratio_max: float, borrowed_max: float) -> SupportTransform:
+    """Name the worst thing a join did to a column, from its two numbers.
+
+    Tolerance-free by construction: a reading exactly as wide as its cell
+    divides to exactly 1.0 in float64 (the widths are integers), and a
+    reading wholly inside its cell borrows exactly 0.0
+    (:func:`~tsara.core.support.borrowed_share`).
+    """
+    if not np.isfinite(ratio_max):
+        return "averaged"  # nothing contributed, so nothing was borrowed either
+    if ratio_max >= COPY_RATIO:
+        return "copied"
+    if ratio_max > 1.0:
+        return "narrowed"
+    if borrowed_max > 0.0:
+        return "straddled"
+    return "averaged"
+
+
+def _summarize(
+    pairs: OverlapPairs,
+    ratios: np.ndarray,
+    weight: np.ndarray,
+    borrowed: np.ndarray,
+    values: np.ndarray,
+) -> _SupportChange:
+    """Reduce a binned column's per-pair and per-cell numbers to its record (§11.2.4).
+
+    Over the pairs that formed a value, not over the cells: a masked reading
+    took part in nothing, so it neither widens the worst ratio nor counts as
+    a reading behind the column.
+    """
+    contributing = weight > 0
+    ratio_max = float(ratios[contributing].max()) if contributing.any() else float("nan")
+    # The column's share: every contributing pair's borrowed time over every
+    # contributing pair's time -- the per-cell shares weighted by how much of
+    # each cell was measured, so a sliver cell cannot dominate it.
+    weight_sum = np.bincount(pairs.target_index, weights=weight, minlength=pairs.n_target)
+    covered = weight_sum > 0
+    if covered.any():
+        share = float(np.sum(borrowed[covered] * weight_sum[covered]) / weight_sum[covered].sum())
+        borrowed_max = float(np.max(borrowed[covered]))
+    else:
+        share = borrowed_max = float("nan")
+    rows = int(np.count_nonzero(np.isfinite(values)))
+    readings = int(np.unique(pairs.reading_index[contributing]).size)
+    return _SupportChange(_label(ratio_max, borrowed_max), ratio_max, share, rows, readings)
+
+
+def _record(attrs: dict[str, object], change: _SupportChange) -> None:
+    """Write a column's support record into its attrs."""
+    attrs[TRANSFORM_ATTR] = change.transform
+    attrs[WIDTH_RATIO_ATTR] = change.width_ratio_max
+    attrs[BORROWED_ATTR] = change.borrowed_share
+    attrs[READINGS_ATTR] = change.readings
+
+
+def _warn_about_support_changes(changes: Mapping[str, _SupportChange], overlapping: bool) -> None:
+    """One warning per join, naming the columns whose values rest on borrowed air.
+
+    Two conditions, both tolerance-free (§11.2.4). A column is *narrowed*, or
+    *copied* under ``finer_support='allow'``, when some reading that formed a
+    value is wider than the cell it filled; the ratio says by how much, and
+    cadence jitter is listed with its 1.02 rather than hidden behind a
+    threshold chosen by taste. A column is *shared* when its rows outnumber
+    the distinct readings behind them, so a fit or receptor model treating
+    rows as independent counts some reading more than once -- asked only of
+    disjoint targets, since overlapping ones share readings by construction.
+    Blending itself (a reading straddling a boundary, neither wider than its
+    cell nor repeated) is recorded in the borrowed share and not warned about:
+    measured, no value of that share separates a half-phase blend from
+    ordinary jitter.
+    """
+
+    def shared(change: _SupportChange) -> bool:
+        return not overlapping and change.rows > change.readings
+
+    flagged = [
+        (column, change)
+        for column, change in changes.items()
+        if change.width_ratio_max > 1.0 or shared(change)
+    ]
+    if not flagged:
+        return
+
+    def describe(column: str, change: _SupportChange) -> str:
+        parts = []
+        if change.width_ratio_max > 1.0:
+            parts.append(f"{change.transform}, readings up to {change.width_ratio_max:.3g}x a cell")
+        if shared(change):
+            parts.append(f"{change.rows} rows from {change.readings} readings")
+        parts.append(f"borrowed share {change.borrowed_share:.2f}")
+        return f"'{column}' ({'; '.join(parts)})"
+
+    # At most eight named: a canister's fifty VOCs share one sampling pattern
+    # and would otherwise repeat one sentence fifty times.
+    listed = ", ".join(describe(column, change) for column, change in flagged[:8])
+    logger.warning(
+        "%d column(s) of this join rest on air the readings did not measure over the "
+        "cells reported (METHODS §11.2.4): %s%s. A reading wider than the cell it fills "
+        "has its value stand for a shorter interval than it measured; rows outnumbering "
+        "readings means some reading sits in more than one row, which a fit or receptor "
+        "model treating rows as independent counts more than once. Each column records "
+        "tsara_support_transform, tsara_width_ratio_max, tsara_borrowed_share and "
+        "tsara_n_readings, and carries the share borrowed per cell in borrowed_<name>.",
+        len(flagged),
+        listed,
+        " ..." if len(flagged) > 8 else "",
     )
 
 
@@ -613,13 +904,14 @@ def bin_streams_onto_cells(
     variables: Sequence[VariableRef] | None = None,
     *,
     propagation_form: PropagationForm = "ar1_neff",
+    finer_support: FinerSupport = "refuse",
 ) -> xr.Dataset:
     """Put any set of variables onto one set of cells.
 
     The joining primitive. Each variable is averaged onto every target cell,
     weighted by overlap; its uncertainty is propagated through the same
-    weights; and the count and coverage that qualify the result travel with
-    it (``docs/METHODS.md`` §11.2).
+    weights; and the count, coverage and borrowed share that qualify the
+    result travel with it (``docs/METHODS.md`` §11.2, §11.2.4).
 
     Parameters
     ----------
@@ -642,21 +934,30 @@ def bin_streams_onto_cells(
         matrix normally names its columns.
     propagation_form : {'ar1_neff', 'ar1_asymptotic', 'ar1_double_sum'}, optional
         Which registered form reduces a correlated random component (§3.4).
+    finer_support : {'refuse', 'allow'}, optional
+        What to do when a reading is at least :data:`COPY_RATIO` times as
+        wide as a target cell it touches, so that it would be copied across
+        rows. ``refuse`` (the default) raises; ``allow`` copies it, labels the
+        column ``copied``, records how much of each value was borrowed and
+        warns (§11.2.4). Config: ``AlignmentConfig.finer_support``.
 
     Returns
     -------
     xarray.Dataset
-        One column per selected variable, plus ``n_readings_<name>`` and
-        ``coverage_<name>`` for each, plus whatever uncertainty components
-        were available. Angular variables gain ``<name>_resultant_length``
-        and ``<name>_dispersion`` instead of a sigma. Cells are described by
-        CF ``time_bnds``.
+        One column per selected variable, plus ``n_readings_<name>``,
+        ``coverage_<name>`` and ``borrowed_<name>`` for each, plus whatever
+        uncertainty components were available. Angular variables gain
+        ``<name>_resultant_length`` and ``<name>_dispersion`` instead of a
+        sigma. Every column records ``tsara_support_transform``,
+        ``tsara_width_ratio_max``, ``tsara_borrowed_share`` and
+        ``tsara_n_readings``. Cells are described by CF ``time_bnds``.
 
     Raises
     ------
     TsaraAlignError
-        If no streams are given, a variable cannot be resolved, or a stream
-        has no cells.
+        If no streams are given, a variable cannot be resolved, a stream has
+        no cells, or a reading would be copied across rows and
+        ``finer_support`` is ``refuse``.
     """
     # 1. Validate what was asked for, and resolve it to (instrument, variable) pairs.
     if not streams:
@@ -667,35 +968,55 @@ def bin_streams_onto_cells(
     if not selection:
         raise TsaraAlignError(
             "No variables selected. Every stream holds only companion columns — "
-            "uncertainties, counts, coverage fractions, angular quality numbers — "
-            "which travel with the values they describe rather than being binned "
-            "on their own."
+            "uncertainties, counts, coverage fractions, borrowed shares, angular "
+            "quality numbers — which travel with the values they describe rather "
+            "than being binned on their own."
         )
     # 2. Decide each output column's name (suffixed only on a collision).
     names = _output_names(selection)
-    # 3. Refuse the direction that would replicate readings (METHODS §11.2.1).
-    # Once per instrument rather than once per variable: the question is about
-    # cells, and a spectral stream can carry a thousand columns on one clock.
+    # 3. Each instrument's cells, their overlaps with the target and the
+    # reading-to-cell width ratio of every overlap, found ONCE per instrument
+    # rather than once per variable: all three depend only on the cells, and a
+    # spectral stream can carry a thousand columns on one clock. A stream
+    # already on the target cells passes through and needs no search at all --
+    # nor the copy check, since a reading that *is* its target fills exactly
+    # one cell. Every other stream is refused here (or loudly allowed) if the
+    # join would copy its readings across rows, before anything is averaged.
+    joins: dict[str, tuple[CellBounds, OverlapPairs | None, np.ndarray | None]] = {}
     for instrument in dict.fromkeys(name for name, _ in selection):
-        _refuse_upsampling(stream_cells(streams[instrument], instrument), target, instrument)
+        readings = stream_cells(streams[instrument], instrument)
+        if _same_cells(readings, target):
+            joins[instrument] = (readings, None, None)
+            continue
+        found = overlap_pairs(readings, target)
+        found_ratios = pair_width_ratios(readings, target, found)
+        _refuse_upsampling(readings, target, instrument, found, found_ratios, finer_support)
+        joins[instrument] = (readings, found, found_ratios)
     # 4. Put each variable on the target cells: its value, its companions
-    # (count, coverage, sigmas or angular quality), and its attributes.
+    # (count, coverage, borrowed share, sigmas or angular quality), its
+    # attributes, and the record of what the join did to its support.
     data_vars: dict[str, tuple[str, np.ndarray, dict[str, object]]] = {}
     # Per column: the cell method a passed-through variable declared, or a
     # sentinel saying this call averaged it. Needed to fix cell_methods below.
     native: dict[str, str | None] = {}
+    changes: dict[str, _SupportChange] = {}
     for instrument, variable in selection:
         column = names[instrument, variable]
-        columns, declared_method = _one_variable(
+        cells, pairs, ratios = joins[instrument]
+        columns, declared_method, change = _one_variable(
             streams[instrument],
             instrument=instrument,
             variable=variable,
             column=column,
             target=target,
             propagation_form=propagation_form,
+            readings=cells,
+            pairs=pairs,
+            ratios=ratios,
         )
         data_vars.update({name: (TIME_COORD, *rest) for name, rest in columns.items()})
         native[column] = declared_method
+        changes[column] = change
 
     # 5. Assemble the product: one row per target cell, `time` at each midpoint.
     dataset = xr.Dataset(
@@ -710,6 +1031,8 @@ def bin_streams_onto_cells(
     # `time: mean` that attaching them stamps on every column.
     attach_time_bounds(dataset, target, "mean")
     _correct_cell_methods(dataset, names.values(), native)
+    # 7. Say, once, which columns rest on borrowed air (§11.2.4).
+    _warn_about_support_changes(changes, targets_overlap(target))
     # Pinned here rather than by whoever eventually writes the file: a joined
     # product is an ordinary Dataset with no bundle of its own, so the user
     # inspecting one in a notebook is the one who calls `to_netcdf`, and
@@ -733,9 +1056,10 @@ def _correct_cell_methods(
       ``time: mean`` on a point sample would assert an averaging that never
       happened.
     * A contributing-sample count is a **sum** over the cell, CF's own word.
-    * A coverage fraction, a resultant length and a dispersion are properties
-      of the cell rather than statistics of the data inside it, so they get
-      no cell method — the same reason the sigma companions get none (§10.2).
+    * A coverage fraction, a borrowed share, a resultant length and a
+      dispersion are properties of the cell rather than statistics of the
+      data inside it, so they get no cell method — the same reason the sigma
+      companions get none (§10.2).
     """
     for column in columns:
         declared = native.get(column, _BINNED_HERE)
@@ -750,6 +1074,7 @@ def _correct_cell_methods(
         # Properties of the cell, not statistics of the data in it: no method.
         for name in (
             coverage_name(column),
+            borrowed_name(column),
             f"{column}{RESULTANT_LENGTH_SUFFIX}",
             f"{column}{DISPERSION_SUFFIX}",
         ):
@@ -765,15 +1090,24 @@ def _one_variable(
     column: str,
     target: CellBounds,
     propagation_form: PropagationForm,
-) -> tuple[dict[str, tuple[np.ndarray, dict[str, object]]], str | None]:
-    """Return one variable's columns on the target cells.
+    readings: CellBounds,
+    pairs: OverlapPairs | None,
+    ratios: np.ndarray | None,
+) -> tuple[dict[str, tuple[np.ndarray, dict[str, object]]], str | None, _SupportChange]:
+    """Return one variable's columns on the target cells, and what the join did to it.
+
+    ``readings`` are the variable's own cells, which its values describe;
+    ``pairs`` their overlaps with the target and ``ratios`` the width ratio of
+    each — or both ``None`` when the caller found the stream already on the
+    target cells, so that there is nothing to search and the variable passes
+    through.
 
     The second return value says whether the variable was already on the
     target support, and if so what cell method its own stream declared — the
-    only thing the caller cannot re-derive from the columns themselves.
+    only thing the caller cannot re-derive from the columns themselves. The
+    third is the column's support record, already written into its attrs and
+    returned so the caller can warn about all columns at once.
     """
-    # The variable's own cells, which its values describe.
-    readings = stream_cells(stream, instrument)
     if stream[variable].dims != (TIME_COORD,):
         # Named rather than broadcast against: without this the cell
         # boundaries, or any other array carrying a second dimension, reach
@@ -794,16 +1128,19 @@ def _one_variable(
     # that reads all three lives in `core.naming` and is shared with the
     # auxiliary interpolator, which has to make the same decision.
     circular = is_circular(attrs)
-    # Already on the target cells? Then pass through rather than average onto itself.
-    already_here = _same_cells(readings, target)
-    attrs[BINNED_ATTR] = int(not already_here)
+    if circular:
+        _warn_of_a_dropped_direction_sigma(stream, variable, instrument)
+    # Already on the target cells (the caller found nothing to search)? Then
+    # pass through rather than average onto itself.
+    attrs[BINNED_ATTR] = int(pairs is not None)
 
-    if already_here:
+    if pairs is None or ratios is None:
         # The companions below must be exactly what the binned path would
         # produce for one reading covering its target, so that a product's
         # columns and their meaning do not depend on whether a stream happened
         # to share the target's cells. A masked value contributes nothing,
-        # there as here: no count, no coverage, no quality number.
+        # there as here: no count, no coverage, no borrowed share, no quality
+        # number.
         present = np.isfinite(values)
         columns: dict[str, tuple[np.ndarray, dict[str, object]]] = {column: (values, attrs)}
         columns[n_readings_name(column)] = (
@@ -814,6 +1151,14 @@ def _one_variable(
             present.astype(np.float64),
             _coverage_attrs(column, native=True),
         )
+        # A reading on its own cell borrows nothing from beyond it.
+        columns[borrowed_name(column)] = (
+            np.where(present, 0.0, np.nan),
+            _borrowed_attrs(column, native=True),
+        )
+        n_present = int(np.count_nonzero(present))
+        change = _SupportChange("passthrough", 1.0, 0.0, n_present, n_present)
+        _record(attrs, change)
         if circular:
             # One reading agrees with itself: R is 1 and the dispersion 0,
             # which is what vector-averaging that single reading returns.
@@ -826,7 +1171,7 @@ def _one_variable(
                 np.where(present, 0.0, np.nan),
                 _dispersion_attrs(column, str(attrs.get("units", "degrees"))),
             )
-            return columns, stream[variable].attrs.get(CELL_METHODS_ATTR)
+            return columns, stream[variable].attrs.get(CELL_METHODS_ATTR), change
         # A reading on its own cell needs no propagation: each sigma is used as
         # it stands, moved only if it was quoted at another interval.
         for component, sigma_name in (("random", sigma_rand_name), ("systematic", sigma_sys_name)):
@@ -840,14 +1185,52 @@ def _one_variable(
                 sigma_values,
                 _sigma_attrs(stream, variable, component, provenance, form="native"),
             )
-        return columns, stream[variable].attrs.get(CELL_METHODS_ATTR)
+        return columns, stream[variable].attrs.get(CELL_METHODS_ATTR), change
 
     # Not on the target cells: average it, as a direction or as a number.
     if circular:
-        return _bin_circular(stream, variable, column, readings, target, attrs), _BINNED_HERE
-    return _bin_scalar(
-        stream, variable, column, readings, target, values, attrs, propagation_form
-    ), _BINNED_HERE
+        columns, borrowed, weight = _bin_circular(
+            stream, variable, column, readings, target, attrs, pairs
+        )
+    else:
+        columns, borrowed, weight = _bin_scalar(
+            stream, variable, column, readings, target, values, attrs, propagation_form, pairs
+        )
+    # The third qualifier, per cell, and the four-number record, per column.
+    columns[borrowed_name(column)] = (borrowed, _borrowed_attrs(column, native=False))
+    change = _summarize(pairs, ratios, weight, borrowed, columns[column][0])
+    _record(attrs, change)
+    return columns, _BINNED_HERE, change
+
+
+def _warn_of_a_dropped_direction_sigma(stream: xr.Dataset, variable: str, instrument: str) -> None:
+    """Say so when a direction carries a declared sigma that no join propagates.
+
+    Ingestion resolves and stores a declared uncertainty on a circular
+    variable exactly as on any other; both join paths then drop it, because a
+    direction's companions are the mean resultant length and the exact
+    dispersion, which describe the spread of its *readings* and are not the
+    instrument's precision (§11.5). Until the Phase-4.6 walkthrough that
+    happened without a word. Propagating a direction sigma properly is a
+    small-angle, von-Mises question that no real manifest has yet asked; what
+    is owed meanwhile is the sentence.
+    """
+    declared = [
+        name
+        for name in (sigma_rand_name(variable), sigma_sys_name(variable))
+        if name in stream.data_vars
+    ]
+    if not declared:
+        return
+    logger.warning(
+        "'%s' on '%s' is circular and carries %s, which no join propagates: a direction's "
+        "companions are its mean resultant length and exact dispersion, which describe the "
+        "spread of its readings, not the instrument's precision (METHODS §11.5). The "
+        "declared figure stays on the stream and is absent from this product.",
+        variable,
+        instrument,
+        " and ".join(declared),
+    )
 
 
 def _bin_circular(
@@ -857,20 +1240,21 @@ def _bin_circular(
     readings: CellBounds,
     target: CellBounds,
     attrs: dict[str, object],
-) -> dict[str, tuple[np.ndarray, dict[str, object]]]:
+    pairs: OverlapPairs,
+) -> tuple[dict[str, tuple[np.ndarray, dict[str, object]]], np.ndarray, np.ndarray]:
     """Vector-average an angular variable and carry its quality numbers.
 
     An angle has no meaningful arithmetic mean, so it gets none. What it gets
     instead is the mean resultant length, which is the honest statement of
     how well determined the direction is, and the exact circular standard
-    deviation derived from it (§11.5).
+    deviation derived from it (§11.5). Returns the columns, the per-cell
+    borrowed share, and the per-pair weights the caller's record needs.
     """
-    # Same overlap search as a scalar, different arithmetic on the pairs.
-    result = bin_circular_onto_cells(
-        readings, np.asarray(stream[variable].values, dtype=np.float64), target
-    )
+    angles = np.asarray(stream[variable].values, dtype=np.float64)
+    # The same overlaps as a scalar, different arithmetic on the pairs.
+    result = bin_circular_onto_cells(readings, angles, target, pairs=pairs)
     units = str(attrs.get("units", "degrees"))
-    return {
+    columns = {
         column: (result.mean_deg, attrs),
         n_readings_name(column): (result.n_readings, _count_attrs(column, native=False)),
         coverage_name(column): (result.coverage, _coverage_attrs(column, native=False)),
@@ -883,6 +1267,7 @@ def _bin_circular(
             _dispersion_attrs(column, units),
         ),
     }
+    return columns, result.borrowed, contributing_weights(pairs, angles)
 
 
 def _resultant_attrs(column: str) -> dict[str, object]:
@@ -917,57 +1302,33 @@ def _bin_scalar(
     values: np.ndarray,
     attrs: dict[str, object],
     propagation_form: PropagationForm,
-) -> dict[str, tuple[np.ndarray, dict[str, object]]]:
-    """Overlap-weighted mean of one scalar variable, with its uncertainty."""
-    # Long form: one entry per overlapping (reading, target cell) pair,
-    # with the overlap in nanoseconds. Everything below aggregates these pairs.
-    pairs = overlap_pairs(readings, target)
-    n_target = len(target)
-    # The reading's value in each pair.
-    paired = values[pairs.reading_index]
-    # A pair contributes when its reading holds a value and the overlap is positive.
-    contributes = np.isfinite(paired) & (pairs.overlap_ns > 0)
-    # Its weight is the overlap; a pair that does not contribute weighs nothing.
-    weight = np.where(contributes, pairs.overlap_ns, 0.0).astype(np.float64)
-    # Per target cell: the total contributing overlap (the denominator) ...
-    weight_sum = np.bincount(pairs.target_index, weights=weight, minlength=n_target)
-    # ... and the overlap-weighted sum of values (the numerator). A masked value
-    # is zeroed before multiplying, because 0 * nan is nan, not 0.
-    value_sum = np.bincount(
-        pairs.target_index,
-        weights=weight * np.where(contributes, paired, 0.0),
-        minlength=n_target,
-    )
-    # The weighted mean where anything contributed; nan everywhere else, never
-    # a value borrowed from a neighbour.
-    binned = np.full(n_target, np.nan, dtype=np.float64)
-    filled = weight_sum > 0
-    binned[filled] = value_sum[filled] / weight_sum[filled]
-    # n_readings: how many readings contributed to each target cell.
-    counts = np.bincount(
-        pairs.target_index, weights=contributes.astype(np.float64), minlength=n_target
-    ).astype(np.int64)
-    # Coverage can exceed 1 slightly, and is left alone when it does.
-    # Fixed-width cells centred on jittered timestamps overlap each other, so
-    # their overlaps with one target cell can sum past its width (§10.2, where
-    # the effect is documented as benign: the value is a weighted MEAN, so the
-    # weights normalize). Clipping would hide a real property of the input
-    # record behind a tidier number.
-    # coverage: the contributing overlap as a fraction of the target cell's width.
-    width = target.width_ns.astype(np.float64)
-    coverage = np.zeros(n_target, dtype=np.float64)
-    wide = width > 0
-    coverage[wide] = weight_sum[wide] / width[wide]
+    pairs: OverlapPairs,
+) -> tuple[dict[str, tuple[np.ndarray, dict[str, object]]], np.ndarray, np.ndarray]:
+    """Overlap-weighted mean of one scalar variable, with its uncertainty.
 
+    The mean, the count, the coverage and the borrowed share are
+    :func:`~tsara.core.support.bin_onto_cells`, called with the overlaps the
+    caller found once for the whole instrument; this function used to carry
+    a second spelling of that arithmetic, and two implementations of one
+    idea is the shape the Phase-4 reframe rejected. What is added here is the
+    uncertainty, propagated through exactly the weights that formed the value.
+    Returns the columns, the per-cell borrowed share, and the per-pair weights
+    the caller's record needs.
+    """
+    n_target = len(target)
+    binned = bin_onto_cells(readings, values, target, pairs=pairs)
     columns: dict[str, tuple[np.ndarray, dict[str, object]]] = {
-        column: (binned, attrs),
-        n_readings_name(column): (counts, _count_attrs(column, native=False)),
-        coverage_name(column): (coverage, _coverage_attrs(column, native=False)),
+        column: (binned.values, attrs),
+        n_readings_name(column): (binned.n_readings, _count_attrs(column, native=False)),
+        coverage_name(column): (binned.coverage, _coverage_attrs(column, native=False)),
     }
     # Uncertainty, propagated through exactly the weights that formed the value
-    # (docs/METHODS.md §3). The declared timescale, if any, says how correlated
-    # the random errors of neighbouring readings are; without one they are
-    # independent, which is what declaring a component random means.
+    # (docs/METHODS.md §3): each pair's overlap, or zero where the reading is
+    # masked, from the one shared definition. The declared timescale, if any,
+    # says how correlated the random errors of neighbouring readings are;
+    # without one they are independent, which is what declaring a component
+    # random means.
+    weight = contributing_weights(pairs, values)
     tau = stream[variable].attrs.get("decorrelation_timescale")
     tau_s = float(pd.Timedelta(tau).total_seconds()) if tau is not None else None
     # How far apart readings are (for the correlated-error forms), and how wide
@@ -1005,7 +1366,7 @@ def _bin_scalar(
             result.sigma,
             _sigma_attrs(stream, variable, component, provenance, form=result.form),
         )
-    return columns
+    return columns, binned.borrowed, weight
 
 
 def _count_attrs(column: str, *, native: bool) -> dict[str, object]:
@@ -1030,6 +1391,23 @@ def _coverage_attrs(column: str, *, native: bool) -> dict[str, object]:
             f"Fraction of each target cell covered by contributing {column} data."
             + (
                 " Already on this support: one where a value is present, zero where masked."
+                if native
+                else ""
+            )
+        ),
+        "units": "1",
+    }
+
+
+def _borrowed_attrs(column: str, *, native: bool) -> dict[str, object]:
+    """Return attrs for a per-cell borrowed share."""
+    return {
+        "description": (
+            f"Share of each cell's {column} value resting on air outside the cell: the "
+            "coverage-weighted fraction of each contributing reading's own cell lying beyond "
+            "the target (METHODS §11.2.4). Exactly zero for pure averaging."
+            + (
+                " Already on this support: zero where a value is present, nothing where masked."
                 if native
                 else ""
             )
