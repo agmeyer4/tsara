@@ -2733,11 +2733,15 @@ key, so the real-data results in this section are evidence of a different kind:
 a loop reimplementation agreeing with TSARA on the files, and numbers that can
 be measured again. `examples/notebooks/04b_alignment_real_data.ipynb` does the
 second. It reads the permitted archive through manifests, runs this section's
-operations, and ends in a ledger setting 83 numbers from §9.2.3 and §11.4–§11.7.1
-beside the values printed here; at the close of the Phase-4 walkthrough all 83
-agreed. It is committed without outputs and needs `TSARA_ARCHIVE`. Not re-run
-there: the archive-wide census in §11.4.1, the Yamartino comparison in §11.5,
-the midpoint-against-mean table in §11.6, and the compression timings in §11.7.
+operations, and ends in a ledger setting 90 numbers from §9.2.3, §11.2.4 and
+§11.4–§11.7.1 beside the values printed here. At the close of the Phase-4
+walkthrough all 83 rows it then had agreed; the ledger has since gained rows for
+§11.2.4's archive joins and §11.4.1's shared-readings counts, and at the close
+of Phase 4.6 all 90 agree. It is committed without outputs and needs
+`TSARA_ARCHIVE`; `tests/test_notebooks.py` executes it under that variable and
+fails on any ledger row that differs. Not re-run there: the archive-wide census
+in §11.4.1, the Yamartino comparison in §11.5, the midpoint-against-mean table
+in §11.6, and the compression timings in §11.7.
 
 ### 11.2 The joining operation
 
