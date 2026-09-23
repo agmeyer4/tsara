@@ -3821,12 +3821,16 @@ convention everywhere else.
 
 Implemented in `tsara.align.grid`, specified in §1.4. A single uniform
 `(time × variable)` cube, built **only** for the products that inherently need
-one. Its first real consumer is the continuous rolling state of Phase 5, the
-next phase, which wants the uniform span gaps and all; the matrix a receptor
-model such as PMF consumes is the other, and wants the opposite — dense rows,
-one drive at a time with `start` and `end`, no spanning (measured below).
-Baselines, detection and cross-species regression all run at native rate and
-never see it (§1.1).
+one. Which products those are — the continuous rolling state, the matrix a
+receptor model such as PMF consumes, or neither as a uniform cube — is
+deliberately not settled here. The two candidates want opposite things (the
+rolling state a uniform span, gaps and all; a receptor matrix dense rows, one
+drive at a time with `start` and `end` — measured below), and how a grid
+meets rolling baselines, plume windows and mixed cadences is one argument to
+be made in full before Phase 5, not in pieces (owner decision, 2026-09-23).
+This section records what the grid does and what it was measured to cost, not
+what it is for. Baselines, detection and cross-species regression all run at
+native rate and never see it (§1.1).
 
 It is a thin layer over §11.2 — the only things it adds are *which cells* and
 the rule that the period must respect the data going into it. `grid_cells`
