@@ -133,8 +133,11 @@ instruments:
           random: {mode: declared, absolute: 0.5, relative: 0.001}
 ```
 
-Then `ingest_campaign(load_manifest("manifest.yaml"))`. Fuller, commented
-examples ship in [`examples/configs/`](examples/configs/):
+Then `ingest_campaign(load_manifest("manifest.yaml"))`. Loading is strict in
+both directions a typo can take: a key the schema does not know is refused,
+and a key written twice in one mapping is refused by the reader rather than
+silently keeping the last value. Fuller, commented examples ship in
+[`examples/configs/`](examples/configs/):
 
 | file | shows |
 |---|---|

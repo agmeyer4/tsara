@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from tsara import load_analysis, load_config, load_manifest
+from tsara.config.loader import read_yaml
 from tsara.core.exceptions import TsaraConfigError
 
 # Spelled out rather than imported from conftest: `from tests.conftest import ...`
@@ -96,6 +97,99 @@ def test_non_mapping_top_level_rejected(tmp_path: Path) -> None:
     path.write_text("- just\n- a\n- list\n", encoding="utf-8")
     with pytest.raises(TsaraConfigError, match="mapping"):
         load_manifest(path)
+
+
+# ---------------------------------------------------------------------------
+# Duplicate keys
+# ---------------------------------------------------------------------------
+#
+# The YAML specification requires unique keys; PyYAML's safe_load keeps the
+# LAST value silently. Measured before the loader refused it: a variable
+# pasted twice under one instrument loaded as one variable reading the second
+# column. These pin the refusal and its message on every level a duplicate can
+# occur at, and the two shapes that must NOT be mistaken for one.
+
+
+def _write(tmp_path: Path, name: str, text: str) -> Path:
+    path = tmp_path / name
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_a_duplicate_top_level_key_is_refused_naming_both_lines(tmp_path: Path) -> None:
+    path = _write(tmp_path, "twice.yaml", "name: first\nbase_path: /data\nname: second\n")
+    with pytest.raises(TsaraConfigError) as info:
+        load_manifest(path)
+    message = str(info.value)
+    assert "twice.yaml" in message
+    assert "duplicate key 'name'" in message
+    # First definition first, then the repeat: the order a reader fixes them in.
+    assert "line 1" in message and "line 3" in message
+    assert message.index("line 1") < message.index("line 3")
+
+
+def test_a_variable_pasted_twice_under_one_instrument_is_refused(tmp_path: Path) -> None:
+    """The motivating case: variable names are unique per instrument (METHODS
+    §1.6), and with safe_load the mapping enforced that by keeping the second
+    `ch4` and dropping the first without a word."""
+    path = _write(
+        tmp_path,
+        "manifest.yaml",
+        "instruments:\n"
+        "  picarro:\n"
+        "    variables:\n"
+        "      ch4: {column: CH4_A}\n"
+        "      co2: {column: CO2}\n"
+        "      ch4: {column: CH4_B}\n",
+    )
+    with pytest.raises(TsaraConfigError) as info:
+        load_manifest(path)
+    message = str(info.value)
+    assert "duplicate key 'ch4'" in message
+    assert "line 4" in message and "line 6" in message
+
+
+def test_a_duplicate_key_inside_a_sequence_item_is_refused(tmp_path: Path) -> None:
+    path = _write(tmp_path, "rules.yaml", "qaqc:\n  - kind: range\n    kind: flag\n")
+    with pytest.raises(TsaraConfigError, match="duplicate key 'kind'"):
+        read_yaml(path)
+
+
+def test_the_same_key_under_different_parents_is_not_a_duplicate(tmp_path: Path) -> None:
+    """Two instruments each declaring `ch4` is the everyday case, not an error."""
+    path = _write(tmp_path, "two.yaml", "picarro:\n  ch4: 1\naeris:\n  ch4: 2\n")
+    assert read_yaml(path) == {"picarro": {"ch4": 1}, "aeris": {"ch4": 2}}
+
+
+def test_overriding_a_merged_default_is_not_a_duplicate(tmp_path: Path) -> None:
+    """A YAML merge key (`<<: *defaults`) plus an override of one merged entry
+    is the legitimate use of merge keys. PyYAML implements the merge by
+    flattening the anchor's entries INTO the mapping's key list, after which
+    the overridden key appears twice -- so the refusal has to look before that
+    flattening, and this is the test that would catch it looking after."""
+    path = _write(
+        tmp_path,
+        "merge.yaml",
+        "defaults: &defaults\n  units: ppb\n  role: gas\nch4:\n  <<: *defaults\n  units: ppm\n",
+    )
+    assert read_yaml(path)["ch4"] == {"units": "ppm", "role": "gas"}
+
+
+def test_an_unhashable_key_is_left_to_pyyaml_to_report(tmp_path: Path) -> None:
+    """A sequence used as a key (`? [a, b]`) cannot be a dict key at all. The
+    duplicate check steps over it rather than crashing on `key in seen`, and
+    PyYAML's own 'found unhashable key' arrives wrapped like any other error."""
+    path = _write(tmp_path, "complex_key.yaml", "? [a, b]\n: value\n")
+    with pytest.raises(TsaraConfigError, match="unhashable key"):
+        read_yaml(path)
+
+
+def test_the_reader_is_still_a_safe_loader(tmp_path: Path) -> None:
+    """The refusal is a SafeLoader subclass; a config file still cannot build
+    arbitrary Python objects, which is the property `safe_load` gave."""
+    path = _write(tmp_path, "unsafe.yaml", "x: !!python/object/apply:os.getcwd []\n")
+    with pytest.raises(TsaraConfigError, match="Invalid YAML"):
+        read_yaml(path)
 
 
 def test_validation_error_names_the_file(

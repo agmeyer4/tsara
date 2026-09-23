@@ -1,10 +1,20 @@
 """YAML → validated configuration objects.
 
-This is the only module that touches YAML. Everything downstream works with
-validated Pydantic objects, so a config error can *only* surface here — with
-the file path attached — never deep inside the engine.
+This is the only module that parses YAML: the stage bundles that save a
+config beside their products read it back through :func:`read_yaml` too.
+Everything downstream works with validated Pydantic objects, so a config
+error can *only* surface here — with the file path attached — never deep
+inside the engine.
 
-Three entry points:
+Two kinds of typo are refused rather than absorbed. A key the schema does
+not know is refused by the schema (``extra="forbid"`` on every model, see
+``tsara.config.base``). A key written *twice* in one mapping is refused by
+the reader (:class:`_UniqueKeyLoader`): the YAML specification requires
+unique keys, but PyYAML's ``safe_load`` keeps whichever value came last and
+says nothing, so a variable pasted twice under one instrument would have
+silently lost its first definition.
+
+Four entry points:
 
 * :func:`load_manifest` — a YAML file containing a manifest.
 * :func:`load_analysis` — a YAML file containing analysis settings.
@@ -19,11 +29,13 @@ Three entry points:
 from __future__ import annotations
 
 import logging
+from collections.abc import Hashable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import yaml
 from pydantic import ValidationError, model_validator
+from yaml.constructor import ConstructorError
 
 from tsara.config.analysis import AnalysisConfig
 from tsara.config.base import StrictModel as _StrictModel
@@ -38,6 +50,14 @@ logger = logging.getLogger(__name__)
 #: Bound to StrictModel so `_validate(Manifest, ...)` types as Manifest, not
 #: Any — callers keep full attribute/type checking on the returned object.
 _ModelT = TypeVar("_ModelT", bound=_StrictModel)
+
+#: The tag YAML gives a merge key (``<<``). PyYAML spells it as this literal
+#: inside ``flatten_mapping`` and exposes no constant for it. A merge key is
+#: not a key of the mapping — it is an instruction to splice another mapping
+#: in — so the duplicate check has to step over it: constructing it as an
+#: ordinary key fails (no constructor for the tag), and two ``<<`` entries
+#: are PyYAML's business, not ours.
+_MERGE_TAG = "tag:yaml.org,2002:merge"
 
 
 class TsaraConfig(_StrictModel):
@@ -76,21 +96,90 @@ class TsaraConfig(_StrictModel):
 # ---------------------------------------------------------------------------
 
 
-def _read_yaml(path: str | Path) -> dict[str, Any]:
-    """Read a YAML file into a dict, converting failures to TsaraConfigError.
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """A ``SafeLoader`` that refuses a mapping defining the same key twice.
 
-    ``yaml.safe_load`` (never ``load``) — config files must not be able to
-    instantiate arbitrary Python objects.
+    The YAML specification requires the keys of a mapping to be unique, but
+    PyYAML does not enforce it: ``safe_load`` keeps whichever value came
+    *last* and says nothing. For a science config that is the worst kind of
+    failure — a variable pasted twice under one instrument silently loses
+    its first definition, a sweep parameter listed twice silently runs the
+    second. Measured before this class existed:
+    ``variables: {ch4: {column: A}, ch4: {column: B}}`` loaded as one
+    variable reading ``B``.
+
+    The check runs on the raw key nodes *before* the base class flattens
+    YAML merge keys (``<<: *defaults``) into the mapping, because an entry
+    overriding a merged default is the legitimate use of a merge key and
+    must not read as a duplicate.
+
+    Subclassing ``SafeLoader`` rather than ``Loader`` keeps the property the
+    old ``safe_load`` call had: a config file cannot instantiate arbitrary
+    Python objects.
+    """
+
+    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[Hashable, Any]:
+        """Refuse a repeated key, naming both places it appears, then delegate."""
+        first_seen: dict[Hashable, yaml.Mark] = {}
+        for key_node, _value_node in node.value:
+            if key_node.tag == _MERGE_TAG:
+                continue
+            key = self.construct_object(key_node, deep=deep)
+            if not isinstance(key, Hashable):
+                # A list or a mapping cannot be a dict key at all; the base
+                # class reports that one, with its own mark.
+                continue
+            if key in first_seen:
+                # PyYAML's own two-mark format: the context mark is the first
+                # definition, the problem mark the repeat, each with its line
+                # and the offending text.
+                raise ConstructorError(
+                    "while constructing a mapping",
+                    first_seen[key],
+                    f"found duplicate key {key!r}; YAML would silently keep only the last value",
+                    key_node.start_mark,
+                )
+            first_seen[key] = key_node.start_mark
+        return super().construct_mapping(node, deep=deep)
+
+
+def read_yaml(path: str | Path) -> dict[str, Any]:
+    """Read a YAML file into a dict, converting every failure to TsaraConfigError.
+
+    Every YAML TSARA reads comes through here — the loaders below and the
+    two stage bundles that read back the config saved beside their products —
+    so the rules are stated once: a missing file, a syntax error, a duplicate
+    key (:class:`_UniqueKeyLoader`) and a top level that is not a mapping are
+    each refused with the file path in the message. ``SafeLoader`` semantics
+    throughout: a config file cannot instantiate arbitrary Python objects.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        The YAML file.
+
+    Returns
+    -------
+    dict
+        The file's top-level mapping, untouched by any schema.
+
+    Raises
+    ------
+    TsaraConfigError
+        With the path attached, for every failure named above.
     """
     path = Path(path)
     if not path.is_file():
         raise TsaraConfigError(f"Config file not found: {path}")
     try:
         with path.open("r", encoding="utf-8") as fh:
-            data = yaml.safe_load(fh)
+            # `yaml.load` with a SafeLoader *subclass* is `safe_load` plus the
+            # duplicate-key refusal; it is not the unsafe `yaml.Loader`.
+            data = yaml.load(fh, Loader=_UniqueKeyLoader)
     except yaml.YAMLError as exc:
-        # PyYAML errors carry line/column info in their str(); keep it.
-        raise TsaraConfigError(f"YAML syntax error in {path}:\n{exc}") from exc
+        # PyYAML errors carry line/column info and the offending text in
+        # their str(); keep it. A duplicate key arrives here too.
+        raise TsaraConfigError(f"Invalid YAML in {path}:\n{exc}") from exc
 
     if not isinstance(data, dict):
         raise TsaraConfigError(
@@ -153,7 +242,7 @@ def load_manifest(path: str | Path) -> Manifest:
         If the file is missing, is not valid YAML, or fails validation.
     """
     path = Path(path)
-    manifest = _validate(Manifest, _read_yaml(path), path)
+    manifest = _validate(Manifest, read_yaml(path), path)
     manifest = _resolve_base_path(manifest, path.parent.resolve())
     logger.info(
         "Loaded manifest '%s': %d instrument(s), %d gas species, platform=%s",
@@ -184,7 +273,7 @@ def load_analysis(path: str | Path) -> AnalysisConfig:
         If the file is missing, is not valid YAML, or fails validation.
     """
     path = Path(path)
-    analysis = _validate(AnalysisConfig, _read_yaml(path), path)
+    analysis = _validate(AnalysisConfig, read_yaml(path), path)
     logger.info(
         "Loaded analysis config: output_grid=%s, %d baseline window(s) x %d quantile(s)",
         analysis.output_grid.freq,
@@ -219,7 +308,7 @@ def load_config(path: str | Path) -> TsaraConfig:
         validation.
     """
     path = Path(path)
-    data = _read_yaml(path)
+    data = read_yaml(path)
 
     missing = {"manifest", "analysis"} - data.keys()
     if missing:
@@ -275,6 +364,6 @@ def load_synthetic(path: str | Path) -> SyntheticConfig:
     from tsara.synthetic.config import SyntheticConfig
 
     path = Path(path)
-    config: SyntheticConfig = _validate(SyntheticConfig, _read_yaml(path), path)
+    config: SyntheticConfig = _validate(SyntheticConfig, read_yaml(path), path)
     logger.info("Loaded synthetic config '%s' from %s", config.name, path)
     return config
