@@ -451,6 +451,12 @@ $(\sum w)^2 / \sum w^2$, which is exact for equal weights and an
 approximation otherwise; `ar1_double_sum` is how to find out what that
 approximation costs on a given cell.
 
+`ar1_double_sum` builds an $N \times N$ float64 correlation matrix — 200 MB
+at 5 000 readings, 3.2 GB at 20 000 — so it refuses a cell above
+`DOUBLE_SUM_MAX_POINTS = 5000` readings with a `TsaraPropagationError` naming
+`ar1_neff`, rather than a MemoryError naming nothing. A rolling stage pays
+whichever form it chooses once per window.
+
 `ar1_asymptotic` is the large-$N$ limit, $N_{\mathrm{eff}} = N(1-\rho_1)/(1+\rho_1)$.
 It is the form this document specified before the finite-$N$ version existed,
 and it is kept because reproducing its error is worth being able to do:
@@ -589,6 +595,11 @@ Therefore:
   - *scale-type* systematics propagate directly: a relative scale uncertainty
     $s$ on either axis contributes relative uncertainty $s$ to the slope,
     added in quadrature at the event level.
+- **In neither component yet: the support error of §11.2.4.** A point built
+  by a straddled or narrowed join carries a σ that omits the error that join
+  made, so weighting by σ alone over-trusts it. Whether the recorded borrowed
+  share enters these weights is to be decided before this section is built,
+  not after.
 
 ### 4.4 `odr` — scipy.odr
 
@@ -2959,6 +2970,21 @@ fully covered" is false, and those are exactly the cells that are wrong.
 Nothing needs the capability. Every product can be rebuilt from the native
 streams, exactly, and a sweep over grid period does precisely that.
 
+**Two refusals, two kinds of argument.** This refusal and the copy refusal of
+§11.2.4 share a mechanism and not a justification. The copy rule at
+`COPY_RATIO = 2` is a theorem: two disjoint cells of width *W* occupy 2*W* of
+distinct time, so a reading narrower than 2*W* cannot be the whole content of
+two rows, and no consumer can change that. This refusal rests on the middle
+row of the table above and on the paragraph before this one: a *nested*
+re-join is repairable to 1.6 × 10⁻¹² ppb by coverage weighting, so what
+refuses it is that nothing needs it and that everything it would give can be
+had exactly from the streams. A later phase that does need a nested re-join
+is therefore arguing against a consumer argument, not against a proof, and
+should expect to win by building the coverage-weighted form (values and
+coverage exact, counts still double counted). The non-nested case stays
+refused on the last row's evidence, which is narrowing, and no weighting
+repairs it.
+
 **What is not refused.** The list names the three join stages rather than
 allowing only the two source stages (`ingest`, `synthetic`), and the difference
 is for §5. A baseline is computed cell by cell over a stream's own cells, so
@@ -2977,7 +3003,7 @@ family of things a join can do to support:
 | what happens to a reading | the assumption it makes |
 |---|---|
 | it sits wholly inside its target (**averaged**) | none |
-| it straddles a target boundary, no wider than the cell (**shared**) | its air was uniform across the straddle; the value it helps form describes a wider interval than the row states |
+| it straddles a target boundary, no wider than the cell (**straddled**) | its air was uniform across the straddle; the value it helps form describes a wider interval than the row states |
 | it is wider than a cell it fills (**narrowed**) | its whole-cell mean stands for a shorter interval than it measured |
 | it is at least twice as wide as a cell it fills (**copied**) | one reading fills two rows' worth: the interpolation rule (§1.2) for a step function |
 
@@ -2986,7 +3012,11 @@ pairs the binner already has (`tsara.core.support.overlap_pairs`):
 
 * **The width ratio, per pair**, `r = |R| / |T|`, reading width over target
   width (`tsara.align.binning.pair_width_ratios`). The *category*: `r ≤ 1`
-  averaged or shared, `1 < r < 2` narrowed, `r ≥ 2` copied. Exact in integer
+  averaged or straddled, `1 < r < 2` narrowed, `r ≥ 2` copied. The line sits
+  at exactly 2 by counting, not by taste: two disjoint cells of width *W*
+  occupy 2*W* of distinct time, so one reading of width *R* can be the entire
+  content of two rows only when *R* ≥ 2*W*, and below that any second row it
+  touches must reach past it onto a neighbouring reading. Exact in integer
   nanoseconds, so no tolerance is needed anywhere: cadence jitter on the
   archive tops out at `r = 1.024` (the 2026 LANL Aeris on a 1 s grid) against
   a refusal at 2 (`COPY_RATIO`).
@@ -3096,6 +3126,20 @@ quarter of the real drives' enhancement events have (§9.5). The covariance a
 blend induces between neighbouring rows is `W diag(σ²) Wᵀ` from the overlap
 weights and needs carrying, not estimating — §11.4.1's open question for the
 regression phase.
+
+**A named limitation, put in front of the regression phase.** The error above
+is absent from the uncertainty budget by decision, so a value labelled
+`straddled` or `narrowed` carries the same σ as one labelled `averaged` and is
+wrong by an amount its σ does not describe. A fit that weights points by their
+uncertainty (§4.3), or a receptor model that weights rows the same way, then
+over-trusts exactly the rows that deserve it least: they get no less weight
+than clean rows. Everything needed to price it is already recorded per cell
+(`borrowed_<name>`, `coverage_<name>`, `n_readings_<name>`,
+`tsara_width_ratio_max`) and nothing reads it. Whether the borrowed share
+enters the weights is a decision the regression phase has to make *before* it
+designs them, because past that point the omission is baked into every ratio;
+the within-cell spread of a faster stream, measured above as a calibrated
+price, is the companion that would carry it if the answer is yes.
 
 **A consequence for pairing.** The clock is the wider-supported member's cells
 by median width, so its partner is normally averaged, never copied. A clock
@@ -3777,12 +3821,17 @@ convention everywhere else.
 
 Implemented in `tsara.align.grid`, specified in §1.4. A single uniform
 `(time × variable)` cube, built **only** for the products that inherently need
-one: the continuous rolling state, and the matrix a receptor model such as PMF
-consumes. Baselines, detection and cross-species regression all run at native
-rate and never see it (§1.1).
+one. Its first real consumer is the continuous rolling state of Phase 5, the
+next phase, which wants the uniform span gaps and all; the matrix a receptor
+model such as PMF consumes is the other, and wants the opposite — dense rows,
+one drive at a time with `start` and `end`, no spanning (measured below).
+Baselines, detection and cross-species regression all run at native rate and
+never see it (§1.1).
 
 It is a thin layer over §11.2 — the only things it adds are *which cells* and
-the rule that the period must respect the data going into it.
+the rule that the period must respect the data going into it. `grid_cells`
+already has a second caller: `pair_species(target=)` builds an explicit
+pairing clock through it, under the same rule (§11.4.1).
 
 **There is deliberately no "PMF matrix" object.** A receptor-model matrix is
 this function called with a chosen set of columns. Which columns is a
