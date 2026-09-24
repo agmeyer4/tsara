@@ -142,130 +142,6 @@ class InterpolatedField:
     n_outside: int
 
 
-def _as_seconds(duration: str | pd.Timedelta) -> float:
-    """Return a duration in seconds, or raise naming what was given.
-
-    Positivity is tested by comparing ``Timedelta`` objects rather than by
-    reading seconds off the result, which matches
-    :func:`tsara.config.base.validate_positive_timedelta` and avoids a real
-    trap: ``pd.Timedelta("1ns").total_seconds()`` is ``0.0``, so *any*
-    sub-microsecond duration would read as non-positive and be rejected.
-    TSARA works in integer nanoseconds everywhere else for the same family of
-    reasons.
-    """
-    try:
-        delta = pd.Timedelta(duration)
-    except (ValueError, TypeError) as error:
-        raise TsaraAlignError(f"Could not read '{duration}' as a duration.") from error
-    if delta <= pd.Timedelta(0):
-        raise TsaraAlignError(
-            f"max_interp_gap must be positive, got {duration}. Use a positive "
-            "duration, or bin the field instead of interpolating it."
-        )
-    return float(delta.value) / NS_PER_S
-
-
-def _check_role(stream: xr.Dataset, variable: str, instrument: str) -> None:
-    """Refuse to interpolate anything that is not declared smooth."""
-    role = stream[variable].attrs.get("role")
-    if role is None:
-        raise TsaraAlignError(
-            f"'{variable}' on '{instrument}' declares no role, so TSARA cannot tell "
-            "whether interpolating it is physically justified. Only auxiliary "
-            "fields may be interpolated (METHODS §1.2); declare a role, or bin the "
-            "variable instead."
-        )
-    if str(role) in REFUSED_ROLES:
-        raise TsaraAlignError(
-            f"'{variable}' on '{instrument}' has role '{role}' and will not be "
-            "interpolated. A concentration inside a plume is not a smooth field, "
-            "and interpolating it invents structure exactly where the science is "
-            "(METHODS §1.2). Bin it onto the cells instead."
-        )
-
-
-def _interpolate(
-    sample_ns: np.ndarray,
-    values: np.ndarray,
-    target_ns: np.ndarray,
-    max_gap_s: float,
-    *,
-    circular: bool,
-) -> InterpolatedField:
-    """Evaluate a field at ``target_ns``, refusing to bridge long gaps."""
-    # Interpolate between samples that hold a value; a masked sample is not a fix.
-    finite = np.isfinite(values)
-    sample_ns, values = sample_ns[finite], values[finite]
-    if sample_ns.size == 0:
-        return InterpolatedField(
-            values=np.full(target_ns.size, np.nan),
-            n_exact=0,
-            n_interpolated=0,
-            n_gap_masked=0,
-            n_outside=int(target_ns.size),
-        )
-    # np.interp and the bracketing search below both need samples in time order.
-    order = np.argsort(sample_ns, kind="stable")
-    sample_ns, values = sample_ns[order], values[order]
-
-    # Epoch nanoseconds do not fit in a float64 mantissa: at 2024 epochs the
-    # spacing between representable values is about 378 ns, so converting
-    # directly would quantise every timestamp onto a coarse grid. Subtracting
-    # a reference first keeps the arithmetic exact.
-    reference = int(sample_ns[0])
-    sample_s = (sample_ns - reference).astype(np.float64) / NS_PER_S
-    target_s = (target_ns - reference).astype(np.float64) / NS_PER_S
-
-    if circular:
-        # A direction is interpolated as a unit vector, so 350 -> 10 passes through
-        # north rather than through south.
-        radians = np.radians(values)
-        sin_part = np.interp(target_s, sample_s, np.sin(radians))
-        cos_part = np.interp(target_s, sample_s, np.cos(radians))
-        interpolated = wrap_degrees(np.degrees(np.arctan2(sin_part, cos_part)))
-    else:
-        # Straight-line interpolation between the two samples around each target.
-        interpolated = np.interp(target_s, sample_s, values)
-
-    # Where each target sits among the samples. `right` is the first sample at
-    # or after it, so `right - 1` is the last one before.
-    right = np.searchsorted(sample_ns, target_ns, side="left")
-    # A target landing exactly on a sample was measured, not interpolated.
-    exact = (right < sample_ns.size) & (
-        sample_ns[np.minimum(right, sample_ns.size - 1)] == target_ns
-    )
-    # Before the first sample or after the last: never extrapolated.
-    outside = ((target_ns < sample_ns[0]) | (target_ns > sample_ns[-1])) & ~exact
-    # The gap between the two samples bracketing each target ...
-    left = np.clip(right - 1, 0, sample_ns.size - 1)
-    right_clipped = np.clip(right, 0, sample_ns.size - 1)
-    gap_ns = (sample_ns[right_clipped] - sample_ns[left]).astype(np.float64)
-    # ... refused when strictly longer than the guard (a gap equal to it is bridged).
-    too_far = (gap_ns / NS_PER_S > max_gap_s) & ~exact & ~outside
-
-    result = np.asarray(interpolated, dtype=np.float64)
-    result[outside | too_far] = np.nan
-    return InterpolatedField(
-        values=result,
-        n_exact=int(np.count_nonzero(exact)),
-        n_interpolated=int(np.count_nonzero(~exact & ~outside & ~too_far)),
-        n_gap_masked=int(np.count_nonzero(too_far)),
-        n_outside=int(np.count_nonzero(outside)),
-    )
-
-
-def _median_spacing_s(sample_ns: np.ndarray, values: np.ndarray) -> float:
-    """Return the median interval between consecutive finite samples, in seconds.
-
-    ``inf`` for a record with fewer than two finite samples, which has no
-    spacing to compare and is reported by the outside-the-record count instead.
-    """
-    present = np.sort(sample_ns[np.isfinite(values)])
-    if present.size < 2:
-        return float("inf")
-    return float(np.median(np.diff(present))) / NS_PER_S
-
-
 def interpolate_onto_cells(
     streams: Mapping[str, xr.Dataset],
     variable: VariableRef,
@@ -443,6 +319,130 @@ def attach_positions(
             },
         )
     return joined
+
+
+def _check_role(stream: xr.Dataset, variable: str, instrument: str) -> None:
+    """Refuse to interpolate anything that is not declared smooth."""
+    role = stream[variable].attrs.get("role")
+    if role is None:
+        raise TsaraAlignError(
+            f"'{variable}' on '{instrument}' declares no role, so TSARA cannot tell "
+            "whether interpolating it is physically justified. Only auxiliary "
+            "fields may be interpolated (METHODS §1.2); declare a role, or bin the "
+            "variable instead."
+        )
+    if str(role) in REFUSED_ROLES:
+        raise TsaraAlignError(
+            f"'{variable}' on '{instrument}' has role '{role}' and will not be "
+            "interpolated. A concentration inside a plume is not a smooth field, "
+            "and interpolating it invents structure exactly where the science is "
+            "(METHODS §1.2). Bin it onto the cells instead."
+        )
+
+
+def _as_seconds(duration: str | pd.Timedelta) -> float:
+    """Return a duration in seconds, or raise naming what was given.
+
+    Positivity is tested by comparing ``Timedelta`` objects rather than by
+    reading seconds off the result, which matches
+    :func:`tsara.config.base.validate_positive_timedelta` and avoids a real
+    trap: ``pd.Timedelta("1ns").total_seconds()`` is ``0.0``, so *any*
+    sub-microsecond duration would read as non-positive and be rejected.
+    TSARA works in integer nanoseconds everywhere else for the same family of
+    reasons.
+    """
+    try:
+        delta = pd.Timedelta(duration)
+    except (ValueError, TypeError) as error:
+        raise TsaraAlignError(f"Could not read '{duration}' as a duration.") from error
+    if delta <= pd.Timedelta(0):
+        raise TsaraAlignError(
+            f"max_interp_gap must be positive, got {duration}. Use a positive "
+            "duration, or bin the field instead of interpolating it."
+        )
+    return float(delta.value) / NS_PER_S
+
+
+def _interpolate(
+    sample_ns: np.ndarray,
+    values: np.ndarray,
+    target_ns: np.ndarray,
+    max_gap_s: float,
+    *,
+    circular: bool,
+) -> InterpolatedField:
+    """Evaluate a field at ``target_ns``, refusing to bridge long gaps."""
+    # Interpolate between samples that hold a value; a masked sample is not a fix.
+    finite = np.isfinite(values)
+    sample_ns, values = sample_ns[finite], values[finite]
+    if sample_ns.size == 0:
+        return InterpolatedField(
+            values=np.full(target_ns.size, np.nan),
+            n_exact=0,
+            n_interpolated=0,
+            n_gap_masked=0,
+            n_outside=int(target_ns.size),
+        )
+    # np.interp and the bracketing search below both need samples in time order.
+    order = np.argsort(sample_ns, kind="stable")
+    sample_ns, values = sample_ns[order], values[order]
+
+    # Epoch nanoseconds do not fit in a float64 mantissa: at 2024 epochs the
+    # spacing between representable values is about 378 ns, so converting
+    # directly would quantise every timestamp onto a coarse grid. Subtracting
+    # a reference first keeps the arithmetic exact.
+    reference = int(sample_ns[0])
+    sample_s = (sample_ns - reference).astype(np.float64) / NS_PER_S
+    target_s = (target_ns - reference).astype(np.float64) / NS_PER_S
+
+    if circular:
+        # A direction is interpolated as a unit vector, so 350 -> 10 passes through
+        # north rather than through south.
+        radians = np.radians(values)
+        sin_part = np.interp(target_s, sample_s, np.sin(radians))
+        cos_part = np.interp(target_s, sample_s, np.cos(radians))
+        interpolated = wrap_degrees(np.degrees(np.arctan2(sin_part, cos_part)))
+    else:
+        # Straight-line interpolation between the two samples around each target.
+        interpolated = np.interp(target_s, sample_s, values)
+
+    # Where each target sits among the samples. `right` is the first sample at
+    # or after it, so `right - 1` is the last one before.
+    right = np.searchsorted(sample_ns, target_ns, side="left")
+    # A target landing exactly on a sample was measured, not interpolated.
+    exact = (right < sample_ns.size) & (
+        sample_ns[np.minimum(right, sample_ns.size - 1)] == target_ns
+    )
+    # Before the first sample or after the last: never extrapolated.
+    outside = ((target_ns < sample_ns[0]) | (target_ns > sample_ns[-1])) & ~exact
+    # The gap between the two samples bracketing each target ...
+    left = np.clip(right - 1, 0, sample_ns.size - 1)
+    right_clipped = np.clip(right, 0, sample_ns.size - 1)
+    gap_ns = (sample_ns[right_clipped] - sample_ns[left]).astype(np.float64)
+    # ... refused when strictly longer than the guard (a gap equal to it is bridged).
+    too_far = (gap_ns / NS_PER_S > max_gap_s) & ~exact & ~outside
+
+    result = np.asarray(interpolated, dtype=np.float64)
+    result[outside | too_far] = np.nan
+    return InterpolatedField(
+        values=result,
+        n_exact=int(np.count_nonzero(exact)),
+        n_interpolated=int(np.count_nonzero(~exact & ~outside & ~too_far)),
+        n_gap_masked=int(np.count_nonzero(too_far)),
+        n_outside=int(np.count_nonzero(outside)),
+    )
+
+
+def _median_spacing_s(sample_ns: np.ndarray, values: np.ndarray) -> float:
+    """Return the median interval between consecutive finite samples, in seconds.
+
+    ``inf`` for a record with fewer than two finite samples, which has no
+    spacing to compare and is reported by the outside-the-record count instead.
+    """
+    present = np.sort(sample_ns[np.isfinite(values)])
+    if present.size < 2:
+        return float("inf")
+    return float(np.median(np.diff(present))) / NS_PER_S
 
 
 def _refuse_antimeridian(gps: xr.Dataset, variable: str, instrument: str) -> None:

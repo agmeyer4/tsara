@@ -186,35 +186,6 @@ def read_yaml(path: str | Path) -> dict[str, Any]:
     return data
 
 
-def _validate(model_cls: type[_ModelT], data: dict[str, Any], path: Path) -> _ModelT:
-    """Run Pydantic validation, re-raising with the file path attached.
-
-    Pydantic's ValidationError already pinpoints the offending field
-    ('instruments.picarro.variables.ch4.units'); we add *which file* so a
-    multi-config batch run on the cluster fails with an actionable message.
-    """
-    try:
-        return model_cls.model_validate(data)
-    except ValidationError as exc:
-        raise TsaraConfigError(f"Invalid configuration in {path}:\n{exc}") from exc
-
-
-def _resolve_base_path(manifest: Manifest, anchor: Path) -> Manifest:
-    """Resolve a relative ``base_path`` against the manifest file's directory.
-
-    Rationale: a manifest checked into a project repo should be able to say
-    ``base_path: ../data`` and work for every collaborator regardless of
-    their working directory when they launch TSARA. Absolute paths pass
-    through untouched. Configs are frozen, so this returns a *new* Manifest
-    rather than mutating.
-    """
-    if manifest.base_path.is_absolute():
-        return manifest
-    resolved = (anchor / manifest.base_path).resolve()
-    logger.debug("Resolved relative base_path %s -> %s", manifest.base_path, resolved)
-    return manifest.model_copy(update={"base_path": resolved})
-
-
 # ---------------------------------------------------------------------------
 # Public loaders
 # ---------------------------------------------------------------------------
@@ -358,3 +329,32 @@ def load_synthetic(path: str | Path) -> SyntheticConfig:
     config: SyntheticConfig = _validate(SyntheticConfig, read_yaml(path), path)
     logger.info("Loaded synthetic config '%s' from %s", config.name, path)
     return config
+
+
+def _validate(model_cls: type[_ModelT], data: dict[str, Any], path: Path) -> _ModelT:
+    """Run Pydantic validation, re-raising with the file path attached.
+
+    Pydantic's ValidationError already pinpoints the offending field
+    ('instruments.picarro.variables.ch4.units'); we add *which file* so a
+    multi-config batch run on the cluster fails with an actionable message.
+    """
+    try:
+        return model_cls.model_validate(data)
+    except ValidationError as exc:
+        raise TsaraConfigError(f"Invalid configuration in {path}:\n{exc}") from exc
+
+
+def _resolve_base_path(manifest: Manifest, anchor: Path) -> Manifest:
+    """Resolve a relative ``base_path`` against the manifest file's directory.
+
+    Rationale: a manifest checked into a project repo should be able to say
+    ``base_path: ../data`` and work for every collaborator regardless of
+    their working directory when they launch TSARA. Absolute paths pass
+    through untouched. Configs are frozen, so this returns a *new* Manifest
+    rather than mutating.
+    """
+    if manifest.base_path.is_absolute():
+        return manifest
+    resolved = (anchor / manifest.base_path).resolve()
+    logger.debug("Resolved relative base_path %s -> %s", manifest.base_path, resolved)
+    return manifest.model_copy(update={"base_path": resolved})

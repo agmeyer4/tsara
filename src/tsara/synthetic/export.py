@@ -332,15 +332,6 @@ def export_raw(
     return manifest_path
 
 
-def _variable_names(config: SyntheticConfig) -> set[str]:
-    """Return every variable name any configured instrument writes."""
-    return {
-        instrument.variable_name(field)
-        for instrument in config.instruments.values()
-        for field in instrument.measures
-    }
-
-
 def _check_species_exist(
     config: SyntheticConfig,
     scales: Mapping[str, RawUnits],
@@ -360,42 +351,13 @@ def _check_species_exist(
         )
 
 
-def _label_of(config: SyntheticConfig, name: str) -> str:
-    """Return the support label of one emitted stream.
-
-    The GPS track is not in ``config.instruments`` -- it is manufactured from
-    the platform -- so it is answered separately rather than by a lookup that
-    would raise on it.
-    """
-    instrument = config.instruments.get(name)
-    return "mid" if instrument is None else instrument.support.label
-
-
-def _width_of(config: SyntheticConfig, name: str) -> str:
-    """Return the cell width of one emitted stream, as a duration string."""
-    instrument = config.instruments.get(name)
-    if instrument is None:
-        return str(getattr(config.platform, "gps_rate", "1s"))
-    return instrument.support.width or instrument.native_rate
-
-
-def _method_of(config: SyntheticConfig, name: str) -> str:
-    """Return the support method of one emitted stream."""
-    instrument = config.instruments.get(name)
-    return "point" if instrument is None else instrument.support.method
-
-
-def _shift_ns(shift: str | None) -> int:
-    """Return the nanoseconds a written timestamp must be moved by.
-
-    The file receives ``truth - shift`` so that ingestion, adding the
-    manifest's declared ``time_shift``, lands back on truth. Inverting here
-    rather than in the manifest keeps the manifest holding the numbers a real
-    one would, exactly as :class:`RawUnits` does for units.
-    """
-    import pandas as pd
-
-    return 0 if shift is None else int(pd.Timedelta(shift).value)
+def _variable_names(config: SyntheticConfig) -> set[str]:
+    """Return every variable name any configured instrument writes."""
+    return {
+        instrument.variable_name(field)
+        for instrument in config.instruments.values()
+        for field in instrument.measures
+    }
 
 
 def _check_instruments_exist(dataset: SyntheticDataset, requested: Mapping[str, object]) -> None:
@@ -427,6 +389,29 @@ def _check_boundary_columns_are_free(dataset: SyntheticDataset) -> None:
             f"overwritten by the columns '{START_COLUMN}'/'{STOP_COLUMN}'. "
             "Rename them, or export with support_declaration='declared'."
         )
+
+
+def _reported_sigma_columns(config: SyntheticConfig, stream: str) -> dict[str, str]:
+    """Map each variable of one stream to the sigma column it publishes, if any.
+
+    Read from the config rather than from the generated stream, because
+    ``report_as`` is a *configuration* fact: the generator writes the column
+    under that name but records nothing in the variable's attrs, so asking
+    the dataset would silently answer "no column" for every variable. The
+    GPS stream is manufactured by the platform and publishes none.
+    """
+    columns: dict[str, str] = {}
+    instrument = config.instruments.get(stream)
+    if instrument is None:
+        return columns
+    for field, measurement in instrument.measures.items():
+        uncertainty = measurement.uncertainty
+        if uncertainty is None:
+            continue
+        for component in (uncertainty.random, uncertainty.systematic):
+            if component is not None and component.report_as is not None:
+                columns[instrument.variable_name(field)] = component.report_as
+    return columns
 
 
 def _chunks(
@@ -540,51 +525,28 @@ def _write_csv(
     frame.to_csv(target, index=False)
 
 
-def _reported_sigma_columns(config: SyntheticConfig, stream: str) -> dict[str, str]:
-    """Map each variable of one stream to the sigma column it publishes, if any.
+def _label_of(config: SyntheticConfig, name: str) -> str:
+    """Return the support label of one emitted stream.
 
-    Read from the config rather than from the generated stream, because
-    ``report_as`` is a *configuration* fact: the generator writes the column
-    under that name but records nothing in the variable's attrs, so asking
-    the dataset would silently answer "no column" for every variable. The
-    GPS stream is manufactured by the platform and publishes none.
+    The GPS track is not in ``config.instruments`` -- it is manufactured from
+    the platform -- so it is answered separately rather than by a lookup that
+    would raise on it.
     """
-    columns: dict[str, str] = {}
-    instrument = config.instruments.get(stream)
-    if instrument is None:
-        return columns
-    for field, measurement in instrument.measures.items():
-        uncertainty = measurement.uncertainty
-        if uncertainty is None:
-            continue
-        for component in (uncertainty.random, uncertainty.systematic):
-            if component is not None and component.report_as is not None:
-                columns[instrument.variable_name(field)] = component.report_as
-    return columns
+    instrument = config.instruments.get(name)
+    return "mid" if instrument is None else instrument.support.label
 
 
-def _support_block(
-    config: SyntheticConfig, name: str, declaration: SupportDeclaration
-) -> dict[str, Any] | None:
-    """Return the manifest's ``support:`` block for one stream, if any.
+def _shift_ns(shift: str | None) -> int:
+    """Return the nanoseconds a written timestamp must be moved by.
 
-    The three rungs, built from what the generator actually did. ``reported``
-    names the boundary columns the writer emitted; ``declared`` restates the
-    label, width and method; ``none`` returns None, leaving ingestion to
-    assume and to say that it assumed.
+    The file receives ``truth - shift`` so that ingestion, adding the
+    manifest's declared ``time_shift``, lands back on truth. Inverting here
+    rather than in the manifest keeps the manifest holding the numbers a real
+    one would, exactly as :class:`RawUnits` does for units.
     """
-    if declaration == "none":
-        return None
-    label = _label_of(config, name)
-    method = _method_of(config, name)
-    if declaration == "declared":
-        return {"label": label, "width": _width_of(config, name), "method": method}
-    # Per-row boundaries: no label or width, which the schema refuses to
-    # accept alongside them, since the columns already fix every cell.
-    block: dict[str, Any] = {"method": method, "stop_column": STOP_COLUMN}
-    if label != "start":
-        block["start_column"] = START_COLUMN
-    return block
+    import pandas as pd
+
+    return 0 if shift is None else int(pd.Timedelta(shift).value)
 
 
 def _build_manifest(
@@ -733,3 +695,41 @@ def _build_manifest(
             "instruments": instruments,
         }
     )
+
+
+def _support_block(
+    config: SyntheticConfig, name: str, declaration: SupportDeclaration
+) -> dict[str, Any] | None:
+    """Return the manifest's ``support:`` block for one stream, if any.
+
+    The three rungs, built from what the generator actually did. ``reported``
+    names the boundary columns the writer emitted; ``declared`` restates the
+    label, width and method; ``none`` returns None, leaving ingestion to
+    assume and to say that it assumed.
+    """
+    if declaration == "none":
+        return None
+    label = _label_of(config, name)
+    method = _method_of(config, name)
+    if declaration == "declared":
+        return {"label": label, "width": _width_of(config, name), "method": method}
+    # Per-row boundaries: no label or width, which the schema refuses to
+    # accept alongside them, since the columns already fix every cell.
+    block: dict[str, Any] = {"method": method, "stop_column": STOP_COLUMN}
+    if label != "start":
+        block["start_column"] = START_COLUMN
+    return block
+
+
+def _method_of(config: SyntheticConfig, name: str) -> str:
+    """Return the support method of one emitted stream."""
+    instrument = config.instruments.get(name)
+    return "point" if instrument is None else instrument.support.method
+
+
+def _width_of(config: SyntheticConfig, name: str) -> str:
+    """Return the cell width of one emitted stream, as a duration string."""
+    instrument = config.instruments.get(name)
+    if instrument is None:
+        return str(getattr(config.platform, "gps_rate", "1s"))
+    return instrument.support.width or instrument.native_rate

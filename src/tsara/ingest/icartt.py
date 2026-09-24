@@ -269,6 +269,38 @@ class IcarttFilename:
         return (1, 0, token)
 
 
+#: How far past a provably-wrong NLHEAD to keep looking for header text.
+#: Generous enough to clear any real comment block (the longest in the 2024
+#: archive is 23 lines) and small enough that a file with no residue costs
+#: one failed match per line rather than a scan of the whole record.
+_RESIDUAL_HEADER_LIMIT = 200
+
+
+#: Column names that look like they hold a cell boundary or a midpoint.
+#:
+#: Both halves are required: "stop" alone matches a stop *flag*, and "time"
+#: alone matches the time axis itself. Used only to report what a file offers,
+#: never to decide anything -- see :mod:`tsara.ingest.support` for why
+#: guessing a boundary column is refused.
+#: Names that could be a cell boundary a manifest is able to *name*.
+#:
+#: ``mid`` is deliberately absent. The schema accepts a ``start_column`` and a
+#: ``stop_column``; a midpoint column is neither, so listing one answers a
+#: question the user cannot act on and invites the one manifest entry that
+#: would be silently wrong -- ``stop_column: Time_Mid`` halves every cell.
+#: Measured across all 1122 files of the 2024 archive, dropping it costs
+#: nothing: every file carrying a mid column either carries a real stop column
+#: beside it (64 files) or is one of the 20 whose *independent variable* is
+#: itself named ``Time_Mid``, where the "candidate" was the file's own time
+#: axis handed back to the user.
+_BOUNDARY_NAME = re.compile(r"(stop|end)", re.IGNORECASE)
+_TIME_NAME = re.compile(r"(time|utc|sec)", re.IGNORECASE)
+
+#: Independent-variable names that justify a label without guessing.
+_START_NAME = re.compile(r"start", re.IGNORECASE)
+_MID_NAME = re.compile(r"mid", re.IGNORECASE)
+
+
 def parse_icartt_filename(path: Path | str) -> IcarttFilename | None:
     """Parse a standard ICARTT filename.
 
@@ -357,86 +389,6 @@ def select_latest_revisions(paths: list[Path]) -> list[Path]:
     selected = sorted(keep + [path for _, path in best.values()])
     _warn_on_repeated_basenames(selected, n_unparsed=len(keep))
     return selected
-
-
-def _warn_on_repeated_basenames(selected: list[Path], *, n_unparsed: int) -> None:
-    """Warn when the selected set holds one filename in several directories.
-
-    The blind spot this covers: revision selection can only compare files
-    whose names carry a ``YYYYMMDD`` token, and files without one are kept
-    unconditionally — correctly, since an unparseable name is not evidence
-    of duplication. But "kept unconditionally" and "kept silently" are
-    different things. 147 of the 1122 names in the target archive have no
-    date token, and 39 of those basenames exist in two or three directories
-    at once (``Miro_Data_0809.ict`` appears under a dated directory, under
-    ``Calibrated Data/``, and again under ``Calibrated Data (Updated)/``).
-
-    A recursive template then ingests all three copies of the same day. If
-    they are genuinely different products the counts are right; if they are
-    successive reprocessings of one day, the campaign silently triple-counts
-    that air, and nothing downstream can tell which happened — the files
-    look like ordinary distinct inputs by the time they are concatenated.
-    Whether it is duplication is a question only the data owner can answer,
-    so this reports rather than decides.
-
-    Parameters
-    ----------
-    selected : list of pathlib.Path
-        Files revision selection chose.
-    n_unparsed : int
-        How many of them had no parseable ICARTT filename, quoted in the
-        message so the cause is visible alongside the symptom.
-    """
-    counts = Counter(path.name for path in selected)
-    repeated = sorted(name for name, count in counts.items() if count > 1)
-    if not repeated:
-        return
-    logger.warning(
-        "%d basename(s) appear in more than one directory among the %d selected "
-        "ICARTT file(s) (e.g. %s). %d selected name(s) carry no YYYYMMDD token and "
-        "so cannot be de-duplicated by revision; if any of these are copies of the "
-        "same data rather than distinct products, that data will be counted twice.",
-        len(repeated),
-        len(selected),
-        ", ".join(repeated[:3]),
-        n_unparsed,
-    )
-
-
-def _read_text(path: Path) -> list[str]:
-    """Read a file as text, tolerating non-UTF-8 bytes.
-
-    30 files in the target archive are not valid UTF-8 (stray bytes in PI
-    names and comment blocks). Refusing them would lose real data over a
-    non-scientific detail, so decoding falls back to latin-1, which cannot
-    fail and leaves the numeric content — always ASCII — untouched.
-    """
-    raw = path.read_bytes()
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        logger.debug("%s is not valid UTF-8; decoding as latin-1.", path)
-        text = raw.decode("latin-1")
-    return text.splitlines()
-
-
-def _split(line: str) -> list[str]:
-    """Split an ICARTT header line on commas, trimming whitespace."""
-    return [part.strip() for part in line.split(",")]
-
-
-def _variable_from_line(line: str, scale: float, missing: float) -> IcarttVariable:
-    """Build a variable definition from a ``name, units, description`` line."""
-    parts = _split(line)
-    return IcarttVariable(
-        name=parts[0],
-        units=parts[1] if len(parts) > 1 else "",
-        # Descriptions legitimately contain commas, so rejoin the remainder
-        # instead of taking only the third field.
-        description=", ".join(parts[2:]) if len(parts) > 2 else "",
-        scale=scale,
-        missing=missing,
-    )
 
 
 def parse_icartt_header(lines: list[str], path: Path) -> IcarttHeader:
@@ -599,18 +551,6 @@ def parse_icartt_header(lines: list[str], path: Path) -> IcarttHeader:
     )
 
 
-def _read_comment_block(lines: list[str], index: int) -> tuple[tuple[str, ...], int]:
-    """Read a count-prefixed comment block, returning it and the next index."""
-    try:
-        count = int(_split(lines[index])[0])
-    except (ValueError, IndexError):
-        # A non-numeric count means the header deviates from the spec; treat
-        # the block as empty and let NLHEAD govern where data starts.
-        return (), index + 1
-    start = index + 1
-    return tuple(lines[start : start + count]), start + count
-
-
 @register_reader("icartt")
 def read_icartt(path: Path, loader: LoaderConfig, /) -> RawTable:
     """Read one ICARTT FFI-1001 file into a :class:`RawTable`.
@@ -677,40 +617,184 @@ def read_icartt(path: Path, loader: LoaderConfig, /) -> RawTable:
     return RawTable(frame=frame, path=path, attrs=_provenance(header, lod_counts, file_columns))
 
 
-def _modal_field_count(body: list[str]) -> int:
-    """Most common comma-separated field count among the data lines.
+def _warn_on_repeated_basenames(selected: list[Path], *, n_unparsed: int) -> None:
+    """Warn when the selected set holds one filename in several directories.
 
-    This is the one statement about a file's shape that comes from the data
-    rather than from the header's claims about the data, which is exactly
-    why it is worth computing: when the two name lists disagree, the rows
-    themselves are the tie-breaker. The *mode* rather than the maximum or
-    the first row's width, because real archives contain truncated lines
-    (one file here loses 14 rows of 84,362 to a logger interrupted
-    mid-number) and a header whose text has leaked into the data block.
+    The blind spot this covers: revision selection can only compare files
+    whose names carry a ``YYYYMMDD`` token, and files without one are kept
+    unconditionally — correctly, since an unparseable name is not evidence
+    of duplication. But "kept unconditionally" and "kept silently" are
+    different things. 147 of the 1122 names in the target archive have no
+    date token, and 39 of those basenames exist in two or three directories
+    at once (``Miro_Data_0809.ict`` appears under a dated directory, under
+    ``Calibrated Data/``, and again under ``Calibrated Data (Updated)/``).
+
+    A recursive template then ingests all three copies of the same day. If
+    they are genuinely different products the counts are right; if they are
+    successive reprocessings of one day, the campaign silently triple-counts
+    that air, and nothing downstream can tell which happened — the files
+    look like ordinary distinct inputs by the time they are concatenated.
+    Whether it is duplication is a question only the data owner can answer,
+    so this reports rather than decides.
+
+    Parameters
+    ----------
+    selected : list of pathlib.Path
+        Files revision selection chose.
+    n_unparsed : int
+        How many of them had no parseable ICARTT filename, quoted in the
+        message so the cause is visible alongside the symptom.
     """
-    widths = Counter(len(line.split(",")) for line in body if line.strip())
-    # Counter.most_common breaks ties by first insertion, i.e. by first
-    # appearance in the file — deterministic, which is all that is needed.
-    return widths.most_common(1)[0][0] if widths else 0
+    counts = Counter(path.name for path in selected)
+    repeated = sorted(name for name, count in counts.items() if count > 1)
+    if not repeated:
+        return
+    logger.warning(
+        "%d basename(s) appear in more than one directory among the %d selected "
+        "ICARTT file(s) (e.g. %s). %d selected name(s) carry no YYYYMMDD token and "
+        "so cannot be de-duplicated by revision; if any of these are copies of the "
+        "same data rather than distinct products, that data will be counted twice.",
+        len(repeated),
+        len(selected),
+        ", ".join(repeated[:3]),
+        n_unparsed,
+    )
 
 
-def _mangle_duplicates(names: list[str]) -> list[str]:
-    """Disambiguate repeated names the way ``pandas.read_csv`` does.
+def _split(line: str) -> list[str]:
+    """Split an ICARTT header line on commas, trimming whitespace."""
+    return [part.strip() for part in line.split(",")]
 
-    A duplicate is not merely untidy here: :func:`~tsara.ingest.base.check_raw_table`
-    rejects a frame with duplicate columns (selection would be ambiguous),
-    and ``pandas.read_csv`` refuses a duplicated ``names=`` list outright
-    with an untyped ``ValueError`` — which would escape a reader whose
-    contract promises :class:`~tsara.ingest.base.TsaraIngestError`. Renaming
-    the later occurrences keeps the data readable and the failure typed.
+
+def _variable_from_line(line: str, scale: float, missing: float) -> IcarttVariable:
+    """Build a variable definition from a ``name, units, description`` line."""
+    parts = _split(line)
+    return IcarttVariable(
+        name=parts[0],
+        units=parts[1] if len(parts) > 1 else "",
+        # Descriptions legitimately contain commas, so rejoin the remainder
+        # instead of taking only the third field.
+        description=", ".join(parts[2:]) if len(parts) > 2 else "",
+        scale=scale,
+        missing=missing,
+    )
+
+
+def _read_comment_block(lines: list[str], index: int) -> tuple[tuple[str, ...], int]:
+    """Read a count-prefixed comment block, returning it and the next index."""
+    try:
+        count = int(_split(lines[index])[0])
+    except (ValueError, IndexError):
+        # A non-numeric count means the header deviates from the spec; treat
+        # the block as empty and let NLHEAD govern where data starts.
+        return (), index + 1
+    start = index + 1
+    return tuple(lines[start : start + count]), start + count
+
+
+def _metadata_scan_region(lines: list[str], n_header: int, nlhead_understated: bool) -> list[str]:
+    """Return the lines to scrape ``KEY: value`` metadata from.
+
+    Normally the header, and nothing else. The exception is a file whose
+    ``NLHEAD`` is provably too small: clamping it up to ``12 + NV`` recovers
+    a *lower bound* on the header, not the header, so the comment block —
+    LOD flags included — can still sit past the bound, in lines the reader
+    otherwise treats as data.
+
+    Two files in the 2024 archive are exactly this shape, and between them
+    they were the last 19,398 unmasked LOD sentinels once the block-walk
+    scrape was fixed.
+
+    The window is scanned to its end rather than stopped at the first
+    non-metadata line, because the residue does not begin with metadata: it
+    opens with the leftover variable definitions and comment counts that the
+    clamp could not account for, so any early stop would halt before
+    reaching the ``KEY: value`` block. Scanning into data rows is harmless —
+    :data:`_METADATA_LINE` is anchored on an uppercase key followed by a
+    colon, and an ICARTT data row begins with a numeric time field — so the
+    cost of over-scanning is a few failed matches, while the cost of
+    under-scanning is an unmasked sentinel in a concentration.
     """
-    seen: Counter[str] = Counter()
-    out: list[str] = []
-    for name in names:
-        count = seen[name]
-        seen[name] += 1
-        out.append(name if count == 0 else f"{name}.{count}")
-    return out
+    if not nlhead_understated:
+        return lines[:n_header]
+    return list(lines[: n_header + _RESIDUAL_HEADER_LIMIT])
+
+
+def _read_text(path: Path) -> list[str]:
+    """Read a file as text, tolerating non-UTF-8 bytes.
+
+    30 files in the target archive are not valid UTF-8 (stray bytes in PI
+    names and comment blocks). Refusing them would lose real data over a
+    non-scientific detail, so decoding falls back to latin-1, which cannot
+    fail and leaves the numeric content — always ASCII — untouched.
+    """
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        logger.debug("%s is not valid UTF-8; decoding as latin-1.", path)
+        text = raw.decode("latin-1")
+    return text.splitlines()
+
+
+def _read_data(
+    lines: list[str], header: IcarttHeader, path: Path, loader: ICARTTLoader
+) -> pd.DataFrame:
+    """Parse the data block below the header into a DataFrame."""
+    body = lines[header.n_header_lines :]
+    if not any(line.strip() for line in body):
+        raise TsaraIngestError(f"'{path}' has a valid header but no data rows.")
+
+    names = _choose_column_names(body, header, path)
+
+    from io import StringIO
+
+    # Counted before parsing so that rows pandas discards can be reported. A
+    # ragged line is a logging glitch, not a format difference: one file in
+    # the target archive truncates 14 lines out of 84,362 (0.017%) where the
+    # logger was interrupted mid-number. Refusing the file would throw away a
+    # whole day of measurements to avoid 14 bad rows, so bad lines are skipped
+    # and *counted* — silent skipping would be the genuinely dangerous option.
+    n_nonblank = sum(1 for line in body if line.strip())
+
+    read_kwargs: dict[str, Any] = {
+        "header": None,
+        "names": names,
+        "skipinitialspace": True,
+        "skip_blank_lines": True,
+        "on_bad_lines": "skip",
+        # Values stay as written; scaling and missing-masking happen next, in
+        # that order, so a sentinel is never scaled.
+        "dtype": None,
+        # Parse each column in one pass rather than in chunks. Chunked
+        # inference makes a column's dtype depend on where a truncated row
+        # happens to fall, which pandas reports as a DtypeWarning and which
+        # would make the result depend on file size.
+        "low_memory": False,
+        # Load-bearing, not cosmetic. Without it, a file whose rows are ALL
+        # wider than the declared names makes pandas decide the surplus
+        # leading fields are an index: it builds a MultiIndex and every value
+        # silently shifts left, so the first declared column receives the
+        # third field. index_col=False forces the columns to align with the
+        # names as declared.
+        "index_col": False,
+        **float_precision_kwarg(loader),
+    }
+    # `**kwargs` erases the return type, so restore it rather than letting
+    # Any leak into every caller.
+    frame = cast("pd.DataFrame", pd.read_csv(StringIO("\n".join(body)), **read_kwargs))
+
+    n_skipped = n_nonblank - len(frame)
+    if n_skipped > 0:
+        check_dropped_rows(
+            n_dropped=n_skipped,
+            n_total=n_nonblank,
+            path=path,
+            reason="malformed data row (wrong field count)",
+            max_fraction=loader.max_dropped_fraction,
+            logger=logger,
+        )
+    return frame
 
 
 def _choose_column_names(body: list[str], header: IcarttHeader, path: Path) -> list[str]:
@@ -802,155 +886,40 @@ def _choose_column_names(body: list[str], header: IcarttHeader, path: Path) -> l
     return _mangle_duplicates(definitions)
 
 
-def _read_data(
-    lines: list[str], header: IcarttHeader, path: Path, loader: ICARTTLoader
-) -> pd.DataFrame:
-    """Parse the data block below the header into a DataFrame."""
-    body = lines[header.n_header_lines :]
-    if not any(line.strip() for line in body):
-        raise TsaraIngestError(f"'{path}' has a valid header but no data rows.")
+def _modal_field_count(body: list[str]) -> int:
+    """Most common comma-separated field count among the data lines.
 
-    names = _choose_column_names(body, header, path)
-
-    from io import StringIO
-
-    # Counted before parsing so that rows pandas discards can be reported. A
-    # ragged line is a logging glitch, not a format difference: one file in
-    # the target archive truncates 14 lines out of 84,362 (0.017%) where the
-    # logger was interrupted mid-number. Refusing the file would throw away a
-    # whole day of measurements to avoid 14 bad rows, so bad lines are skipped
-    # and *counted* — silent skipping would be the genuinely dangerous option.
-    n_nonblank = sum(1 for line in body if line.strip())
-
-    read_kwargs: dict[str, Any] = {
-        "header": None,
-        "names": names,
-        "skipinitialspace": True,
-        "skip_blank_lines": True,
-        "on_bad_lines": "skip",
-        # Values stay as written; scaling and missing-masking happen next, in
-        # that order, so a sentinel is never scaled.
-        "dtype": None,
-        # Parse each column in one pass rather than in chunks. Chunked
-        # inference makes a column's dtype depend on where a truncated row
-        # happens to fall, which pandas reports as a DtypeWarning and which
-        # would make the result depend on file size.
-        "low_memory": False,
-        # Load-bearing, not cosmetic. Without it, a file whose rows are ALL
-        # wider than the declared names makes pandas decide the surplus
-        # leading fields are an index: it builds a MultiIndex and every value
-        # silently shifts left, so the first declared column receives the
-        # third field. index_col=False forces the columns to align with the
-        # names as declared.
-        "index_col": False,
-        **float_precision_kwarg(loader),
-    }
-    # `**kwargs` erases the return type, so restore it rather than letting
-    # Any leak into every caller.
-    frame = cast("pd.DataFrame", pd.read_csv(StringIO("\n".join(body)), **read_kwargs))
-
-    n_skipped = n_nonblank - len(frame)
-    if n_skipped > 0:
-        check_dropped_rows(
-            n_dropped=n_skipped,
-            n_total=n_nonblank,
-            path=path,
-            reason="malformed data row (wrong field count)",
-            max_fraction=loader.max_dropped_fraction,
-            logger=logger,
-        )
-    return frame
-
-
-#: How far past a provably-wrong NLHEAD to keep looking for header text.
-#: Generous enough to clear any real comment block (the longest in the 2024
-#: archive is 23 lines) and small enough that a file with no residue costs
-#: one failed match per line rather than a scan of the whole record.
-_RESIDUAL_HEADER_LIMIT = 200
-
-
-def _metadata_scan_region(lines: list[str], n_header: int, nlhead_understated: bool) -> list[str]:
-    """Return the lines to scrape ``KEY: value`` metadata from.
-
-    Normally the header, and nothing else. The exception is a file whose
-    ``NLHEAD`` is provably too small: clamping it up to ``12 + NV`` recovers
-    a *lower bound* on the header, not the header, so the comment block —
-    LOD flags included — can still sit past the bound, in lines the reader
-    otherwise treats as data.
-
-    Two files in the 2024 archive are exactly this shape, and between them
-    they were the last 19,398 unmasked LOD sentinels once the block-walk
-    scrape was fixed.
-
-    The window is scanned to its end rather than stopped at the first
-    non-metadata line, because the residue does not begin with metadata: it
-    opens with the leftover variable definitions and comment counts that the
-    clamp could not account for, so any early stop would halt before
-    reaching the ``KEY: value`` block. Scanning into data rows is harmless —
-    :data:`_METADATA_LINE` is anchored on an uppercase key followed by a
-    colon, and an ICARTT data row begins with a numeric time field — so the
-    cost of over-scanning is a few failed matches, while the cost of
-    under-scanning is an unmasked sentinel in a concentration.
+    This is the one statement about a file's shape that comes from the data
+    rather than from the header's claims about the data, which is exactly
+    why it is worth computing: when the two name lists disagree, the rows
+    themselves are the tie-breaker. The *mode* rather than the maximum or
+    the first row's width, because real archives contain truncated lines
+    (one file here loses 14 rows of 84,362 to a logger interrupted
+    mid-number) and a header whose text has leaked into the data block.
     """
-    if not nlhead_understated:
-        return lines[:n_header]
-    return list(lines[: n_header + _RESIDUAL_HEADER_LIMIT])
+    widths = Counter(len(line.split(",")) for line in body if line.strip())
+    # Counter.most_common breaks ties by first insertion, i.e. by first
+    # appearance in the file — deterministic, which is all that is needed.
+    return widths.most_common(1)[0][0] if widths else 0
 
 
-def _lod_sentinels(header: IcarttHeader) -> dict[str, tuple[float, ...]]:
-    """Map each dependent variable to the LOD sentinels that apply to it.
+def _mangle_duplicates(names: list[str]) -> list[str]:
+    """Disambiguate repeated names the way ``pandas.read_csv`` does.
 
-    ICARTT marks out-of-detection-range samples with sentinels that are
-    *not* the ``VMISS`` missing value: ``LLOD_FLAG`` for below the lower
-    limit of detection and ``ULOD_FLAG`` for above the upper one. They are
-    declared in the special-comment block rather than on a fixed header
-    line, so they need parsing rather than indexing.
-
-    Three shapes occur in real archives, and all three are handled:
-
-    * a single value applying to every variable (``LLOD_FLAG: -8888``);
-    * one value per dependent variable (a 16-item comma-separated list);
-    * a non-numeric placeholder (``N/A``, ``NaN``) meaning "not used".
-
-    When the item count matches ``NV`` the mapping is per-variable;
-    otherwise the union of the declared values applies to all of them.
-    Taking the union is the conservative reading: these sentinels are
-    chosen precisely to be impossible measurements, so masking one that a
-    given variable never uses costs nothing, while failing to mask one that
-    it does use puts a large negative number into a concentration.
+    A duplicate is not merely untidy here: :func:`~tsara.ingest.base.check_raw_table`
+    rejects a frame with duplicate columns (selection would be ambiguous),
+    and ``pandas.read_csv`` refuses a duplicated ``names=`` list outright
+    with an untyped ``ValueError`` — which would escape a reader whose
+    contract promises :class:`~tsara.ingest.base.TsaraIngestError`. Renaming
+    the later occurrences keeps the data readable and the failure typed.
     """
-    declared: list[tuple[float, ...]] = []
-    for key in ("LLOD_FLAG", "ULOD_FLAG"):
-        raw = header.metadata.get(key)
-        if raw is None:
-            continue
-        values: list[float] = []
-        for token in raw.split(","):
-            try:
-                value = float(token.strip())
-            except ValueError:
-                # 'N/A' and 'NaN' both mean the flag is unused. NaN is
-                # excluded deliberately as well as accidentally: it can
-                # never compare equal, so it could not mask anything.
-                continue
-            if not np.isnan(value):
-                values.append(value)
-        if values:
-            declared.append(tuple(values))
-
-    if not declared:
-        return {}
-
-    names = [variable.name for variable in header.variables]
-    per_variable: dict[str, list[float]] = {name: [] for name in names}
-    for sentinels in declared:
-        if len(sentinels) == len(names):
-            for name, value in zip(names, sentinels, strict=True):
-                per_variable[name].append(value)
-        else:
-            for name in names:
-                per_variable[name].extend(sentinels)
-    return {name: tuple(dict.fromkeys(values)) for name, values in per_variable.items() if values}
+    seen: Counter[str] = Counter()
+    out: list[str] = []
+    for name in names:
+        count = seen[name]
+        seen[name] += 1
+        out.append(name if count == 0 else f"{name}.{count}")
+    return out
 
 
 def _apply_scales_and_missing(
@@ -1007,6 +976,62 @@ def _apply_scales_and_missing(
             column = column * variable.scale
         frame[variable.name] = column
     return frame, lod_counts
+
+
+def _lod_sentinels(header: IcarttHeader) -> dict[str, tuple[float, ...]]:
+    """Map each dependent variable to the LOD sentinels that apply to it.
+
+    ICARTT marks out-of-detection-range samples with sentinels that are
+    *not* the ``VMISS`` missing value: ``LLOD_FLAG`` for below the lower
+    limit of detection and ``ULOD_FLAG`` for above the upper one. They are
+    declared in the special-comment block rather than on a fixed header
+    line, so they need parsing rather than indexing.
+
+    Three shapes occur in real archives, and all three are handled:
+
+    * a single value applying to every variable (``LLOD_FLAG: -8888``);
+    * one value per dependent variable (a 16-item comma-separated list);
+    * a non-numeric placeholder (``N/A``, ``NaN``) meaning "not used".
+
+    When the item count matches ``NV`` the mapping is per-variable;
+    otherwise the union of the declared values applies to all of them.
+    Taking the union is the conservative reading: these sentinels are
+    chosen precisely to be impossible measurements, so masking one that a
+    given variable never uses costs nothing, while failing to mask one that
+    it does use puts a large negative number into a concentration.
+    """
+    declared: list[tuple[float, ...]] = []
+    for key in ("LLOD_FLAG", "ULOD_FLAG"):
+        raw = header.metadata.get(key)
+        if raw is None:
+            continue
+        values: list[float] = []
+        for token in raw.split(","):
+            try:
+                value = float(token.strip())
+            except ValueError:
+                # 'N/A' and 'NaN' both mean the flag is unused. NaN is
+                # excluded deliberately as well as accidentally: it can
+                # never compare equal, so it could not mask anything.
+                continue
+            if not np.isnan(value):
+                values.append(value)
+        if values:
+            declared.append(tuple(values))
+
+    if not declared:
+        return {}
+
+    names = [variable.name for variable in header.variables]
+    per_variable: dict[str, list[float]] = {name: [] for name in names}
+    for sentinels in declared:
+        if len(sentinels) == len(names):
+            for name, value in zip(names, sentinels, strict=True):
+                per_variable[name].append(value)
+        else:
+            for name in names:
+                per_variable[name].extend(sentinels)
+    return {name: tuple(dict.fromkeys(values)) for name, values in per_variable.items() if values}
 
 
 def _build_time_index(
@@ -1120,29 +1145,48 @@ def _time_like_column(
     return to_utc_naive_ns(times, "UTC", path)
 
 
-#: Column names that look like they hold a cell boundary or a midpoint.
-#:
-#: Both halves are required: "stop" alone matches a stop *flag*, and "time"
-#: alone matches the time axis itself. Used only to report what a file offers,
-#: never to decide anything -- see :mod:`tsara.ingest.support` for why
-#: guessing a boundary column is refused.
-#: Names that could be a cell boundary a manifest is able to *name*.
-#:
-#: ``mid`` is deliberately absent. The schema accepts a ``start_column`` and a
-#: ``stop_column``; a midpoint column is neither, so listing one answers a
-#: question the user cannot act on and invites the one manifest entry that
-#: would be silently wrong -- ``stop_column: Time_Mid`` halves every cell.
-#: Measured across all 1122 files of the 2024 archive, dropping it costs
-#: nothing: every file carrying a mid column either carries a real stop column
-#: beside it (64 files) or is one of the 20 whose *independent variable* is
-#: itself named ``Time_Mid``, where the "candidate" was the file's own time
-#: axis handed back to the user.
-_BOUNDARY_NAME = re.compile(r"(stop|end)", re.IGNORECASE)
-_TIME_NAME = re.compile(r"(time|utc|sec)", re.IGNORECASE)
+def _provenance(
+    header: IcarttHeader,
+    lod_counts: dict[str, int] | None = None,
+    columns: list[str] | None = None,
+) -> dict[str, Any]:
+    """Extract the header fields worth carrying alongside the data.
 
-#: Independent-variable names that justify a label without guessing.
-_START_NAME = re.compile(r"start", re.IGNORECASE)
-_MID_NAME = re.compile(r"mid", re.IGNORECASE)
+    Limit-of-detection flags are included deliberately. ICARTT files mark
+    out-of-detection-range samples with sentinels distinct from ``VMISS``,
+    which is scientifically *not* the same as missing data — a below-LOD
+    benzene is an upper bound, whereas a dropout is no information at all.
+    :func:`_apply_scales_and_missing` masks those samples so they cannot
+    reach a baseline as numbers, and the flags and per-variable counts are
+    carried here so a later stage can still tell the two apart and
+    substitute LOD/2 or fit a censored model without re-reading every file.
+    """
+    provenance: dict[str, Any] = {
+        "icartt_pi": header.pi_name,
+        "icartt_organization": header.organization,
+        "icartt_instrument_description": header.instrument_description,
+        "icartt_mission": header.mission,
+        "icartt_data_date": header.data_date.isoformat(),
+        "icartt_revision_date": header.revision_date.isoformat(),
+        "icartt_interval": header.interval,
+    }
+    hint = _label_hint(header)
+    if hint is not None:
+        provenance[LABEL_HINT_KEY] = hint
+    candidates = _boundary_candidates(columns or [])
+    if candidates:
+        # Reported so a user can see what their manifest could be naming;
+        # nothing here acts on it (see tsara.ingest.support for why).
+        provenance[CANDIDATE_COLUMNS_KEY] = ", ".join(candidates)
+    for key in ("REVISION", "PLATFORM", "LOCATION", "ULOD_FLAG", "LLOD_FLAG", "LLOD_VALUE"):
+        if key in header.metadata:
+            provenance[f"icartt_{key.lower()}"] = header.metadata[key]
+    if lod_counts:
+        # Under the raw column names, because that is the only vocabulary a
+        # reader has: the manifest's canonical names are not visible here.
+        # Stream assembly translates them when it knows the mapping.
+        provenance["icartt_lod_masked"] = dict(lod_counts)
+    return provenance
 
 
 def _label_hint(header: IcarttHeader) -> str | None:
@@ -1186,47 +1230,3 @@ def _boundary_candidates(columns: list[str]) -> tuple[str, ...]:
     return tuple(
         column for column in columns if _BOUNDARY_NAME.search(column) and _TIME_NAME.search(column)
     )
-
-
-def _provenance(
-    header: IcarttHeader,
-    lod_counts: dict[str, int] | None = None,
-    columns: list[str] | None = None,
-) -> dict[str, Any]:
-    """Extract the header fields worth carrying alongside the data.
-
-    Limit-of-detection flags are included deliberately. ICARTT files mark
-    out-of-detection-range samples with sentinels distinct from ``VMISS``,
-    which is scientifically *not* the same as missing data — a below-LOD
-    benzene is an upper bound, whereas a dropout is no information at all.
-    :func:`_apply_scales_and_missing` masks those samples so they cannot
-    reach a baseline as numbers, and the flags and per-variable counts are
-    carried here so a later stage can still tell the two apart and
-    substitute LOD/2 or fit a censored model without re-reading every file.
-    """
-    provenance: dict[str, Any] = {
-        "icartt_pi": header.pi_name,
-        "icartt_organization": header.organization,
-        "icartt_instrument_description": header.instrument_description,
-        "icartt_mission": header.mission,
-        "icartt_data_date": header.data_date.isoformat(),
-        "icartt_revision_date": header.revision_date.isoformat(),
-        "icartt_interval": header.interval,
-    }
-    hint = _label_hint(header)
-    if hint is not None:
-        provenance[LABEL_HINT_KEY] = hint
-    candidates = _boundary_candidates(columns or [])
-    if candidates:
-        # Reported so a user can see what their manifest could be naming;
-        # nothing here acts on it (see tsara.ingest.support for why).
-        provenance[CANDIDATE_COLUMNS_KEY] = ", ".join(candidates)
-    for key in ("REVISION", "PLATFORM", "LOCATION", "ULOD_FLAG", "LLOD_FLAG", "LLOD_VALUE"):
-        if key in header.metadata:
-            provenance[f"icartt_{key.lower()}"] = header.metadata[key]
-    if lod_counts:
-        # Under the raw column names, because that is the only vocabulary a
-        # reader has: the manifest's canonical names are not visible here.
-        # Stream assembly translates them when it knows the mapping.
-        provenance["icartt_lod_masked"] = dict(lod_counts)
-    return provenance

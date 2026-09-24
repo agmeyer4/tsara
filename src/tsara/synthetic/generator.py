@@ -340,91 +340,6 @@ def generate(
 SUBSAMPLE_SPACING_FRACTION = 0.25
 
 
-def _kernel_scale_s(shape: PlumeShape) -> float:
-    """Return the narrowest timescale a plume shape resolves, in seconds.
-
-    The Gaussian width in both cases: an EMG is a Gaussian rise convolved with
-    an exponential tail, so its ``sigma`` is the sharpest feature it has and
-    its ``tau`` only stretches what follows.
-    """
-    import pandas as pd
-
-    return float(pd.Timedelta(shape.sigma).total_seconds())
-
-
-def _fields_of(source: SourceSpec) -> set[str]:
-    """Return every field a source's events can carry, children included.
-
-    A nested child may name species its parent never emits — the landfill with
-    a thermogenic blip inside it — so its ratios widen the set rather than
-    being a subset of the parent's.
-    """
-    fields = {source.reference_species, *source.ratios}
-    if source.nested is not None and source.nested.ratios is not None:
-        fields |= set(source.nested.ratios)
-    return fields
-
-
-def _narrowest_plume(config: SyntheticConfig, fields: set[str]) -> tuple[float, str] | None:
-    """Return the narrowest kernel among sources emitting any of ``fields``.
-
-    Returns the scale in seconds and a label naming the source, or ``None``
-    when no source emits anything this caller measures — a met-only instrument,
-    or a campaign with no sources at all.
-    """
-    best: tuple[float, str] | None = None
-    for name, source in config.atmosphere.sources.items():
-        if not _fields_of(source) & fields:
-            continue
-        candidates = [(_kernel_scale_s(source.shape), name)]
-        if source.nested is not None:
-            # The child is meant to be substantially narrower, so it usually
-            # sets the requirement.
-            candidates.append((_kernel_scale_s(source.nested.shape), f"{name}'s nested child"))
-        for scale_s, label in candidates:
-            if best is None or scale_s < best[0]:
-                best = (scale_s, label)
-    return best
-
-
-def _node_spacings_s(
-    field: FieldSpec,
-    config: SyntheticConfig,
-    profiles: Mapping[str, RealDataProfile] | None,
-) -> list[tuple[float, str]]:
-    """Return the node spacing of each stochastic term in a field's background.
-
-    A stochastic background is drawn on nodes and is linear between them, so
-    its node spacing is the finest structure it has. The analytic terms —
-    offset, diurnal, drift — are smooth functions with no such limit and are
-    not reported here.
-    """
-    import pandas as pd
-
-    truth_s = float(pd.Timedelta(config.atmosphere.truth_resolution).total_seconds())
-    background = field.background
-    spacings: list[tuple[float, str]] = []
-    if background.kind == "bootstrap":
-        # Indexed rather than guarded: this runs after the atmosphere has been
-        # realized, and realizing a bootstrap background without its profile
-        # raises. A guard here would be a branch no run can take.
-        assert profiles is not None  # narrowed by realize_atmosphere
-        spacings.append(
-            (
-                float(profiles[background.profile].sample_period_s),
-                f"bootstrap profile '{background.profile}'",
-            )
-        )
-        # A bootstrap may sit on a parametric base, which can wander in its own
-        # right, on the atmosphere's nodes rather than the profile's.
-        base = background.base
-        if base is not None and base.random_walk_std > 0.0:
-            spacings.append((truth_s, "random walk on truth_resolution"))
-    elif background.random_walk_std > 0.0:
-        spacings.append((truth_s, "random walk on truth_resolution"))
-    return spacings
-
-
 def _warn_about_sampling(
     config: SyntheticConfig,
     profiles: Mapping[str, RealDataProfile] | None,
@@ -505,6 +420,91 @@ def _warn_about_sampling(
                 label,
                 width_s,
             )
+
+
+def _narrowest_plume(config: SyntheticConfig, fields: set[str]) -> tuple[float, str] | None:
+    """Return the narrowest kernel among sources emitting any of ``fields``.
+
+    Returns the scale in seconds and a label naming the source, or ``None``
+    when no source emits anything this caller measures — a met-only instrument,
+    or a campaign with no sources at all.
+    """
+    best: tuple[float, str] | None = None
+    for name, source in config.atmosphere.sources.items():
+        if not _fields_of(source) & fields:
+            continue
+        candidates = [(_kernel_scale_s(source.shape), name)]
+        if source.nested is not None:
+            # The child is meant to be substantially narrower, so it usually
+            # sets the requirement.
+            candidates.append((_kernel_scale_s(source.nested.shape), f"{name}'s nested child"))
+        for scale_s, label in candidates:
+            if best is None or scale_s < best[0]:
+                best = (scale_s, label)
+    return best
+
+
+def _fields_of(source: SourceSpec) -> set[str]:
+    """Return every field a source's events can carry, children included.
+
+    A nested child may name species its parent never emits — the landfill with
+    a thermogenic blip inside it — so its ratios widen the set rather than
+    being a subset of the parent's.
+    """
+    fields = {source.reference_species, *source.ratios}
+    if source.nested is not None and source.nested.ratios is not None:
+        fields |= set(source.nested.ratios)
+    return fields
+
+
+def _kernel_scale_s(shape: PlumeShape) -> float:
+    """Return the narrowest timescale a plume shape resolves, in seconds.
+
+    The Gaussian width in both cases: an EMG is a Gaussian rise convolved with
+    an exponential tail, so its ``sigma`` is the sharpest feature it has and
+    its ``tau`` only stretches what follows.
+    """
+    import pandas as pd
+
+    return float(pd.Timedelta(shape.sigma).total_seconds())
+
+
+def _node_spacings_s(
+    field: FieldSpec,
+    config: SyntheticConfig,
+    profiles: Mapping[str, RealDataProfile] | None,
+) -> list[tuple[float, str]]:
+    """Return the node spacing of each stochastic term in a field's background.
+
+    A stochastic background is drawn on nodes and is linear between them, so
+    its node spacing is the finest structure it has. The analytic terms —
+    offset, diurnal, drift — are smooth functions with no such limit and are
+    not reported here.
+    """
+    import pandas as pd
+
+    truth_s = float(pd.Timedelta(config.atmosphere.truth_resolution).total_seconds())
+    background = field.background
+    spacings: list[tuple[float, str]] = []
+    if background.kind == "bootstrap":
+        # Indexed rather than guarded: this runs after the atmosphere has been
+        # realized, and realizing a bootstrap background without its profile
+        # raises. A guard here would be a branch no run can take.
+        assert profiles is not None  # narrowed by realize_atmosphere
+        spacings.append(
+            (
+                float(profiles[background.profile].sample_period_s),
+                f"bootstrap profile '{background.profile}'",
+            )
+        )
+        # A bootstrap may sit on a parametric base, which can wander in its own
+        # right, on the atmosphere's nodes rather than the profile's.
+        base = background.base
+        if base is not None and base.random_walk_std > 0.0:
+            spacings.append((truth_s, "random walk on truth_resolution"))
+    elif background.random_walk_std > 0.0:
+        spacings.append((truth_s, "random walk on truth_resolution"))
+    return spacings
 
 
 # ---------------------------------------------------------------------------
@@ -670,6 +670,72 @@ def _apply_dropouts(
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
+
+
+def _build_gps_stream(
+    config: SyntheticConfig,
+    times: pd.DatetimeIndex,
+    latitude: npt.NDArray[np.float64],
+    longitude: npt.NDArray[np.float64],
+) -> xr.Dataset:
+    """Package a mobile track as its own instrument stream.
+
+    Parameters
+    ----------
+    config : SyntheticConfig
+        Run configuration.
+    times : pandas.DatetimeIndex
+        GPS timestamps.
+    latitude, longitude : numpy.ndarray
+        Track coordinates.
+
+    Returns
+    -------
+    xarray.Dataset
+        The GPS stream, with ``gps_lat``/``gps_lon`` roles matching the
+        manifest vocabulary.
+    """
+    import pandas as pd
+    import xarray as xr
+
+    # A track is a sequence of position fixes, so `point` is the honest
+    # method; the cells exist so that a later stage can bin the track onto a
+    # gas instrument's cells by overlap like any other stream.
+    width_ns = int(pd.Timedelta(getattr(config.platform, "gps_rate", "1s")).value)
+    bounds = CellBounds.from_label(_epoch_ns(times), width_ns, "mid")
+
+    stream = xr.Dataset(
+        data_vars={
+            LATITUDE_COORD: (
+                TIME_COORD,
+                latitude,
+                {"units": "degrees_north", "role": "gps_lat", "field": LATITUDE_COORD},
+            ),
+            LONGITUDE_COORD: (
+                TIME_COORD,
+                longitude,
+                {"units": "degrees_east", "role": "gps_lon", "field": LONGITUDE_COORD},
+            ),
+        },
+        coords={TIME_COORD: times},
+        attrs={
+            "tsara_version": __version__,
+            "tsara_stage": "synthetic",
+            "synthetic_config_name": config.name,
+            "instrument": getattr(config.platform, "gps_instrument", "gps"),
+            "platform_kind": config.platform.kind,
+            **support_attrs(
+                label="mid",
+                width_ns=width_ns,
+                coverage=bounds.coverage_fraction,
+                label_provenance="declared",
+                width_provenance="declared",
+                method_provenance="declared",
+            ),
+        },
+    )
+    attach_time_bounds(stream, bounds, "point")
+    return stream
 
 
 def _render_instrument(
@@ -918,72 +984,6 @@ def _event_position(
     track_times, latitude, longitude = track
     lat, lon = positions_at(pd.DatetimeIndex([peak_time]), track_times, latitude, longitude)
     return {"latitude": float(lat[0]), "longitude": float(lon[0])}
-
-
-def _build_gps_stream(
-    config: SyntheticConfig,
-    times: pd.DatetimeIndex,
-    latitude: npt.NDArray[np.float64],
-    longitude: npt.NDArray[np.float64],
-) -> xr.Dataset:
-    """Package a mobile track as its own instrument stream.
-
-    Parameters
-    ----------
-    config : SyntheticConfig
-        Run configuration.
-    times : pandas.DatetimeIndex
-        GPS timestamps.
-    latitude, longitude : numpy.ndarray
-        Track coordinates.
-
-    Returns
-    -------
-    xarray.Dataset
-        The GPS stream, with ``gps_lat``/``gps_lon`` roles matching the
-        manifest vocabulary.
-    """
-    import pandas as pd
-    import xarray as xr
-
-    # A track is a sequence of position fixes, so `point` is the honest
-    # method; the cells exist so that a later stage can bin the track onto a
-    # gas instrument's cells by overlap like any other stream.
-    width_ns = int(pd.Timedelta(getattr(config.platform, "gps_rate", "1s")).value)
-    bounds = CellBounds.from_label(_epoch_ns(times), width_ns, "mid")
-
-    stream = xr.Dataset(
-        data_vars={
-            LATITUDE_COORD: (
-                TIME_COORD,
-                latitude,
-                {"units": "degrees_north", "role": "gps_lat", "field": LATITUDE_COORD},
-            ),
-            LONGITUDE_COORD: (
-                TIME_COORD,
-                longitude,
-                {"units": "degrees_east", "role": "gps_lon", "field": LONGITUDE_COORD},
-            ),
-        },
-        coords={TIME_COORD: times},
-        attrs={
-            "tsara_version": __version__,
-            "tsara_stage": "synthetic",
-            "synthetic_config_name": config.name,
-            "instrument": getattr(config.platform, "gps_instrument", "gps"),
-            "platform_kind": config.platform.kind,
-            **support_attrs(
-                label="mid",
-                width_ns=width_ns,
-                coverage=bounds.coverage_fraction,
-                label_provenance="declared",
-                width_provenance="declared",
-                method_provenance="declared",
-            ),
-        },
-    )
-    attach_time_bounds(stream, bounds, "point")
-    return stream
 
 
 def _stream_attrs(

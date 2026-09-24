@@ -134,68 +134,6 @@ class PlumeKernel:
         return _emg_log_shape(u, self.sigma_s / self.tau_s)
 
 
-def _emg_log_shape(u: npt.NDArray[np.float64], sigma_over_tau: float) -> npt.NDArray[np.float64]:
-    r"""Log of the (unnormalized) exponentially-modified Gaussian shape.
-
-    The EMG density is the convolution of a Gaussian (turbulent dispersion)
-    with a decaying exponential (residence time). Its textbook form,
-
-    .. math::
-
-        f(t) \propto \exp\!\Big(\tfrac{\sigma^2}{2\tau^2}
-        - \tfrac{t-\mu}{\tau}\Big)\,
-        \mathrm{erfc}\!\Big(\tfrac{\sigma/\tau - u}{\sqrt 2}\Big),
-
-    overflows catastrophically in float64: the exponential explodes while
-    ``erfc`` underflows to 0, so their product evaluates to ``inf * 0 = nan``
-    exactly in the tail where plume shapes matter most. Rewriting via the
-    *scaled* complementary error function
-    :math:`\mathrm{erfcx}(z) = e^{z^2}\mathrm{erfc}(z)` cancels the two
-    divergences analytically:
-
-    .. math::
-
-        f(t) \propto e^{-u^2/2}\;\mathrm{erfcx}\!\Big(
-        \tfrac{\sigma/\tau - u}{\sqrt 2}\Big),
-        \qquad u = \tfrac{t-\mu}{\sigma}
-
-    which is stable until ``erfcx`` itself overflows around ``z = -26``.
-    Beyond that, :math:`\mathrm{erfcx}(z) \to 2e^{z^2}`, giving the closed
-    form :math:`\log f \to \log 2 + \sigma^2/(2\tau^2) - u\sigma/\tau`
-    — a pure exponential decay of timescale tau, which is exactly the
-    physical tail behaviour the EMG is chosen for.
-
-    Parameters
-    ----------
-    u : numpy.ndarray
-        Standardized offset ``(t - mu) / sigma``.
-    sigma_over_tau : float
-        Ratio ``sigma / tau``, the shape's only dimensionless parameter.
-
-    Returns
-    -------
-    numpy.ndarray
-        Unnormalized log-shape values.
-    """
-    from scipy.special import erfcx
-
-    z = (sigma_over_tau - u) / math.sqrt(2.0)
-    result = np.empty_like(u, dtype=np.float64)
-
-    asymptotic = z < _ERFCX_ASYMPTOTIC_CUTOFF
-    stable = ~asymptotic
-
-    if np.any(stable):
-        result[stable] = -0.5 * u[stable] ** 2 + np.log(erfcx(z[stable]))
-    if np.any(asymptotic):
-        # log f = log(2) + z^2 - u^2/2, and z^2 - u^2/2 simplifies exactly to
-        # (sigma/tau)^2/2 - u*(sigma/tau).
-        result[asymptotic] = (
-            math.log(2.0) + 0.5 * sigma_over_tau**2 - u[asymptotic] * sigma_over_tau
-        )
-    return result
-
-
 def build_kernel(shape: PlumeShape) -> PlumeKernel:
     """Precompute the normalized kernel for a configured plume shape.
 
@@ -259,6 +197,68 @@ def build_kernel(shape: PlumeShape) -> PlumeKernel:
         support_after_s=support_after,
         log_peak=float(fine_values[fine_index]),
     )
+
+
+def _emg_log_shape(u: npt.NDArray[np.float64], sigma_over_tau: float) -> npt.NDArray[np.float64]:
+    r"""Log of the (unnormalized) exponentially-modified Gaussian shape.
+
+    The EMG density is the convolution of a Gaussian (turbulent dispersion)
+    with a decaying exponential (residence time). Its textbook form,
+
+    .. math::
+
+        f(t) \propto \exp\!\Big(\tfrac{\sigma^2}{2\tau^2}
+        - \tfrac{t-\mu}{\tau}\Big)\,
+        \mathrm{erfc}\!\Big(\tfrac{\sigma/\tau - u}{\sqrt 2}\Big),
+
+    overflows catastrophically in float64: the exponential explodes while
+    ``erfc`` underflows to 0, so their product evaluates to ``inf * 0 = nan``
+    exactly in the tail where plume shapes matter most. Rewriting via the
+    *scaled* complementary error function
+    :math:`\mathrm{erfcx}(z) = e^{z^2}\mathrm{erfc}(z)` cancels the two
+    divergences analytically:
+
+    .. math::
+
+        f(t) \propto e^{-u^2/2}\;\mathrm{erfcx}\!\Big(
+        \tfrac{\sigma/\tau - u}{\sqrt 2}\Big),
+        \qquad u = \tfrac{t-\mu}{\sigma}
+
+    which is stable until ``erfcx`` itself overflows around ``z = -26``.
+    Beyond that, :math:`\mathrm{erfcx}(z) \to 2e^{z^2}`, giving the closed
+    form :math:`\log f \to \log 2 + \sigma^2/(2\tau^2) - u\sigma/\tau`
+    — a pure exponential decay of timescale tau, which is exactly the
+    physical tail behaviour the EMG is chosen for.
+
+    Parameters
+    ----------
+    u : numpy.ndarray
+        Standardized offset ``(t - mu) / sigma``.
+    sigma_over_tau : float
+        Ratio ``sigma / tau``, the shape's only dimensionless parameter.
+
+    Returns
+    -------
+    numpy.ndarray
+        Unnormalized log-shape values.
+    """
+    from scipy.special import erfcx
+
+    z = (sigma_over_tau - u) / math.sqrt(2.0)
+    result = np.empty_like(u, dtype=np.float64)
+
+    asymptotic = z < _ERFCX_ASYMPTOTIC_CUTOFF
+    stable = ~asymptotic
+
+    if np.any(stable):
+        result[stable] = -0.5 * u[stable] ** 2 + np.log(erfcx(z[stable]))
+    if np.any(asymptotic):
+        # log f = log(2) + z^2 - u^2/2, and z^2 - u^2/2 simplifies exactly to
+        # (sigma/tau)^2/2 - u*(sigma/tau).
+        result[asymptotic] = (
+            math.log(2.0) + 0.5 * sigma_over_tau**2 - u[asymptotic] * sigma_over_tau
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -369,54 +369,6 @@ class RealizedEvent:
             center - pd.Timedelta(seconds=self.kernel.support_before_s),
             center + pd.Timedelta(seconds=self.kernel.support_after_s),
         )
-
-
-def _draw_amplitude(spec: AmplitudeSpec, rng: np.random.Generator) -> float:
-    """Draw one peak amplitude from the configured distribution.
-
-    Parameters
-    ----------
-    spec : AmplitudeSpec
-        Lognormal or uniform amplitude configuration.
-    rng : numpy.random.Generator
-        Random number generator.
-
-    Returns
-    -------
-    float
-        Peak enhancement in the reference species' units.
-    """
-    if isinstance(spec, LognormalAmplitude):
-        # Parameterized by the median, so exp(mu) = median directly.
-        return float(spec.median * math.exp(spec.sigma_log * rng.normal()))
-    return float(rng.uniform(spec.low, spec.high))
-
-
-def _draw_ratio(spec: RatioSpec, rng: np.random.Generator) -> float:
-    """Draw one realized enhancement ratio.
-
-    Uses the lognormal parameterization from
-    :meth:`~tsara.config.synthetic.RatioSpec.lognormal_parameters`, so the
-    configured ``mean`` is the true arithmetic mean of the draws and
-    ``relative_spread`` is their true relative standard deviation. A
-    zero-spread spec returns the mean exactly.
-
-    Parameters
-    ----------
-    spec : RatioSpec
-        Ratio distribution.
-    rng : numpy.random.Generator
-        Random number generator.
-
-    Returns
-    -------
-    float
-        Realized ratio for one event; always strictly positive.
-    """
-    mu, sigma_log = spec.lognormal_parameters()
-    if sigma_log == 0.0:
-        return float(spec.mean)
-    return float(math.exp(mu + sigma_log * rng.normal()))
 
 
 def schedule_events(config: SyntheticConfig, rng: np.random.Generator) -> list[RealizedEvent]:
@@ -569,6 +521,54 @@ def _realize_event(
         ratios=ratios,
         lags_s=lags_s,
     )
+
+
+def _draw_amplitude(spec: AmplitudeSpec, rng: np.random.Generator) -> float:
+    """Draw one peak amplitude from the configured distribution.
+
+    Parameters
+    ----------
+    spec : AmplitudeSpec
+        Lognormal or uniform amplitude configuration.
+    rng : numpy.random.Generator
+        Random number generator.
+
+    Returns
+    -------
+    float
+        Peak enhancement in the reference species' units.
+    """
+    if isinstance(spec, LognormalAmplitude):
+        # Parameterized by the median, so exp(mu) = median directly.
+        return float(spec.median * math.exp(spec.sigma_log * rng.normal()))
+    return float(rng.uniform(spec.low, spec.high))
+
+
+def _draw_ratio(spec: RatioSpec, rng: np.random.Generator) -> float:
+    """Draw one realized enhancement ratio.
+
+    Uses the lognormal parameterization from
+    :meth:`~tsara.config.synthetic.RatioSpec.lognormal_parameters`, so the
+    configured ``mean`` is the true arithmetic mean of the draws and
+    ``relative_spread`` is their true relative standard deviation. A
+    zero-spread spec returns the mean exactly.
+
+    Parameters
+    ----------
+    spec : RatioSpec
+        Ratio distribution.
+    rng : numpy.random.Generator
+        Random number generator.
+
+    Returns
+    -------
+    float
+        Realized ratio for one event; always strictly positive.
+    """
+    mu, sigma_log = spec.lognormal_parameters()
+    if sigma_log == 0.0:
+        return float(spec.mean)
+    return float(math.exp(mu + sigma_log * rng.normal()))
 
 
 def _realize_child(

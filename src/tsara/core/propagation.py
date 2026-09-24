@@ -173,35 +173,29 @@ class PropagatedSigma:
     n_effective: float
 
 
-def _as_1d(array: npt.ArrayLike, *, name: str) -> npt.NDArray[np.float64]:
-    """Return ``array`` as a 1-D float64 array, or raise naming the field."""
-    values = np.asarray(array, dtype=np.float64)
-    if values.ndim != 1:
-        raise TsaraPropagationError(f"{name} must be one-dimensional, got shape {values.shape}.")
-    return values
+@dataclass(frozen=True)
+class BinnedSigma:
+    """Propagated uncertainties for many cells at once.
 
+    The vectorized counterpart of :class:`PropagatedSigma`. Binning a stream
+    onto a day of one-second grid cells is 86 400 propagations, and calling
+    the scalar form in a Python loop for each of them costs seconds per
+    species per sweep point.
 
-def _normalized_weights(weights: npt.ArrayLike, *, expected: int) -> npt.NDArray[np.float64] | None:
-    """Return weights scaled to sum to one, or ``None`` if they sum to zero.
-
-    A zero total is a real case rather than a defect -- it is what an empty
-    overlap looks like -- so it is answered with ``None`` and turned into a
-    NaN uncertainty by the caller, not raised.
+    Attributes
+    ----------
+    sigma : numpy.ndarray
+        Propagated 1-sigma per target cell, ``nan`` where nothing contributed.
+    form : str
+        The registered form used, or ``'independent'`` / ``'systematic'``.
+        One label for the whole call, because one call uses one form.
+    n_effective : numpy.ndarray
+        Effective sample size per cell.
     """
-    w = _as_1d(weights, name="weights")
-    if w.size != expected:
-        raise TsaraPropagationError(
-            f"Got {w.size} weight(s) for {expected} value(s); they must correspond one to one."
-        )
-    if np.any(w < 0):
-        raise TsaraPropagationError(
-            "Weights must be non-negative; a negative weight would let one sample "
-            "subtract another's uncertainty."
-        )
-    total = float(w.sum())
-    if total <= 0:
-        return None
-    return w / total
+
+    sigma: npt.NDArray[np.float64]
+    form: str
+    n_effective: npt.NDArray[np.float64]
 
 
 def kish_sample_size(weights: npt.ArrayLike) -> float:
@@ -282,41 +276,6 @@ def lag1_correlation(spacing_s: float, tau_s: float) -> float:
     return float(np.exp(-spacing_s / tau_s))
 
 
-def _variance_ratio_equal_weight(n: int, rho: float) -> float:
-    r"""Return ``Var(mean) / sigma^2`` for *n* equally spaced, equal-sigma samples.
-
-    Evaluates the §3.1 double sum in its equal-weight, equal-sigma,
-    equally-spaced case, where :math:`\rho_{ij} = \rho^{|i-j|}` collapses the
-    :math:`N^2` terms onto *N* distinct lags::
-
-        Var/sigma^2 = (1 / N^2) * (N + 2 * sum_{k=1}^{N-1} (N - k) rho^k)
-
-    The sum is evaluated **term by term** rather than through its closed
-    form. The closed form,
-    ``N (rho - rho^N)/(1 - rho) - rho(1 - N rho^(N-1) + (N-1) rho^N)/(1 - rho)^2``,
-    is algebraically identical and numerically hopeless as rho approaches 1:
-    at rho = 0.999 it subtracts two quantities of order 1e4 that agree to
-    four figures, through a denominator of 1e-6. The direct sum costs one
-    array of length N and is exact.
-
-    The terms decay geometrically, so the sum is truncated once ``rho**k``
-    falls below :data:`_GEOMETRIC_FLOOR`; past that point the contributions no
-    longer change a float64 accumulator.
-    """
-    if n <= 1:
-        return 1.0
-    if rho <= 0.0:
-        return 1.0 / n
-    if rho >= 1.0:
-        # Perfectly correlated: averaging changes nothing.
-        return 1.0
-    # How many lags can still matter, given geometric decay.
-    reach = int(np.ceil(np.log(_GEOMETRIC_FLOOR) / np.log(rho)))
-    k = np.arange(1, min(n, max(reach, 1) + 1), dtype=np.float64)
-    tail = float(np.sum((n - k) * rho**k))
-    return (n + 2.0 * tail) / (n * n)
-
-
 def n_effective(
     n: npt.ArrayLike,
     spacing_s: float,
@@ -393,36 +352,6 @@ def n_effective(
         ratio = _variance_ratio_equal_weight(int(round(float(value))), rho)
         out[counts == value] = 1.0 / ratio
     return np.asarray(np.clip(out, 1.0, counts), dtype=np.float64)
-
-
-def _double_sum_variance(
-    sigmas: npt.NDArray[np.float64],
-    weights: npt.NDArray[np.float64],
-    times_s: npt.NDArray[np.float64],
-    tau_s: float,
-) -> float:
-    r"""Return the §3.1 double sum evaluated pair by pair.
-
-    :math:`\mathrm{Var} = \sum_i \sum_j w_i w_j \rho_{ij} \sigma_i \sigma_j`
-    with :math:`\rho_{ij} = e^{-|t_i - t_j|/\tau}`. Written as
-    :math:`a^\mathsf{T} C\, a` with :math:`a_i = w_i \sigma_i`, which is the
-    same arithmetic in one matrix product.
-
-    Assumption-free given AR(1): unlike the effective-sample-size forms it
-    needs neither equal spacing nor equal sigma, which is exactly why it is
-    the reference the others are measured against.
-    """
-    if sigmas.size > DOUBLE_SUM_MAX_POINTS:
-        raise TsaraPropagationError(
-            f"'ar1_double_sum' builds an N x N correlation matrix and got "
-            f"N = {sigmas.size}, above the {DOUBLE_SUM_MAX_POINTS} limit. Use "
-            "'ar1_neff', which is linear in N and agrees with this form to "
-            "within the margin recorded in docs/METHODS.md §3.4."
-        )
-    a = weights * sigmas
-    lag = np.abs(times_s[:, None] - times_s[None, :])
-    correlation = np.exp(-lag / tau_s)
-    return float(a @ correlation @ a)
 
 
 def propagate_random(
@@ -551,52 +480,6 @@ def propagate_random(
         form=form,
         n_effective=effective,
     )
-
-
-def _mean_spacing(
-    times_s: npt.ArrayLike | None,
-    *,
-    count: int,
-    mask: npt.NDArray[np.bool_],
-) -> float:
-    """Return the sampling interval the effective-sample-size forms should use.
-
-    Taken from the contributing samples when timestamps are available, and
-    otherwise from the caller's own claim that the samples are consecutive.
-    The median of the differences is used rather than the mean, so one gap in
-    the middle of a cell does not stretch the interval that the other samples
-    are corrected with.
-
-    Raises
-    ------
-    TsaraPropagationError
-        If no timestamps were supplied. A correlation correction without a
-        spacing would have to invent one, and inventing the very quantity the
-        correction is most sensitive to is the failure this module exists to
-        avoid.
-    """
-    if times_s is None:
-        raise TsaraPropagationError(
-            "A decorrelation timescale was declared but no times_s was given. "
-            "Correcting for correlation needs to know how far apart the samples "
-            "are; supply times_s, or pass tau_s=None to treat them as independent."
-        )
-    times = _as_1d(times_s, name="times_s")
-    if times.size != mask.size:
-        raise TsaraPropagationError(
-            f"Got {times.size} time(s) for {mask.size} sigma(s); they must correspond one to one."
-        )
-    if count < 2:
-        # One sample has no spacing; any positive value gives N_eff = 1.
-        return 1.0
-    deltas = np.diff(np.sort(times[mask]))
-    positive = deltas[deltas > 0]
-    if positive.size == 0:
-        raise TsaraPropagationError(
-            "All contributing samples share one timestamp, so they have no spacing "
-            "to correlate over."
-        )
-    return float(np.median(positive))
 
 
 def propagate_systematic(
@@ -737,79 +620,6 @@ def sigma_at_support(
     return np.asarray(values * np.sqrt(effective), dtype=np.float64), form
 
 
-@dataclass(frozen=True)
-class BinnedSigma:
-    """Propagated uncertainties for many cells at once.
-
-    The vectorized counterpart of :class:`PropagatedSigma`. Binning a stream
-    onto a day of one-second grid cells is 86 400 propagations, and calling
-    the scalar form in a Python loop for each of them costs seconds per
-    species per sweep point.
-
-    Attributes
-    ----------
-    sigma : numpy.ndarray
-        Propagated 1-sigma per target cell, ``nan`` where nothing contributed.
-    form : str
-        The registered form used, or ``'independent'`` / ``'systematic'``.
-        One label for the whole call, because one call uses one form.
-    n_effective : numpy.ndarray
-        Effective sample size per cell.
-    """
-
-    sigma: npt.NDArray[np.float64]
-    form: str
-    n_effective: npt.NDArray[np.float64]
-
-
-def _binned_totals(
-    sigmas: npt.ArrayLike,
-    weights: npt.ArrayLike,
-    target_index: npt.ArrayLike,
-    n_target: int,
-) -> tuple[
-    npt.NDArray[np.float64],
-    npt.NDArray[np.float64],
-    npt.NDArray[np.float64],
-    npt.NDArray[np.float64],
-]:
-    """Return per-cell weight, weight-squared, weighted-sigma and weighted-variance sums.
-
-    Shared by both components so that a masked sample is excluded from each
-    of them identically. Everything is "long form": one entry per
-    (target cell, reading) pair, aggregated with ``bincount``.
-    """
-    sigma = _as_1d(sigmas, name="sigmas")
-    w = _as_1d(weights, name="weights")
-    index = np.asarray(target_index, dtype=np.int64)
-    if not (sigma.shape == w.shape == index.shape):
-        raise TsaraPropagationError(
-            f"Long-form arrays must correspond one to one; got {sigma.size} sigma(s), "
-            f"{w.size} weight(s) and {index.size} target index/indices."
-        )
-    if np.any(w < 0):
-        raise TsaraPropagationError("Weights must be non-negative.")
-    if np.any(sigma[np.isfinite(sigma)] < 0):
-        raise TsaraPropagationError("Uncertainties must be non-negative.")
-    # A pair with no sigma, or no weight, is excluded from every total alike.
-    keep = np.isfinite(sigma) & (w > 0)
-    w = np.where(keep, w, 0.0)
-    sigma = np.where(keep, sigma, 0.0)
-
-    def total_of(values: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        # `bincount` returns an integer array when it is handed no weights at
-        # all, which happens for an empty long form; asking for float64 keeps
-        # every caller's arithmetic in one dtype.
-        return np.asarray(np.bincount(index, weights=values, minlength=n_target), dtype=np.float64)
-
-    return (
-        total_of(w),  # sum w            (normalizer)
-        total_of(w * w),  # sum w^2          (for the Kish sample size)
-        total_of(w * sigma),  # sum w sigma      (systematic numerator)
-        total_of(w * w * sigma * sigma),  # sum w^2 sigma^2  (random numerator)
-    )
-
-
 def propagate_random_binned(
     sigmas: npt.ArrayLike,
     weights: npt.ArrayLike,
@@ -910,6 +720,183 @@ def propagate_random_binned(
     return BinnedSigma(sigma=sigma, form=form, n_effective=effective)
 
 
+def propagate_systematic_binned(
+    sigmas: npt.ArrayLike,
+    weights: npt.ArrayLike,
+    target_index: npt.ArrayLike,
+    n_target: int,
+) -> BinnedSigma:
+    """Propagate the systematic component onto many cells at once.
+
+    The weighted mean of the sigmas per cell (§3.3), with no reduction by
+    sample count. Vectorized counterpart of :func:`propagate_systematic`.
+
+    Parameters
+    ----------
+    sigmas, weights, target_index : array_like
+        Long form, one entry per (target cell, reading) pair.
+    n_target : int
+        Number of target cells.
+
+    Returns
+    -------
+    BinnedSigma
+        Per-cell sigma, the label ``'systematic'``, and the Kish sample size
+        of the contributing weights -- reported for symmetry, never used as a
+        divisor.
+    """
+    total, total_sq, weighted_sigma, _ = _binned_totals(sigmas, weights, target_index, n_target)
+    sigma = np.full(n_target, np.nan, dtype=np.float64)
+    effective = np.zeros(n_target, dtype=np.float64)
+    filled = total > 0
+    # Per cell: sum(w sigma) / sum w, the weighted mean of the sigmas, with no 1/sqrt(N).
+    sigma[filled] = weighted_sigma[filled] / total[filled]
+    effective[filled] = total[filled] ** 2 / total_sq[filled]
+    return BinnedSigma(sigma=sigma, form="systematic", n_effective=effective)
+
+
+def _as_1d(array: npt.ArrayLike, *, name: str) -> npt.NDArray[np.float64]:
+    """Return ``array`` as a 1-D float64 array, or raise naming the field."""
+    values = np.asarray(array, dtype=np.float64)
+    if values.ndim != 1:
+        raise TsaraPropagationError(f"{name} must be one-dimensional, got shape {values.shape}.")
+    return values
+
+
+def _variance_ratio_equal_weight(n: int, rho: float) -> float:
+    r"""Return ``Var(mean) / sigma^2`` for *n* equally spaced, equal-sigma samples.
+
+    Evaluates the §3.1 double sum in its equal-weight, equal-sigma,
+    equally-spaced case, where :math:`\rho_{ij} = \rho^{|i-j|}` collapses the
+    :math:`N^2` terms onto *N* distinct lags::
+
+        Var/sigma^2 = (1 / N^2) * (N + 2 * sum_{k=1}^{N-1} (N - k) rho^k)
+
+    The sum is evaluated **term by term** rather than through its closed
+    form. The closed form,
+    ``N (rho - rho^N)/(1 - rho) - rho(1 - N rho^(N-1) + (N-1) rho^N)/(1 - rho)^2``,
+    is algebraically identical and numerically hopeless as rho approaches 1:
+    at rho = 0.999 it subtracts two quantities of order 1e4 that agree to
+    four figures, through a denominator of 1e-6. The direct sum costs one
+    array of length N and is exact.
+
+    The terms decay geometrically, so the sum is truncated once ``rho**k``
+    falls below :data:`_GEOMETRIC_FLOOR`; past that point the contributions no
+    longer change a float64 accumulator.
+    """
+    if n <= 1:
+        return 1.0
+    if rho <= 0.0:
+        return 1.0 / n
+    if rho >= 1.0:
+        # Perfectly correlated: averaging changes nothing.
+        return 1.0
+    # How many lags can still matter, given geometric decay.
+    reach = int(np.ceil(np.log(_GEOMETRIC_FLOOR) / np.log(rho)))
+    k = np.arange(1, min(n, max(reach, 1) + 1), dtype=np.float64)
+    tail = float(np.sum((n - k) * rho**k))
+    return (n + 2.0 * tail) / (n * n)
+
+
+def _normalized_weights(weights: npt.ArrayLike, *, expected: int) -> npt.NDArray[np.float64] | None:
+    """Return weights scaled to sum to one, or ``None`` if they sum to zero.
+
+    A zero total is a real case rather than a defect -- it is what an empty
+    overlap looks like -- so it is answered with ``None`` and turned into a
+    NaN uncertainty by the caller, not raised.
+    """
+    w = _as_1d(weights, name="weights")
+    if w.size != expected:
+        raise TsaraPropagationError(
+            f"Got {w.size} weight(s) for {expected} value(s); they must correspond one to one."
+        )
+    if np.any(w < 0):
+        raise TsaraPropagationError(
+            "Weights must be non-negative; a negative weight would let one sample "
+            "subtract another's uncertainty."
+        )
+    total = float(w.sum())
+    if total <= 0:
+        return None
+    return w / total
+
+
+def _double_sum_variance(
+    sigmas: npt.NDArray[np.float64],
+    weights: npt.NDArray[np.float64],
+    times_s: npt.NDArray[np.float64],
+    tau_s: float,
+) -> float:
+    r"""Return the §3.1 double sum evaluated pair by pair.
+
+    :math:`\mathrm{Var} = \sum_i \sum_j w_i w_j \rho_{ij} \sigma_i \sigma_j`
+    with :math:`\rho_{ij} = e^{-|t_i - t_j|/\tau}`. Written as
+    :math:`a^\mathsf{T} C\, a` with :math:`a_i = w_i \sigma_i`, which is the
+    same arithmetic in one matrix product.
+
+    Assumption-free given AR(1): unlike the effective-sample-size forms it
+    needs neither equal spacing nor equal sigma, which is exactly why it is
+    the reference the others are measured against.
+    """
+    if sigmas.size > DOUBLE_SUM_MAX_POINTS:
+        raise TsaraPropagationError(
+            f"'ar1_double_sum' builds an N x N correlation matrix and got "
+            f"N = {sigmas.size}, above the {DOUBLE_SUM_MAX_POINTS} limit. Use "
+            "'ar1_neff', which is linear in N and agrees with this form to "
+            "within the margin recorded in docs/METHODS.md §3.4."
+        )
+    a = weights * sigmas
+    lag = np.abs(times_s[:, None] - times_s[None, :])
+    correlation = np.exp(-lag / tau_s)
+    return float(a @ correlation @ a)
+
+
+def _mean_spacing(
+    times_s: npt.ArrayLike | None,
+    *,
+    count: int,
+    mask: npt.NDArray[np.bool_],
+) -> float:
+    """Return the sampling interval the effective-sample-size forms should use.
+
+    Taken from the contributing samples when timestamps are available, and
+    otherwise from the caller's own claim that the samples are consecutive.
+    The median of the differences is used rather than the mean, so one gap in
+    the middle of a cell does not stretch the interval that the other samples
+    are corrected with.
+
+    Raises
+    ------
+    TsaraPropagationError
+        If no timestamps were supplied. A correlation correction without a
+        spacing would have to invent one, and inventing the very quantity the
+        correction is most sensitive to is the failure this module exists to
+        avoid.
+    """
+    if times_s is None:
+        raise TsaraPropagationError(
+            "A decorrelation timescale was declared but no times_s was given. "
+            "Correcting for correlation needs to know how far apart the samples "
+            "are; supply times_s, or pass tau_s=None to treat them as independent."
+        )
+    times = _as_1d(times_s, name="times_s")
+    if times.size != mask.size:
+        raise TsaraPropagationError(
+            f"Got {times.size} time(s) for {mask.size} sigma(s); they must correspond one to one."
+        )
+    if count < 2:
+        # One sample has no spacing; any positive value gives N_eff = 1.
+        return 1.0
+    deltas = np.diff(np.sort(times[mask]))
+    positive = deltas[deltas > 0]
+    if positive.size == 0:
+        raise TsaraPropagationError(
+            "All contributing samples share one timestamp, so they have no spacing "
+            "to correlate over."
+        )
+    return float(np.median(positive))
+
+
 def _double_sum_binned(
     sigmas: npt.ArrayLike,
     weights: npt.ArrayLike,
@@ -960,36 +947,49 @@ def _double_sum_binned(
     return BinnedSigma(sigma=out_sigma, form="ar1_double_sum", n_effective=out_effective)
 
 
-def propagate_systematic_binned(
+def _binned_totals(
     sigmas: npt.ArrayLike,
     weights: npt.ArrayLike,
     target_index: npt.ArrayLike,
     n_target: int,
-) -> BinnedSigma:
-    """Propagate the systematic component onto many cells at once.
+) -> tuple[
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+]:
+    """Return per-cell weight, weight-squared, weighted-sigma and weighted-variance sums.
 
-    The weighted mean of the sigmas per cell (§3.3), with no reduction by
-    sample count. Vectorized counterpart of :func:`propagate_systematic`.
-
-    Parameters
-    ----------
-    sigmas, weights, target_index : array_like
-        Long form, one entry per (target cell, reading) pair.
-    n_target : int
-        Number of target cells.
-
-    Returns
-    -------
-    BinnedSigma
-        Per-cell sigma, the label ``'systematic'``, and the Kish sample size
-        of the contributing weights -- reported for symmetry, never used as a
-        divisor.
+    Shared by both components so that a masked sample is excluded from each
+    of them identically. Everything is "long form": one entry per
+    (target cell, reading) pair, aggregated with ``bincount``.
     """
-    total, total_sq, weighted_sigma, _ = _binned_totals(sigmas, weights, target_index, n_target)
-    sigma = np.full(n_target, np.nan, dtype=np.float64)
-    effective = np.zeros(n_target, dtype=np.float64)
-    filled = total > 0
-    # Per cell: sum(w sigma) / sum w, the weighted mean of the sigmas, with no 1/sqrt(N).
-    sigma[filled] = weighted_sigma[filled] / total[filled]
-    effective[filled] = total[filled] ** 2 / total_sq[filled]
-    return BinnedSigma(sigma=sigma, form="systematic", n_effective=effective)
+    sigma = _as_1d(sigmas, name="sigmas")
+    w = _as_1d(weights, name="weights")
+    index = np.asarray(target_index, dtype=np.int64)
+    if not (sigma.shape == w.shape == index.shape):
+        raise TsaraPropagationError(
+            f"Long-form arrays must correspond one to one; got {sigma.size} sigma(s), "
+            f"{w.size} weight(s) and {index.size} target index/indices."
+        )
+    if np.any(w < 0):
+        raise TsaraPropagationError("Weights must be non-negative.")
+    if np.any(sigma[np.isfinite(sigma)] < 0):
+        raise TsaraPropagationError("Uncertainties must be non-negative.")
+    # A pair with no sigma, or no weight, is excluded from every total alike.
+    keep = np.isfinite(sigma) & (w > 0)
+    w = np.where(keep, w, 0.0)
+    sigma = np.where(keep, sigma, 0.0)
+
+    def total_of(values: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        # `bincount` returns an integer array when it is handed no weights at
+        # all, which happens for an empty long form; asking for float64 keeps
+        # every caller's arithmetic in one dtype.
+        return np.asarray(np.bincount(index, weights=values, minlength=n_target), dtype=np.float64)
+
+    return (
+        total_of(w),  # sum w            (normalizer)
+        total_of(w * w),  # sum w^2          (for the Kish sample size)
+        total_of(w * sigma),  # sum w sigma      (systematic numerator)
+        total_of(w * w * sigma * sigma),  # sum w^2 sigma^2  (random numerator)
+    )
