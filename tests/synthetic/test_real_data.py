@@ -27,8 +27,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from tsara.config.synthetic import BootstrapBackground
 from tsara.synthetic.background import realize_background
-from tsara.synthetic.config import BootstrapBackground
 from tsara.synthetic.profiling import profile_series
 
 #: Environment variables configuring the live-mount tests.

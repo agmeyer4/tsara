@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tsara.synthetic.config import TrueComponent, TrueUncertainty
+from tsara.config.synthetic import TrueComponent, TrueUncertainty
 from tsara.synthetic.noise import (
     _ar1_standardized,
     apply_uncertainty,

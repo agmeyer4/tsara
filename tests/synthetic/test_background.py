@@ -9,13 +9,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from tsara.config.synthetic import BootstrapBackground, ParametricBackground
 from tsara.core.timebase import SECOND_NS, SECONDS_PER_DAY
 from tsara.synthetic.background import (
     RealizedBackground,
     TsaraSyntheticError,
     realize_background,
 )
-from tsara.synthetic.config import BootstrapBackground, ParametricBackground
 from tsara.synthetic.profiling import RealDataProfile
 
 #: The campaign every test realizes over: 2026-01-01, two days.

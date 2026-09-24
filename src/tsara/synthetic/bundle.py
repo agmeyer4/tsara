@@ -69,6 +69,7 @@ import yaml
 
 from tsara import __version__
 from tsara.config.loader import read_yaml
+from tsara.config.synthetic import BootstrapBackground, SyntheticConfig
 from tsara.core.bundle import (
     BUNDLE_FORMAT_VERSION,
     BUNDLE_MANIFEST,
@@ -82,7 +83,6 @@ from tsara.core.bundle import (
     rename_retired_attrs,
 )
 from tsara.core.support import check_bounds_intact, ensure_time_bounds
-from tsara.synthetic.config import BootstrapBackground, SyntheticConfig
 from tsara.synthetic.plumes import GroundTruth
 
 if TYPE_CHECKING:  # pragma: no cover

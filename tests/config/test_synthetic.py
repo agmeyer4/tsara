@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from tsara.config.base import validate_signed_timedelta
 from tsara.config.manifest import DeclaredUncertainty, ReportedUncertainty, SupportSpec
-from tsara.synthetic.config import (
+from tsara.config.synthetic import (
     TRUTH_PREFIX,
     AtmosphereSpec,
     BootstrapBackground,
@@ -641,8 +641,13 @@ def test_mobile_with_free_gps_name_is_accepted(synthetic_dict: dict[str, Any]) -
     assert isinstance(config.platform, MobileTrack)
 
 
-def test_gas_fields_are_listed_in_declaration_order(noise_free_config: SyntheticConfig) -> None:
-    assert noise_free_config.atmosphere.gas_fields == ("ch4", "c2h6")
+def test_gas_fields_are_listed_in_declaration_order(synthetic_dict: dict[str, Any]) -> None:
+    synthetic_dict["atmosphere"]["fields"]["c2h6"] = {
+        "units": "ppb",
+        "background": {"kind": "parametric", "offset": 2.0},
+    }
+    config = SyntheticConfig.model_validate(synthetic_dict)
+    assert config.atmosphere.gas_fields == ("ch4", "c2h6")
 
 
 def test_gas_fields_leave_out_met_and_aux(synthetic_dict: dict[str, Any]) -> None:

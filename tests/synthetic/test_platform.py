@@ -13,8 +13,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from tsara.config.synthetic import MobileTrack
 from tsara.core.geodesy import METERS_PER_DEGREE
-from tsara.synthetic.config import MobileTrack
 from tsara.synthetic.platform import build_track
 
 

@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 import yaml
 
+from tsara.config.synthetic import SyntheticConfig
 from tsara.core.bundle import BUNDLE_STAGE_KEY
 from tsara.core.exceptions import TsaraConfigError
 from tsara.core.naming import (
@@ -32,7 +33,6 @@ from tsara.synthetic.bundle import (
     load_bundle,
     save_bundle,
 )
-from tsara.synthetic.config import SyntheticConfig
 from tsara.synthetic.generator import SyntheticDataset, generate
 from tsara.synthetic.profiling import RealDataProfile
 

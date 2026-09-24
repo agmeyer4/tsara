@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Hashable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import Any, TypeVar
 
 import yaml
 from pydantic import ValidationError, model_validator
@@ -40,10 +40,8 @@ from yaml.constructor import ConstructorError
 from tsara.config.analysis import AnalysisConfig
 from tsara.config.base import StrictModel as _StrictModel
 from tsara.config.manifest import Manifest
+from tsara.config.synthetic import SyntheticConfig
 from tsara.core.exceptions import TsaraConfigError
-
-if TYPE_CHECKING:  # pragma: no cover
-    from tsara.synthetic.config import SyntheticConfig
 
 logger = logging.getLogger(__name__)
 
@@ -356,13 +354,6 @@ def load_synthetic(path: str | Path) -> SyntheticConfig:
     TsaraConfigError
         If the file is missing, is not valid YAML, or fails validation.
     """
-    # Imported here, not at module scope, for two reasons: it breaks the
-    # import cycle (tsara.synthetic reads tsara.__version__ for provenance
-    # attrs), and it keeps `import tsara` from pulling in the whole synthetic
-    # subpackage — the same responsiveness concern that defers pandas in
-    # tsara.config.base.
-    from tsara.synthetic.config import SyntheticConfig
-
     path = Path(path)
     config: SyntheticConfig = _validate(SyntheticConfig, read_yaml(path), path)
     logger.info("Loaded synthetic config '%s' from %s", config.name, path)

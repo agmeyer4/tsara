@@ -87,6 +87,7 @@ import numpy as np
 import yaml
 
 from tsara.config.manifest import Manifest
+from tsara.config.synthetic import MobileTrack, StationarySite
 from tsara.core.naming import (
     LATITUDE_COORD,
     LONGITUDE_COORD,
@@ -94,14 +95,13 @@ from tsara.core.naming import (
     TIME_COORD,
 )
 from tsara.synthetic.background import TsaraSyntheticError
-from tsara.synthetic.config import MobileTrack, StationarySite
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Mapping, Sequence
 
     import xarray as xr
 
-    from tsara.synthetic.config import SyntheticConfig
+    from tsara.config.synthetic import SyntheticConfig
     from tsara.synthetic.generator import SyntheticDataset
 
 logger = logging.getLogger(__name__)

@@ -55,8 +55,8 @@ if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt
     import pandas as pd
 
+    from tsara.config.synthetic import FieldSpec, SyntheticConfig
     from tsara.core.support import CellBounds
-    from tsara.synthetic.config import FieldSpec, SyntheticConfig
     from tsara.synthetic.profiling import RealDataProfile
 
 logger = logging.getLogger(__name__)
@@ -304,7 +304,7 @@ class Atmosphere:
         What a perfect ``mean`` instrument with these cells would read,
         evaluated by the midpoint rule at ``subsamples`` instants per cell --
         the same quadrature, at the same default count, a generated ``mean``
-        instrument uses (:class:`~tsara.synthetic.config.TrueSupport`).
+        instrument uses (:class:`~tsara.config.synthetic.TrueSupport`).
 
         Parameters
         ----------

@@ -8,7 +8,7 @@ than it is, so the parametric model deliberately offers non-stationary terms
 with no closed-form inverse.
 
 Two interchangeable kinds of background, per the
-:class:`~tsara.synthetic.config.BackgroundConfig` union:
+:class:`~tsara.config.synthetic.BackgroundConfig` union:
 
 * **parametric** — analytic terms with exactly known truth, plus an optional
   random walk.
@@ -54,13 +54,13 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from tsara.core.exceptions import TsaraError
-from tsara.core.timebase import NS_PER_S, SECONDS_PER_DAY, SECONDS_PER_HOUR
-from tsara.synthetic.config import (
+from tsara.config.synthetic import (
     BackgroundConfig,
     BootstrapBackground,
     ParametricBackground,
 )
+from tsara.core.exceptions import TsaraError
+from tsara.core.timebase import NS_PER_S, SECONDS_PER_DAY, SECONDS_PER_HOUR
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt
@@ -197,8 +197,8 @@ def realize_background(
     Parameters
     ----------
     config : BackgroundConfig
-        Either a :class:`~tsara.synthetic.config.ParametricBackground` or a
-        :class:`~tsara.synthetic.config.BootstrapBackground`.
+        Either a :class:`~tsara.config.synthetic.ParametricBackground` or a
+        :class:`~tsara.config.synthetic.BootstrapBackground`.
     start_ns, end_ns : int
         The campaign, epoch nanoseconds. Drift is measured from ``start_ns``,
         and stochastic terms are realized across ``[start_ns, end_ns]``.

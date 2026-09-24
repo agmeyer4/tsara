@@ -34,12 +34,7 @@ from tsara.align import (
     pair_species,
 )
 from tsara.config.analysis import OutputGridConfig
-from tsara.core.naming import sigma_rand_name
-from tsara.core.propagation import PROPAGATION_FORMS, PropagationForm
-from tsara.core.support import CellBounds
-from tsara.core.timebase import SECOND_NS as SECOND
-from tsara.synthetic import generate
-from tsara.synthetic.config import (
+from tsara.config.synthetic import (
     AtmosphereSpec,
     FieldSpec,
     GaussianShape,
@@ -55,6 +50,11 @@ from tsara.synthetic.config import (
     TrueSupport,
     TrueUncertainty,
 )
+from tsara.core.naming import sigma_rand_name
+from tsara.core.propagation import PROPAGATION_FORMS, PropagationForm
+from tsara.core.support import CellBounds
+from tsara.core.timebase import SECOND_NS as SECOND
+from tsara.synthetic import generate
 from tsara.synthetic.generator import SyntheticDataset
 
 START = pd.Timestamp("2026-07-01T00:00:00Z").to_pydatetime()

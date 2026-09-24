@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tsara.synthetic.config import (
+from tsara.config.synthetic import (
     AtmosphereSpec,
     EMGShape,
     FieldSpec,
@@ -147,24 +147,14 @@ def with_sources() -> WithSources:
     return _swap
 
 
-@pytest.fixture()
-def source_dict() -> dict[str, Any]:
-    """Raw dict for a valid source, for validation-failure tests."""
-    return {
-        "rate_per_hour": 2.0,
-        "shape": {"kind": "gaussian", "sigma": "20s"},
-        "reference_species": "ch4",
-        "amplitude": {"kind": "lognormal", "median": 100.0, "sigma_log": 0.5},
-        "ratios": {"c2h6": {"mean": 0.05}},
-    }
-
-
-# `synthetic_dict` deliberately lives in the ROOT conftest, not here: both
-# tests/config (loader round-trips) and tests/synthetic (schema validation)
-# need it, and a second copy at this level would shadow the root one for
-# everything under tests/synthetic/. The two were byte-identical, so nothing
-# depended on the shadowing — but the next edit to either would have made the
-# same config mean different things in different directories.
+# `synthetic_dict` and `source_dict` deliberately live in the ROOT conftest,
+# not here: they are raw dicts for schema validation, which tests/config runs
+# now that the schema is tsara.config.synthetic, while tests/synthetic builds
+# on `synthetic_dict` too. A second copy at this level would shadow the root
+# one for everything under tests/synthetic/ -- the two were once
+# byte-identical, so nothing depended on the shadowing, but the next edit to
+# either would have made the same config mean different things in different
+# directories.
 
 
 @pytest.fixture()

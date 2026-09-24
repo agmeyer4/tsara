@@ -29,9 +29,7 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
-from tsara.core.timebase import SECONDS_PER_HOUR
-from tsara.core.timebase import to_utc_naive_stamp as _to_utc_naive_stamp
-from tsara.synthetic.config import (
+from tsara.config.synthetic import (
     AmplitudeSpec,
     GaussianShape,
     LognormalAmplitude,
@@ -40,6 +38,8 @@ from tsara.synthetic.config import (
     SourceSpec,
     SyntheticConfig,
 )
+from tsara.core.timebase import SECONDS_PER_HOUR
+from tsara.core.timebase import to_utc_naive_stamp as _to_utc_naive_stamp
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt
@@ -207,8 +207,8 @@ def build_kernel(shape: PlumeShape) -> PlumeKernel:
     Parameters
     ----------
     shape : PlumeShape
-        A :class:`~tsara.synthetic.config.GaussianShape` or
-        :class:`~tsara.synthetic.config.EMGShape`.
+        A :class:`~tsara.config.synthetic.GaussianShape` or
+        :class:`~tsara.config.synthetic.EMGShape`.
 
     Returns
     -------
@@ -281,7 +281,7 @@ class RealizedEvent:
     event_id : str
         Unique identifier, e.g. ``"well_pad_00007"``.
     source_name : str
-        Key of the :class:`~tsara.synthetic.config.SourceSpec` that spawned it.
+        Key of the :class:`~tsara.config.synthetic.SourceSpec` that spawned it.
     center_time : pandas.Timestamp
         The shape's center parameter (Gaussian mu), *before* per-species lag.
     kernel : PlumeKernel
@@ -396,7 +396,7 @@ def _draw_ratio(spec: RatioSpec, rng: np.random.Generator) -> float:
     """Draw one realized enhancement ratio.
 
     Uses the lognormal parameterization from
-    :meth:`~tsara.synthetic.config.RatioSpec.lognormal_parameters`, so the
+    :meth:`~tsara.config.synthetic.RatioSpec.lognormal_parameters`, so the
     configured ``mean`` is the true arithmetic mean of the draws and
     ``relative_spread`` is their true relative standard deviation. A
     zero-spread spec returns the mean exactly.

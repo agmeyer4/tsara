@@ -17,6 +17,19 @@ import pandas as pd
 import pytest
 from pydantic import ValidationError
 
+from tsara.config.synthetic import (
+    AtmosphereSpec,
+    FieldSpec,
+    GaussianShape,
+    InstrumentSpec,
+    MeasurementSpec,
+    NestedSpec,
+    ParametricBackground,
+    RatioSpec,
+    SyntheticConfig,
+    TrueComponent,
+    TrueUncertainty,
+)
 from tsara.core.circular import wrap_degrees
 from tsara.core.naming import (
     BOUNDS_ATTR,
@@ -32,19 +45,6 @@ from tsara.core.naming import (
 )
 from tsara.synthetic.atmosphere import realize_atmosphere
 from tsara.synthetic.background import TsaraSyntheticError
-from tsara.synthetic.config import (
-    AtmosphereSpec,
-    FieldSpec,
-    GaussianShape,
-    InstrumentSpec,
-    MeasurementSpec,
-    NestedSpec,
-    ParametricBackground,
-    RatioSpec,
-    SyntheticConfig,
-    TrueComponent,
-    TrueUncertainty,
-)
 from tsara.synthetic.generator import (
     TRUTH_PREFIX,
     _build_cells,

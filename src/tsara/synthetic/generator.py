@@ -63,6 +63,16 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from tsara import __version__
+from tsara.config.synthetic import (
+    TRUTH_PREFIX,
+    FieldSpec,
+    InstrumentSpec,
+    MobileTrack,
+    PlumeShape,
+    SourceSpec,
+    StationarySite,
+    SyntheticConfig,
+)
 from tsara.core.circular import wrap_degrees
 from tsara.core.geodesy import positions_at
 from tsara.core.naming import (
@@ -82,16 +92,6 @@ from tsara.core.timebase import to_utc_naive as _to_utc_naive
 from tsara.core.timebase import to_utc_naive_stamp as _to_utc_naive_stamp
 from tsara.synthetic.atmosphere import Atmosphere, CellGrid, realize_atmosphere
 from tsara.synthetic.background import TsaraSyntheticError
-from tsara.synthetic.config import (
-    TRUTH_PREFIX,
-    FieldSpec,
-    InstrumentSpec,
-    MobileTrack,
-    PlumeShape,
-    SourceSpec,
-    StationarySite,
-    SyntheticConfig,
-)
 from tsara.synthetic.noise import apply_uncertainty, quantize
 from tsara.synthetic.platform import build_track
 from tsara.synthetic.plumes import GroundTruth, GroundTruthEvent
@@ -106,7 +106,7 @@ if TYPE_CHECKING:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 #: Prefix marking variables that describe the answer rather than the data.
-#: Defined in :mod:`tsara.synthetic.config` (the schema layer reserves it so
+#: Defined in :mod:`tsara.config.synthetic` (the schema layer reserves it so
 #: a ``report_as`` column can never shadow the answer key) and re-exported
 #: here, where it is used.
 __all__ = ["SyntheticDataset", "TRUTH_PREFIX", "generate"]
@@ -227,7 +227,7 @@ def generate(
         Full specification of the dataset to manufacture.
     profiles : mapping of str to RealDataProfile, optional
         Real-data profiles keyed by name, required only if any field uses a
-        :class:`~tsara.synthetic.config.BootstrapBackground`. Passed at call
+        :class:`~tsara.config.synthetic.BootstrapBackground`. Passed at call
         time rather than embedded in the config so that real-data-derived
         arrays can never be serialized into a config file.
 
@@ -563,7 +563,7 @@ def _build_times(
     """
     import pandas as pd
 
-    from tsara.synthetic.config import DropoutSpec
+    from tsara.config.synthetic import DropoutSpec
 
     # Normalize to tz-naive UTC immediately. TSARA is UTC internally, and a
     # tz-aware axis would (a) make tz-aware and tz-naive configs produce
@@ -635,7 +635,7 @@ def _apply_dropouts(
     """
     import pandas as pd
 
-    from tsara.synthetic.config import DropoutSpec
+    from tsara.config.synthetic import DropoutSpec
 
     assert isinstance(dropouts, DropoutSpec)  # narrowed by the caller
 

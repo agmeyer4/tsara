@@ -8,6 +8,13 @@ true about it". The generator (:mod:`tsara.synthetic.generator`) turns one
 a :class:`~tsara.synthetic.plumes.GroundTruth` record of every fact the
 analysis pipeline will later have to rediscover.
 
+It lives beside the manifest and analysis schemas rather than inside the
+synthetic stage because it *is* a schema: the config package is the whole
+vocabulary a TSARA YAML file may speak, loaded through one door
+(:mod:`tsara.config.loader`), and the synthetic stage consumes this schema
+the way ingestion consumes the manifest. :mod:`tsara.synthetic` re-exports
+the names a user builds a dataset from.
+
 Design decisions embedded in this schema
 -----------------------------------------
 * **One atmosphere, sampled by every instrument.** The air is described once,

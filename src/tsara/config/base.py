@@ -105,7 +105,7 @@ def validate_signed_timedelta(value: str, *, field: str) -> None:
 
     The sibling anticipated by :func:`validate_positive_timedelta`, added when
     the first genuinely signed time quantity appeared: the synthetic
-    generator's ``inter_species_lag`` (:mod:`tsara.synthetic.config`). A lag is
+    generator's ``inter_species_lag`` (:mod:`tsara.config.synthetic`). A lag is
     an *offset*, not a duration — a species that arrives at the inlet 15 s
     *before* the reference species is a physically meaningful configuration
     (different stacks, different transport paths), so zero and negative values

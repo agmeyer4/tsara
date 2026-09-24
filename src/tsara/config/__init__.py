@@ -11,6 +11,10 @@ manifest
 analysis
     *What to do with it*: master grid, baseline parameter sweeps, plume
     detection, smoothing, clustering, and regression settings.
+synthetic
+    *What fake reality to manufacture*: an atmosphere, its sources and the
+    instruments sampling it, with every ground truth stated. A schema like
+    the other two, consumed by :mod:`tsara.synthetic`.
 loader
     YAML → validated config objects, with readable error reporting and
     manifest-relative path resolution.

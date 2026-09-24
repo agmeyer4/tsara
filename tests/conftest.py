@@ -147,6 +147,18 @@ def synthetic_dict() -> dict[str, Any]:
 
 
 @pytest.fixture()
+def source_dict() -> dict[str, Any]:
+    """Raw dict for a valid source, for validation-failure tests."""
+    return {
+        "rate_per_hour": 2.0,
+        "shape": {"kind": "gaussian", "sigma": "20s"},
+        "reference_species": "ch4",
+        "amplitude": {"kind": "lognormal", "median": 100.0, "sigma_log": 0.5},
+        "ratios": {"c2h6": {"mean": 0.05}},
+    }
+
+
+@pytest.fixture()
 def respell_as_format_2() -> RespellBundle:
     """Return a helper that rewrites a saved stream bundle as format 2 wrote it.
 
