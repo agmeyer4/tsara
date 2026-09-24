@@ -25,11 +25,17 @@ attributes and this document, because each was once used for several:
 | Word | Means | Never means |
 |---|---|---|
 | **source** | an *emission* source: something emitting gases at a ratio (`SourceSpec`, a Source Complex) | the input of a join, where a number came from, or a file |
-| **reading** | one value an instrument wrote, with the cell of time it describes; the input side of any join (`n_readings_<name>`, `reading_index`) | a row of a product TSARA built. A product may not be joined again, so a reading is always a measurement (§11.2.3) |
+| **reading** | one value an instrument wrote, with the cell of time it describes; the input side of any join (`n_readings_<name>`, `reading_index`) | a row of a product TSARA built. Joining a product again is refused today and will be allowed only with a record saying its rows are not readings (§11.2.3) |
+| **stream** | one instrument's dataset at native rate: every row is a reading on its own cell (§1.1) | a product |
+| **ingest** | reading each value from a file together with the cell the file or the manifest says it describes; one file row becomes one stream row, the number unchanged (§9) | a join |
+| **join** | computing a value on a cell the caller chose, as the overlap-weighted mean of the readings touching it, its sigma propagated through the same weights (§11.2); many readings in, one row out | interpolation, or any statistic other than the mean |
+| **product** | what a join returns; its `tsara_stage` is `binned`, `paired` or `gridded` | a stream |
+| **cell set** | the cells a join is asked to fill; need not be uniform, sorted or disjoint (§1.4) | |
 | **target cell** / **row** | a cell a join puts values onto, and the line of a product that describes it | |
 | **pair** | a row where both species of a regression have a value (§1.3) | |
 | **provenance** | where a number or a fact came from: `declared`, `reported`, `inferred`, `assumed`, `empirical` … (`uncertainty_provenance`, `tsara_support_label_provenance`) | |
 | **field** | the physical quantity a variable measures (§1.6) | |
+| **baseline at window w** | the low quantile of a variable over a window of length w around a reading; always stated with its window (§6.1) | "the baseline" or "the true background": what is baseline at one window is signal at another |
 | **borrowed** | the share of a joined value resting on air outside its own cell (`borrowed_<name>`, `tsara_borrowed_share`, §11.2.4) | an uncertainty; it is a magnitude, and no threshold on it separates a blend from jitter |
 | **averaged / straddled / narrowed / copied** | what a join did to the readings behind a column (`tsara_support_transform`, §11.2.4): wholly inside their cells; lying across a boundary; wider than a cell they fill; at least twice as wide, which is refused unless asked for by name | |
 | **shared** | a reading that formed more than one row of a product, so those rows share its error (`tsara_shared_readings`, the sharing warnings, §11.4.1) | the support label: a straddled reading is shared only when both cells it lies across are rows of the product, which a sparse partner's are not |
@@ -55,10 +61,10 @@ The pipeline defers any change of clock to the last possible moment:
 | Stage | Clock used | Support (§10) |
 |---|---|---|
 | QA/QC, unit conversion | native | unchanged; both are pointwise |
-| Rolling baseline, enhancement Δ | native (time-based windows) | windows are durations, so cells of any width fit |
+| Rolling baseline, enhancement Δ, noise σ — the continuous rolling state | native (time-based windows), per stream (§6.2) | windows are durations, so cells of any width fit; each reading is weighted by the share of its cell inside the window (§6.3) |
 | Plume detection | native → events are time **intervals** | an event's bounds are the union of the cells above threshold; the smallest resolvable event is one cell |
 | Ratio regression | **pairing clock** (§1.3), per event/window | the **wider-supported** stream's cells, with its partner averaged onto them by overlap |
-| Continuous rolling state, PMF matrix | **output grid** (§1.4) | grid cells, overlap-weighted |
+| Receptor-model (PMF) export | a **cell set** chosen for it (§1.4) | one join onto those cells |
 
 Rationale: rolling quantiles and MAD thresholds are well-defined on irregular
 native timestamps; resampling before those stages either destroys information
@@ -68,8 +74,9 @@ pays for one.
 
 The rejected middle path — a single Dataset on the union of all native
 timestamps, NaN-padded — is called out explicitly because it looks like a
-compromise: it corrupts rolling-window valid-sample counts, bloats memory, and
-makes "minimum valid fraction" semantics incoherent. It is not used.
+compromise: it corrupts the count of readings in every rolling window, bloats
+memory, and makes any fraction-of-window validity rule measure the padding
+rather than the data (§6.4). It is not used.
 
 Note that early synchronization remains *expressible* in this architecture
 (bin every stream to the output grid first, then run the identical per-stream
@@ -150,24 +157,85 @@ uses its own wider-supported member). Each ratio is an independent slope estimat
 its own honest CI; no shared clock across pairs is required for the ratios to
 be comparable as estimates.
 
-### 1.4 Output grid
+### 1.4 Cell sets, and the uniform grid as one of them
 
-A single uniform master grid — the familiar `(time × species)` cube — is
-constructed **only** for the continuous rolling state and the PMF export
-matrix, which inherently require one. Construction is binning-only, by
-overlap-weighted mean and no other statistic (§11.7), with per-cell
-propagated uncertainties and `n_readings_<name>` counts carried alongside values. Grid cells carry CF boundaries like any
-other stream, and `cell_methods = "time: mean (interval: <native>)"` records
-the resolution of the data that went into them (§10.2). Validation refuses a
-period at which a selected reading would be **at least twice as wide as a grid
-cell it touches** — copied across rows — unless `finer_support: allow` asks
-for it (§11.2.4, §11.7; the post-Phase-3.5 form of "≥ the slowest stream's
-native period"); everything narrower is recorded per column and named in one
+**Decided 2026-09-24 (owner), replacing Phase 1's "master grid".** The
+primitive is a **cell set**: the list of cells a join is asked to fill. It
+need not be uniform, sorted or disjoint. A grid in the everyday sense, a table
+with a row per cell and blanks where a species has no reading, is a cell set
+with values joined onto it. A uniform tiling and a rectangular table are the
+obvious cases that fall out at the end; they are not the structure underneath.
+
+Two things are chosen for every join, and only two. *Which cells*: today
+another instrument's own cells (pairing, §1.3), a uniform tiling
+(`grid_cells`), or cells the caller supplies (`pair_species(target=)`, and
+overlapping windows since Phase 4.6). *How a value is made* from the readings
+touching a cell: one rule, the overlap-weighted mean (§11.2). It stays the only
+rule because it is the only one that is a physical claim about the cell: a
+60 s mean is what a 60 s instrument would have reported.
+
+**"Same air" is a rule about arithmetic, not about the container.** Two numbers
+may be combined, as a ratio, a slope or one row of a receptor matrix, only when
+they describe the same cell. A table with blanks is a fine container; the rule
+applies at the moment two columns meet.
+
+The word "grid" used to hide three different needs:
+
+| need | what it requires | where TSARA meets it |
+|---|---|---|
+| same air for cross-species arithmetic | a common cell set per operation | a join onto whatever cells the question names |
+| even sampling for signal processing (filters, FFT) | one series, evenly spaced, contiguous | Phase 8 smoothing: per stream at native rate, or per contiguous run of a product's column; a blank is never filled, since filling one is interpolating a gas |
+| a rectangular table for a downstream tool | rows × columns at the end | an export: one join onto chosen cells, plus a writer |
+
+Only the first is about the science, and it never requires uniformity.
+
+**What this settles.** The continuous rolling state is not a grid product: it
+lives per stream at native rate, beside the readings (§6.2). A receptor-model
+table is one join onto a cell set chosen for it, and there is no
+receptor-matrix object (§11.7). Three candidate cell sets, measured on the ten
+2024 mobile-lab drive days:
+
+| cell set | rows | CH4 (Picarro, `CH4_ppb`) | benzene (iWAS canister) | what a row is |
+|---|---|---|---|---|
+| 60 s tiling, per drive | 3,350 | 99.8 % of rows occupied | 7.7 % of rows | a minute of transect |
+| the canister fills themselves | 261 | every fill; median 7 readings, coverage 0.43 | 100 % | one physical sample |
+| plume events, proxy rule, 07-18 drive only | 162 at Δ > 50 ppb | median 1 reading per event | none | one encounter with a plume |
+
+Rules. The tiling covers each drive, a drive being a run of the MetNav record
+with no gap over an hour; every threshold from 2 s to 6 h finds the same ten.
+A row is occupied when at least one finite reading's midpoint falls in it. The
+fill cells are the iWAS `iWAS_Start`/`iWAS_Stop_UTC` intervals (median 14.9 s),
+with CH4 joined onto them by `bin_streams_onto_cells`; coverage is 0.43 because
+the 2024 merge file gives the analyzer 1 s rows while it reports about every
+2.3 s (§9.2.3). The event rule is a stated proxy, not TSARA's detector: a
+10-minute centred 5th-percentile baseline by midpoint membership, Δ above the
+threshold, and maximal runs of such readings no more than 3.1 s apart, over the
+07-18 drive's 8,448 CH4 readings. At 50 ppb, 71.6 % of events are one or two
+readings wide, the 90th percentile lasts 17 s and the widest 311 s.
+
+**The uniform grid as built** (`build_output_grid`, §11.7) is one factory for
+one kind of cell set, a tiling. Construction is binning only, by
+overlap-weighted mean and no other statistic (§11.7.1), with per-cell
+propagated uncertainties and `n_readings_<name>` counts carried alongside
+values. Grid cells carry CF boundaries like any other stream and
+`cell_methods = "time: mean"`. Earlier versions of this section said the string
+also records the resolution of what went in, as `time: mean (interval:
+<native>)`; the binner has never written that (found 2026-09-24), and whether
+it should is for the phase that builds an export. Validation refuses a period
+at which a selected reading would be **at least twice as wide as a grid cell it
+touches**, copied across rows, unless `finer_support: allow` asks for it
+(§11.2.4, §11.7); everything narrower is recorded per column and named in one
 warning; cells with no native samples are NaN with `n_readings_<name> = 0`,
-never interpolated. Config: `OutputGridConfig`
-(`tsara.config.analysis`) — deliberately not named "the grid" or paired with
-the aux-interpolation guard, since neither streams nor cross-species pairing
-(§1.3) use it; it exists solely for this output boundary.
+never interpolated. Config: `OutputGridConfig` (`tsara.config.analysis`).
+
+**Put off, deliberately (2026-09-24).** What else produces cell sets (an
+instrument's own cells, the event catalog), how a configuration names that
+choice, and the export writer are decided when the export is built.
+`AnalysisConfig.output_grid` is required today and validated against the
+shortest baseline window, a grid the baseline never rolls over; it is to become
+optional, and the validator is replaced by the rule of §6.4. Nothing yet names
+a *segment*, a contiguous run of a record such as one drive, though per-drive
+cells, per-drive export and Phase 8's segment-wise filtering all need one.
 
 ### 1.5 Circular statistics for angular variables
 
@@ -680,12 +748,219 @@ not a sole objective. **[estimator details — Phase 7]**
 
 ---
 
-## 6. Baselines, detection, smoothing, clustering **[stubs]**
+## 6. Baselines, detection, smoothing, clustering
 
-- **Rolling low-quantile baseline** **[stub — Phase 5]**: quantile q of a
-  centered time-based window; window/quantile lists are sweep dimensions.
-  Baseline *uncertainty* (order-statistic variance or block bootstrap) to be
-  specified in Phase 5 — it feeds Δ uncertainty.
+Baselines were scoped on 2026-09-24 and are decided in §6.1–6.6, to be built in
+Phase 5; the numbers quoted were measured on the permitted 2024 archive under
+the rules stated beside them. Detection, smoothing and clustering remain stubs
+(§6.8).
+
+### 6.1 What a baseline is for **[decided 2026-09-24 — Phase 5]**
+
+**Enhancement is the quantity used; the baseline is what a method subtracted to
+get it.** Δ = value − baseline, so either one gives the other. The baseline is
+stored so that it can be looked at and checked, not because it is a separate
+scientific quantity. Where it matters:
+
+| use | does the baseline matter? |
+|---|---|
+| finding plumes: detection looks for Δ above noise | yes; this is its main job |
+| a ratio from single readings, Δy / Δx | yes |
+| a receptor model fed enhancements | yes |
+| a slope fitted inside one event (OLS, York) | only through how it changes during the event: a baseline flat across the event moves the intercept, not the slope |
+
+So for the regression ratios TSARA exists to produce, the baseline's job is
+mostly to say where the plumes are.
+
+**There is no single true baseline.** A rolling low quantile over a window of
+length *w* follows everything slower than about *w* and leaves what is shorter
+standing as enhancement; a plume that fills most of the window becomes part of
+that window's baseline. Worked case: a 30-minute landfill plume with a
+20-second gas blip on top of it.
+
+| window | the baseline follows | events found on Δ |
+|---|---|---|
+| 2 min | the landfill air | the blip |
+| 2 h | the air under the landfill | the landfill, and the blip inside it |
+| 6 h | slower structure, such as valley build-up | the same, plus anything slower |
+
+The selection is not sharp: a plume close to the window's length is partly
+absorbed. That is why the window is a sweep dimension rather than a setting to
+get right: the sweep reports how an answer moves with scale instead of choosing
+one. Nesting is read directly off the results: an event found at a short
+window whose interval lies inside an event found at a longer one is its child,
+which is the parent–child link of the catalog (§6.8). This document therefore
+says "the baseline at window *w*", never "the baseline".
+
+**Open, for Phases 6–7: which window's ratio belongs to which event.** At the
+2-hour window the blip's enhancement includes the landfill air beneath it, so a
+ratio fitted there mixes the two sources; the blip's own ratio comes from the
+short window, and the landfill's from the long one. Candidate rule, not
+decided: an event's ratio is judged across the windows at which that event is
+found; a ratio flat across them belongs to the source, and one that drifts is
+mixing with another scale. That is the stability cube (§5) read per event.
+
+### 6.2 The continuous rolling state lives beside the readings **[decided 2026-09-24 — Phase 5]**
+
+For every reading of every instrument and every point of the sweep, the rolling
+state holds the baseline, the enhancement Δ, and the noise scale σ that
+detection thresholds are quoted in. All three are per-reading quantities. They
+live on the reading's own cell at native rate, with the sweep
+(`baseline_window`, `baseline_quantile`) as extra dimensions, and are saved
+beside the stream they came from. They are not a grid product (§1.4). Size for
+one species at 3 windows × 3 quantiles × (baseline, Δ, σ) in float64, over the
+ten 2024 drive days:
+
+| stored on | rows | size |
+|---|---|---|
+| the Picarro stream's own rows (the merge file's 1 s rows) | 200,410 | 43 MB |
+| a 1 s grid spanning the campaign | 2,546,521 | 550 MB, 92.1 % of it outside any drive |
+| 60 s cells per drive | 3,350 | 0.7 MB |
+
+Native rate is thirteen times smaller than the spanning grid and loses nothing.
+Thirty species at native rate is about 1.3 GB, which eager NumPy carries; the
+Dask question stays with Phase 7's cube.
+
+A per-reading product keeps each reading's cell, so it is joined like a stream
+(§11.2.3): putting a dense instrument's baseline onto a canister's fills
+(§6.5) is an ordinary join. One mechanical gap stands in the way. The join
+accepts a variable with a time axis and nothing else, and a swept baseline
+carries 3 × 3 = 9 versions per reading. The join's weights depend only on the
+readings and the cells, so they are the same for all nine, and averaging every
+version at once is a generalisation of the binner, not a redesign.
+
+### 6.3 Which readings belong to a window **[decided 2026-09-24 — Phase 5]**
+
+Windows are durations, centred on each reading. **A reading contributes in
+proportion to the share of its own cell lying inside the window**, which is the
+interval model and the weight every join already uses, so the baseline is a
+weighted quantile. The width rule of every join holds here too: a reading at
+least `COPY_RATIO` = 2 times as wide as the window is not stood on it
+(§11.2.4). In practice the count of §6.4 refuses those windows first, because a
+window shorter than half a reading touches at most two readings; the width rule
+is the backstop for a quantile such as the median, whose required count is
+small.
+
+Not xarray's `rolling().construct()`: that is count-based and cannot take a
+duration. On the 07-18 drive a 600-reading window spans about 23 minutes
+(600 × the analyzer's mean spacing of 2.31 s) and changes length at every
+dropout.
+
+**Rejected: membership by midpoint** (a reading belongs if its midpoint lies in
+the window, which is what pandas' time-based rolling gives). Measured, the two
+rules differ in the second order. Rule: 5th percentile; a window centred on
+every finite reading's midpoint; the overlap rule is a weighted quantile
+interpolated at cumulative-weight midpoints; "differ" means any difference
+above 10⁻⁹ ppb.
+
+| stream | window | windows | differ | median | p95 | max (ppb) |
+|---|---|---|---|---|---|---|
+| ground Picarro, 60 s means, 07-15 to 07-17 | 2 min | 4,092 | 97 % | 0.09 | 2.62 | 28.96 |
+| ground Picarro, 60 s means | 10 min | 4,092 | 92 % | 0.14 | 1.75 | 13.65 |
+| ground Picarro, 60 s means | 60 min | 4,092 | 78 % | 0.05 | 0.85 | 7.22 |
+| drive Picarro, 1 s cells, 07-18 | 2 min | 8,448 | 83 % | 0.09 | 0.67 | 21.79 |
+| drive Picarro, 1 s cells | 10 min | 8,448 | 62 % | 0.04 | 0.19 | 2.18 |
+| drive Picarro, 1 s cells | 60 min | 8,448 | 27 % | 0.00 | 0.05 | 0.59 |
+
+The difference is sub-ppb typically and large only where a window holds a
+handful of wide cells, which is the regime where a 5th percentile of three
+readings is not a background anyway. Overlap weighting was chosen because the
+package says a value describes an interval, not because of the size of the
+effect. What would not be defensible is leaving the rule unstated, since every
+window's reading count depends on it.
+
+### 6.4 When a window is valid: a count **[decided 2026-09-24 — Phase 5]**
+
+**Validity is a count of readings, `min_readings`, with a stated relation to
+the quantile.** With *N* readings and linear interpolation, a *q*-quantile lies
+between the two lowest readings whenever (*N* − 1)·*q* < 1; at *q* = 0.05 that
+is any window of twenty readings or fewer, so the default follows 1/*q*. Every
+window records `n_readings_` and `coverage_` as every join does. One warning
+per stream at run time names the windows too short for the quantile. This
+replaces `BaselineConfig.min_valid_fraction` and the `AnalysisConfig` validator
+that compares the shortest window with the output grid (both removed in
+Phase 5). Proposed with the decision and to be confirmed in the Phase-5 plan: a
+window that fails the count or the width rule of §6.3 leaves that sweep point
+blank for that instrument, with the reason recorded, instead of raising, so
+one short window on a 60 s instrument does not stop a whole sweep.
+
+**Why not a fraction.** `min_valid_fraction` never said what it was a fraction
+of, and on real data the three readings disagree completely. Share of windows,
+centred on each finite reading, that pass 0.5:
+
+| stream, 2024 | window | finite rows ÷ rows in window | seconds measured ÷ window | finite readings ÷ (window ÷ own spacing) |
+|---|---|---|---|---|
+| drive Picarro CH4, 07-18 (1 s rows; median spacing between readings 2.0 s) | 10 min | 0.0 % | 0.0 % | 99.6 % |
+| drive Picarro CH4, 07-18 | 60 min | 0.0 % | 0.0 % | 97.2 % |
+| drive NOy-LIF, 07-18 | 10 min | 100 % | 100 % | 100 % |
+| iWAS canisters, 07-18 (32 fills, median spacing 441 s) | 10 min | 100 % | 0.0 % | 100 % |
+| iWAS canisters, 07-18 | 60 min | 100 % | 0.0 % | 84.4 % |
+| ground Picarro 60 s means, 07-15 to 07-17 | 10 min | 100 % | 100 % | 100 % |
+
+The first two denominators say the 07-18 drive has no valid window at all: they
+measure the merge file's 1 s rows (§9.2.3), not the analyzer. The third passes
+the drive, but it is relative to the stream itself, so a canister passes with
+one fill in the window. None of them is what a quantile needs; a count is.
+
+### 6.5 Baseline methods: options, not one rule **[decided 2026-09-24 — Phase 5]**
+
+Because a baseline is not a single thing (§6.1), a sparse instrument does not
+get one policy. Each option is a baseline method registered by name, like the
+file readers and the noise estimators, and chosen **per variable** in the
+analysis configuration. Whether the method itself becomes a sweep axis is left
+until a sweep needs it.
+
+- **`rolling_quantile`.** The weighted low quantile of §6.3 over each window,
+  blank with the reason recorded wherever a window holds too few readings
+  (§6.4).
+- **`from_field`.** The baseline of a dense instrument measuring the same
+  `field` (§1.6), at the same window and quantile, joined onto this
+  instrument's cells. The atmosphere has one benzene background, and a PTR-MS
+  samples it every second beside the canister. It fails exactly when the two
+  instruments disagree in calibration. It needs the join to accept a swept
+  variable (§6.2).
+- **`constant`.** A declared number, zero included; at zero the enhancement is
+  the concentration. A slope fitted inside an event loses nothing by it
+  (§6.1), and a receptor model run on concentrations rather than enhancements
+  is common practice, with the background appearing as a factor of its own.
+
+**Why a sparse instrument needs options.** Fills of the iWAS canister in a
+window centred on each fill, over all 261 fills of the ten 2024 drive days,
+counting fills whose midpoints fall inside, the fill itself included:
+
+| window | fills in the window (min / median / max) | only itself | fewer than 5 |
+|---|---|---|---|
+| 2 min | 1 / 1 / 4 | 93 % | 100 % |
+| 10 min | 1 / 1 / 5 | 54 % | 100 % |
+| 60 min | 1 / 6 / 11 | 0.4 % | 30 % |
+| 6 h | 8 / 23 / 35 | 0 % | 0 % |
+
+A canister species has a `rolling_quantile` baseline only at windows of hours,
+while the 1 s analyzers beside it have baselines at minutes. What stands in at
+the scales it cannot see is a choice made per variable, not a rule.
+
+### 6.6 What a baseline records **[decided 2026-09-24 — Phase 5]**
+
+CF's `cell_methods` vocabulary (Appendix E of the conventions) has no general
+quantile, and asks for bounds with any method other than `point`. A baseline at
+a reading is a statistic over a window stated at a cell inside it: two
+supports, and no CF string is true of both. TSARA already has the precedent:
+the sigma companions carry no `cell_methods`, because nothing CF can say about
+them is true (§10.2). So a baseline carries **no `cell_methods`**, and instead
+TSARA attributes naming its method, window, quantile and membership rule, with
+per-window `n_readings_` and `coverage_` beside it; the names are fixed in
+Phase 5 and documented here then. The enhancement inherits the reading's own
+`cell_methods`, since subtracting a per-reading number changes nothing about
+what the cell is. A rolling slope in Phase 7 is a product whose cells are its
+windows, under the same no-false-method rule.
+
+### 6.7 Baseline uncertainty **[stub — Phase 5]**
+
+Order-statistic variance or block bootstrap, to be specified in Phase 5; it
+feeds the uncertainty of Δ.
+
+### 6.8 Detection, smoothing, clustering **[stubs]**
+
 - **Plume detection** **[partial stub — Phase 6]**: two-threshold hysteresis
   segmentation of the enhancement Δ (config: `DetectionConfig.enter_sigma`
   (sweep dim) / `exit_sigma`, both in noise-σ units, plus `min_duration` and
@@ -703,10 +978,15 @@ not a sole objective. **[estimator details — Phase 7]**
   across sweep points. Exact segmentation details specified in Phase 6.
   Nested events (an event at a short baseline window inside an event at a
   longer one) are recorded with parent–child links in the catalog —
-  detection-level bookkeeping only; no area mathematics (§7).
+  detection-level bookkeeping only; no area mathematics (§7). How windows
+  see scales, and the open question of which window's ratio belongs to which
+  event, are in §6.1.
 - **Smoothing** **[stub — Phase 8]**: zero-phase Butterworth per stream at its
   native nominal rate, segment-wise around gaps (filtfilt requires uniform
-  sampling; each instrument is nominally uniform between gaps).
+  sampling; each instrument is nominally uniform between gaps), or along a
+  contiguous run of a product's column (§1.4). A blank is never filled, since
+  filling one is interpolating a gas; the filter is recorded like every other
+  operation, its weights carrying the sigma as a join's do.
 - **Source-complex clustering** **[stub — Phase 8]**: DBSCAN on scaled
   space-time coordinates.
 
@@ -716,7 +996,7 @@ not a sole objective. **[estimator details — Phase 7]**
 
 TSARA's pipeline is designed so new science stages can be inserted at any
 point later without rearchitecting: stages consume and produce the documented
-products of §1 (native-rate streams, event catalog, output grid), estimators
+products of §1 (native-rate streams, event catalog, joined products), estimators
 are registered by name, and the catalog schema reserves room for
 stage-specific columns. Candidates already identified, deliberately **not** in
 v1:
@@ -2924,9 +3204,37 @@ carries them as a data variable, so the selection accepts that shape too. Any
 variable that is not one value per cell is refused by name rather than reaching
 the weighting as a shape mismatch.
 
-#### 11.2.3 A product may not be joined again
+#### 11.2.3 Joining a product again: refused today, to be allowed with a record
 
-`bin_streams_onto_cells` refuses any input whose `tsara_stage` says this
+**Decided 2026-09-24 (owner), reversing the refusal of 2026-09-17: joining a
+product will be allowed, and built when a stage first needs it.** The evidence
+below stands as a description of what goes wrong without a record; the
+decision changes the answer from a refusal to a record, as Phase 4.6 did for
+narrowing and copying (§11.2.4). What it will be:
+
+- each input row is weighted by its overlap × its **coverage**, so a
+  quarter-measured row counts as a quarter. Value and coverage come out exact
+  when the new cells are unions of old rows (the middle row of the table
+  below);
+- a new cell that cuts an old row is the straddle §11.2.4 already allows and
+  records for readings, labelled with its borrowed share;
+- every column so built says that it rests on a product rather than on
+  readings.
+
+Two details are the design work of that phase. Rows of a product are not
+independent, since a reading straddling a row boundary sits in two rows, so
+the second join either carries the first join's weights and propagates the
+covariance, or records that it assumed independent rows; that is the Phase-7
+covariance question arriving early. And the record becomes a chain: both steps
+are written, and the readings count is carried from the first join rather than
+re-summed. Rebuilding from the streams stays exact and cheap, since the bundle
+keeps every stream and a rebuild is one join on loaded data. The reasons to
+allow a re-join are quantities made per row, which have no stream to rebuild
+from (a ratio computed per paired row), and composability. Phase 5 is not
+expected to need it: a baseline keeps each reading's cell and is joined as a
+stream (the last paragraph of this section).
+
+**Today**, `bin_streams_onto_cells` refuses any input whose `tsara_stage` says this
 package built it by joining — `binned`, `paired` or `gridded`. Pairing and the
 output grid resolve their selection through the same function, so both refuse
 it too, at either entry point.
@@ -2985,9 +3293,10 @@ refuses it is that nothing needs it and that everything it would give can be
 had exactly from the streams. A later phase that does need a nested re-join
 is therefore arguing against a consumer argument, not against a proof, and
 should expect to win by building the coverage-weighted form (values and
-coverage exact, counts still double counted). The non-nested case stays
-refused on the last row's evidence, which is narrowing, and no weighting
-repairs it.
+coverage exact, counts still double counted). No weighting repairs the
+non-nested case; under the per-pair rule of §11.2.4 a row cut by a wider new
+cell is straddled, the same class of error §11.2.4 measures and records for
+straddled readings, and that is how the decision above treats it.
 
 **What is not refused.** The list names the three join stages rather than
 allowing only the two source stages (`ingest`, `synthetic`), and the difference
@@ -3823,18 +4132,15 @@ convention everywhere else.
 
 ### 11.7 Output grid
 
-Implemented in `tsara.align.grid`, specified in §1.4. A single uniform
-`(time × variable)` cube, built **only** for the products that inherently need
-one. Which products those are — the continuous rolling state, the matrix a
-receptor model such as PMF consumes, or neither as a uniform cube — is
-deliberately not settled here. The two candidates want opposite things (the
-rolling state a uniform span, gaps and all; a receptor matrix dense rows, one
-drive at a time with `start` and `end` — measured below), and how a grid
-meets rolling baselines, plume windows and mixed cadences is one argument to
-be made in full before Phase 5, not in pieces (owner decision, 2026-09-23).
-This section records what the grid does and what it was measured to cost, not
-what it is for. Baselines, detection and cross-species regression all run at
-native rate and never see it (§1.1).
+Implemented in `tsara.align.grid`, specified in §1.4. A uniform
+`(time × variable)` table: one kind of cell set, a tiling. Its role was scoped
+on 2026-09-24 (§1.4): the continuous rolling state does not live on it (§6.2),
+and a receptor-model table is one join onto a cell set chosen for it, of which
+a tiling per drive is one candidate beside the canister fills and plume
+events. What else the grid is for is put off until an export needs it. This
+section records what the grid does and what it was measured to cost.
+Baselines, detection and cross-species regression all run at native rate and
+never see it (§1.1).
 
 It is a thin layer over §11.2 — the only things it adds are *which cells* and
 the rule that the period must respect the data going into it. `grid_cells`
