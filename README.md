@@ -211,18 +211,30 @@ and audited later. A bundle is a plain directory: `bundle.json`, the resolved
 
 ```
 src/tsara/
-  config/      Pydantic schemas + YAML loader (manifest, analysis, synthetic)
-  core/        Shared primitives: exceptions, logging, timebase, geodesy,
-               naming, support, propagation, circular
-  ingest/      Readers, crawler, QA/QC, units, uncertainty, campaign, bundles
+  _version.py  The version number, written once
+  core/        Shared primitives: exceptions, logging, timebase, naming, geodesy,
+               support, propagation, circular, bundle. A leaf: imports nothing
+               else from tsara
+  config/      Pydantic schemas + YAML loader (manifest, analysis, synthetic).
+               Imports only core
+  ingest/      Readers, crawler, QA/QC, units, uncertainty, support, campaign,
+               bundles
   align/       Which variables, which cells, the one joining operation; pairing,
                auxiliary fields, output grid
   synthetic/   Ground-truth data generation, profiling, raw-file export
+               The three stages import core and config and never each other:
+               they hand each other xarray Datasets
 docs/METHODS.md   The methods document: mathematics, rationale, rejected options
 examples/configs/    Commented YAML for every schema
 examples/notebooks/  Executed walkthroughs, outputs committed
 tests/               pytest suite, 100% line + branch coverage enforced
 ```
+
+Imports point down that list only. Each package's `__init__` docstring maps its
+modules in the order the stage runs, and every module reads from the top: its
+public functions first, then each private helper after the function that first
+calls it. `tests/test_architecture.py` keeps the layers, the maps and the
+reading order true.
 
 ## Notebooks
 
@@ -265,20 +277,20 @@ committed **without** outputs:
 ## Development
 
 ```bash
-pytest                      # suite; the 100% line+branch floor is enforced in config
 ruff check . && ruff format --check .
 mypy --strict src tests
+pytest --cov=tsara --cov-branch     # suite; the 100% line+branch floor fails the run
 TSARA_ARCHIVE=/path/to/Data TSARA_NOTEBOOKS=1 pytest tests/test_notebooks.py
                             # opt-in: executes notebooks 04b (against the archive)
                             # and 04, and requires every check and ledger row to hold
 ```
 
-A few house rules worth knowing before contributing: every algorithm gets a
-`docs/METHODS.md` section in the phase that introduces it; every stage product
-gets save/load in that same phase; swappable estimators are registered by name
-and every registered name has a methods section. Tests that enumerate their own
-subjects by hand are treated as bugs — discover the subjects and guard against
-the discovery returning nothing.
+The first three are what continuous integration runs on every pull request
+(`.github/workflows/ci.yml`). [CONTRIBUTING.md](CONTRIBUTING.md) has the rest:
+how the package is laid out and why, what a change brings with it (tests,
+a `docs/METHODS.md` section for every algorithm in the phase that introduces
+it, save/load for every stage product, measured claims that state their
+rule), the vocabulary, and the real-data rule.
 
 ## License
 

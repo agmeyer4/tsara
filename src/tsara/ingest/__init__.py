@@ -35,6 +35,11 @@ Shape of the subpackage
 ``timeparse``
     Shared across readers: where time lives in a file, and how it reaches
     UTC exactly once at nanosecond resolution.
+``support``
+    Shared across readers and the campaign: the interval of air each value
+    describes, taken from a boundary column a file states, a declaration in
+    the manifest, or the cadence TSARA must infer, with its provenance
+    recorded per field (``docs/METHODS.md`` §10).
 
 Importing this package imports the built-in reader modules, which is what
 registers them. Readers provided by other packages must be imported by

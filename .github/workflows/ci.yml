@@ -1,0 +1,47 @@
+# The four gates every change passes locally (CONTRIBUTING.md, "The gates"),
+# run by GitHub on every pull request and on every push to main. Nothing
+# here needs the campaign archive: the tests that do are gated on
+# environment variables and skip.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch cancels the run still in flight.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # The version the package is developed on. requires-python is
+          # >=3.11; add a matrix here when a second version is supported.
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install the package with its development extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,viz]"
+
+      - name: Lint and formatting
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Types
+        run: mypy --strict src tests
+
+      - name: Suite, with the 100 % line and branch coverage floor
+        run: pytest --cov=tsara --cov-branch
