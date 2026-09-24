@@ -72,12 +72,8 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from tsara.align.binning import (
-    TsaraAlignError,
-    VariableRef,
-    resolve_variable,
-    stream_cells,
-)
+from tsara.align.cells import stream_cells
+from tsara.align.variables import TsaraAlignError, VariableRef, resolve_variable
 from tsara.core.circular import wrap_degrees
 from tsara.core.naming import (
     ALTITUDE_COORD,

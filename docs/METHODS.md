@@ -2850,7 +2850,7 @@ exactly and archive jitter tops out at 1.024 against a refusal at 2.
 
 **The rule: a reading at least twice as wide as a target cell it touches
 would be copied across rows, and is refused** unless `finer_support: allow`
-asks for it (`tsara.align.binning.pair_width_ratios`, `COPY_RATIO`; the
+asks for it (`tsara.align.cells.pair_width_ratios`, `COPY_RATIO`; the
 whole family, the two numbers and the record are §11.2.4).
 
 | reading cells | target cells | width ratio | outcome |
@@ -3015,7 +3015,7 @@ Two numbers describe every row of every case, both computed from the overlap
 pairs the binner already has (`tsara.core.support.overlap_pairs`):
 
 * **The width ratio, per pair**, `r = |R| / |T|`, reading width over target
-  width (`tsara.align.binning.pair_width_ratios`). The *category*: `r ≤ 1`
+  width (`tsara.align.cells.pair_width_ratios`). The *category*: `r ≤ 1`
   averaged or straddled, `1 < r < 2` narrowed, `r ≥ 2` copied. The line sits
   at exactly 2 by counting, not by taste: two disjoint cells of width *W*
   occupy 2*W* of distinct time, so one reading of width *R* can be the entire

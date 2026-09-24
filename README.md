@@ -215,7 +215,8 @@ src/tsara/
   core/        Shared primitives: exceptions, logging, timebase, geodesy,
                naming, support, propagation, circular
   ingest/      Readers, crawler, QA/QC, units, uncertainty, campaign, bundles
-  align/       One joining operation: pairing, auxiliary fields, output grid
+  align/       Which variables, which cells, the one joining operation; pairing,
+               auxiliary fields, output grid
   synthetic/   Ground-truth data generation, profiling, raw-file export
 docs/METHODS.md   The methods document: mathematics, rationale, rejected options
 examples/configs/    Commented YAML for every schema

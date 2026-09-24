@@ -36,8 +36,8 @@ enforce (§10), so it is an error naming the offending instrument and a period
 that would work, not a warning -- unless the caller passes
 ``finer_support="allow"``, in which case the copies are made, labelled and
 warned about (§11.2.4). The test is the binner's own
-(:func:`~tsara.align.binning.pair_width_ratios`, at
-:data:`~tsara.align.binning.COPY_RATIO`), run against the grid's actual cells
+(:func:`~tsara.align.cells.pair_width_ratios`, at
+:data:`~tsara.align.cells.COPY_RATIO`), run against the grid's actual cells
 before anything is built, so the grid and the operation it calls can never
 disagree about the same data.
 
@@ -82,17 +82,9 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
-from tsara.align.binning import (
-    COPY_RATIO,
-    FinerSupport,
-    TsaraAlignError,
-    VariableRef,
-    bin_streams_onto_cells,
-    pair_width_ratios,
-    phase_offset_s,
-    select_variables,
-    stream_cells,
-)
+from tsara.align.binning import FinerSupport, bin_streams_onto_cells
+from tsara.align.cells import COPY_RATIO, pair_width_ratios, phase_offset_s, stream_cells
+from tsara.align.variables import TsaraAlignError, VariableRef, select_variables
 from tsara.core.support import CellBounds, overlap_pairs
 from tsara.core.timebase import NS_PER_S, to_utc_naive_stamp
 
@@ -203,7 +195,7 @@ def _refuse_a_period_too_fine(
 ) -> None:
     """Raise if any selected reading would be copied across grid cells.
 
-    The binner's own ratio (:func:`~tsara.align.binning.pair_width_ratios`),
+    The binner's own ratio (:func:`~tsara.align.cells.pair_width_ratios`),
     run here against the grid's actual cells so the refusal can name a period
     that would work before anything is binned. Checked against the cells
     inside the requested window, so a wide instrument whose data all falls
@@ -256,7 +248,7 @@ def _warn_if_out_of_phase(cells: Mapping[str, CellBounds], target: CellBounds) -
     this is a note rather than a refusal: blending is sometimes unavoidable,
     and which instrument the grid should be in phase with is the user's
     choice. The test itself is shared with pairing
-    (:func:`~tsara.align.binning.phase_offset_s`), which says the same thing
+    (:func:`~tsara.align.cells.phase_offset_s`), which says the same thing
     about a partner half a cell from the clock.
     """
     for instrument, bounds in cells.items():

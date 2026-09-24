@@ -15,15 +15,9 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from tsara.align import TsaraAlignError, bin_streams_onto_cells, resolve_variable
-from tsara.align.binning import (
-    phase_offset_s,
-    readings_behind,
-    select_variables,
-    shared_readings,
-    stream_cells,
-    targets_overlap,
-)
+from tsara.align import TsaraAlignError, bin_streams_onto_cells
+from tsara.align.cells import stream_cells, targets_overlap
+from tsara.align.variables import select_variables
 from tsara.core.naming import sigma_rand_name
 from tsara.core.support import CellBounds
 from tsara.core.timebase import SECOND_NS as SECOND
@@ -395,12 +389,6 @@ def test_a_selection_of_only_sigma_companions_is_refused() -> None:
         bin_streams_onto_cells({"a": stream}, cells(0.0, 2.0, 2))
 
 
-def test_resolve_variable_is_the_shared_lookup() -> None:
-    streams = {"a": make_stream(0.0, 1.0, 4, {"ch4": np.arange(4.0)})}
-    assert resolve_variable(streams, "ch4") == ("a", "ch4")
-    assert resolve_variable(streams, ("a", "ch4")) == ("a", "ch4")
-
-
 # ---------------------------------------------------------------------------
 # The product describes itself
 # ---------------------------------------------------------------------------
@@ -551,33 +539,6 @@ def test_a_zero_width_target_cell_makes_nothing_look_replicated() -> None:
     assert np.isfinite(joined["ch4"].values[1])
 
 
-def test_shared_readings_counts_finite_readings_forming_two_cells_and_ignores_touching() -> None:
-    """A reading over two cells is shared; one the search visits at zero overlap is not.
-
-    Readings [0, 4) and [1, 1.5) against cells [1, 2) and [2, 3). The wide one
-    forms both cells. The nested one forms [1, 2) only, but the overlap search
-    still visits it for [2, 3) with an overlap of zero, which must count for
-    nothing -- the same membership rule as ``readings_behind``. Masking the wide
-    reading takes the count to zero: a masked reading formed nothing.
-    """
-    readings = CellBounds(
-        start_ns=np.array([0, SECOND], dtype=np.int64),
-        stop_ns=np.array([4 * SECOND, SECOND + SECOND // 2], dtype=np.int64),
-    )
-    target = cells(1.0, 1.0, 2)
-    stream = make_stream(0.0, 1.0, 2, {"v": np.array([1.0, 2.0])})
-    assert shared_readings(stream, "v", readings, target) == 1
-    masked = make_stream(0.0, 1.0, 2, {"v": np.array([np.nan, 2.0])})
-    assert shared_readings(masked, "v", readings, target) == 0
-
-
-def test_readings_behind_counts_distinct_finite_contributors() -> None:
-    """Five readings, one masked, spread over three 2 s cells: four readings."""
-    stream = make_stream(0.0, 1.0, 5, {"ch4": np.array([1.0, np.nan, 3.0, 4.0, 5.0])})
-    count = readings_behind(stream, "ch4", stream_cells(stream, "a"), cells(0.0, 2.0, 3))
-    assert count == 4
-
-
 def test_a_grid_out_of_phase_with_an_equal_width_stream_is_not_refused() -> None:
     """Half a period out of phase, every reading straddles two targets.
 
@@ -662,24 +623,6 @@ def test_a_stream_from_either_producer_is_joinable(stage: str) -> None:
     stream.attrs["tsara_stage"] = stage
     joined = bin_streams_onto_cells({"a": stream}, cells(0.0, 10.0, 6))
     assert joined.sizes["time"] == 6
-
-
-def test_angular_quality_columns_are_not_selected_as_variables() -> None:
-    """A resultant length and a dispersion describe a cell, not the air in it.
-
-    Checked through the selection rather than through a second join, which is
-    now refused: the rule is about which columns count as variables, and
-    `select_variables` is public and answers that for the grid as well.
-    """
-    attrs: dict[str, dict[str, object]] = {"wind_dir": {"units": "degrees", "circular": 1}}
-    met = make_stream(0.0, 1.0, 60, {"wind_dir": np.linspace(0.0, 50.0, 60)}, attrs=attrs)
-    once = bin_streams_onto_cells({"met": met}, cells(0.0, 10.0, 6))
-    assert "wind_dir_resultant_length" in once.data_vars
-    # The product's stage is what refuses a re-join; strip it and the selection
-    # rule alone is what is being measured here.
-    stripped = once.copy()
-    del stripped.attrs["tsara_stage"]
-    assert select_variables({"binned": stripped}) == [("binned", "wind_dir")]
 
 
 def test_cell_boundaries_carried_as_a_data_variable_are_not_selected() -> None:
@@ -1218,19 +1161,6 @@ def test_a_column_with_nothing_behind_it_records_nothing(caplog: pytest.LogCaptu
     assert "rest on air" not in caplog.text
 
 
-def test_targets_overlap_is_exact_and_order_free() -> None:
-    assert not targets_overlap(spaced(0, 60, 5, 60))
-    assert targets_overlap(bounds([0, 1], [2, 3]))
-    # A single nanosecond of overlap counts; abutting cells do not.
-    one_ns = CellBounds(
-        start_ns=np.array([0, SECOND - 1], dtype=np.int64),
-        stop_ns=np.array([SECOND, 2 * SECOND], dtype=np.int64),
-    )
-    assert targets_overlap(one_ns)
-    assert not targets_overlap(bounds([5, 0], [6, 5]))  # unsorted, abutting
-    assert not targets_overlap(bounds([0], [1]))
-
-
 # ---------------------------------------------------------------------------
 # A declared sigma on a direction is dropped aloud (METHODS §11.5)
 # ---------------------------------------------------------------------------
@@ -1277,20 +1207,3 @@ def test_a_direction_without_a_sigma_is_not_warned_about(caplog: pytest.LogCaptu
 # ---------------------------------------------------------------------------
 # The one exact blend test, shared by the grid and pairing (METHODS §11.9.1)
 # ---------------------------------------------------------------------------
-
-
-def test_phase_offset_is_reported_only_for_equal_widths_out_of_phase() -> None:
-    """Same width and offset: the offset. Anything else: None, and no tolerance anywhere."""
-    grid = spaced(0, 60, 10, 60)
-    assert phase_offset_s(spaced(30, 60, 9, 60), grid) == pytest.approx(30.0)
-    assert phase_offset_s(spaced(10, 60, 9, 60), grid) == pytest.approx(10.0)
-    assert phase_offset_s(spaced(0, 60, 10, 60), grid) is None  # in phase
-    assert phase_offset_s(spaced(0, 1.023, 400, 1.023), spaced(0, 1, 409, 1)) is None  # jitter
-    assert phase_offset_s(spaced(0, 1, 600, 1), grid) is None  # narrower readings
-    empty = CellBounds(start_ns=np.array([], dtype=np.int64), stop_ns=np.array([], dtype=np.int64))
-    assert phase_offset_s(empty, grid) is None
-    assert phase_offset_s(grid, empty) is None
-    # A degenerate target of zero width has no phase to be out of.
-    assert phase_offset_s(bounds([0, 5], [0, 5]), bounds([0, 5], [0, 5])) is None
-    # Mixed target widths: not a uniform tiling, so no phase question either.
-    assert phase_offset_s(spaced(0, 60, 4, 60), bounds([0, 60, 120], [60, 120, 150])) is None

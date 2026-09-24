@@ -117,18 +117,18 @@ from tsara.align.binning import (
     BORROWED_ATTR,
     READINGS_ATTR,
     FinerSupport,
-    TsaraAlignError,
-    VariableRef,
     bin_streams_onto_cells,
+)
+from tsara.align.cells import (
     median_width_s,
     phase_offset_s,
     readings_behind,
-    resolve_variable,
     shared_readings,
     stream_cells,
     targets_overlap,
 )
 from tsara.align.grid import grid_cells
+from tsara.align.variables import TsaraAlignError, VariableRef, resolve_variable
 from tsara.config.analysis import OutputGridConfig
 from tsara.core.naming import TIME_COORD, coverage_name
 from tsara.core.support import CellBounds
@@ -380,7 +380,7 @@ def _warn_if_a_partner_blends(
     averaged member blends the two readings straddling its cell, so it rests
     on air outside the cell by the borrowed share (0.5 at half a cell). That
     much follows from the geometry alone -- the same exact test the grid
-    applies to its own cells (:func:`~tsara.align.binning.phase_offset_s`)
+    applies to its own cells (:func:`~tsara.align.cells.phase_offset_s`)
     -- and is always said.
 
     What does not follow from the geometry is whether the pairs are
@@ -392,7 +392,7 @@ def _warn_if_a_partner_blends(
     and naming the remedy would send the caller to throw away resolution for
     nothing. So that clause is gated on the exact count of readings that
     formed more than one surviving pair
-    (:func:`~tsara.align.binning.shared_readings`), never on the geometry.
+    (:func:`~tsara.align.cells.shared_readings`), never on the geometry.
     """
     for name, member_cells, shared in (y, x):
         if dataset[name].attrs.get(BINNED_ATTR) != 1:
