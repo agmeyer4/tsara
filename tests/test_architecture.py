@@ -22,10 +22,6 @@ import pytest
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "tsara"
 
-#: Every module that re-exports a public surface. Adding a subpackage with an
-#: ``__all__`` means adding it here.
-PACKAGES_WITH_EXPORTS = ["tsara", "tsara.ingest", "tsara.synthetic"]
-
 
 def _modules_declaring_all() -> list[str]:
     """Return every ``tsara`` module that declares ``__all__``, discovered.
@@ -61,6 +57,14 @@ def _modules_declaring_all() -> list[str]:
 
 #: Every module with a public surface, found rather than remembered.
 MODULES_WITH_EXPORTS = _modules_declaring_all()
+
+#: The packages among them: the ``__init__`` modules that re-export a surface.
+#: Discovered too. This was a hand-written list of three, and it had already
+#: missed ``tsara.align`` for a phase, which is the failure the discovery
+#: above exists to prevent.
+PACKAGES_WITH_EXPORTS = [
+    name for name in MODULES_WITH_EXPORTS if (SRC.parent / Path(*name.split("."))).is_dir()
+]
 
 
 def _tsara_imports(module_path: Path) -> list[str]:
@@ -205,8 +209,8 @@ def test_export_discovery_finds_more_than_the_packages() -> None:
     A parametrized test over zero cases passes, so a walk that stops
     matching would turn this whole file green while checking nothing.
     """
+    assert PACKAGES_WITH_EXPORTS, "no package __init__ declares __all__; the walk found nothing"
     assert len(MODULES_WITH_EXPORTS) > len(PACKAGES_WITH_EXPORTS)
-    assert set(PACKAGES_WITH_EXPORTS) <= set(MODULES_WITH_EXPORTS)
 
 
 #: Public names that legitimately have no caller inside ``src/``.
@@ -540,4 +544,190 @@ def test_no_attr_exemption_is_stale() -> None:
     assert gone == [], f"EXEMPT_ATTRS names attributes no longer written: {gone}"
     assert documented == [], (
         f"EXEMPT_ATTRS excuses attributes that ARE documented: {documented}. Drop them."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Module layout: the layers, the package maps, and the reading order
+# ---------------------------------------------------------------------------
+#
+# The convention is written once, in CLAUDE.md §2. What a test can hold true
+# is held here: imports point down the layers only; every module is named in
+# its package's map; every private helper follows the function that first
+# calls it. Measured before the rule was adopted (2026-09-24): of 28 modules
+# with private helpers, 14 read top-down, 6 bottom-up and 8 mixed; two of the
+# five package maps had silently lost a module; and one hand-written list in
+# this very file had missed a package for a phase.
+
+#: The dependency layers, bottom up. A module may import ``tsara._version``,
+#: its own package, and any package in a layer BELOW its own -- never a
+#: package beside it. Stage packages sit side by side on purpose: they hand
+#: each other xarray Datasets whose vocabulary lives in ``core.naming``, never
+#: imports, which is what lets a new stage be inserted anywhere. A package
+#: added to ``src/tsara`` fails ``test_every_package_is_in_a_layer`` until it
+#: has a row here.
+LAYERS: tuple[tuple[str, ...], ...] = (
+    ("core",),
+    ("config",),
+    ("synthetic", "ingest", "align"),
+)
+
+#: Layer index of every package that has one.
+_LAYER_OF: dict[str, int] = {pkg: i for i, layer in enumerate(LAYERS) for pkg in layer}
+
+
+def _packages() -> list[str]:
+    """Return every subpackage of ``tsara``, discovered."""
+    return sorted(p.name for p in SRC.iterdir() if p.is_dir() and (p / "__init__.py").exists())
+
+
+def _modules_in_layers() -> list[Path]:
+    """Return every module inside a package that has a layer."""
+    return sorted(path for pkg in _LAYER_OF for path in (SRC / pkg).rglob("*.py"))
+
+
+def test_every_package_is_in_a_layer() -> None:
+    """A package with no layer is a package whose imports nothing polices."""
+    unplaced = sorted(set(_packages()) - set(_LAYER_OF))
+    assert unplaced == [], f"packages with no row in LAYERS: {unplaced}"
+    assert len(_modules_in_layers()) > len(_LAYER_OF), "the layer walk found no modules"
+
+
+@pytest.mark.parametrize("module_path", _modules_in_layers(), ids=lambda p: str(p.relative_to(SRC)))
+def test_imports_point_down_the_layers(module_path: Path) -> None:
+    """A module imports its own package, the layers below it, and nothing else.
+
+    The general form of the ``core`` leaf test above. Two arrows pointed the
+    wrong way before this existed: the config loader imported the synthetic
+    schema from a stage, lazily inside a function to dodge the cycle, and five
+    stage modules imported the version string from the package root, which
+    works only until the root re-exports a stage. Both are gone; this keeps
+    them gone, and keeps the stages from ever importing one another.
+    """
+    package = module_path.relative_to(SRC).parts[0]
+    layer = _LAYER_OF[package]
+    offenders = []
+    for name in _tsara_imports(module_path):
+        parts = name.split(".")
+        target = parts[1] if len(parts) > 1 else "<root>"
+        if target == "_version" or target == package:
+            continue
+        if target in _LAYER_OF and _LAYER_OF[target] < layer:
+            continue
+        offenders.append(name)
+    assert offenders == [], (
+        f"{module_path.relative_to(SRC)} (layer {layer}: {package}) imports {offenders}. "
+        "A module may import tsara._version, its own package, and packages in a "
+        "lower layer of LAYERS. Stages hand each other Datasets, not imports."
+    )
+
+
+def _map_entries(package: str) -> set[str]:
+    """Return the module names a package's ``__init__`` docstring lists.
+
+    An entry is a line of the docstring that is a name, or several separated
+    by commas, optionally in double backticks -- the definition-list form the
+    maps use (``units``, ``qaqc``, ``uncertainty`` on one line). A name
+    mentioned in running prose does not count, because prose mentions are
+    exactly how a map looks complete while missing a module.
+    """
+    tree = ast.parse((SRC / package / "__init__.py").read_text(encoding="utf-8"))
+    doc = ast.get_docstring(tree) or ""
+    listed: set[str] = set()
+    for line in doc.splitlines():
+        tokens = [token.strip().strip("`") for token in line.strip().split(",")]
+        if tokens and all(token.isidentifier() for token in tokens):
+            listed.update(tokens)
+    return listed
+
+
+def _package_modules() -> list[tuple[str, str]]:
+    """Return ``(package, module)`` for every module of every package."""
+    return sorted(
+        (pkg, path.stem)
+        for pkg in _packages()
+        for path in (SRC / pkg).glob("*.py")
+        if path.stem != "__init__"
+    )
+
+
+def test_map_discovery_finds_the_packages() -> None:
+    """Guard the walk: a parametrized test over nothing passes."""
+    assert {"core", "config", "ingest", "align", "synthetic"} <= set(_packages())
+    assert len(_package_modules()) > len(_packages())
+
+
+@pytest.mark.parametrize(("package", "module"), _package_modules(), ids=lambda x: x)
+def test_every_module_is_named_in_its_package_map(package: str, module: str) -> None:
+    """The package docstring is the reader's map, and a map with a module
+    missing is worse than no map: it says the package has been surveyed.
+
+    Measured on the day this was added: ``synthetic`` had omitted ``export``
+    since Phase 3, ``ingest`` had omitted ``support`` since Phase 3.5, and
+    ``core`` named four of its nine modules, in prose, with no list at all.
+    """
+    assert module in _map_entries(package), (
+        f"tsara/{package}/{module}.py is not listed in tsara/{package}/__init__.py's "
+        "docstring. Add it to the map, in the order the package runs."
+    )
+
+
+def _private_functions_out_of_order(module_path: Path) -> list[str]:
+    """Return the private top-level functions defined before their first use.
+
+    A private function is a helper, and a helper is read after the function
+    that needs it: that is the reading order the whole package follows. A
+    private *class* is a type and goes with the constants at the top, so it
+    is not held to this. A private function nothing references is reported
+    too -- a helper with no caller is dead code, and none exists today.
+    """
+    tree = ast.parse(module_path.read_text(encoding="utf-8"))
+    out: list[str] = []
+    for node in tree.body:
+        if not (isinstance(node, ast.FunctionDef) and node.name.startswith("_")):
+            continue
+        uses = [
+            sub.lineno
+            for other in tree.body
+            if other is not node
+            for sub in ast.walk(other)
+            if isinstance(sub, ast.Name) and sub.id == node.name
+        ]
+        # `end_lineno` is Optional in the stubs; a parsed definition always has one.
+        end = node.end_lineno if node.end_lineno is not None else node.lineno
+        if not uses:
+            out.append(f"{node.name} (line {node.lineno}) is referenced by nothing")
+        elif min(uses) > end:
+            out.append(f"{node.name} (line {node.lineno}) is first used at line {min(uses)}")
+    return out
+
+
+def test_the_reading_order_detector_sees_helpers() -> None:
+    """Guard the scan: it must find the package's private helpers at all."""
+    n_private = sum(
+        1
+        for path in SRC.rglob("*.py")
+        for node in ast.parse(path.read_text(encoding="utf-8")).body
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("_")
+    )
+    assert n_private > 100, f"only {n_private} private functions found; the scan is broken"
+
+
+@pytest.mark.parametrize(
+    "module_path", sorted(SRC.rglob("*.py")), ids=lambda p: str(p.relative_to(SRC))
+)
+def test_every_private_helper_follows_its_first_caller(module_path: Path) -> None:
+    """A module reads from the top: the operation, then its steps in order.
+
+    The one part of the layout convention a test can hold. Python does not
+    care where a function is defined, so nothing breaks when a helper drifts
+    above its caller; what breaks is the reader's ability to open any module
+    and find the operation at the top and each step where the operation
+    reaches for it. Enforced after every module was laid out this way in one
+    pure-move commit, verified statement by statement against a snapshot.
+    """
+    assert _private_functions_out_of_order(module_path) == [], (
+        f"{module_path.relative_to(SRC)} defines helpers before their first caller: "
+        f"{_private_functions_out_of_order(module_path)}. Move each helper below the "
+        "function that first uses it (CLAUDE.md §2, module layout)."
     )

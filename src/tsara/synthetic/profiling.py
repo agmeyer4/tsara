@@ -5,7 +5,7 @@ module closes that gap: it measures the statistical shape of a real
 timeseries — noise magnitude, noise autocorrelation, background level and
 spread — and packages it as a :class:`RealDataProfile` that the generator
 can either read parameters from or resample fluctuations out of
-(:class:`~tsara.synthetic.config.BootstrapBackground`).
+(:class:`~tsara.config.synthetic.BootstrapBackground`).
 
 Naming
 ------
@@ -79,7 +79,7 @@ class RealDataProfile:
     Attributes
     ----------
     name : str
-        Key by which a :class:`~tsara.synthetic.config.BootstrapBackground`
+        Key by which a :class:`~tsara.config.synthetic.BootstrapBackground`
         refers to this profile.
     residual_blocks : numpy.ndarray
         Shape ``(n_blocks, block_length)``. Contiguous, gap-free, individually
@@ -255,7 +255,7 @@ def profile_series(
         ``DatetimeIndex``. NaNs are permitted and are excluded from blocks.
     name : str
         Profile key, referenced by
-        :class:`~tsara.synthetic.config.BootstrapBackground.profile`.
+        :class:`~tsara.config.synthetic.BootstrapBackground.profile`.
     baseline_window : str, default "30min"
         Centered rolling window for the background fit.
     baseline_quantile : float, default 0.10

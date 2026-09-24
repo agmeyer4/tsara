@@ -12,7 +12,9 @@ import numpy as np
 import pytest
 import yaml
 
+from tsara.config.synthetic import SyntheticConfig
 from tsara.core.bundle import BUNDLE_STAGE_KEY
+from tsara.core.exceptions import TsaraConfigError
 from tsara.core.naming import (
     BOUNDS_ATTR,
     SUPPORT_LABEL_PROVENANCE_ATTR,
@@ -31,7 +33,6 @@ from tsara.synthetic.bundle import (
     load_bundle,
     save_bundle,
 )
-from tsara.synthetic.config import SyntheticConfig
 from tsara.synthetic.generator import SyntheticDataset, generate
 from tsara.synthetic.profiling import RealDataProfile
 
@@ -299,7 +300,6 @@ def test_a_bundle_from_before_the_atmosphere_is_refused_by_name(
     [
         {"name": "not-a-mapping-of-instruments", "instruments": ["analyzer"]},
         {"name": "instruments-without-species", "instruments": {"analyzer": {"native_rate": "1s"}}},
-        ["not", "a", "mapping"],
     ],
 )
 def test_an_invalid_config_is_left_to_validation(
@@ -311,6 +311,30 @@ def test_an_invalid_config_is_left_to_validation(
     bundle = generate(noisy_config).save(tmp_path / "run")
     (bundle / BUNDLE_CONFIG).write_text(yaml.safe_dump(payload))
     with pytest.raises(ValidationError):
+        load_bundle(bundle)
+
+
+def test_a_saved_config_that_is_not_a_mapping_is_refused_at_the_door(
+    noisy_config: SyntheticConfig, tmp_path: Path
+) -> None:
+    """A list where a config should be never reaches validation: the reader
+    every config comes through refuses a non-mapping top level by name."""
+    bundle = generate(noisy_config).save(tmp_path / "run")
+    (bundle / BUNDLE_CONFIG).write_text(yaml.safe_dump(["not", "a", "mapping"]))
+    with pytest.raises(TsaraConfigError, match="must be a mapping"):
+        load_bundle(bundle)
+
+
+def test_a_saved_config_with_a_key_written_twice_is_refused(
+    noisy_config: SyntheticConfig, tmp_path: Path
+) -> None:
+    """The saved copy is read through the same door as a user's file
+    (`tsara.config.loader.read_yaml`), so a hand edit that repeats a key is
+    refused instead of being read last-wins."""
+    bundle = generate(noisy_config).save(tmp_path / "run")
+    target = bundle / BUNDLE_CONFIG
+    target.write_text(target.read_text(encoding="utf-8") + "name: pasted_again\n", encoding="utf-8")
+    with pytest.raises(TsaraConfigError, match="duplicate key 'name'"):
         load_bundle(bundle)
 
 

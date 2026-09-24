@@ -29,9 +29,7 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
-from tsara.core.timebase import SECONDS_PER_HOUR
-from tsara.core.timebase import to_utc_naive_stamp as _to_utc_naive_stamp
-from tsara.synthetic.config import (
+from tsara.config.synthetic import (
     AmplitudeSpec,
     GaussianShape,
     LognormalAmplitude,
@@ -40,6 +38,8 @@ from tsara.synthetic.config import (
     SourceSpec,
     SyntheticConfig,
 )
+from tsara.core.timebase import SECONDS_PER_HOUR
+from tsara.core.timebase import to_utc_naive_stamp as _to_utc_naive_stamp
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt
@@ -134,6 +134,71 @@ class PlumeKernel:
         return _emg_log_shape(u, self.sigma_s / self.tau_s)
 
 
+def build_kernel(shape: PlumeShape) -> PlumeKernel:
+    """Precompute the normalized kernel for a configured plume shape.
+
+    For a Gaussian everything is analytic. For an EMG the peak location and
+    normalizing constant are found on a dense reference grid (4001 points
+    across the support), which is accurate to well under a sampling interval
+    for any realistic configuration and avoids a root-find.
+
+    Parameters
+    ----------
+    shape : PlumeShape
+        A :class:`~tsara.config.synthetic.GaussianShape` or
+        :class:`~tsara.config.synthetic.EMGShape`.
+
+    Returns
+    -------
+    PlumeKernel
+        Kernel normalized to unit peak.
+    """
+    import pandas as pd
+
+    sigma_s = float(pd.Timedelta(shape.sigma).total_seconds())
+
+    if isinstance(shape, GaussianShape):
+        support = GAUSSIAN_SUPPORT_SIGMAS * sigma_s
+        return PlumeKernel(
+            sigma_s=sigma_s,
+            tau_s=0.0,
+            peak_offset_s=0.0,
+            support_before_s=support,
+            support_after_s=support,
+            log_peak=0.0,
+        )
+
+    tau_s = float(pd.Timedelta(shape.tau).total_seconds())
+    support_before = GAUSSIAN_SUPPORT_SIGMAS * sigma_s
+    support_after = GAUSSIAN_SUPPORT_SIGMAS * sigma_s + EMG_SUPPORT_TAUS * tau_s
+
+    grid = np.linspace(-support_before, support_after, 4001, dtype=np.float64)
+    log_values = _emg_log_shape(grid / sigma_s, sigma_s / tau_s)
+    peak_index = int(np.argmax(log_values))
+
+    # Refine the peak between the coarse grid's neighbouring points. Without
+    # this, `log_peak` is the maximum of a *sampled* shape and therefore
+    # slightly below the true continuous maximum, so the normalized kernel can
+    # exceed 1 by ~1e-6 at a well-placed sample — which would let a recorded
+    # `sampled_peak_amplitude` exceed the `true_amplitude` it is supposed to
+    # be bounded by. Cheap to fix, and it keeps that invariant exact enough to
+    # assert on.
+    lo = grid[max(peak_index - 1, 0)]
+    hi = grid[min(peak_index + 1, grid.size - 1)]
+    fine = np.linspace(lo, hi, 401, dtype=np.float64)
+    fine_values = _emg_log_shape(fine / sigma_s, sigma_s / tau_s)
+    fine_index = int(np.argmax(fine_values))
+
+    return PlumeKernel(
+        sigma_s=sigma_s,
+        tau_s=tau_s,
+        peak_offset_s=float(fine[fine_index]),
+        support_before_s=support_before,
+        support_after_s=support_after,
+        log_peak=float(fine_values[fine_index]),
+    )
+
+
 def _emg_log_shape(u: npt.NDArray[np.float64], sigma_over_tau: float) -> npt.NDArray[np.float64]:
     r"""Log of the (unnormalized) exponentially-modified Gaussian shape.
 
@@ -196,71 +261,6 @@ def _emg_log_shape(u: npt.NDArray[np.float64], sigma_over_tau: float) -> npt.NDA
     return result
 
 
-def build_kernel(shape: PlumeShape) -> PlumeKernel:
-    """Precompute the normalized kernel for a configured plume shape.
-
-    For a Gaussian everything is analytic. For an EMG the peak location and
-    normalizing constant are found on a dense reference grid (4001 points
-    across the support), which is accurate to well under a sampling interval
-    for any realistic configuration and avoids a root-find.
-
-    Parameters
-    ----------
-    shape : PlumeShape
-        A :class:`~tsara.synthetic.config.GaussianShape` or
-        :class:`~tsara.synthetic.config.EMGShape`.
-
-    Returns
-    -------
-    PlumeKernel
-        Kernel normalized to unit peak.
-    """
-    import pandas as pd
-
-    sigma_s = float(pd.Timedelta(shape.sigma).total_seconds())
-
-    if isinstance(shape, GaussianShape):
-        support = GAUSSIAN_SUPPORT_SIGMAS * sigma_s
-        return PlumeKernel(
-            sigma_s=sigma_s,
-            tau_s=0.0,
-            peak_offset_s=0.0,
-            support_before_s=support,
-            support_after_s=support,
-            log_peak=0.0,
-        )
-
-    tau_s = float(pd.Timedelta(shape.tau).total_seconds())
-    support_before = GAUSSIAN_SUPPORT_SIGMAS * sigma_s
-    support_after = GAUSSIAN_SUPPORT_SIGMAS * sigma_s + EMG_SUPPORT_TAUS * tau_s
-
-    grid = np.linspace(-support_before, support_after, 4001, dtype=np.float64)
-    log_values = _emg_log_shape(grid / sigma_s, sigma_s / tau_s)
-    peak_index = int(np.argmax(log_values))
-
-    # Refine the peak between the coarse grid's neighbouring points. Without
-    # this, `log_peak` is the maximum of a *sampled* shape and therefore
-    # slightly below the true continuous maximum, so the normalized kernel can
-    # exceed 1 by ~1e-6 at a well-placed sample — which would let a recorded
-    # `sampled_peak_amplitude` exceed the `true_amplitude` it is supposed to
-    # be bounded by. Cheap to fix, and it keeps that invariant exact enough to
-    # assert on.
-    lo = grid[max(peak_index - 1, 0)]
-    hi = grid[min(peak_index + 1, grid.size - 1)]
-    fine = np.linspace(lo, hi, 401, dtype=np.float64)
-    fine_values = _emg_log_shape(fine / sigma_s, sigma_s / tau_s)
-    fine_index = int(np.argmax(fine_values))
-
-    return PlumeKernel(
-        sigma_s=sigma_s,
-        tau_s=tau_s,
-        peak_offset_s=float(fine[fine_index]),
-        support_before_s=support_before,
-        support_after_s=support_after,
-        log_peak=float(fine_values[fine_index]),
-    )
-
-
 # ---------------------------------------------------------------------------
 # Realized events
 # ---------------------------------------------------------------------------
@@ -281,7 +281,7 @@ class RealizedEvent:
     event_id : str
         Unique identifier, e.g. ``"well_pad_00007"``.
     source_name : str
-        Key of the :class:`~tsara.synthetic.config.SourceSpec` that spawned it.
+        Key of the :class:`~tsara.config.synthetic.SourceSpec` that spawned it.
     center_time : pandas.Timestamp
         The shape's center parameter (Gaussian mu), *before* per-species lag.
     kernel : PlumeKernel
@@ -369,54 +369,6 @@ class RealizedEvent:
             center - pd.Timedelta(seconds=self.kernel.support_before_s),
             center + pd.Timedelta(seconds=self.kernel.support_after_s),
         )
-
-
-def _draw_amplitude(spec: AmplitudeSpec, rng: np.random.Generator) -> float:
-    """Draw one peak amplitude from the configured distribution.
-
-    Parameters
-    ----------
-    spec : AmplitudeSpec
-        Lognormal or uniform amplitude configuration.
-    rng : numpy.random.Generator
-        Random number generator.
-
-    Returns
-    -------
-    float
-        Peak enhancement in the reference species' units.
-    """
-    if isinstance(spec, LognormalAmplitude):
-        # Parameterized by the median, so exp(mu) = median directly.
-        return float(spec.median * math.exp(spec.sigma_log * rng.normal()))
-    return float(rng.uniform(spec.low, spec.high))
-
-
-def _draw_ratio(spec: RatioSpec, rng: np.random.Generator) -> float:
-    """Draw one realized enhancement ratio.
-
-    Uses the lognormal parameterization from
-    :meth:`~tsara.synthetic.config.RatioSpec.lognormal_parameters`, so the
-    configured ``mean`` is the true arithmetic mean of the draws and
-    ``relative_spread`` is their true relative standard deviation. A
-    zero-spread spec returns the mean exactly.
-
-    Parameters
-    ----------
-    spec : RatioSpec
-        Ratio distribution.
-    rng : numpy.random.Generator
-        Random number generator.
-
-    Returns
-    -------
-    float
-        Realized ratio for one event; always strictly positive.
-    """
-    mu, sigma_log = spec.lognormal_parameters()
-    if sigma_log == 0.0:
-        return float(spec.mean)
-    return float(math.exp(mu + sigma_log * rng.normal()))
 
 
 def schedule_events(config: SyntheticConfig, rng: np.random.Generator) -> list[RealizedEvent]:
@@ -569,6 +521,54 @@ def _realize_event(
         ratios=ratios,
         lags_s=lags_s,
     )
+
+
+def _draw_amplitude(spec: AmplitudeSpec, rng: np.random.Generator) -> float:
+    """Draw one peak amplitude from the configured distribution.
+
+    Parameters
+    ----------
+    spec : AmplitudeSpec
+        Lognormal or uniform amplitude configuration.
+    rng : numpy.random.Generator
+        Random number generator.
+
+    Returns
+    -------
+    float
+        Peak enhancement in the reference species' units.
+    """
+    if isinstance(spec, LognormalAmplitude):
+        # Parameterized by the median, so exp(mu) = median directly.
+        return float(spec.median * math.exp(spec.sigma_log * rng.normal()))
+    return float(rng.uniform(spec.low, spec.high))
+
+
+def _draw_ratio(spec: RatioSpec, rng: np.random.Generator) -> float:
+    """Draw one realized enhancement ratio.
+
+    Uses the lognormal parameterization from
+    :meth:`~tsara.config.synthetic.RatioSpec.lognormal_parameters`, so the
+    configured ``mean`` is the true arithmetic mean of the draws and
+    ``relative_spread`` is their true relative standard deviation. A
+    zero-spread spec returns the mean exactly.
+
+    Parameters
+    ----------
+    spec : RatioSpec
+        Ratio distribution.
+    rng : numpy.random.Generator
+        Random number generator.
+
+    Returns
+    -------
+    float
+        Realized ratio for one event; always strictly positive.
+    """
+    mu, sigma_log = spec.lognormal_parameters()
+    if sigma_log == 0.0:
+        return float(spec.mean)
+    return float(math.exp(mu + sigma_log * rng.normal()))
 
 
 def _realize_child(

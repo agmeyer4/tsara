@@ -396,6 +396,18 @@ def test_an_unreadable_manifest_is_an_error(tmp_path: Path) -> None:
         load_streams(bundle)
 
 
+def test_a_saved_manifest_with_a_key_written_twice_is_refused(tmp_path: Path) -> None:
+    """The saved copy is read through the same door as a user's manifest
+    (`tsara.config.loader.read_yaml`), so a hand edit that repeats a key is
+    refused here too instead of being read last-wins."""
+    collection = ingest_campaign(_manifest(_archive(tmp_path)))
+    bundle = save_streams(collection, tmp_path / "bundle")
+    target = bundle / BUNDLE_MANIFEST_CONFIG
+    target.write_text(target.read_text(encoding="utf-8") + "name: pasted_again\n", encoding="utf-8")
+    with pytest.raises(TsaraBundleError, match="duplicate key 'name'"):
+        load_streams(bundle)
+
+
 def test_the_saved_manifest_records_the_resolved_base_path(tmp_path: Path) -> None:
     """A bundle records what ran, not what a relative path meant somewhere."""
     base = _archive(tmp_path)

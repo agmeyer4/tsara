@@ -28,6 +28,34 @@ A concrete consequence: if a would-be "core" module needs to import
 :mod:`tsara.config`, it is not core — it is a stage, and belongs with the
 stage that owns it.
 
+Submodules, in reading order
+----------------------------
+exceptions
+    The ``TsaraError`` hierarchy every stage's own error derives from.
+logutil
+    The library/application logging split: nothing is printed until the
+    application asks.
+timebase
+    How TSARA represents time: UTC-internal, integer nanoseconds where
+    exactness matters, and the one home of every time-unit conversion.
+naming
+    The vocabulary every stage must agree on: coordinate and companion-column
+    names, the attribute keys products carry, the support and provenance
+    labels.
+geodesy
+    How TSARA represents position: a local equirectangular approximation.
+support
+    Cells: the interval of air a value describes, CF bounds, and the one
+    overlap-weighted binning arithmetic every join calls.
+propagation
+    Uncertainty through a mean: the random component that averages down, the
+    systematic one that does not, and the correlated forms between.
+circular
+    Angular statistics: wrapping, the mean resultant length, the exact
+    dispersion, and vector averaging onto cells.
+bundle
+    The on-disk bundle convention shared by every stage that saves itself.
+
 Public API
 ----------
 Nothing here is re-exported from this package's own ``__init__``; the

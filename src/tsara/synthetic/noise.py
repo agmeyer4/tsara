@@ -28,8 +28,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from tsara.config.synthetic import TrueComponent, TrueUncertainty
 from tsara.core.timebase import epoch_s as _epoch_s
-from tsara.synthetic.config import TrueComponent, TrueUncertainty
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt
@@ -75,7 +75,7 @@ def draw_random_error(
 
     With no ``decorrelation_timescale_s`` the draws are i.i.d. Gaussian with
     the per-point sigma from
-    :meth:`~tsara.synthetic.config.TrueComponent.sigma`. With one, the
+    :meth:`~tsara.config.synthetic.TrueComponent.sigma`. With one, the
     *standardized* error follows an AR(1) process with lag correlation
     :math:`\rho = e^{-\Delta t/\tau}` (METHODS.md §3.4) before being scaled
     to the per-point sigma — so the marginal variance is unchanged and only

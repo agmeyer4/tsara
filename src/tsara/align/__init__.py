@@ -9,6 +9,15 @@ back to the values that went into it.
 
 Shape of the subpackage
 -----------------------
+``variables``
+    Which variables a call means: a bare name resolved across the streams or
+    an explicit ``(instrument, variable)`` pair, the default selection that
+    leaves the companion columns out, and the refusal of a product that is
+    itself a join (§11.2.3).
+``cells``
+    A stream's cells and how readings meet target cells: widths, the
+    per-pair width ratio and the copy line, the readings behind a set of
+    cells, phase, overlap. Asked by every module below, answered once.
 ``binning``
     The one joining operation: any set of variables onto any set of cells,
     with uncertainty, counts and coverage travelling automatically. Everything
@@ -38,15 +47,11 @@ configuration, streams and provenance.
 from __future__ import annotations
 
 from tsara.align.auxiliary import InterpolatedField, attach_positions, interpolate_onto_cells
-from tsara.align.binning import (
-    TsaraAlignError,
-    bin_streams_onto_cells,
-    resolve_variable,
-    select_variables,
-)
+from tsara.align.binning import bin_streams_onto_cells
 from tsara.align.bundle import load_grid, save_grid
 from tsara.align.grid import build_output_grid, grid_cells
 from tsara.align.pairing import PairedSpecies, pair_species
+from tsara.align.variables import TsaraAlignError, resolve_variable, select_variables
 
 __all__ = [
     "InterpolatedField",

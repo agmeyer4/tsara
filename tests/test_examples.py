@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from tsara import load_analysis, load_manifest, load_synthetic
 from tsara.config import analysis as analysis_schema
 from tsara.config import manifest as manifest_schema
-from tsara.synthetic.config import SyntheticConfig
+from tsara.config.synthetic import SyntheticConfig
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Callable, Iterator

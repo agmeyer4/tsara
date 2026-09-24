@@ -16,11 +16,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from tsara.config.synthetic import SyntheticConfig
 from tsara.core.support import CellBounds
 from tsara.core.timebase import SECOND_NS as SECOND
 from tsara.synthetic import generate
 from tsara.synthetic.atmosphere import CellGrid, realize_atmosphere
-from tsara.synthetic.config import SyntheticConfig
 from tsara.synthetic.generator import TRUTH_PREFIX
 
 
@@ -347,9 +347,9 @@ def _one_event_atmosphere(center_ns: int, sigma: str = "3s") -> Any:
     Hand-built because both cases below need an event at a chosen instant,
     and a scheduled event lands wherever its Poisson draw puts it.
     """
+    from tsara.config.synthetic import FieldSpec, GaussianShape, ParametricBackground
     from tsara.synthetic.atmosphere import Atmosphere
     from tsara.synthetic.background import RealizedBackground
-    from tsara.synthetic.config import FieldSpec, GaussianShape, ParametricBackground
     from tsara.synthetic.plumes import RealizedEvent, build_kernel
 
     center = pd.Timestamp(center_ns)

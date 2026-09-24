@@ -32,6 +32,7 @@ import yaml
 
 from tsara.config.loader import load_manifest
 from tsara.config.manifest import CSVLoader, SupportSpec
+from tsara.config.synthetic import SyntheticConfig
 from tsara.core.naming import (
     TIME_BOUNDS_VAR,
     TIME_COORD,
@@ -41,7 +42,6 @@ from tsara.core.naming import (
 from tsara.ingest import ingest_campaign, load_streams, save_streams
 from tsara.synthetic import generate
 from tsara.synthetic.background import TsaraSyntheticError
-from tsara.synthetic.config import SyntheticConfig
 from tsara.synthetic.export import (
     EXPORT_MANIFEST,
     EXPORT_RAW_DIR,

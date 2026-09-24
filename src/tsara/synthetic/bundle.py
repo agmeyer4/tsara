@@ -67,7 +67,9 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from tsara import __version__
+from tsara._version import __version__
+from tsara.config.loader import read_yaml
+from tsara.config.synthetic import BootstrapBackground, SyntheticConfig
 from tsara.core.bundle import (
     BUNDLE_FORMAT_VERSION,
     BUNDLE_MANIFEST,
@@ -81,7 +83,6 @@ from tsara.core.bundle import (
     rename_retired_attrs,
 )
 from tsara.core.support import check_bounds_intact, ensure_time_bounds
-from tsara.synthetic.config import BootstrapBackground, SyntheticConfig
 from tsara.synthetic.plumes import GroundTruth
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -260,7 +261,9 @@ def load_bundle(
     config_path = bundle / BUNDLE_CONFIG
     if not config_path.is_file():
         raise TsaraBundleError(f"Bundle '{bundle}' is missing {BUNDLE_CONFIG}.")
-    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    # The same door `load_synthetic` uses for a user's file, so a hand-edited
+    # copy with a key written twice is refused rather than read last-wins.
+    payload = read_yaml(config_path)
     _refuse_the_schema_before_the_atmosphere(payload, bundle)
     config = SyntheticConfig.model_validate(payload)
 
@@ -323,14 +326,16 @@ def load_bundle(
     )
 
 
-def _refuse_the_schema_before_the_atmosphere(payload: Any, bundle: Path) -> None:
+def _refuse_the_schema_before_the_atmosphere(payload: dict[str, Any], bundle: Path) -> None:
     """Say plainly that a pre-Phase-4.5 bundle is from another schema.
 
     Left to validation, such a config fails with one error per misplaced key
     -- ``atmosphere`` missing, ``sources`` and every instrument's ``species``
     unexpected -- which reads like a corrupt file rather than an old one.
+    The payload is a mapping by construction: ``read_yaml`` refused anything
+    else before this is reached.
     """
-    if not isinstance(payload, dict) or "atmosphere" in payload:
+    if "atmosphere" in payload:
         return
     instruments = payload.get("instruments")
     old_instruments = isinstance(instruments, dict) and any(

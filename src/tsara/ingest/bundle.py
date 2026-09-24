@@ -34,7 +34,8 @@ from typing import Any
 import xarray as xr
 import yaml
 
-from tsara import __version__
+from tsara._version import __version__
+from tsara.config.loader import read_yaml
 from tsara.config.manifest import Manifest
 from tsara.core.bundle import (
     BUNDLE_FORMAT_VERSION,
@@ -266,7 +267,8 @@ def _read_manifest(bundle: Path) -> Manifest:
     if not target.is_file():
         raise TsaraBundleError(f"'{target}' is missing; the bundle is incomplete.")
     try:
-        payload = yaml.safe_load(target.read_text(encoding="utf-8"))
-        return Manifest.model_validate(payload)
+        # The same door a user's manifest comes through (config.loader), so a
+        # hand-edited copy with a key written twice is refused here too.
+        return Manifest.model_validate(read_yaml(target))
     except Exception as exc:
         raise TsaraBundleError(f"Could not read the manifest in '{target}': {exc}") from exc

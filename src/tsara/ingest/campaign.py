@@ -153,60 +153,18 @@ class _Ingested:
 _MAX_DISTINCT_ATTR_VALUES = 8
 
 
-def _merge_file_attrs(per_file: list[Mapping[str, object]]) -> dict[str, object]:
-    """Reconcile what each file declared about itself into one mapping.
-
-    A reader returns :attr:`~tsara.ingest.base.RawTable.attrs` per file, and
-    an instrument is usually many files. Most keys are campaign constants —
-    the PI, the mission, the LOD flag values — and simply agree. The
-    interesting case is when they do not, and the rule here is to *say so*
-    rather than to pick: a silent choice between two PIs, or two different
-    LOD flags, would put a false statement in a saved product that claims to
-    be self-describing (CLAUDE.md §5).
-
-    Counts (:data:`LOD_COUNT_KEY`) are summed instead, since a tally over
-    files is exactly the tally over the concatenated record.
-    """
-    merged: dict[str, object] = {}
-    totals: dict[str, int] = {}
-    values: dict[str, list[object]] = {}
-
-    for attrs in per_file:
-        for key, value in attrs.items():
-            if key == LOD_COUNT_KEY and isinstance(value, Mapping):
-                for column, count in value.items():
-                    totals[str(column)] = totals.get(str(column), 0) + int(count)
-                continue
-            seen = values.setdefault(key, [])
-            if value not in seen:
-                seen.append(value)
-
-    for key, distinct in values.items():
-        if len(distinct) == 1:
-            merged[key] = distinct[0]
-        else:
-            # Joined, not dropped: that four files in a campaign carry
-            # different revision strings is a fact worth reading in
-            # `ncdump -h`, and it is the kind of thing nobody thinks to
-            # check until an analysis disagrees with a colleague's.
-            #
-            # Summarized past a threshold, because some keys differ in every
-            # file by design -- an ICARTT data date does -- and a thousand-file
-            # instrument would otherwise write a thousand-item attr that is
-            # unreadable in `ncdump -h` and useless as provenance. The first
-            # and last of the sorted values plus a count says the same thing
-            # in a line, and still makes the disagreement visible.
-            ordered_values = sorted(str(item) for item in distinct)
-            if len(ordered_values) > _MAX_DISTINCT_ATTR_VALUES:
-                merged[key] = (
-                    f"{ordered_values[0]} ... {ordered_values[-1]} "
-                    f"({len(ordered_values)} distinct values)"
-                )
-            else:
-                merged[key] = "; ".join(ordered_values)
-    if totals:
-        merged[LOD_COUNT_KEY] = totals
-    return merged
+#: The label vocabulary, as a lookup that both validates and types.
+#:
+#: A hint arrives from ``RawTable.attrs``, which is untyped by design, so it
+#: has to be checked before it can be trusted as a label. A dict does that and
+#: gives the checker a typed result, where a membership test would give
+#: neither.
+_LABELS: dict[str, SupportLabel] = {
+    "start": "start",
+    "mid": "mid",
+    "end": "end",
+    "unknown": "unknown",
+}
 
 
 def ingest_campaign(
@@ -353,6 +311,54 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
     )
 
 
+def _per_row_widths(
+    frames: Sequence[pd.DataFrame], cadences: Sequence[int | None]
+) -> npt.NDArray[np.int64] | None:
+    """Expand each file's measured cadence to one width per row.
+
+    A file too short to have a cadence borrows the median of the files that
+    do, which is the least-surprising stand-in and is only ever reached by a
+    file of one or two rows. When *no* file was long enough, there is nothing
+    to borrow and None says so rather than inventing a number.
+    """
+    known = [cadence for cadence in cadences if cadence is not None]
+    if not known:
+        return None
+    fallback = int(np.median(known))
+    per_file = [fallback if cadence is None else cadence for cadence in cadences]
+    return np.repeat(
+        np.asarray(per_file, dtype=np.int64),
+        np.asarray([len(frame) for frame in frames], dtype=np.int64),
+    )
+
+
+def _agreed_hint(hints: Sequence[str | None]) -> SupportLabel | None:
+    """Return the label hint only when every file agrees on it.
+
+    A disagreement means the instrument's files do not share a convention,
+    and picking a winner would put half of them half a cell out. Returning
+    None instead lets the resolver fall back to a centred cell, which is
+    wrong by at most half that on every file rather than fully wrong on some.
+    """
+    distinct = {hint for hint in hints if hint is not None}
+    if len(distinct) != 1 or any(hint is None for hint in hints):
+        return None
+    return _LABELS.get(distinct.pop())
+
+
+def _shift_ns(time_shift: str | None, *, name: str) -> int:
+    """Return an instrument's declared clock correction in nanoseconds."""
+    if time_shift is None:
+        return 0
+    shift = int(pd.Timedelta(time_shift).value)
+    if shift:
+        # Logged because a silent clock change is the one correction nobody
+        # can spot afterwards: the numbers stay plausible and only their
+        # relationship to another instrument moves.
+        logger.info("Instrument '%s': applying declared time_shift %s.", name, time_shift)
+    return shift
+
+
 def _n_within_file(index: pd.Index, sizes: Sequence[int]) -> int:
     """Count the duplicate timestamps one file explains, on the FINAL axis.
 
@@ -400,68 +406,6 @@ def _n_within_file(index: pd.Index, sizes: Sequence[int]) -> int:
         int(index[start:stop].duplicated(keep="first").sum())
         for start, stop in zip(edges[:-1], edges[1:], strict=True)
     )
-
-
-def _shift_ns(time_shift: str | None, *, name: str) -> int:
-    """Return an instrument's declared clock correction in nanoseconds."""
-    if time_shift is None:
-        return 0
-    shift = int(pd.Timedelta(time_shift).value)
-    if shift:
-        # Logged because a silent clock change is the one correction nobody
-        # can spot afterwards: the numbers stay plausible and only their
-        # relationship to another instrument moves.
-        logger.info("Instrument '%s': applying declared time_shift %s.", name, time_shift)
-    return shift
-
-
-def _per_row_widths(
-    frames: Sequence[pd.DataFrame], cadences: Sequence[int | None]
-) -> npt.NDArray[np.int64] | None:
-    """Expand each file's measured cadence to one width per row.
-
-    A file too short to have a cadence borrows the median of the files that
-    do, which is the least-surprising stand-in and is only ever reached by a
-    file of one or two rows. When *no* file was long enough, there is nothing
-    to borrow and None says so rather than inventing a number.
-    """
-    known = [cadence for cadence in cadences if cadence is not None]
-    if not known:
-        return None
-    fallback = int(np.median(known))
-    per_file = [fallback if cadence is None else cadence for cadence in cadences]
-    return np.repeat(
-        np.asarray(per_file, dtype=np.int64),
-        np.asarray([len(frame) for frame in frames], dtype=np.int64),
-    )
-
-
-#: The label vocabulary, as a lookup that both validates and types.
-#:
-#: A hint arrives from ``RawTable.attrs``, which is untyped by design, so it
-#: has to be checked before it can be trusted as a label. A dict does that and
-#: gives the checker a typed result, where a membership test would give
-#: neither.
-_LABELS: dict[str, SupportLabel] = {
-    "start": "start",
-    "mid": "mid",
-    "end": "end",
-    "unknown": "unknown",
-}
-
-
-def _agreed_hint(hints: Sequence[str | None]) -> SupportLabel | None:
-    """Return the label hint only when every file agrees on it.
-
-    A disagreement means the instrument's files do not share a convention,
-    and picking a winner would put half of them half a cell out. Returning
-    None instead lets the resolver fall back to a centred cell, which is
-    wrong by at most half that on every file rather than fully wrong on some.
-    """
-    distinct = {hint for hint in hints if hint is not None}
-    if len(distinct) != 1 or any(hint is None for hint in hints):
-        return None
-    return _LABELS.get(distinct.pop())
 
 
 def _order(frame: pd.DataFrame, name: str, *, n_within: int = 0) -> pd.DataFrame:
@@ -515,3 +459,59 @@ def _order(frame: pd.DataFrame, name: str, *, n_within: int = 0) -> pd.DataFrame
         )
         ordered = ordered.loc[~duplicated]
     return ordered
+
+
+def _merge_file_attrs(per_file: list[Mapping[str, object]]) -> dict[str, object]:
+    """Reconcile what each file declared about itself into one mapping.
+
+    A reader returns :attr:`~tsara.ingest.base.RawTable.attrs` per file, and
+    an instrument is usually many files. Most keys are campaign constants —
+    the PI, the mission, the LOD flag values — and simply agree. The
+    interesting case is when they do not, and the rule here is to *say so*
+    rather than to pick: a silent choice between two PIs, or two different
+    LOD flags, would put a false statement in a saved product that claims to
+    be self-describing (CLAUDE.md §5).
+
+    Counts (:data:`LOD_COUNT_KEY`) are summed instead, since a tally over
+    files is exactly the tally over the concatenated record.
+    """
+    merged: dict[str, object] = {}
+    totals: dict[str, int] = {}
+    values: dict[str, list[object]] = {}
+
+    for attrs in per_file:
+        for key, value in attrs.items():
+            if key == LOD_COUNT_KEY and isinstance(value, Mapping):
+                for column, count in value.items():
+                    totals[str(column)] = totals.get(str(column), 0) + int(count)
+                continue
+            seen = values.setdefault(key, [])
+            if value not in seen:
+                seen.append(value)
+
+    for key, distinct in values.items():
+        if len(distinct) == 1:
+            merged[key] = distinct[0]
+        else:
+            # Joined, not dropped: that four files in a campaign carry
+            # different revision strings is a fact worth reading in
+            # `ncdump -h`, and it is the kind of thing nobody thinks to
+            # check until an analysis disagrees with a colleague's.
+            #
+            # Summarized past a threshold, because some keys differ in every
+            # file by design -- an ICARTT data date does -- and a thousand-file
+            # instrument would otherwise write a thousand-item attr that is
+            # unreadable in `ncdump -h` and useless as provenance. The first
+            # and last of the sorted values plus a count says the same thing
+            # in a line, and still makes the disagreement visible.
+            ordered_values = sorted(str(item) for item in distinct)
+            if len(ordered_values) > _MAX_DISTINCT_ATTR_VALUES:
+                merged[key] = (
+                    f"{ordered_values[0]} ... {ordered_values[-1]} "
+                    f"({len(ordered_values)} distinct values)"
+                )
+            else:
+                merged[key] = "; ".join(ordered_values)
+    if totals:
+        merged[LOD_COUNT_KEY] = totals
+    return merged

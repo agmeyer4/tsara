@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 
+from tsara._version import __version__
 from tsara.config.analysis import AnalysisConfig
 from tsara.config.loader import (
     TsaraConfig,
@@ -28,8 +29,6 @@ from tsara.config.loader import (
 from tsara.config.manifest import Manifest
 from tsara.core.exceptions import TsaraConfigError, TsaraError
 from tsara.core.logutil import setup_logging
-
-__version__ = "0.1.0"
 
 # Library etiquette: never emit log output unless the application opts in
 # (via tsara.setup_logging() or its own handler configuration).

@@ -22,11 +22,11 @@ import xarray as xr
 from tsara.align import TsaraAlignError
 from tsara.align.auxiliary import attach_positions, interpolate_onto_cells
 from tsara.config.loader import load_manifest
+from tsara.config.synthetic import SyntheticConfig
 from tsara.core.support import CellBounds
 from tsara.core.timebase import SECOND_NS as SECOND
 from tsara.ingest import ingest_campaign
 from tsara.synthetic import generate
-from tsara.synthetic.config import SyntheticConfig
 from tsara.synthetic.export import export_raw
 
 

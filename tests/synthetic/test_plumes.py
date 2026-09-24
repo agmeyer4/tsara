@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tsara.synthetic.config import (
+from tsara.config.synthetic import (
     EMGShape,
     GaussianShape,
     LognormalAmplitude,

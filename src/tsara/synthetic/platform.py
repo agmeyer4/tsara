@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from tsara.config.synthetic import MobileTrack
 from tsara.core.geodesy import (
     METERS_PER_DEGREE,
     clamp_latitude,
@@ -30,7 +31,6 @@ from tsara.core.geodesy import (
     wrap_longitude,
 )
 from tsara.core.timebase import epoch_s as _epoch_s
-from tsara.synthetic.config import MobileTrack
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt

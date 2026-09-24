@@ -268,20 +268,6 @@ def circular_dispersion(resultant_length: npt.ArrayLike) -> npt.NDArray[np.float
     return np.asarray(np.degrees(radians), dtype=np.float64)
 
 
-def _weighted_components(
-    angles_deg: npt.NDArray[np.float64],
-    weights: npt.NDArray[np.float64],
-) -> tuple[float, float, float]:
-    """Return the weighted sine, cosine and total weight of finite angles."""
-    finite = np.isfinite(angles_deg) & (weights > 0)
-    if not finite.any():
-        return float("nan"), float("nan"), 0.0
-    radians = np.radians(angles_deg[finite])
-    w = weights[finite]
-    total = float(w.sum())
-    return float(np.sum(w * np.sin(radians))), float(np.sum(w * np.cos(radians))), total
-
-
 def circular_mean(
     angles_deg: npt.ArrayLike,
     weights: npt.ArrayLike | None = None,
@@ -486,3 +472,17 @@ def bin_circular_onto_cells(
         n_overlapping=n_overlapping,
         borrowed=borrowed_share(pairs, readings, weight),
     )
+
+
+def _weighted_components(
+    angles_deg: npt.NDArray[np.float64],
+    weights: npt.NDArray[np.float64],
+) -> tuple[float, float, float]:
+    """Return the weighted sine, cosine and total weight of finite angles."""
+    finite = np.isfinite(angles_deg) & (weights > 0)
+    if not finite.any():
+        return float("nan"), float("nan"), 0.0
+    radians = np.radians(angles_deg[finite])
+    w = weights[finite]
+    total = float(w.sum())
+    return float(np.sum(w * np.sin(radians))), float(np.sum(w * np.cos(radians))), total

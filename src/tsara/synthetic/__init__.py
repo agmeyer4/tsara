@@ -11,11 +11,13 @@ It doubles as the test harness for every later phase: alignment, baselines,
 detection, regression, and UQ are all developed against data generated here
 before real files are readable.
 
+The schema this stage consumes -- the atmosphere (fields, backgrounds,
+sources) and the instruments measuring it -- is
+:class:`~tsara.config.synthetic.SyntheticConfig`, which lives with the other
+schemas in :mod:`tsara.config` and is re-exported here.
+
 Submodules
 ----------
-config
-    Pydantic schemas describing the dataset to manufacture: the atmosphere
-    (fields, backgrounds, sources) and the instruments measuring it.
 profiling
     Measuring real data's statistical shape, so synthetic parameters are
     grounded in reality rather than guessed.
@@ -36,16 +38,16 @@ platform
 generator
     The orchestrator: realize the atmosphere, then let each instrument
     sample it.
+export
+    A generated dataset written out as the raw files and manifest an archive
+    would hold: the round-trip harness ingestion is checked against.
 bundle
     Reading and writing the on-disk TSARA bundle directory.
 """
 
 from __future__ import annotations
 
-from tsara.synthetic.atmosphere import Atmosphere, realize_atmosphere
-from tsara.synthetic.background import TsaraSyntheticError
-from tsara.synthetic.bundle import TsaraBundleError, load_bundle, save_bundle
-from tsara.synthetic.config import (
+from tsara.config.synthetic import (
     AtmosphereSpec,
     BootstrapBackground,
     DropoutSpec,
@@ -66,6 +68,9 @@ from tsara.synthetic.config import (
     TrueUncertainty,
     UniformAmplitude,
 )
+from tsara.synthetic.atmosphere import Atmosphere, realize_atmosphere
+from tsara.synthetic.background import TsaraSyntheticError
+from tsara.synthetic.bundle import TsaraBundleError, load_bundle, save_bundle
 from tsara.synthetic.export import export_raw
 from tsara.synthetic.generator import SyntheticDataset, generate
 from tsara.synthetic.plumes import GroundTruth, GroundTruthEvent

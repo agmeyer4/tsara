@@ -15,7 +15,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tsara"
-version = "0.1.0"
+# The version number is written once, in src/tsara/_version.py, and read from
+# there at build time (see [tool.setuptools.dynamic] below).
+dynamic = ["version"]
 description = "Time Series and Ratio Analyses: enhancement-ratio extraction and source fingerprinting for multi-rate trace gas timeseries."
 readme = "README.md"
 # PEP 639 SPDX license expression; the old `license = { file = ... }` table
@@ -114,6 +116,9 @@ Repository = "https://github.com/agmeyer4/tsara"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "tsara._version.__version__" }
 
 # PEP 561: ship the `py.typed` marker so that type checkers run by *users* of
 # TSARA actually read our annotations. Without it, `import tsara` is treated as
