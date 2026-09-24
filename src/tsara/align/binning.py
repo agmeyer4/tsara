@@ -73,7 +73,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from tsara import __version__
+from tsara._version import __version__
 from tsara.align.cells import (
     COPY_RATIO,
     cadence_s,

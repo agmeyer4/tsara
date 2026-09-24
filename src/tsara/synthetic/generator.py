@@ -62,7 +62,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from tsara import __version__
+from tsara._version import __version__
 from tsara.config.synthetic import (
     TRUTH_PREFIX,
     FieldSpec,

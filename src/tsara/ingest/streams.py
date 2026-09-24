@@ -50,7 +50,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from tsara import __version__
+from tsara._version import __version__
 from tsara.config.manifest import MobilePlatform, StationaryPlatform
 from tsara.core.circular import wrap_degrees
 from tsara.core.naming import (

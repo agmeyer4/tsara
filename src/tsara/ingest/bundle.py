@@ -34,7 +34,7 @@ from typing import Any
 import xarray as xr
 import yaml
 
-from tsara import __version__
+from tsara._version import __version__
 from tsara.config.loader import read_yaml
 from tsara.config.manifest import Manifest
 from tsara.core.bundle import (
