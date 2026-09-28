@@ -88,11 +88,17 @@ from tsara.align.variables import TsaraAlignError, VariableRef, select_variables
 from tsara.core.bundle import pin_time_encoding
 from tsara.core.circular import bin_circular_onto_cells
 from tsara.core.naming import (
+    BINNED_ATTR,
+    BORROWED_ATTR,
     CELL_METHODS_ATTR,
     DISPERSION_SUFFIX,
+    INSTRUMENT_ATTR,
+    READINGS_ATTR,
     RESULTANT_LENGTH_SUFFIX,
     TIME_BOUNDS_VAR,
     TIME_COORD,
+    TRANSFORM_ATTR,
+    WIDTH_RATIO_ATTR,
     borrowed_name,
     coverage_name,
     is_circular,
@@ -130,37 +136,21 @@ if TYPE_CHECKING:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "BINNED_ATTR",
-    "BORROWED_ATTR",
     "FinerSupport",
-    "INSTRUMENT_ATTR",
     "PROPAGATION_FORM_ATTR",
-    "READINGS_ATTR",
     "SIGMA_AT_SUPPORT_ATTR",
     "SupportTransform",
-    "TRANSFORM_ATTR",
-    "WIDTH_RATIO_ATTR",
     "bin_streams_onto_cells",
 ]
 
 
-#: Attrs the joined product carries, documented in ``docs/METHODS.md`` §11.2.
-INSTRUMENT_ATTR = "tsara_instrument"
-BINNED_ATTR = "tsara_binned"
+#: Attrs the joined product's sigma companions carry, documented in
+#: ``docs/METHODS.md`` §11.2. The record every column carries -- instrument,
+#: binned, and the four support numbers of §11.2.4 -- is spelled once in
+#: :mod:`tsara.core.naming`, because the rolling stage carries it forward on
+#: an adopted baseline and the stages never import each other.
 PROPAGATION_FORM_ATTR = "tsara_propagation_form"
 SIGMA_AT_SUPPORT_ATTR = "tsara_sigma_at_support"
-
-
-#: Per-column attrs recording how a join changed the support of what it holds
-#: (``docs/METHODS.md`` §11.2.4): the worst thing that happened to any reading
-#: behind the column, in a word; the largest reading-to-cell width ratio among
-#: the readings that formed a value; the share of the column's covered time
-#: whose value rests on air outside its cell; and how many distinct readings
-#: stand behind the column's rows.
-TRANSFORM_ATTR = "tsara_support_transform"
-WIDTH_RATIO_ATTR = "tsara_width_ratio_max"
-BORROWED_ATTR = "tsara_borrowed_share"
-READINGS_ATTR = "tsara_n_readings"
 
 
 #: What a join may do with a reading at or beyond :data:`~tsara.core.support.COPY_RATIO`.

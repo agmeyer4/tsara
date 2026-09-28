@@ -1004,15 +1004,55 @@ the scales it cannot see is a choice made per variable, not a rule.
 CF's `cell_methods` vocabulary (Appendix E of the conventions) has no general
 quantile, and asks for bounds with any method other than `point`. A baseline at
 a reading is a statistic over a window stated at a cell inside it: two
-supports, and no CF string is true of both. TSARA already has the precedent:
-the sigma companions carry no `cell_methods`, because nothing CF can say about
-them is true (§10.2). So a baseline carries **no `cell_methods`**, and instead
-TSARA attributes naming its method, window, quantile and membership rule, with
-per-window `n_readings_` and `coverage_` beside it; the names are fixed in
-Phase 5 and documented here then. The enhancement inherits the reading's own
-`cell_methods`, since subtracting a per-reading number changes nothing about
-what the cell is. A rolling slope in Phase 7 is a product whose cells are its
-windows, under the same no-false-method rule.
+supports, and no CF string is true of both. TSARA already has the precedent: the sigma companions carry no `cell_methods`,
+because nothing CF can say about them is true (§10.2). So a baseline carries
+**no `cell_methods`**, and instead TSARA attributes naming its method, window,
+quantile and membership rule, with per-window `n_readings_` and `coverage_`
+beside it. The enhancement inherits the reading's own `cell_methods`, since
+subtracting a per-reading number changes nothing about what the cell is. A
+rolling slope in Phase 7 is a product whose cells are its windows, under the
+same no-false-method rule.
+
+**The product (built 2026-09-28, `rolling.state`).** One `xarray.Dataset`
+per instrument, `tsara_stage = "rolling"`, on the stream's own `time` and
+`time_bnds` and every other coordinate the stream carries, with two more
+dimensions: `baseline_window` (the configured windows in seconds, their
+spelling kept in `tsara_baseline_windows`) and `baseline_quantile`. For each
+rolled variable `x` (by default every non-circular `role: gas` variable; a
+direction is refused):
+
+| variable | dims | what it is |
+|---|---|---|
+| `x`, `sigma_rand_x`, `sigma_sys_x` | (time) | the reading and its declared sigmas, copied, so the file stands alone |
+| `baseline_x` | (time, window, quantile) | the baseline; `nan` where blank |
+| `enhancement_x` | (time, window, quantile) | `x` − baseline, never clipped |
+| `n_readings_window_x`, `coverage_window_x` | (time, window) | the window's contributing count and covered share (§6.4); `rolling_quantile` only, since a constant has no window and an adopted baseline's windows are the donor's |
+| `sigma_rand_baseline_x` | (time, window, quantile) | Woodruff (§6.7), `empirical`; for `from_field`, the donor's, joined |
+| `sigma_sys_baseline_x` | (time, window, quantile) | the reading's systematic sigma at the quantile position; for `from_field`, the donor's, joined |
+| `sigma_rand_enhancement_x`, `sigma_sys_enhancement_x` | (time, window, quantile) | under the rules of §6.7; written only when the reading has the component |
+
+The window companions are companions by the existing `n_readings_` and
+`coverage_` prefixes, spelled with `window` so that a later join's own
+`n_readings_baseline_x` (the rows it drew on) cannot be mistaken for them.
+`baseline_x` and `enhancement_x` are variables, not companions: each has
+units and a field and is joined like any reading (§11.2, *swept variables*).
+
+The baseline's attributes, in place of a cell method: `tsara_baseline_method`
+(the registered name), `tsara_baseline_membership` (`overlap`, §6.3),
+`tsara_baseline_windows` (the configured spellings), `tsara_baseline_min_readings`
+(one count per quantile, §6.4), `tsara_baseline_blank_fraction` (one number
+per sweep point, window-major, the share of readings at which that point is
+blank for either reason), `tsara_baseline_too_wide_fraction` (per window, the
+share of readings whose window held a reading at least `COPY_RATIO` times as
+wide, §6.3); a `from_field` baseline adds `tsara_baseline_from` (the donor
+instrument) and carries the join's own record of what it did to the donor's
+support (§11.2.4); a `constant` adds `tsara_baseline_value`. The sampling
+sigma carries `tsara_sigma_assumption`, naming Woodruff's exchangeability
+assumption and that the figure is a floor (§6.7); each enhancement sigma
+carries `tsara_sigma_rule`, naming which rule of §6.7 formed it
+(`quadrature`; `same instrument: sigma_sys(x) |enhancement| / |x|`;
+`quadrature with the donor's`; `reading`). A sweep point blank at every
+reading is named in one warning per stream, with the count it needed.
 
 ### 6.7 Baseline uncertainty **[decided 2026-09-28 — Phase 5]**
 

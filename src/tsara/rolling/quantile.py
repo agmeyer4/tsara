@@ -121,6 +121,11 @@ class RollingQuantile:
         ``(windows,)``: whether a contributing reading was at least
         :data:`~tsara.core.support.COPY_RATIO` times as wide as the window,
         so that the window should not be stood on it (§6.3).
+    carried : numpy.ndarray or None
+        ``(windows, quantiles)``: the per-reading number handed in as
+        ``carry``, sorted with the values and read at the same positions --
+        the reading's systematic sigma at the quantile (§6.7). ``None`` when
+        nothing was carried.
     """
 
     values: npt.NDArray[np.float64]
@@ -129,6 +134,7 @@ class RollingQuantile:
     coverage: npt.NDArray[np.float64]
     n_effective: npt.NDArray[np.float64]
     too_wide: npt.NDArray[np.bool_]
+    carried: npt.NDArray[np.float64] | None = None
 
 
 def rolling_quantile(
@@ -137,6 +143,7 @@ def rolling_quantile(
     windows: CellBounds,
     quantiles: npt.ArrayLike,
     *,
+    carry: npt.ArrayLike | None = None,
     block_elements: int = MAX_BLOCK_ELEMENTS,
 ) -> RollingQuantile:
     """Evaluate the weighted quantile of a record over every window of a set.
@@ -155,6 +162,12 @@ def rolling_quantile(
     quantiles : array-like
         The quantiles wanted, each in [0, 1]; every one is read from the same
         sort.
+    carry : array-like, optional
+        One number per reading to carry through the sort and read at the same
+        positions as the value: the reading's systematic sigma, which a
+        quantile that falls between two readings inherits by the same
+        interpolation (§6.7). ``nan`` where the reading is masked is fine;
+        a masked reading takes no part.
     block_elements : int, optional
         The element budget per block, :data:`MAX_BLOCK_ELEMENTS` by default.
         Exposed so a test can force many small blocks; not a configuration.
@@ -179,6 +192,12 @@ def rolling_quantile(
         )
     if block_elements < 1:
         raise TsaraRollingError(f"block_elements must be positive, got {block_elements}.")
+    carried_values = None if carry is None else np.asarray(carry, dtype=np.float64)
+    if carried_values is not None and carried_values.shape != v.shape:
+        raise TsaraRollingError(
+            f"carry has shape {carried_values.shape} but there are {v.size} reading(s); "
+            "it is one number per reading."
+        )
     n_windows = len(windows)
     out_values = np.full((n_windows, q.size), np.nan, dtype=np.float64)
     out_sigma = np.full((n_windows, q.size), np.nan, dtype=np.float64)
@@ -186,7 +205,12 @@ def rolling_quantile(
     coverage = np.zeros(n_windows, dtype=np.float64)
     n_effective = np.full(n_windows, np.nan, dtype=np.float64)
     too_wide = np.zeros(n_windows, dtype=np.bool_)
-    result = RollingQuantile(out_values, out_sigma, n_readings, coverage, n_effective, too_wide)
+    out_carried = (
+        None if carried_values is None else np.full((n_windows, q.size), np.nan, dtype=np.float64)
+    )
+    result = RollingQuantile(
+        out_values, out_sigma, n_readings, coverage, n_effective, too_wide, out_carried
+    )
     if n_windows == 0 or len(readings) == 0:
         return result
     window_width = windows.width_ns.astype(np.float64)
@@ -239,6 +263,11 @@ def rolling_quantile(
         order = np.argsort(key, axis=1, kind="stable")
         sorted_values = np.take_along_axis(key, order, axis=1)
         sorted_weights = np.take_along_axis(weight, order, axis=1)
+        sorted_carry = (
+            None
+            if carried_values is None or out_carried is None
+            else np.take_along_axis(carried_values[index], order, axis=1)
+        )
         # The total is the last cumulative sum, not the pairwise `weight_sum`
         # above: the reference form divides by its own last cumulative sum,
         # and only the same sequence of additions gives the same positions
@@ -261,6 +290,11 @@ def rolling_quantile(
                 positions, sorted_values, count, np.clip(quantile + error, 0, 1)
             )
             out_sigma[rows, column] = np.where(has, (high - low) / 2, np.nan)
+            if sorted_carry is not None and out_carried is not None:
+                # The carried number at the same bracket and fraction as the value.
+                out_carried[rows, column] = np.where(
+                    has, _interpolate_rows(positions, sorted_carry, count, quantile), np.nan
+                )
     return result
 
 

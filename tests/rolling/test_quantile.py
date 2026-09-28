@@ -358,3 +358,11 @@ def test_a_window_holding_one_reading_has_that_value_and_no_spread() -> None:
     assert np.isin(got.values[lone], [9.0, 20.0]).all()
     assert (got.values[lone][:, 0] == got.values[lone][:, 1]).all()
     assert (got.sigma[lone] == 0.0).all()
+
+
+def test_a_carried_number_of_the_wrong_shape_is_refused() -> None:
+    readings = cells(0.0, 1.0, 5)
+    with pytest.raises(TsaraRollingError, match="carry has shape"):
+        rolling_quantile(
+            readings, np.arange(5.0), window_cells(readings, 10 * SECOND), [0.5], carry=np.ones(4)
+        )
