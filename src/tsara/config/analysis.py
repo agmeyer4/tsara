@@ -1,9 +1,10 @@
 """Analysis configuration schema: *what to do with the ingested data*.
 
 Where the manifest (:mod:`tsara.config.manifest`) describes the raw data,
-this module describes the science: the master time grid, the baseline
-parameter sweep, plume detection thresholds, smoothing, source-complex
-clustering, and regression/UQ settings.
+this module describes the science: the baseline parameter sweep and the
+method each variable's baseline is built with, plume detection thresholds,
+smoothing, source-complex clustering, regression/UQ settings, and an optional
+uniform output grid for the run that wants to export a rectangular table.
 
 The sweep philosophy
 --------------------
@@ -18,8 +19,9 @@ collapses to a point and methodological variance is zero by construction.
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 
@@ -27,19 +29,24 @@ from tsara.config.base import StrictModel as _StrictModel
 from tsara.config.base import validate_positive_timedelta as _validate_duration
 
 # ---------------------------------------------------------------------------
-# Output grid (continuous rolling state + PMF export matrix ONLY)
+# Output grid (optional: a uniform tiling, one kind of cell set, for an export)
 # ---------------------------------------------------------------------------
 
 
 class OutputGridConfig(_StrictModel):
-    """Definition of the uniform grid built for the continuous state + PMF matrix.
+    """A uniform tiling of cells: one kind of cell set, built when an export wants one.
 
-    REVISED 2026-07-09 ("synchronize late", see METHODS.md §1.1/§1.4): this
-    grid is *not* what streams are synchronized onto for baselines,
-    detection, or regression — those all run at each stream's own native
-    rate. This grid exists only at the output boundary, for the two products
-    that inherently need a common `(time x species)` cube: the continuous
-    rolling state and the PMF export matrix.
+    A grid is not where any science happens. Baselines, detection and
+    regression run per stream at native rate ("synchronize late", METHODS.md
+    §1.1), and the continuous rolling state -- baseline, enhancement and
+    noise scale for every reading at every sweep point -- lives beside each
+    stream's own readings (§6.2), not on this grid: measured, native rate is
+    thirteen times smaller than a grid spanning a campaign and loses nothing.
+    What a tiling is for is a rectangular table at the end, a receptor
+    model's input matrix being the usual case, and it is one cell set among
+    the others a join may be asked to fill (§1.4). It is therefore optional
+    in :class:`AnalysisConfig`: a run that never exports a table declares
+    none, and a run that does chooses the period for that export.
 
     Construction is binning-only in both directions: gas species are *never*
     interpolated (a concentration inside a plume is not a smooth field), so
@@ -196,20 +203,93 @@ class PairingConfig(_StrictModel):
 # ---------------------------------------------------------------------------
 
 
-class BaselineConfig(_StrictModel):
-    """Rolling low-quantile baseline estimation (the background signal).
+class RollingQuantileMethod(_StrictModel):
+    """The weighted low quantile of a variable's own readings over each window.
 
-    The baseline at each instant is a low quantile (e.g. the 5th percentile)
-    of the signal within a centered rolling window. Low quantiles track the
-    background *underneath* plumes because plumes only ever add mass —
-    enhancements are one-sided — so the lower tail of a window is dominated
-    by background air.
+    The default for every variable. Each reading in a window counts in
+    proportion to the share of its cell inside the window (METHODS.md §6.3),
+    and a window holding fewer readings than the count rule asks for is
+    blank rather than a baseline built on a handful of points (§6.4).
+    """
+
+    method: Literal["rolling_quantile"] = "rolling_quantile"
+
+
+class FromFieldMethod(_StrictModel):
+    """Another instrument's baseline of the same field, joined onto this one's cells.
+
+    For an instrument too sparse to see a background at the windows that
+    matter -- a canister filling every nine minutes has one fill in more than
+    half of all ten-minute windows (METHODS.md §6.5) -- the atmosphere has one
+    background per field, and a dense instrument beside it samples that
+    background every second. Its baseline at the same window and quantile is
+    averaged onto this instrument's cells by the ordinary join, and the
+    product records which instrument it came from. It fails exactly when the
+    two instruments disagree in calibration, which is why the enhancement's
+    systematic uncertainty then carries both instruments' terms (§6.7).
+    """
+
+    method: Literal["from_field"] = "from_field"
+    instrument: str = Field(
+        min_length=1,
+        description=(
+            "The instrument whose baseline this variable adopts. It must declare a "
+            "variable of the same `field` as this one, and its own baseline for "
+            "that variable must not itself be `from_field` (no chains); checked "
+            "when manifest and analysis configs are combined."
+        ),
+    )
+
+
+class ConstantMethod(_StrictModel):
+    """A declared number, zero included.
+
+    At zero the enhancement is the concentration. A slope fitted inside an
+    event loses nothing by it, since a baseline flat across the event moves
+    the intercept and not the slope (METHODS.md §6.1), and a receptor model
+    run on concentrations rather than enhancements is common practice, with
+    the background appearing as a factor of its own.
+    """
+
+    method: Literal["constant"] = "constant"
+    value: float = Field(
+        description=(
+            "The baseline, in the variable's canonical units (after the "
+            "manifest's unit conversion). Zero makes the enhancement the concentration."
+        ),
+    )
+
+
+#: Tagged union of the registered baseline methods, dispatched on ``method``
+#: -- the same discriminator convention as the manifest's QA/QC rules, loaders
+#: and platforms. Every name here is a registered method in
+#: :mod:`tsara.rolling` and has a section in METHODS.md §6.5.
+BaselineMethod = Annotated[
+    RollingQuantileMethod | FromFieldMethod | ConstantMethod, Field(discriminator="method")
+]
+
+
+class BaselineConfig(_StrictModel):
+    """Rolling low-quantile baselines: the sweep, the count rule, and the method per variable.
+
+    The baseline at each reading is a low quantile (e.g. the 5th percentile)
+    of the signal within a window of stated duration centred on the reading.
+    Low quantiles track the background *underneath* plumes because plumes
+    only ever add mass -- enhancements are one-sided -- so the lower tail of
+    a window is dominated by background air. There is no single true
+    baseline: a window of length *w* follows everything slower than about
+    *w* and leaves what is shorter standing as enhancement (METHODS.md
+    §6.1), so the window is a sweep dimension rather than a setting to get
+    right.
 
     ``windows`` and ``quantiles`` are sweep dimensions: every (window,
     quantile) pair is evaluated. Windows double as the *multi-scale
-    hierarchy* used for nested-plume parent/child bookkeeping in Phase 6 —
+    hierarchy* used for nested-plume parent/child bookkeeping in Phase 6 --
     a sharp blip is an enhancement over the shortest window's baseline, a
-    broad plume over the longest.
+    broad plume over the longest. ``min_readings`` is the validity rule, a
+    count tied to the quantile (§6.4). ``methods`` chooses, per variable, how
+    its baseline is built (§6.5); anything not named uses the rolling
+    quantile of its own readings.
     """
 
     windows: tuple[str, ...] = Field(
@@ -227,16 +307,90 @@ class BaselineConfig(_StrictModel):
             "point along the 'baseline_quantile' sweep dimension."
         ),
     )
-    min_valid_fraction: float = Field(
-        default=0.5,
-        gt=0,
-        le=1,
+    min_readings: int | None = Field(
+        default=None,
+        ge=2,
         description=(
-            "Minimum fraction of non-NaN samples a window must contain for "
-            "its baseline to be reported; sparser windows yield NaN rather "
-            "than a baseline built on a handful of points."
+            "How many readings a window must hold for its baseline to be "
+            "reported at a quantile; a thinner window is blank, with the count "
+            "recorded beside it. `null` (the default) means ceil(1/q) for each "
+            "quantile q: with fewer readings than that, a q-quantile is set by "
+            "the lowest reading alone, and at exactly 1/q it is a blend of the "
+            "two lowest (METHODS.md §6.4). An integer applies to every quantile. "
+            "A count rather than a fraction, because a fraction never said what "
+            "it was a fraction of, and its three possible denominators disagree "
+            "completely on real records."
         ),
     )
+    methods: dict[str, BaselineMethod] = Field(
+        default_factory=dict,
+        description=(
+            "Per-variable baseline method, keyed '<instrument>.<variable>' "
+            "(variable names are unique per instrument, METHODS.md §1.6). A "
+            "variable not named here uses `rolling_quantile`. Each entry is "
+            "checked against the manifest when the two configs are combined."
+        ),
+    )
+
+    def min_readings_for(self, quantile: float) -> int:
+        """Return the readings a window must hold to report ``quantile``.
+
+        Parameters
+        ----------
+        quantile : float
+            One of ``quantiles``, in (0, 0.5].
+
+        Returns
+        -------
+        int
+            ``min_readings`` when set; otherwise the smallest integer not
+            below 1/q, the count at which the q-quantile is still a blend of
+            the two lowest readings rather than the minimum alone (METHODS.md
+            §6.4). Rounded before the ceiling so that a quantile whose
+            reciprocal is a whole number in arithmetic but not in float64
+            (1/0.05 is 20.000000000000004) gives that whole number.
+        """
+        if self.min_readings is not None:
+            return self.min_readings
+        return math.ceil(round(1.0 / quantile, 9))
+
+    def method_for(self, instrument: str, variable: str) -> BaselineMethod:
+        """Return the baseline method configured for one variable.
+
+        Parameters
+        ----------
+        instrument, variable : str
+            The variable, as the manifest names it.
+
+        Returns
+        -------
+        RollingQuantileMethod or FromFieldMethod or ConstantMethod
+            The configured method, or :class:`RollingQuantileMethod` when
+            ``methods`` does not name this variable.
+        """
+        return self.methods.get(f"{instrument}.{variable}", RollingQuantileMethod())
+
+    @field_validator("methods")
+    @classmethod
+    def _keys_name_an_instrument_and_a_variable(
+        cls, value: dict[str, BaselineMethod]
+    ) -> dict[str, BaselineMethod]:
+        """Require every key to be ``<instrument>.<variable>``, both identifiers.
+
+        Whether the two names exist is the combined config's question
+        (:class:`~tsara.config.loader.TsaraConfig`), since the analysis
+        schema alone cannot see the manifest; the shape is checked here so
+        that a key such as ``ch4`` fails at once with the spelling wanted
+        rather than later as an instrument nobody declared.
+        """
+        for key in value:
+            instrument, dot, variable = key.partition(".")
+            if not dot or not instrument.isidentifier() or not variable.isidentifier():
+                raise ValueError(
+                    f"BaselineConfig.methods keys are '<instrument>.<variable>', e.g. "
+                    f"'iwas.benzene'; got {key!r}."
+                )
+        return value
 
     @field_validator("windows")
     @classmethod
@@ -514,11 +668,20 @@ class AnalysisConfig(_StrictModel):
 
     Optional stages (smoothing, clustering) default to disabled-but-present
     so that ``analysis.smoothing.enabled`` is always a safe attribute access
-    — downstream code never needs None checks for whole stages.
+    — downstream code never needs None checks for whole stages. The output
+    grid is the one exception and is ``None`` when absent: a grid has no
+    sensible default period, since the period is the export's choice, and an
+    absent grid is a statement (nothing is exported on a tiling) rather than
+    a stage switched off.
     """
 
-    output_grid: OutputGridConfig = Field(
-        description="Uniform grid for the continuous state + PMF matrix only (METHODS.md §1.4)."
+    output_grid: OutputGridConfig | None = Field(
+        default=None,
+        description=(
+            "Optional uniform tiling for an export (METHODS.md §1.4). Absent by "
+            "default: the continuous rolling state lives per stream at native "
+            "rate (§6.2), so a run that never exports a table needs no grid."
+        ),
     )
     alignment: AlignmentConfig = Field(
         default_factory=AlignmentConfig,
@@ -542,28 +705,3 @@ class AnalysisConfig(_StrictModel):
         default_factory=ClusteringConfig, description="Optional Source Complex clustering."
     )
     regression: RegressionConfig = Field(description="Enhancement-ratio regression settings.")
-
-    @model_validator(mode="after")
-    def _grid_finer_than_shortest_window(self) -> AnalysisConfig:
-        """Require the output grid to resolve the shortest baseline window.
-
-        A 5-minute grid with a 2-minute baseline window means windows hold
-        zero or one samples — the quantile degenerates to the identity and
-        the 'baseline' is just the signal. Require at least ~10 grid cells
-        per shortest window so the quantile has something to chew on. Note
-        this checks the *output* grid, not the native-rate streams the
-        baseline itself actually rolls over — it is a sanity bound on the
-        continuous-state/PMF product's resolution relative to the shortest
-        swept window, not a synchronization requirement (METHODS.md §1.1).
-        """
-        import pandas as pd
-
-        grid_dt = pd.Timedelta(self.output_grid.freq)
-        shortest = pd.Timedelta(self.baseline.windows[0])
-        if shortest < 10 * grid_dt:
-            raise ValueError(
-                f"Shortest baseline window ({self.baseline.windows[0]}) must be at "
-                f"least 10x the output grid spacing ({self.output_grid.freq}); a "
-                "rolling quantile over fewer samples is statistically meaningless."
-            )
-        return self

@@ -231,10 +231,10 @@ never interpolated. Config: `OutputGridConfig` (`tsara.config.analysis`).
 **Put off, deliberately (2026-09-24).** What else produces cell sets (an
 instrument's own cells, the event catalog), how a configuration names that
 choice, and the export writer are decided when the export is built.
-`AnalysisConfig.output_grid` is required today and validated against the
-shortest baseline window, a grid the baseline never rolls over; it is to become
-optional, and the validator is replaced by the rule of §6.4. Nothing yet names
-a *segment*, a contiguous run of a record such as one drive, though per-drive
+`AnalysisConfig.output_grid` is optional since Phase 5: a run that never
+exports a table declares none, and the validator that once compared it with
+the shortest baseline window, a grid the baseline never rolls over, is gone,
+replaced by the count of §6.4. Nothing yet names a *segment*, a contiguous run of a record such as one drive, though per-drive
 cells, per-drive export and Phase 8's segment-wise filtering all need one.
 
 ### 1.5 Circular statistics for angular variables
@@ -874,15 +874,17 @@ window's reading count depends on it.
 **Validity is a count of readings, `min_readings`, with a stated relation to
 the quantile.** With *N* readings and linear interpolation, a *q*-quantile lies
 between the two lowest readings whenever (*N* − 1)·*q* < 1; at *q* = 0.05 that
-is any window of twenty readings or fewer, so the default follows 1/*q*. Every
+is any window of twenty readings or fewer, so the default follows 1/*q*:
+`BaselineConfig.min_readings` is `null` by default, meaning ⌈1/*q*⌉ for each
+quantile of the sweep, and an integer applies to every quantile. Every
 window records `n_readings_` and `coverage_` as every join does. One warning
 per stream at run time names the windows too short for the quantile. This
 replaces `BaselineConfig.min_valid_fraction` and the `AnalysisConfig` validator
 that compares the shortest window with the output grid (both removed in
-Phase 5). Proposed with the decision and to be confirmed in the Phase-5 plan: a
-window that fails the count or the width rule of §6.3 leaves that sweep point
-blank for that instrument, with the reason recorded, instead of raising, so
-one short window on a 60 s instrument does not stop a whole sweep.
+Phase 5). Confirmed with the Phase-5 plan (2026-09-28): a window that fails
+the count or the width rule of §6.3 leaves that sweep point blank for that
+instrument, with the reason recorded, instead of raising, so one short window
+on a 60 s instrument does not stop a whole sweep.
 
 **Why not a fraction.** `min_valid_fraction` never said what it was a fraction
 of, and on real data the three readings disagree completely. Share of windows,
@@ -923,6 +925,15 @@ until a sweep needs it.
   the concentration. A slope fitted inside an event loses nothing by it
   (§6.1), and a receptor model run on concentrations rather than enhancements
   is common practice, with the background appearing as a factor of its own.
+
+The method is chosen per variable under `baseline.methods`, keyed
+`<instrument>.<variable>` because a variable's name is unique per instrument
+(§1.6); a variable not named there uses `rolling_quantile`. A `from_field`
+entry names the instrument the baseline comes from, and the combined
+configuration refuses one that measures no variable of the same field, that
+names the variable's own instrument, or whose own baseline for that field is
+`from_field` (a chain would make the record of where a baseline came from name
+the wrong instrument).
 
 **Why a sparse instrument needs options.** Fills of the iWAS canister in a
 window centred on each fill, over all 261 fills of the ten 2024 drive days,

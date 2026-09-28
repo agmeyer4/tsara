@@ -10,7 +10,8 @@ from typing import Any
 import pytest
 
 from tsara import load_analysis, load_config, load_manifest
-from tsara.config.loader import read_yaml
+from tsara.config.analysis import FromFieldMethod
+from tsara.config.loader import TsaraConfig, read_yaml
 from tsara.core.exceptions import TsaraConfigError
 
 # Spelled out rather than imported from conftest: `from tests.conftest import ...`
@@ -44,6 +45,7 @@ def test_combined_roundtrip(
     path = write_yaml({"manifest": mobile_manifest_dict, "analysis": analysis_dict}, "run.yaml")
     config = load_config(path)
     assert config.manifest.name == "test_mobile"
+    assert config.analysis.output_grid is not None
     assert config.analysis.output_grid.freq == "1s"
 
 
@@ -391,3 +393,106 @@ def test_shipped_bootstrap_example_is_valid_and_generates() -> None:
     # One instrument, two species, one bootstrapped and one parametric.
     assert {"ch4", "co2"} <= set(dataset.streams["picarro"].data_vars)
     assert len(dataset.ground_truth) > 0
+
+
+# ---------------------------------------------------------------------------
+# Combined cross-check: per-variable baseline methods against the manifest
+# ---------------------------------------------------------------------------
+
+
+def _with_a_second_methane_analyzer(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Add an `aeris` instrument declaring `ch4_aeris` with field `ch4` beside the Picarro."""
+    out = copy.deepcopy(manifest)
+    aeris = copy.deepcopy(out["instruments"]["picarro"])
+    aeris["variables"] = {
+        "ch4_aeris": {"column": "CH4", "role": "gas", "units": "ppb", "field": "ch4"},
+        "wind_dir": {"column": "WD", "role": "met", "units": "degrees", "circular": True},
+    }
+    out["instruments"]["aeris"] = aeris
+    return out
+
+
+def _combined(
+    write_yaml: WriteYaml, manifest: dict[str, Any], analysis: dict[str, Any]
+) -> TsaraConfig:
+    return load_config(write_yaml({"manifest": manifest, "analysis": analysis}, "run.yaml"))
+
+
+def test_a_from_field_method_between_two_instruments_of_one_field_is_accepted(
+    write_yaml: WriteYaml, stationary_manifest_dict: dict[str, Any], analysis_dict: dict[str, Any]
+) -> None:
+    manifest = _with_a_second_methane_analyzer(stationary_manifest_dict)
+    analysis = copy.deepcopy(analysis_dict)
+    analysis["baseline"]["methods"] = {
+        "aeris.ch4_aeris": {"method": "from_field", "instrument": "picarro"},
+        "picarro.co2": {"method": "constant", "value": 0.0},
+    }
+    config = _combined(write_yaml, manifest, analysis)
+    assert config.analysis.baseline.method_for("aeris", "ch4_aeris") == FromFieldMethod(
+        instrument="picarro"
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "method", "message"),
+    [
+        ("lgr.ch4", {"method": "constant", "value": 0.0}, "declares no instrument 'lgr'"),
+        ("picarro.sf6", {"method": "constant", "value": 0.0}, "declares no variable 'sf6'"),
+        ("aeris.wind_dir", {"method": "constant", "value": 0.0}, "circular"),
+        ("picarro.ch4", {"method": "from_field", "instrument": "picarro"}, "its own instrument"),
+        ("picarro.ch4", {"method": "from_field", "instrument": "lgr"}, "does not declare"),
+        (
+            "picarro.co2",
+            {"method": "from_field", "instrument": "aeris"},
+            "no variable with field 'co2'",
+        ),
+    ],
+)
+def test_a_baseline_method_naming_what_the_manifest_lacks_is_refused(
+    write_yaml: WriteYaml,
+    stationary_manifest_dict: dict[str, Any],
+    analysis_dict: dict[str, Any],
+    key: str,
+    method: dict[str, Any],
+    message: str,
+) -> None:
+    manifest = _with_a_second_methane_analyzer(stationary_manifest_dict)
+    analysis = copy.deepcopy(analysis_dict)
+    analysis["baseline"]["methods"] = {key: method}
+    with pytest.raises(TsaraConfigError, match=message):
+        _combined(write_yaml, manifest, analysis)
+
+
+def test_a_from_field_chain_is_refused(
+    write_yaml: WriteYaml, stationary_manifest_dict: dict[str, Any], analysis_dict: dict[str, Any]
+) -> None:
+    """A adopts B's baseline and B adopts C's: the record would name the wrong instrument."""
+    manifest = _with_a_second_methane_analyzer(stationary_manifest_dict)
+    lgr = copy.deepcopy(manifest["instruments"]["picarro"])
+    lgr["variables"] = {"ch4_lgr": {"column": "CH4", "role": "gas", "units": "ppb", "field": "ch4"}}
+    manifest["instruments"]["lgr"] = lgr
+    analysis = copy.deepcopy(analysis_dict)
+    analysis["baseline"]["methods"] = {
+        "lgr.ch4_lgr": {"method": "from_field", "instrument": "aeris"},
+        "aeris.ch4_aeris": {"method": "from_field", "instrument": "picarro"},
+    }
+    with pytest.raises(TsaraConfigError, match="chain"):
+        _combined(write_yaml, manifest, analysis)
+
+
+def test_a_donor_with_two_variables_of_one_field_is_ambiguous(
+    write_yaml: WriteYaml, stationary_manifest_dict: dict[str, Any], analysis_dict: dict[str, Any]
+) -> None:
+    manifest = _with_a_second_methane_analyzer(stationary_manifest_dict)
+    manifest["instruments"]["picarro"]["variables"]["ch4_wet"] = {
+        "column": "CH4_wet",
+        "role": "gas",
+        "units": "ppb",
+        "field": "ch4",
+    }
+    analysis = copy.deepcopy(analysis_dict)
+    analysis["baseline"]["methods"] = {
+        "aeris.ch4_aeris": {"method": "from_field", "instrument": "picarro"}
+    }
+    with pytest.raises(TsaraConfigError, match="ambiguous"):
+        _combined(write_yaml, manifest, analysis)

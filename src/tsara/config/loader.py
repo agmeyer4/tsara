@@ -37,7 +37,7 @@ import yaml
 from pydantic import ValidationError, model_validator
 from yaml.constructor import ConstructorError
 
-from tsara.config.analysis import AnalysisConfig
+from tsara.config.analysis import AnalysisConfig, FromFieldMethod
 from tsara.config.base import StrictModel as _StrictModel
 from tsara.config.manifest import Manifest
 from tsara.config.synthetic import SyntheticConfig
@@ -86,6 +86,81 @@ class TsaraConfig(_StrictModel):
                 f"regression.reference_species '{ref}' is not the field of any role='gas' "
                 f"variable in manifest '{self.manifest.name}'; declared gases: {sorted(gases)}."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _baseline_methods_name_declared_variables(self) -> TsaraConfig:
+        """Check every per-variable baseline method against the manifest.
+
+        The analysis schema validates the *shape* of a ``baseline.methods`` key
+        and nothing more, because it cannot see the manifest. Here both halves
+        are present, so each key must name a declared instrument and one of
+        its variables, and the variable must not be circular -- a direction
+        has no low quantile. A ``from_field`` entry is checked further: the
+        instrument it names must exist, be a different one, and declare a
+        variable of the same ``field`` (METHODS.md §1.6), and that variable's
+        own baseline must not be ``from_field`` too, since a chain would adopt
+        a baseline that is itself adopted, and the record of where a baseline
+        came from would then name the wrong instrument.
+        """
+        instruments = self.manifest.instruments
+        for key, method in self.analysis.baseline.methods.items():
+            instrument_name, _, variable_name = key.partition(".")
+            instrument = instruments.get(instrument_name)
+            if instrument is None:
+                raise ValueError(
+                    f"baseline.methods names '{key}', but manifest '{self.manifest.name}' "
+                    f"declares no instrument '{instrument_name}'; instruments: "
+                    f"{sorted(instruments)}."
+                )
+            variable = instrument.variables.get(variable_name)
+            if variable is None:
+                raise ValueError(
+                    f"baseline.methods names '{key}', but instrument '{instrument_name}' "
+                    f"declares no variable '{variable_name}'; its variables: "
+                    f"{sorted(instrument.variables)}."
+                )
+            if variable.circular:
+                raise ValueError(
+                    f"baseline.methods names '{key}', which is circular; a direction has "
+                    "no low quantile and no baseline."
+                )
+            if not isinstance(method, FromFieldMethod):
+                continue
+            if method.instrument == instrument_name:
+                raise ValueError(
+                    f"baseline.methods['{key}'] takes its baseline from its own instrument; "
+                    "from_field adopts another instrument's baseline of the same field."
+                )
+            donor = instruments.get(method.instrument)
+            if donor is None:
+                raise ValueError(
+                    f"baseline.methods['{key}'] names instrument '{method.instrument}', "
+                    f"which manifest '{self.manifest.name}' does not declare; instruments: "
+                    f"{sorted(instruments)}."
+                )
+            field = instrument.field_of(variable_name)
+            matching = [name for name in donor.variables if donor.field_of(name) == field]
+            if not matching:
+                raise ValueError(
+                    f"baseline.methods['{key}'] adopts a baseline from '{method.instrument}', "
+                    f"which measures no variable with field '{field}'; its fields: "
+                    f"{sorted({donor.field_of(name) for name in donor.variables})}."
+                )
+            if len(matching) > 1:
+                raise ValueError(
+                    f"baseline.methods['{key}'] adopts a baseline from '{method.instrument}', "
+                    f"which declares more than one variable with field '{field}' "
+                    f"({sorted(matching)}), so which baseline to adopt is ambiguous."
+                )
+            donor_method = self.analysis.baseline.methods.get(f"{method.instrument}.{matching[0]}")
+            if isinstance(donor_method, FromFieldMethod):
+                raise ValueError(
+                    f"baseline.methods['{key}'] adopts the baseline of "
+                    f"'{method.instrument}.{matching[0]}', whose own baseline is from_field "
+                    f"(from '{donor_method.instrument}'); a chain is refused so that the "
+                    "record of where a baseline came from names the instrument that made it."
+                )
         return self
 
 
@@ -244,10 +319,12 @@ def load_analysis(path: str | Path) -> AnalysisConfig:
     path = Path(path)
     analysis = _validate(AnalysisConfig, read_yaml(path), path)
     logger.info(
-        "Loaded analysis config: output_grid=%s, %d baseline window(s) x %d quantile(s)",
-        analysis.output_grid.freq,
+        "Loaded analysis config: %d baseline window(s) x %d quantile(s), %d per-variable "
+        "baseline method(s), output_grid=%s",
         len(analysis.baseline.windows),
         len(analysis.baseline.quantiles),
+        len(analysis.baseline.methods),
+        analysis.output_grid.freq if analysis.output_grid is not None else "none",
     )
     return analysis
 
