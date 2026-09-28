@@ -27,9 +27,11 @@ if TYPE_CHECKING:  # pragma: no cover
     import xarray as xr
 
 __all__ = [
+    "BUNDLE_ANALYSIS_CONFIG",
     "BUNDLE_FORMAT_VERSION",
     "BUNDLE_GRID_FILE",
     "BUNDLE_MANIFEST",
+    "BUNDLE_ROLLING_DIR",
     "BUNDLE_STAGE_KEY",
     "BUNDLE_STREAMS_DIR",
     "BUNDLE_VERSION_WITH_CELLS",
@@ -58,6 +60,19 @@ BUNDLE_STREAMS_DIR = "streams"
 #: provenance in its attributes instead, which is what CLAUDE.md §5 asks of
 #: every saved output anyway.
 BUNDLE_GRID_FILE = "grid.nc"
+
+#: Subdirectory holding one netCDF file per instrument's rolling state, and
+#: the file beside it holding the analysis configuration that produced them.
+#:
+#: A directory beside ``streams/`` rather than an entry in ``bundle.json``,
+#: for the grid's reason: the descriptor records which stage created the
+#: bundle, and the rolling state is a later stage's product dropped into the
+#: same directory. Each state file carries its own provenance in its
+#: attributes (``tsara_stage``, the version, the instrument, the sweep), and
+#: the configuration beside it is the record of what ran, as the resolved
+#: manifest is for the streams.
+BUNDLE_ROLLING_DIR = "rolling"
+BUNDLE_ANALYSIS_CONFIG = "analysis.yaml"
 
 #: Bumped only when the layout changes incompatibly, so a future reader can
 #: refuse (or migrate) an old bundle rather than misinterpreting it.

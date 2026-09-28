@@ -1110,8 +1110,28 @@ sigma carries `tsara_sigma_assumption`, naming Woodruff's exchangeability
 assumption and that the figure is a floor (§6.7); each enhancement sigma
 carries `tsara_sigma_rule`, naming which rule of §6.7 formed it
 (`quadrature`; `same instrument: sigma_sys(x) |enhancement| / |x|`;
-`quadrature with the donor's`; `reading`). A sweep point blank at every
-reading is named in one warning per stream, with the count it needed.
+`quadrature with the donor's`; `reading`). A sweep point blank at every reading is named in one warning per stream,
+with the count it needed.
+
+**Persistence (Phase 5, `rolling.bundle`).** `save_state` writes one netCDF
+file per instrument, `rolling/<instrument>.nc`, into a bundle directory
+beside `streams/`, and the analysis configuration that produced them as
+`rolling/analysis.yaml`, as the resolved manifest is written beside the
+streams; `bundle.json` is not touched, for the grid's reason (§11.7). State
+files for instruments the run did not roll are removed, so the directory is
+the record of what ran. An optional zlib level compresses every array, the
+time axis and bounds included, as `save_grid` does; measured on the example
+campaign's states (two gas variables per instrument, a 3 × 3 sweep), level 4
+takes the 2 s Picarro's file from 6.5 MB to 2.8 MB and the 0.25 s Aeris's
+from 25.5 MB to 12.7 MB, values identical.
+`load_state` brings every variable, coordinate (the CF bounds as a
+coordinate) and attribute back exactly, the per-sweep-point records as the
+numeric arrays they are, refuses a file whose `tsara_stage` is not
+`rolling`, and reads the configuration through the one YAML door so a
+hand-edited copy with a key written twice is refused there too (§10.2). A
+reloaded state is joined like a stream (§6.2), which the round-trip test
+checks last. The bundle format version is unchanged: a new directory beside
+the streams is additive, and an older reader ignores it.
 
 ### 6.7 Baseline uncertainty **[decided 2026-09-28 — Phase 5]**
 

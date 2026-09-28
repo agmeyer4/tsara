@@ -29,6 +29,9 @@ Shape of the subpackage
     the enhancement formed unclipped with its uncertainties (§6.7), the
     noise scale beside the reading, and what every column records (§6.6),
     on the stream's own cells.
+``bundle``
+    Saving and reloading the states, one file per instrument beside the
+    streams, with the analysis configuration that produced them.
 
 The joining of a rolling state onto other cells is not here: a per-reading
 product is joined like a stream by :mod:`tsara.align`, which hands its result
@@ -37,6 +40,7 @@ back as a Dataset (§11.2, *swept variables*).
 
 from __future__ import annotations
 
+from tsara.rolling.bundle import RollingStates, load_state, save_state
 from tsara.rolling.methods import (
     BaselineRequest,
     BaselineResult,
@@ -68,18 +72,21 @@ __all__ = [
     "NoiseRequest",
     "NoiseResult",
     "RollingQuantile",
+    "RollingStates",
     "TsaraRollingError",
     "available_baseline_methods",
     "available_noise_estimators",
     "duration_ns",
     "get_baseline_method",
     "get_noise_estimator",
+    "load_state",
     "noise_scale",
     "register_baseline_method",
     "register_noise_estimator",
     "rolling_quantile",
     "rolling_state",
     "rolling_states",
+    "save_state",
     "weighted_quantile",
     "window_cells",
 ]
