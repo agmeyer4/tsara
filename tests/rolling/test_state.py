@@ -138,12 +138,14 @@ def test_the_state_lives_on_the_streams_own_cells_with_the_sweep_as_dimensions(
             "sigma_sys_baseline_ch4",
             "sigma_rand_enhancement_ch4",
             "sigma_sys_enhancement_ch4",
+            "noise_ch4",
             "co2",
             "baseline_co2",
             "enhancement_co2",
             "n_readings_window_co2",
             "coverage_window_co2",
             "sigma_rand_baseline_co2",
+            "noise_co2",
         ]
     )
 

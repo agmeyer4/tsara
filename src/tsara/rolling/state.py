@@ -36,6 +36,7 @@ import numpy as np
 import xarray as xr
 
 from tsara._version import __version__
+from tsara.config.analysis import DetectionConfig
 from tsara.core.bundle import pin_time_encoding
 from tsara.core.naming import (
     CELL_METHODS_ATTR,
@@ -47,10 +48,11 @@ from tsara.core.naming import (
     is_circular,
     is_companion_name,
     n_readings_window_name,
+    noise_name,
     sigma_rand_name,
     sigma_sys_name,
 )
-from tsara.core.support import stream_cells
+from tsara.core.support import CellBounds, stream_cells
 from tsara.core.timebase import NS_PER_S
 from tsara.rolling.methods import (
     QUANTILE_DIM,
@@ -59,6 +61,7 @@ from tsara.rolling.methods import (
     BaselineResult,
     get_baseline_method,
 )
+from tsara.rolling.noise import MIN_NOISE_SAMPLES, noise_scale
 from tsara.rolling.quantile import MAX_BLOCK_ELEMENTS
 from tsara.rolling.windows import TsaraRollingError, duration_ns
 
@@ -76,6 +79,12 @@ __all__ = [
     "BASELINE_MIN_READINGS_ATTR",
     "BASELINE_TOO_WIDE_ATTR",
     "BASELINE_WINDOWS_ATTR",
+    "NOISE_BLANK_FRACTION_ATTR",
+    "NOISE_ESTIMATOR_ATTR",
+    "NOISE_FLOOR_FRACTION_ATTR",
+    "NOISE_MIN_SAMPLES_ATTR",
+    "NOISE_RESOLUTION_ATTR",
+    "NOISE_WINDOW_ATTR",
     "ROLLING_STAGE",
     "SIGMA_ASSUMPTION_ATTR",
     "SIGMA_RULE_ATTR",
@@ -103,6 +112,17 @@ BASELINE_TOO_WIDE_ATTR = "tsara_baseline_too_wide_fraction"
 SIGMA_ASSUMPTION_ATTR = "tsara_sigma_assumption"
 SIGMA_RULE_ATTR = "tsara_sigma_rule"
 
+#: Attrs on the noise scale (§2.5): the estimator used (absent for a declared
+#: or reported figure), its window, the reporting resolution the floor was
+#: built from, the share of readings the floor raised, the fewest samples a
+#: window may hold, and the share of readings left without a scale.
+NOISE_ESTIMATOR_ATTR = "tsara_noise_estimator"
+NOISE_WINDOW_ATTR = "tsara_noise_window"
+NOISE_RESOLUTION_ATTR = "tsara_noise_resolution"
+NOISE_FLOOR_FRACTION_ATTR = "tsara_noise_floor_fraction"
+NOISE_MIN_SAMPLES_ATTR = "tsara_noise_min_samples"
+NOISE_BLANK_FRACTION_ATTR = "tsara_noise_blank_fraction"
+
 #: How readings meet a window, the one rule (§6.3).
 _MEMBERSHIP = "overlap"
 
@@ -125,6 +145,7 @@ def rolling_state(
     baseline: BaselineConfig,
     variables: Sequence[str] | None = None,
     provided: Mapping[str, xr.Dataset] | None = None,
+    noise: DetectionConfig | None = None,
     block_elements: int = MAX_BLOCK_ELEMENTS,
 ) -> xr.Dataset:
     """Compute one stream's rolling state.
@@ -144,6 +165,10 @@ def rolling_state(
     provided : mapping of str to xarray.Dataset, optional
         For each ``from_field`` variable, the donor's baseline joined onto
         this stream's cells (see :func:`~tsara.rolling.methods.baseline_from_field`).
+    noise : DetectionConfig, optional
+        Where the noise scale's two knobs live, ``noise_estimator`` and
+        ``noise_window`` (the sigma exists for detection's thresholds);
+        the defaults of that config when omitted.
     block_elements : int, optional
         The rolling engine's per-block budget; not a configuration.
 
@@ -153,8 +178,9 @@ def rolling_state(
         The rolling state: on the stream's ``time`` and ``time_bnds``, with
         ``baseline_window`` (seconds) and ``baseline_quantile`` as further
         dimensions; per variable ``x`` the reading and its sigmas copied,
-        ``baseline_x``, ``enhancement_x``, their sigma companions, and for a
-        rolling quantile ``n_readings_window_x`` and ``coverage_window_x``.
+        ``baseline_x``, ``enhancement_x``, their sigma companions, ``noise_x``,
+        and for a rolling quantile ``n_readings_window_x`` and
+        ``coverage_window_x``.
 
     Raises
     ------
@@ -164,6 +190,7 @@ def rolling_state(
     """
     readings = stream_cells(stream, instrument)
     selection = _select(stream, instrument, variables)
+    detection = DetectionConfig() if noise is None else noise
     windows_ns = tuple(duration_ns(window) for window in baseline.windows)
     quantiles = tuple(float(q) for q in baseline.quantiles)
     minimum = tuple(baseline.min_readings_for(q) for q in quantiles)
@@ -184,6 +211,9 @@ def rolling_state(
         )
         result = get_baseline_method(request.method.method)(request)
         columns, fully_blank = _one_variable(stream, request, result, baseline, minimum)
+        columns[noise_name(variable)] = _noise_column(
+            stream, variable, readings, detection, block_elements
+        )
         data_vars.update(columns)
         blank_everywhere.extend(fully_blank)
     coords: dict[str, object] = {
@@ -233,6 +263,7 @@ def rolling_states(
     baseline: BaselineConfig,
     *,
     provided: Mapping[str, Mapping[str, xr.Dataset]] | None = None,
+    noise: DetectionConfig | None = None,
     block_elements: int = MAX_BLOCK_ELEMENTS,
 ) -> dict[str, xr.Dataset]:
     """Compute the rolling state of every stream of a campaign.
@@ -249,6 +280,9 @@ def rolling_states(
     provided : mapping of str to mapping, optional
         Per instrument, per ``from_field`` variable, the joined donor
         baseline.
+    noise : DetectionConfig, optional
+        The noise scale's estimator and window; that config's defaults when
+        omitted.
     block_elements : int, optional
         The rolling engine's per-block budget.
 
@@ -267,6 +301,7 @@ def rolling_states(
             instrument=instrument,
             baseline=baseline,
             provided=None if provided is None else provided.get(instrument),
+            noise=noise,
             block_elements=block_elements,
         )
     return states
@@ -550,3 +585,39 @@ def _companion(stream: xr.Dataset, name: str) -> np.ndarray | None:
     if name not in stream.data_vars:
         return None
     return np.asarray(stream[name].values, dtype=np.float64)
+
+
+def _noise_column(
+    stream: xr.Dataset,
+    variable: str,
+    readings: CellBounds,
+    detection: DetectionConfig,
+    block_elements: int,
+) -> tuple[tuple[str, ...], np.ndarray, dict[str, object]]:
+    """Return the noise scale of a variable at every reading, with its record (§2.5)."""
+    result = noise_scale(
+        stream,
+        variable,
+        readings,
+        estimator=detection.noise_estimator,
+        window_ns=duration_ns(detection.noise_window),
+        block_elements=block_elements,
+    )
+    attrs: dict[str, object] = {
+        "units": stream[variable].attrs.get("units", ""),
+        "description": (
+            f"Random noise scale of {variable} at each reading, the sigma detection "
+            "thresholds are quoted in: the declared or reported random sigma when the "
+            "variable has one, else an estimate from the record (METHODS 2.5)."
+        ),
+        "uncertainty_component": "random",
+        "uncertainty_provenance": result.provenance,
+        NOISE_BLANK_FRACTION_ATTR: result.blank_fraction,
+    }
+    if result.estimator is not None:
+        attrs[NOISE_ESTIMATOR_ATTR] = result.estimator
+        attrs[NOISE_WINDOW_ATTR] = detection.noise_window
+        attrs[NOISE_RESOLUTION_ATTR] = result.resolution
+        attrs[NOISE_FLOOR_FRACTION_ATTR] = result.floor_fraction
+        attrs[NOISE_MIN_SAMPLES_ATTR] = MIN_NOISE_SAMPLES
+    return (TIME_COORD,), result.sigma, attrs

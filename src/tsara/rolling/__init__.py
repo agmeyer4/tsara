@@ -20,10 +20,15 @@ Shape of the subpackage
     The baseline methods, registered by name (§6.5): the rolling quantile
     of the variable's own readings, another instrument's baseline of the
     same field handed in as a joined product, and a constant.
+``noise``
+    The noise scale at every reading (§2.5): the declared or reported random
+    sigma when the variable has one, else an estimate by a registered
+    estimator (``diff_mad``, ``mad``) floored at the quantization scale.
 ``state``
     The product: the rules of §6.3 and §6.4 applied to what a method found,
-    the enhancement formed unclipped with its uncertainties (§6.7), and
-    what every column records (§6.6), on the stream's own cells.
+    the enhancement formed unclipped with its uncertainties (§6.7), the
+    noise scale beside the reading, and what every column records (§6.6),
+    on the stream's own cells.
 
 The joining of a rolling state onto other cells is not here: a per-reading
 product is joined like a stream by :mod:`tsara.align`, which hands its result
@@ -39,6 +44,14 @@ from tsara.rolling.methods import (
     get_baseline_method,
     register_baseline_method,
 )
+from tsara.rolling.noise import (
+    NoiseRequest,
+    NoiseResult,
+    available_noise_estimators,
+    get_noise_estimator,
+    noise_scale,
+    register_noise_estimator,
+)
 from tsara.rolling.quantile import (
     MAX_BLOCK_ELEMENTS,
     RollingQuantile,
@@ -52,12 +65,18 @@ __all__ = [
     "BaselineRequest",
     "BaselineResult",
     "MAX_BLOCK_ELEMENTS",
+    "NoiseRequest",
+    "NoiseResult",
     "RollingQuantile",
     "TsaraRollingError",
     "available_baseline_methods",
+    "available_noise_estimators",
     "duration_ns",
     "get_baseline_method",
+    "get_noise_estimator",
+    "noise_scale",
     "register_baseline_method",
+    "register_noise_estimator",
     "rolling_quantile",
     "rolling_state",
     "rolling_states",

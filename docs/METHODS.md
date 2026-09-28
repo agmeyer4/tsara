@@ -420,7 +420,65 @@ reporting resolution (δ/√12 = the standard deviation of uniform rounding
 error).
 
 Registered estimator names: `diff_mad` (default), `mad` (rolling MAD of the
-signal, kept for comparison). MAD-family estimators are only ~37% efficient
+signal, kept for comparison).
+
+**As built (Phase 5, `rolling.noise`).** The ladder is
+:func:`noise_scale`: a variable with a `sigma_rand_<x>` companion gets it
+as its noise scale, provenance carried and no floor, since a declared figure
+is not an estimate; otherwise the estimator named by
+`DetectionConfig.noise_estimator` runs over `DetectionConfig.noise_window`,
+and the result is `empirical`. Both estimators are registered by decorator,
+like the file readers and the baseline methods, and both run through the
+rolling engine of §6.3 at *q* = 0.5, so their window membership is the
+join's: a sample enters a window in proportion to the share of its cell
+inside it. For `diff_mad` a sample is the absolute difference of two
+consecutive finite readings, on the cell between their midpoints, divided
+by √2 and scaled by 1.4826. **A difference across a dropout is dropped**:
+two readings farther apart than `DROPOUT_SPACING_FACTOR` = 1.5 times the
+record's median spacing between consecutive *finite* readings measure the
+air between them, not the instrument. On spacing rather than on cell width,
+because the 07-18 drive's analyzer reports every 2.31 s on 1 s cells and a
+rule on width would drop every difference it has; 1.5 keeps every jittered
+step and drops a single missing row. `mad` is two passes at *q* = 0.5, the
+rolling median and then the median of each reading's distance from the
+median at its own cell. A window holding fewer than `MIN_NOISE_SAMPLES` = 10
+samples is blank: a MAD is about 37 % efficient at the Gaussian, so ten
+differences already jitter by a third, and fewer is a number rather than a
+noise scale. δ for the floor is the variable's declared `quantization` when
+the stream carries one (the generator writes it), else the smallest
+positive gap between the record's distinct finite values: exact for a
+record written in steps, negligible for a continuous one. The noise scale
+is written into the rolling state as `noise_<x>` (§6.6) with
+`uncertainty_provenance`, and for an estimate `tsara_noise_estimator`,
+`tsara_noise_window`, `tsara_noise_resolution` (δ),
+`tsara_noise_floor_fraction` (the share of readings the floor raised),
+`tsara_noise_min_samples` and `tsara_noise_blank_fraction`.
+
+Measured against the generator (rule: the example campaign's 2 s Picarro
+with its sigma columns removed, `diff_mad` over 10 min, the ratio of the
+estimate to the true random sigma the generator wrote beside each reading,
+median over the readings with an estimate; the true sigma is 0.60 ppb and
+the readings' error against the true value has a standard deviation of
+0.60): **1.30**, and 1.21 over the readings outside plumes. Not 1.00,
+because the record is plume-dense: 30 % of readings sit inside plumes
+(enhancement above 3σ) whose slopes exceed the noise per step, so a
+window's median absolute difference lands near the 70th percentile of the
+noise differences, and a quiet reading's window still holds plumes. That is
+the estimator's cost on such a record, and it is a bias in the safe
+direction for detection (thresholds 30 % higher where plumes are dense),
+but it is a bias; the remedy is Phase 6's to build, re-estimating the noise
+outside the plumes it has detected, since only then is the quiet air known.
+On flat air with 0.7 ppb white noise both estimators recover 0.7 within
+5 %. Under a Gaussian plume at the centre of a 10 min
+window (1 s readings, seed 4), `diff_mad` reads 0.80 for 300 ppb at 240 s
+width, 0.79 for 100 ppb at 100 s, 1.11 for 300 ppb at 100 s and 1.15 for
+300 ppb at 60 s, where `mad` reads 2.29, 2.34, 2.58 and 2.77: the difference
+estimator is inflated by the plume's slope, a fraction of a ppb per second
+against a difference noise of a ppb, and the signal's MAD by the plume's
+shape, three to four times the noise. `mad` as built takes each reading's
+residual against the median of its *own* window, which removes what is
+broader than the window and is why it does not collapse outright; the
+classic rolling MAD, one centre per window, would. MAD-family estimators are only ~37% efficient
 at the Gaussian (their own sampling jitter is ~1.6× that of a standard
 deviation on clean data); if threshold jitter ever proves limiting, the
 Rousseeuw–Croux $Q_n$ estimator (~82% efficiency at the same 50% breakdown,
@@ -1030,6 +1088,7 @@ direction is refused):
 | `sigma_rand_baseline_x` | (time, window, quantile) | Woodruff (§6.7), `empirical`; for `from_field`, the donor's, joined |
 | `sigma_sys_baseline_x` | (time, window, quantile) | the reading's systematic sigma at the quantile position; for `from_field`, the donor's, joined |
 | `sigma_rand_enhancement_x`, `sigma_sys_enhancement_x` | (time, window, quantile) | under the rules of §6.7; written only when the reading has the component |
+| `noise_x` | (time) | the noise scale thresholds are quoted in: the declared or reported random sigma, else the estimate of §2.5, floored; a companion |
 
 The window companions are companions by the existing `n_readings_` and
 `coverage_` prefixes, spelled with `window` so that a later join's own

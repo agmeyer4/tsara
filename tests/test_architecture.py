@@ -232,6 +232,10 @@ UNREFERENCED: dict[str, str] = {
     ),
     "baseline_from_field": "Reached by name through the baseline-method registry.",
     "baseline_by_constant": "Reached by name through the baseline-method registry.",
+    "noise_by_diff_mad": (
+        "Reached by name through the noise-estimator registry (@register_noise_estimator)."
+    ),
+    "noise_by_mad": "Reached by name through the noise-estimator registry.",
     "propagate_systematic": (
         "The readable reference implementation of §3.3, which the vectorized "
         "`propagate_systematic_binned` is scored against by test and which "

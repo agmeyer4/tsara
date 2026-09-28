@@ -80,6 +80,7 @@ __all__ = [
     "is_sigma_name",
     "n_readings_name",
     "n_readings_window_name",
+    "noise_name",
     "sigma_rand_name",
     "sigma_sys_name",
 ]
@@ -437,6 +438,22 @@ def coverage_window_name(variable: str) -> str:
         e.g. ``'coverage_window_ch4'``.
     """
     return f"{COVERAGE_WINDOW_PREFIX}{variable}"
+
+
+def noise_name(variable: str) -> str:
+    """Return the name of a variable's noise scale in the rolling state.
+
+    Parameters
+    ----------
+    variable : str
+        Canonical variable name, e.g. ``'ch4'``.
+
+    Returns
+    -------
+    str
+        e.g. ``'noise_ch4'``.
+    """
+    return f"{NOISE_PREFIX}{variable}"
 
 
 def is_companion_name(name: str) -> bool:
