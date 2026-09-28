@@ -126,6 +126,7 @@ __all__ = [
     "bin_onto_cells",
     "borrowed_share",
     "cadence_s",
+    "candidate_ranges",
     "cell_methods_value",
     "check_bounds_intact",
     "check_pairs_match",
@@ -134,6 +135,7 @@ __all__ = [
     "ensure_time_bounds",
     "median_width_s",
     "nominal_cadence_ns",
+    "overlap_lengths",
     "overlap_pairs",
     "pair_width_ratios",
     "same_cells",
@@ -558,23 +560,9 @@ def overlap_pairs(readings: CellBounds, target: CellBounds) -> OverlapPairs:
             target_index=empty, reading_index=empty, overlap_ns=empty, n_target=n_target
         )
 
-    if np.any(np.diff(readings.start_ns) < 0):
-        raise TsaraSupportError(
-            "Binning onto cells requires readings sorted by start time; the "
-            "candidate search below is a binary search and would silently miss "
-            "overlaps on an unsorted input."
-        )
-
-    # Candidate window per target cell. `running_stop` is a cumulative
-    # maximum so that it is non-decreasing and therefore searchable, which
-    # matters because jittered timestamps give fixed-width cells that can
-    # overlap slightly -- their raw stops are then not sorted. Using the
-    # running maximum only ever widens the candidate window, so the exact
-    # overlap test below still decides membership.
-    running_stop = np.maximum.accumulate(readings.stop_ns)
-    lo = np.searchsorted(running_stop, target.start_ns, side="right")
-    hi = np.searchsorted(readings.start_ns, target.stop_ns, side="left")
-    counts = np.maximum(hi - lo, 0).astype(np.int64)
+    # The bracket: which readings may overlap each target cell, by index range.
+    lo, hi = candidate_ranges(readings, target)
+    counts = (hi - lo).astype(np.int64)
     total = int(counts.sum())
     if total == 0:
         return OverlapPairs(
@@ -587,15 +575,90 @@ def overlap_pairs(readings: CellBounds, target: CellBounds) -> OverlapPairs:
     run_start = np.repeat(np.cumsum(counts) - counts, counts)
     reading_index = np.repeat(lo, counts) + (np.arange(total, dtype=np.int64) - run_start)
 
-    overlap = np.minimum(
-        readings.stop_ns[reading_index], target.stop_ns[target_index]
-    ) - np.maximum(readings.start_ns[reading_index], target.start_ns[target_index])
     return OverlapPairs(
         target_index=target_index,
         reading_index=reading_index,
-        overlap_ns=np.maximum(overlap, 0),
+        overlap_ns=overlap_lengths(readings, target, reading_index, target_index),
         n_target=n_target,
     )
+
+
+def candidate_ranges(
+    readings: CellBounds, target: CellBounds
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
+    """Return, per target cell, the index range ``[lo, hi)`` of readings that may overlap it.
+
+    The bracket half of the overlap search, and the membership rule's one
+    spelling: :func:`overlap_pairs` expands these ranges into pairs, and the
+    rolling engine (:mod:`tsara.rolling.quantile`) walks them in blocks,
+    because a long window over a dense record has more (window, reading)
+    pairs than fit in memory. Both then decide membership by the exact
+    overlap, :func:`overlap_lengths`.
+
+    ``running_stop`` is a cumulative maximum so that it is non-decreasing and
+    therefore searchable, which matters because jittered timestamps give
+    fixed-width cells that can overlap slightly -- their raw stops are then
+    not sorted. Using the running maximum only ever widens the bracket, so
+    the exact overlap test still decides membership.
+
+    Parameters
+    ----------
+    readings : CellBounds
+        Cells being averaged. Must be sorted by start time.
+    target : CellBounds
+        Cells to average onto, in any order.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        ``lo`` and ``hi``, one entry per target cell, with ``hi >= lo``.
+
+    Raises
+    ------
+    TsaraSupportError
+        If the readings are not sorted by start time.
+    """
+    if np.any(np.diff(readings.start_ns) < 0):
+        raise TsaraSupportError(
+            "Binning onto cells requires readings sorted by start time; the "
+            "candidate search below is a binary search and would silently miss "
+            "overlaps on an unsorted input."
+        )
+    running_stop = np.maximum.accumulate(readings.stop_ns)
+    lo = np.searchsorted(running_stop, target.start_ns, side="right")
+    hi = np.searchsorted(readings.start_ns, target.stop_ns, side="left")
+    return lo.astype(np.int64), np.maximum(hi, lo).astype(np.int64)
+
+
+def overlap_lengths(
+    readings: CellBounds,
+    target: CellBounds,
+    reading_index: npt.NDArray[np.int64],
+    target_index: npt.NDArray[np.int64],
+) -> npt.NDArray[np.int64]:
+    """Return the overlap of each (reading, target) pair in nanoseconds, never negative.
+
+    The exact half of the membership rule: a pair the bracket visited but
+    which only touches at a boundary, or misses, comes back as zero. The two
+    index arrays broadcast against each other, so a block of windows against
+    a matrix of candidate readings is one call.
+
+    Parameters
+    ----------
+    readings, target : CellBounds
+        The two sets of cells.
+    reading_index, target_index : numpy.ndarray
+        Indices into them, of broadcastable shapes.
+
+    Returns
+    -------
+    numpy.ndarray
+        int64 nanoseconds, the broadcast shape of the two index arrays.
+    """
+    overlap = np.minimum(
+        readings.stop_ns[reading_index], target.stop_ns[target_index]
+    ) - np.maximum(readings.start_ns[reading_index], target.start_ns[target_index])
+    return np.asarray(np.maximum(overlap, 0), dtype=np.int64)
 
 
 def check_pairs_match(pairs: OverlapPairs, readings: CellBounds, target: CellBounds) -> None:

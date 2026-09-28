@@ -842,9 +842,47 @@ interval model and the weight every join already uses, so the baseline is a
 weighted quantile. The width rule of every join holds here too: a reading at
 least `COPY_RATIO` = 2 times as wide as the window is not stood on it
 (§11.2.4). In practice the count of §6.4 refuses those windows first, because a
-window shorter than half a reading touches at most two readings; the width rule
-is the backstop for a quantile such as the median, whose required count is
+window shorter than half a reading touches at most two readings; the width rule is the backstop for a quantile such as the median, whose required count is
 small.
+
+**The weighted quantile, defined once (built 2026-09-28, `rolling.quantile`).**
+Sort the contributing readings by value; a reading contributes when it holds
+a finite value and overlaps the window by a positive amount. Its weight is
+the overlap, and its *position* is the midpoint of its weight mass over the
+total: (*S_k* − *w_k*/2)/*S_N* for the cumulative weight *S_k*. The
+*q*-quantile is the value interpolated linearly at position *q*, clamped to
+the lowest and highest reading. With equal weights the positions are
+(*k* − ½)/*N*, Hazen's plotting position (numpy's `method="hazen"`), which is
+the convention the table below was measured with. Numpy's default rule,
+(*N* − 1)*q*, has no canonical weighted form; Hazen's is exactly "each
+reading's weight mass centred on its value", so it is the one. The window at
+a record's edge is no special case: it holds the readings it holds, its
+count and coverage say so, and the count rule of §6.4 decides. Two forms
+share one expression: a per-window reference written from the definition,
+and a block form that brackets each window's candidates (contiguous, since
+readings are sorted), measures every overlap exactly, sorts each window
+once and reads every quantile from that sort. Their values agree to the
+last bit on the test record; the qualifiers beside them are summed in
+different orders and agree to rounding.
+
+Cost, measured on a synthetic record shaped like the ten-drive Picarro
+(200 000 readings, 1 s cells every 2.3 s with dropouts, 2 % masked), all
+three quantiles from one sort:
+
+| window | per species | readings per window (median) |
+|---|---|---|
+| 2 min | 0.9 s | 52 |
+| 10 min | 3.8 s | 256 |
+| 60 min | 26.5 s | 1 531 |
+
+Linear in the readings times the readings per window, so a 6 h window is
+about three minutes per species. Memory is bounded by a per-block budget in
+*elements* (`MAX_BLOCK_ELEMENTS`, 2 million: about 160 MB live), not in
+windows, so that a 6 h window on a 10 Hz record (216 000 readings per
+window) still fits; there the limit is time (26 million windows each sorting
+216 000 values), and the sorted-sweep form, one sorted window maintained as
+it slides in O(*N* log *N*), is the upgrade path if such a record arrives.
+Nothing in the archive is within a factor of a hundred of it.
 
 Not xarray's `rolling().construct()`: that is count-based and cannot take a
 duration. On the 07-18 drive a 600-reading window spans about 23 minutes
@@ -881,7 +919,13 @@ the quantile.** With *N* readings and linear interpolation, a *q*-quantile lies
 between the two lowest readings whenever (*N* − 1)·*q* < 1; at *q* = 0.05 that
 is any window of twenty readings or fewer, so the default follows 1/*q*:
 `BaselineConfig.min_readings` is `null` by default, meaning ⌈1/*q*⌉ for each
-quantile of the sweep, and an integer applies to every quantile. Every
+quantile of the sweep, and an integer applies to every quantile. Under the
+Hazen positions of §6.3 the guarantee reads: at *N* = 1/*q* the *q*-quantile
+sits halfway between the two lowest readings, below that it slides onto the
+lowest reading, and at *N* ≤ 1/(2*q*) it *is* the minimum. The engine
+applies the definition to every window and reports its count, coverage and
+whether a contributing reading was at least `COPY_RATIO` times as wide as the
+window; the rolling state applies the rule and blanks (§6.6). Every
 window records `n_readings_` and `coverage_` as every join does. One warning
 per stream at run time names the windows too short for the quantile. This
 replaces `BaselineConfig.min_valid_fraction` and the `AnalysisConfig` validator
@@ -970,10 +1014,66 @@ Phase 5 and documented here then. The enhancement inherits the reading's own
 what the cell is. A rolling slope in Phase 7 is a product whose cells are its
 windows, under the same no-false-method rule.
 
-### 6.7 Baseline uncertainty **[stub — Phase 5]**
+### 6.7 Baseline uncertainty **[decided 2026-09-28 — Phase 5]**
 
-Order-statistic variance or block bootstrap, to be specified in Phase 5; it
-feeds the uncertainty of Δ.
+**The baseline's own sampling uncertainty is Woodruff's order-statistic
+interval** (Woodruff 1952): the same sorted window read at positions
+*q* ± √(*q*(1 − *q*)/*N*_eff), with *N*_eff Kish's effective count
+(Σ*w*)²/Σ*w*² of the contributing weights, and half that interval reported as
+a one-sigma figure, `sigma_rand_baseline_<x>`, provenance `empirical`. It is
+distribution-free, needs no density estimate (which Maritz–Jarrett does) and
+no resampling (which a block bootstrap does, at *B* times the cost and with
+a block length to choose), and it costs two more interpolations on a sort
+already done.
+
+Measured (rule: 2 000 windows of *N* independent standard-normal draws,
+seed 7; "ratio" is the mean reported sigma over the standard deviation of
+the estimated quantile across windows; "cover" is the share of windows whose
+interval holds the true quantile):
+
+| *N* | *q* | ratio | cover |
+|---|---|---|---|
+| 200 | 0.05 | 1.03 | 0.66 |
+| 200 | 0.01 | 1.21 | 0.69 |
+| 200 | 0.10 | 1.00 | 0.65 |
+| 50 | 0.05 | 1.15 | 0.68 |
+| 1 000 | 0.05 | 1.02 | 0.69 |
+| 200 | 0.50 | 1.01 | 0.66 |
+
+A factor, not a percent: the interval is asymmetric in the tail (the
+density is lower below a low quantile than above it) and a half-width
+summarises it; at *q* = 0.01 with 200 readings the lower position is
+clamped at the minimum and the figure runs 21 % high.
+
+The assumption is that the readings in a window are exchangeable draws,
+which air is not. On an AR(1) record with lag-one correlation 0.99 per
+reading (same rule, seed 7), the ratio is **0.08**: the reported figure is a
+thirteenth of the true scatter. It is therefore a **floor** on the sampling
+error, labelled as such (`empirical`, with the assumption named in the
+attribute), and not the spread of the baseline; that spread, across windows
+and quantiles, is the sweep's and is read in Phase 7's stability cube.
+
+**The enhancement's uncertainty (to be built with the rolling state).**
+Its random component is the reading's and the baseline's in quadrature,
+`sigma_rand_enhancement_<x>` = √(σ²_rand(*x*) + σ²_b), treating one
+reading's noise as independent of a quantile of hundreds; the reading's own
+share of its window is neglected, which overstates the figure by a hair.
+Its systematic component depends on where the baseline came from. For a
+`rolling_quantile` baseline of the same instrument, an error common to
+reading and baseline is either an offset, which cancels exactly in the
+difference, or a gain, which scales it: with reading = (1 + *g*)·true + *o*
+and the same *g*, *o* in the baseline, Δ_measured = (1 + *g*)·Δ_true, so
+σ_sys(Δ) = ε|Δ| for a relative term ε and 0 for an absolute one. The stream
+records only the combined per-point σ_sys(*x*) ≥ ε*x*, so TSARA writes
+`sigma_sys_enhancement_<x>` = σ_sys(*x*)·|Δ|/|*x*|: exact for a pure gain
+error and an upper bound for any mix. For a `from_field` baseline the two
+instruments' errors do not cancel (§6.5), so the terms add in quadrature,
+and the dense state carries `sigma_sys_baseline_<x>`, the reading sigma
+interpolated at the quantile position, for that purpose. For a `constant`
+nothing cancels and σ_sys(Δ) = σ_sys(*x*). Enhancements are **never
+clipped** at zero: noise makes Δ negative in clean air and on plume edges,
+and clipping would shift the noise distribution's mean and bias every
+Phase-7 regression that follows.
 
 ### 6.8 Detection, smoothing, clustering **[stubs]**
 

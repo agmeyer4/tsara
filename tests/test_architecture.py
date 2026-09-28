@@ -569,7 +569,7 @@ def test_no_attr_exemption_is_stale() -> None:
 LAYERS: tuple[tuple[str, ...], ...] = (
     ("core",),
     ("config",),
-    ("synthetic", "ingest", "align"),
+    ("synthetic", "ingest", "align", "rolling"),
 )
 
 #: Layer index of every package that has one.
