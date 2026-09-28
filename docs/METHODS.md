@@ -811,10 +811,11 @@ not a sole objective. **[estimator details — Phase 7]**
 
 ## 6. Baselines, detection, smoothing, clustering
 
-Baselines were scoped on 2026-09-24 and are decided in §6.1–6.6, to be built in
-Phase 5; the numbers quoted were measured on the permitted 2024 archive under
-the rules stated beside them. Detection, smoothing and clustering remain stubs
-(§6.8).
+Baselines were scoped on 2026-09-24 and built in Phase 5 (2026-09-28):
+§6.1–6.7 say what was decided and, marked *built*, what the package now does
+(`tsara.rolling`). The numbers quoted were measured on the permitted 2024
+archive or on generated data under the rules stated beside them. Detection,
+smoothing and clustering remain stubs (§6.8).
 
 ### 6.1 What a baseline is for **[decided 2026-09-24 — Phase 5]**
 
@@ -861,7 +862,7 @@ decided: an event's ratio is judged across the windows at which that event is
 found; a ratio flat across them belongs to the source, and one that drifts is
 mixing with another scale. That is the stability cube (§5) read per event.
 
-### 6.2 The continuous rolling state lives beside the readings **[decided 2026-09-24 — Phase 5]**
+### 6.2 The continuous rolling state lives beside the readings **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
 
 For every reading of every instrument and every point of the sweep, the rolling
 state holds the baseline, the enhancement Δ, and the noise scale σ that
@@ -892,7 +893,7 @@ the overlaps are found once for all nine; the versions differ only in which
 readings are blank, and that is why count, coverage and borrowed share are
 kept per version.
 
-### 6.3 Which readings belong to a window **[decided 2026-09-24 — Phase 5]**
+### 6.3 Which readings belong to a window **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
 
 Windows are durations, centred on each reading. **A reading contributes in
 proportion to the share of its own cell lying inside the window**, which is the
@@ -901,7 +902,9 @@ weighted quantile. The width rule of every join holds here too: a reading at
 least `COPY_RATIO` = 2 times as wide as the window is not stood on it
 (§11.2.4). In practice the count of §6.4 refuses those windows first, because a
 window shorter than half a reading touches at most two readings; the width rule is the backstop for a quantile such as the median, whose required count is
-small.
+small. A window is a duration, so on a moving platform it is a stretch of
+road as much as an interval of air: the cell model's limitation (CLAUDE.md,
+open flags) is inherited here, not resolved.
 
 **The weighted quantile, defined once (built 2026-09-28, `rolling.quantile`).**
 Sort the contributing readings by value; a reading contributes when it holds
@@ -970,7 +973,7 @@ package says a value describes an interval, not because of the size of the
 effect. What would not be defensible is leaving the rule unstated, since every
 window's reading count depends on it.
 
-### 6.4 When a window is valid: a count **[decided 2026-09-24 — Phase 5]**
+### 6.4 When a window is valid: a count **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
 
 **Validity is a count of readings, `min_readings`, with a stated relation to
 the quantile.** With *N* readings and linear interpolation, a *q*-quantile lies
@@ -1011,7 +1014,7 @@ measure the merge file's 1 s rows (§9.2.3), not the analyzer. The third passes
 the drive, but it is relative to the stream itself, so a canister passes with
 one fill in the window. None of them is what a quantile needs; a count is.
 
-### 6.5 Baseline methods: options, not one rule **[decided 2026-09-24 — Phase 5]**
+### 6.5 Baseline methods: options, not one rule **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
 
 Because a baseline is not a single thing (§6.1), a sparse instrument does not
 get one policy. Each option is a baseline method registered by name, like the
@@ -1026,8 +1029,15 @@ until a sweep needs it.
   `field` (§1.6), at the same window and quantile, joined onto this
   instrument's cells. The atmosphere has one benzene background, and a PTR-MS
   samples it every second beside the canister. It fails exactly when the two
-  instruments disagree in calibration. It needs the join to accept a swept
-  variable (§6.2).
+  instruments disagree in calibration. Built as three calls, because the
+  stages hand each other Datasets and never import each other: roll the
+  donor, join its swept baseline onto the adopter's cells with
+  `bin_streams_onto_cells` (§11.2, *swept variables*), roll the adopter with
+  the product as `provided=`. The adopter checks that the product is that
+  join -- built by a join, on exactly its own cells, at this sweep, the
+  donor's baseline of this field, and one of them -- and carries the join's
+  record of what it did to the donor's support (§11.2.4) on the adopted
+  baseline, with `tsara_baseline_from` naming the donor.
 - **`constant`.** A declared number, zero included; at zero the enhancement is
   the concentration. A slope fitted inside an event loses nothing by it
   (§6.1), and a receptor model run on concentrations rather than enhancements
@@ -1057,7 +1067,7 @@ A canister species has a `rolling_quantile` baseline only at windows of hours,
 while the 1 s analyzers beside it have baselines at minutes. What stands in at
 the scales it cannot see is a choice made per variable, not a rule.
 
-### 6.6 What a baseline records **[decided 2026-09-24 — Phase 5]**
+### 6.6 What a baseline records **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
 
 CF's `cell_methods` vocabulary (Appendix E of the conventions) has no general
 quantile, and asks for bounds with any method other than `point`. A baseline at
@@ -1133,7 +1143,7 @@ reloaded state is joined like a stream (§6.2), which the round-trip test
 checks last. The bundle format version is unchanged: a new directory beside
 the streams is additive, and an older reader ignores it.
 
-### 6.7 Baseline uncertainty **[decided 2026-09-28 — Phase 5]**
+### 6.7 Baseline uncertainty **[decided and built 2026-09-28 — Phase 5]**
 
 **The baseline's own sampling uncertainty is Woodruff's order-statistic
 interval** (Woodruff 1952): the same sorted window read at positions
@@ -1172,7 +1182,7 @@ error, labelled as such (`empirical`, with the assumption named in the
 attribute), and not the spread of the baseline; that spread, across windows
 and quantiles, is the sweep's and is read in Phase 7's stability cube.
 
-**The enhancement's uncertainty (to be built with the rolling state).**
+**The enhancement's uncertainty (built with the rolling state, `rolling.state`; each figure names its rule in `tsara_sigma_rule`).**
 Its random component is the reading's and the baseline's in quadrature,
 `sigma_rand_enhancement_<x>` = √(σ²_rand(*x*) + σ²_b), treating one
 reading's noise as independent of a quantile of hundreds; the reading's own
@@ -1203,8 +1213,13 @@ Phase-7 regression that follows.
   scale σ comes from the measurement-uncertainty system in provenance order —
   declared or reported $\sigma^{\mathrm{rand}}$ when available, else the
   empirical estimator named by `DetectionConfig.noise_estimator` (default
-  `diff_mad`, §2.5); detection has no private definition of noise, and the
-  §2.5 quantization floor applies to whichever estimate is used. Also decided:
+  `diff_mad`, §2.5); detection has no private definition of noise, and the §2.5 quantization
+  floor applies to whichever estimate is used. Phase 5 built that ladder as
+  `noise_<x>` in the rolling state and measured its cost on a plume-dense
+  record: `diff_mad` reads 1.30 times the true sigma when a third of the
+  readings sit inside plumes (§2.5). The remedy is detection's to build,
+  since only detection knows where the plumes are: re-estimate the noise
+  outside the events found, and iterate once. Also decided:
   **quantile-offset correction** — because the baseline
   is a low quantile q, even pure noise has a positive median enhancement of
   $-z_q\,\sigma$ (≈ 1.64σ at q = 0.05, Gaussian), so thresholds are applied

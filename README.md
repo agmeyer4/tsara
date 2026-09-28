@@ -16,7 +16,7 @@ section there before it has a caller.
 
 ## Status
 
-**Alpha — phases 1–4.6 of the roadmap are complete.** The package is
+**Alpha — phases 1–5 of the roadmap are complete.** The package is
 built one phase per review cycle, and only what is listed as done below exists.
 
 | Phase | | |
@@ -28,7 +28,7 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 4 | Alignment & pairing (one joining operation, error propagation, circular stats, output grid) | ✅ done |
 | 4.5 | One atmosphere, realized once and sampled by every instrument; a variable's `field` | ✅ done |
 | 4.6 | How support may be changed at all: one per-pair rule, a record on every column of what the join did, the borrowed share | ✅ done |
-| 5 | Baselines + continuous rolling state | planned |
+| 5 | Baselines + continuous rolling state: per stream on its own cells, a window × quantile sweep, three baseline methods, a noise scale per reading | ✅ done |
 | 6 | Plume detection + nested-event bookkeeping | planned |
 | 7 | Regression (OLS / York / ODR), combined UQ, stability cube | planned |
 | 8 | Smoothing + spatiotemporal source complexes | planned |
@@ -37,11 +37,14 @@ built one phase per review cycle, and only what is listed as done below exists.
 
 So today TSARA can **manufacture a campaign with a known answer key, read a
 real one into analysis-ready streams whose values each carry the time interval
-they describe, and put any set of those variables onto a common support with
-their uncertainty propagated through the same weights**. A manufactured campaign
-holds one atmosphere that every instrument samples, so any disagreement between
-two records of one gas is the instruments' own noise, rounding and support. It cannot yet compute
-baselines, ratios, or the stability cube; there is no CLI yet (phase 9).
+they describe, put any set of those variables onto a common support with
+their uncertainty propagated through the same weights, and roll every stream
+into its continuous state: a baseline, an enhancement and a noise scale for
+each reading at every point of a window × quantile sweep, on the stream's own
+cells, saved beside it**. A manufactured campaign holds one atmosphere that
+every instrument samples, so any disagreement between two records of one gas
+is the instruments' own noise, rounding and support. It cannot yet detect
+plumes, fit ratios, or build the stability cube; there is no CLI yet (phase 9).
 
 ## Install
 
@@ -87,6 +90,19 @@ for name in streams:
 
 # 4. Checkpoint the stage product.
 save_streams(streams, "demo_bundle")
+
+# 5. Roll every stream: for each reading, the baseline, the enhancement and a
+#    noise scale at every point of the window x quantile sweep, on the
+#    stream's own cells. Then checkpoint that too, beside the streams.
+from tsara import load_analysis
+from tsara.rolling import rolling_states, save_state
+
+analysis = load_analysis("examples/configs/analysis_example.yaml")
+states = rolling_states(streams, analysis.baseline, noise=analysis.detection)
+picarro = states["picarro"]
+print(dict(picarro.sizes))
+print(sorted(v for v in picarro.data_vars if v.endswith("ch4")))
+save_state(states, "demo_bundle", analysis=analysis)
 ```
 
 ```
@@ -104,6 +120,22 @@ dimension holds each row's cell boundaries: every value describes an interval
 of air, not an instant. And two of the instruments report `ch4`: both measure
 the one methane the atmosphere holds, each through its own clock and error, and
 each variable records that in its `field` attribute.
+
+Step 5 prints, after about ninety seconds (most of it the 4 Hz analyzer's
+60 min window):
+
+```
+{'time': 10800, 'baseline_window': 3, 'baseline_quantile': 3, 'nv': 2}
+['baseline_ch4', 'ch4', 'coverage_window_ch4', 'enhancement_ch4', 'n_readings_window_ch4', 'noise_ch4', 'sigma_rand_baseline_ch4', 'sigma_rand_ch4', 'sigma_rand_enhancement_ch4', 'sigma_sys_baseline_ch4', 'sigma_sys_ch4', 'sigma_sys_enhancement_ch4']
+```
+
+The state keeps the Picarro's 10 800 cells and adds the sweep as two
+dimensions; for each reading it holds the baseline, the enhancement, the
+window's count and coverage, the sigmas of each, and the noise scale. It also
+warns, once, that the 2 s Picarro's 2 min window holds 61 readings where the
+1st percentile asks for 100, so that sweep point is blank everywhere with the
+reason recorded (`METHODS.md` §6.4). The met and GPS streams have no gas and
+are skipped with a note.
 
 ## Reading your own campaign
 
@@ -205,7 +237,23 @@ delivered on. (`METHODS.md` §10)
 **Every stage saves itself.** Each phase ships persistence for the products it
 introduces, so a long run can be inspected in a notebook, resumed after a crash,
 and audited later. A bundle is a plain directory: `bundle.json`, the resolved
-`manifest.yaml`, and one netCDF per stream under `streams/`.
+`manifest.yaml`, one netCDF per stream under `streams/`, and one per rolling
+state under `rolling/` with the analysis configuration beside them.
+
+**A baseline is stated with its window.** There is no single true baseline: a
+rolling low quantile over a window of length *w* follows everything slower than
+*w* and leaves what is shorter standing as enhancement, so the window and the
+quantile are sweep dimensions of the rolling state rather than settings to get
+right. Each reading in a window counts in proportion to the share of its cell
+inside it, a window holding fewer readings than the quantile can use is blank
+with the reason recorded, and a baseline carries no CF cell method, because a
+statistic over a window stated at a cell inside it has two supports; the
+attributes say what it is instead. An instrument too sparse to see a background
+at the windows that matter has options: another instrument's baseline of the
+same field, joined onto its cells, or a declared constant. Enhancements are
+never clipped at zero, and the noise scale beside each reading is the declared
+figure when there is one and a robust estimate from the record when there is
+not, labelled either way. (`METHODS.md` §6, §2.5)
 
 ## Repository layout
 
@@ -221,8 +269,10 @@ src/tsara/
                bundles
   align/       Which variables, which cells, the one joining operation; pairing,
                auxiliary fields, output grid
+  rolling/     Windows as cells, the weighted rolling quantile, the baseline
+               methods, the rolling state, the noise scale, its bundle
   synthetic/   Ground-truth data generation, profiling, raw-file export
-               The three stages import core and config and never each other:
+               The four stages import core and config and never each other:
                they hand each other xarray Datasets
 docs/METHODS.md   The methods document: mathematics, rationale, rejected options
 examples/configs/    Commented YAML for every schema
