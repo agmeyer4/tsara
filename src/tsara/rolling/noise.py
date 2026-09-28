@@ -23,8 +23,8 @@ engine at q = 0.5. **A difference across a dropout is dropped**: two readings
 farther apart than :data:`DROPOUT_SPACING_FACTOR` times the record's median
 spacing between consecutive finite readings measure the air between them,
 not the instrument. On spacing, not on cell width: the 07-18 drive's
-analyzer reports every 2.31 s on 1 s cells, and a rule on width would drop
-every difference it has.
+analyzer reports every 2 or 3 s on 1 s cells (a median spacing of 2.00 s),
+and a rule on width would drop every difference it has.
 
 ``mad`` is the rolling MAD of the signal about its rolling median, kept for
 comparison: each reading's distance from the median of its own window, then

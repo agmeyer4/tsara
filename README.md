@@ -288,7 +288,7 @@ reading order true.
 
 ## Notebooks
 
-The four walkthroughs are committed with their outputs, so they read on GitHub
+The five walkthroughs are committed with their outputs, so they read on GitHub
 without being run, and none needs any real data:
 
 - [`01_synthetic_data_walkthrough.ipynb`](examples/notebooks/01_synthetic_data_walkthrough.ipynb)
@@ -311,8 +311,17 @@ without being run, and none needs any real data:
   prints ✔ checks comparing TSARA with a calculation written independently from
   the definition, and ends with "Try it" changes whose outcomes were run. A
   closing scoreboard collects every check.
+- [`05_rolling_state_walkthrough.ipynb`](examples/notebooks/05_rolling_state_walkthrough.ipynb)
+  — the continuous rolling state: one weighted quantile by hand, three
+  baselines on one record against the true background (what a window follows
+  and what it leaves standing), the count rule and the edge of a record, the
+  width rule, a canister adopting a PTR's baseline as three calls, a constant,
+  the uncertainty of a baseline against random draws and a manufactured gain
+  and offset, the noise scale's ladder, floor and plume-dense bias, and the
+  state saved, reloaded and joined like a stream. Same interactive shape as 04:
+  parameters cells, ✔ checks, "Try it" notes, a scoreboard.
 
-One companion runs on the real campaign archive instead, and is therefore
+Two companions run on the real campaign archive instead, and are therefore
 committed **without** outputs:
 
 - [`04b_alignment_real_data.ipynb`](examples/notebooks/04b_alignment_real_data.ipynb)
@@ -323,6 +332,11 @@ committed **without** outputs:
   measured under. Set `TSARA_ARCHIVE` to the directory holding the archive's `2024/` and
   `2026/` trees before starting Jupyter; without it the first cell stops and
   says so.
+- [`05b_rolling_state_real_data.ipynb`](examples/notebooks/05b_rolling_state_real_data.ipynb)
+  — notebook 05's operations on the 2024-07-18 drive and the ten drive days:
+  the methane baselines at three windows, the membership rule measured, the
+  canister's windows and its adopted baseline, and the noise scales; its ledger
+  re-measures the archive numbers `docs/METHODS.md` §6 quotes. Same gate as 04b.
 
 ## Development
 

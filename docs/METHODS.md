@@ -436,9 +436,9 @@ consecutive finite readings, on the cell between their midpoints, divided
 by √2 and scaled by 1.4826. **A difference across a dropout is dropped**:
 two readings farther apart than `DROPOUT_SPACING_FACTOR` = 1.5 times the
 record's median spacing between consecutive *finite* readings measure the
-air between them, not the instrument. On spacing rather than on cell width,
-because the 07-18 drive's analyzer reports every 2.31 s on 1 s cells and a
-rule on width would drop every difference it has; 1.5 keeps every jittered
+air between them, not the instrument. On spacing rather than on cell width, because the 07-18 drive's analyzer
+reports every 2 or 3 s on 1 s cells (median spacing 2.00 s, mean 2.31 s) and
+a rule on width would drop every difference it has; 1.5 keeps every jittered
 step and drops a single missing row. `mad` is two passes at *q* = 0.5, the
 rolling median and then the median of each reading's distance from the
 median at its own cell. A window holding fewer than `MIN_NOISE_SAMPLES` = 10
@@ -950,27 +950,43 @@ duration. On the 07-18 drive a 600-reading window spans about 23 minutes
 (600 × the analyzer's mean spacing of 2.31 s) and changes length at every
 dropout.
 
-**Rejected: membership by midpoint** (a reading belongs if its midpoint lies in
-the window, which is what pandas' time-based rolling gives). Measured, the two
-rules differ in the second order. Rule: 5th percentile; a window centred on
-every finite reading's midpoint; the overlap rule is a weighted quantile
-interpolated at cumulative-weight midpoints; "differ" means any difference
-above 10⁻⁹ ppb.
+**Rejected: membership by midpoint** (a reading belongs if its midpoint lies
+in the window, which is what pandas' time-based rolling gives). Measured, the
+two rules differ in the second order. Rule (re-stated 2026-09-28, when
+notebook 05b could not reproduce the first table): the 5th percentile; a
+window centred on every finite reading's midpoint; **both** rules
+interpolated at cumulative-weight midpoints (§6.3's quantile, Hazen's
+positions), the midpoint rule with equal weights and the overlap rule with
+overlap weights, so that the table shows membership alone; "differ" means
+any difference above 10⁻⁹ ppb. On the 07-18 drive's Picarro (8,448 readings
+on 1 s cells, reporting every 2 or 3 s):
 
-| stream | window | windows | differ | median | p95 | max (ppb) |
-|---|---|---|---|---|---|---|
-| ground Picarro, 60 s means, 07-15 to 07-17 | 2 min | 4,092 | 97 % | 0.09 | 2.62 | 28.96 |
-| ground Picarro, 60 s means | 10 min | 4,092 | 92 % | 0.14 | 1.75 | 13.65 |
-| ground Picarro, 60 s means | 60 min | 4,092 | 78 % | 0.05 | 0.85 | 7.22 |
-| drive Picarro, 1 s cells, 07-18 | 2 min | 8,448 | 83 % | 0.09 | 0.67 | 21.79 |
-| drive Picarro, 1 s cells | 10 min | 8,448 | 62 % | 0.04 | 0.19 | 2.18 |
-| drive Picarro, 1 s cells | 60 min | 8,448 | 27 % | 0.00 | 0.05 | 0.59 |
+| window | windows | differ | median | p95 | max (ppb) |
+|---|---|---|---|---|---|
+| 2 min | 8,448 | 43 % | 0.00 | 0.27 | 12.00 |
+| 10 min | 8,448 | 37 % | 0.00 | 0.05 | 2.04 |
+| 60 min | 8,448 | 11 % | 0.00 | 0.00 | 0.38 |
 
-The difference is sub-ppb typically and large only where a window holds a
-handful of wide cells, which is the regime where a 5th percentile of three
-readings is not a background anyway. Overlap weighting was chosen because the
-package says a value describes an interval, not because of the size of the
-effect. What would not be defensible is leaving the rule unstated, since every
+The first version of this table (2026-09-24) read 83 %, 62 % and 27 % of
+windows differing, with medians of 0.09, 0.04 and 0.00 ppb, 95th percentiles
+of 0.67, 0.19 and 0.05 and maxima of 21.79, 2.18 and 0.59, and carried three
+rows for the ground Picarro's 60 s means as well. Notebook 05b reproduces
+those twelve numbers exactly with pandas' own centred time-based rolling
+quantile at its default closure (a window open at its start and closed at
+its end, linear interpolation at (*N* − 1)*q*): the first table had compared
+the overlap rule against that, so most of its "difference" was the
+interpolation convention and the closure, not the membership. The ground
+rows were measured the same way and are withdrawn rather than left beside a
+rule they were not measured under. Under one convention the difference is
+zero at the median and comes from the readings at a window's edges, which
+overlap weighting counts at half and midpoint membership wholly or not at
+all: at 2 min, every one of the 228 windows differing by more than 0.5 ppb
+has an edge reading among its lowest three, and at 10 min all ten such
+windows have one among their lowest ten, which is where the 5th percentile's
+position falls (2.7 and 13 readings in); at 60 min no window differs by that
+much. Overlap weighting was chosen because the package says a value
+describes an interval (§1.3), not because of the size of the effect. What
+would not be defensible is leaving the rule unstated, since every
 window's reading count depends on it.
 
 ### 6.4 When a window is valid: a count **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
