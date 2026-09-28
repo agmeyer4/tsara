@@ -119,19 +119,12 @@ from tsara.align.binning import (
     FinerSupport,
     bin_streams_onto_cells,
 )
-from tsara.align.cells import (
-    median_width_s,
-    phase_offset_s,
-    readings_behind,
-    shared_readings,
-    stream_cells,
-    targets_overlap,
-)
+from tsara.align.cells import phase_offset_s, readings_behind, shared_readings
 from tsara.align.grid import grid_cells
 from tsara.align.variables import TsaraAlignError, VariableRef, resolve_variable
 from tsara.config.analysis import OutputGridConfig
 from tsara.core.naming import TIME_COORD, coverage_name
-from tsara.core.support import CellBounds
+from tsara.core.support import CellBounds, median_width_s, stream_cells, targets_overlap
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Mapping

@@ -118,7 +118,7 @@ def select_variables(
     The cell boundaries are excluded too. They are metadata describing the
     rows rather than a variable over them, and they are *usually* a coordinate
     and therefore invisible here; a stream that carries them as a data variable
-    is a shape :func:`~tsara.align.cells.stream_cells` deliberately accepts, so this must accept
+    is a shape :func:`~tsara.core.support.stream_cells` deliberately accepts, so this must accept
     it as well rather than trying to average a set of boundaries.
     """
     if variables is not None:

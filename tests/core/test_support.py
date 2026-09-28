@@ -41,6 +41,7 @@ from tsara.core.support import (
     nominal_cadence_ns,
     overlap_pairs,
     support_attrs,
+    targets_overlap,
 )
 from tsara.core.timebase import SECOND_NS as SECOND
 
@@ -1034,3 +1035,33 @@ def test_the_two_binners_weight_by_the_same_overlaps() -> None:
     assert scalar.n_readings.tolist() == angular.n_readings.tolist()
     assert scalar.n_overlapping.tolist() == angular.n_overlapping.tolist()
     assert scalar.coverage == pytest.approx(angular.coverage)
+
+
+def _spaced_s(start_s: float, width_s: float, n: int, step_s: float) -> CellBounds:
+    """Return ``n`` cells of ``width_s`` whose starts are ``step_s`` apart."""
+    start = (np.arange(n, dtype=np.int64) * int(round(step_s * SECOND))) + int(
+        round(start_s * SECOND)
+    )
+    return CellBounds(start_ns=start, stop_ns=start + int(round(width_s * SECOND)))
+
+
+def _bounds_s(start_s: list[float], stop_s: list[float]) -> CellBounds:
+    """Return cells from explicit starts and stops in seconds."""
+    return CellBounds(
+        start_ns=(np.array(start_s) * SECOND).astype(np.int64),
+        stop_ns=(np.array(stop_s) * SECOND).astype(np.int64),
+    )
+
+
+def test_targets_overlap_is_exact_and_order_free() -> None:
+    """A single nanosecond of overlap counts; abutting cells, in any order, do not."""
+    assert not targets_overlap(_spaced_s(0, 60, 5, 60))
+    assert targets_overlap(_bounds_s([0, 1], [2, 3]))
+    # A single nanosecond of overlap counts; abutting cells do not.
+    one_ns = CellBounds(
+        start_ns=np.array([0, SECOND - 1], dtype=np.int64),
+        stop_ns=np.array([SECOND, 2 * SECOND], dtype=np.int64),
+    )
+    assert targets_overlap(one_ns)
+    assert not targets_overlap(_bounds_s([5, 0], [6, 5]))  # unsorted, abutting
+    assert not targets_overlap(_bounds_s([0], [1]))

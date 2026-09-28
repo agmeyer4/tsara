@@ -72,7 +72,6 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from tsara.align.cells import stream_cells
 from tsara.align.variables import TsaraAlignError, VariableRef, resolve_variable
 from tsara.core.circular import wrap_degrees
 from tsara.core.naming import (
@@ -82,6 +81,7 @@ from tsara.core.naming import (
     TIME_COORD,
     is_circular,
 )
+from tsara.core.support import stream_cells
 from tsara.core.timebase import NS_PER_S
 
 if TYPE_CHECKING:  # pragma: no cover

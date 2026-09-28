@@ -48,7 +48,7 @@ through untouched, because averaging a cell onto itself is the identity
 mathematically and not in floating point. And a target cell with no
 contributing data stays ``nan``: gases are binned, never interpolated (§1.2).
 
-One behaviour is a policy. A reading at least :data:`~tsara.align.cells.COPY_RATIO` times as wide
+One behaviour is a policy. A reading at least :data:`~tsara.core.support.COPY_RATIO` times as wide
 as a target cell it touches would be *copied* across rows, and is refused
 unless ``finer_support="allow"`` asks for it by name; everything narrower is
 allowed, recorded per column, and named in one warning per call (§11.2.4).
@@ -74,14 +74,6 @@ import pandas as pd
 import xarray as xr
 
 from tsara._version import __version__
-from tsara.align.cells import (
-    COPY_RATIO,
-    cadence_s,
-    median_width_s,
-    pair_width_ratios,
-    stream_cells,
-    targets_overlap,
-)
 from tsara.align.variables import TsaraAlignError, VariableRef, select_variables
 from tsara.core.bundle import pin_time_encoding
 from tsara.core.circular import bin_circular_onto_cells
@@ -104,11 +96,18 @@ from tsara.core.propagation import (
     sigma_at_support,
 )
 from tsara.core.support import (
+    COPY_RATIO,
     CellBounds,
     attach_time_bounds,
     bin_onto_cells,
+    cadence_s,
     contributing_weights,
+    median_width_s,
     overlap_pairs,
+    pair_width_ratios,
+    same_cells,
+    stream_cells,
+    targets_overlap,
 )
 from tsara.core.timebase import NS_PER_S
 
@@ -153,7 +152,7 @@ BORROWED_ATTR = "tsara_borrowed_share"
 READINGS_ATTR = "tsara_n_readings"
 
 
-#: What a join may do with a reading at or beyond :data:`~tsara.align.cells.COPY_RATIO`.
+#: What a join may do with a reading at or beyond :data:`~tsara.core.support.COPY_RATIO`.
 #: ``refuse`` is the default and the interpolation rule's guarantee (§1.2);
 #: ``allow`` copies the reading across rows, labels every affected column
 #: ``copied``, records how much of each value was borrowed, and warns.
@@ -166,7 +165,7 @@ FinerSupport = Literal["refuse", "allow"]
 #: the target; ``averaged`` when every contributing reading sat wholly inside
 #: its cell (borrowed share exactly 0); ``straddled`` when some reading lay
 #: across a cell boundary but none was wider than a cell it filled;
-#: ``narrowed`` when one was, by less than :data:`~tsara.align.cells.COPY_RATIO`; ``copied`` at
+#: ``narrowed`` when one was, by less than :data:`~tsara.core.support.COPY_RATIO`; ``copied`` at
 #: or beyond it. The word *shared* is kept for a different fact, a reading
 #: that formed more than one row's value (:func:`~tsara.align.cells.shared_readings`, §11.4.1):
 #: a straddled reading in a product whose rows sit cells apart is not shared.
@@ -236,7 +235,7 @@ def bin_streams_onto_cells(
     propagation_form : {'ar1_neff', 'ar1_asymptotic', 'ar1_double_sum'}, optional
         Which registered form reduces a correlated random component (§3.4).
     finer_support : {'refuse', 'allow'}, optional
-        What to do when a reading is at least :data:`~tsara.align.cells.COPY_RATIO` times as
+        What to do when a reading is at least :data:`~tsara.core.support.COPY_RATIO` times as
         wide as a target cell it touches, so that it would be copied across
         rows. ``refuse`` (the default) raises; ``allow`` copies it, labels the
         column ``copied``, records how much of each value was borrowed and
@@ -286,7 +285,7 @@ def bin_streams_onto_cells(
     joins: dict[str, tuple[CellBounds, OverlapPairs | None, np.ndarray | None]] = {}
     for instrument in dict.fromkeys(name for name, _ in selection):
         readings = stream_cells(streams[instrument], instrument)
-        if _same_cells(readings, target):
+        if same_cells(readings, target):
             joins[instrument] = (readings, None, None)
             continue
         found = overlap_pairs(readings, target)
@@ -370,22 +369,6 @@ def _output_names(selection: Sequence[tuple[str, str]]) -> dict[tuple[str, str],
         else:
             names[instrument, variable] = variable
     return names
-
-
-def _same_cells(readings: CellBounds, target: CellBounds) -> bool:
-    """Return whether two sets of cells are identical.
-
-    Tested on the *cells*, not on the instrument name, because that is the
-    property that matters: any stream already on the target support must pass
-    through untouched. Averaging a cell onto itself is the identity
-    mathematically and not in floating point, and several gases retrieved
-    from one spectrum is the commonest case there is.
-    """
-    # Same length first, so the element-wise comparison is only made when it can succeed.
-    return len(readings) == len(target) and bool(
-        np.array_equal(readings.start_ns, target.start_ns)
-        and np.array_equal(readings.stop_ns, target.stop_ns)
-    )
 
 
 def _refuse_upsampling(

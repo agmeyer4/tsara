@@ -16,10 +16,9 @@ import pytest
 import xarray as xr
 
 from tsara.align import TsaraAlignError, bin_streams_onto_cells
-from tsara.align.cells import stream_cells, targets_overlap
 from tsara.align.variables import select_variables
 from tsara.core.naming import sigma_rand_name
-from tsara.core.support import CellBounds
+from tsara.core.support import CellBounds, stream_cells, targets_overlap
 from tsara.core.timebase import SECOND_NS as SECOND
 
 

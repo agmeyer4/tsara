@@ -15,9 +15,11 @@ Shape of the subpackage
     leaves the companion columns out, and the refusal of a product that is
     itself a join (§11.2.3).
 ``cells``
-    A stream's cells and how readings meet target cells: widths, the
-    per-pair width ratio and the copy line, the readings behind a set of
-    cells, phase, overlap. Asked by every module below, answered once.
+    What only a product can be asked: the readings behind a set of target
+    cells and how many formed more than one, and the phase of a same-width
+    stream against a tiling. A stream's cells, widths, the per-pair width
+    ratio and the copy line live in :mod:`tsara.core.support`, where the
+    rolling stage can reach them too.
 ``binning``
     The one joining operation: any set of variables onto any set of cells,
     with uncertainty, counts and coverage travelling automatically. Everything

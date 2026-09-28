@@ -45,8 +45,9 @@ naming
 geodesy
     How TSARA represents position: a local equirectangular approximation.
 support
-    Cells: the interval of air a value describes, CF bounds, and the one
-    overlap-weighted binning arithmetic every join calls.
+    Cells: the interval of air a value describes, CF bounds, a stream's
+    cells and how readings meet target cells (the width ratio and the copy
+    line), and the one overlap-weighted binning arithmetic every join calls.
 propagation
     Uncertainty through a mean: the random component that averages down, the
     systematic one that does not, and the correlated forms between.

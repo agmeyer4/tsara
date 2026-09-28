@@ -26,7 +26,7 @@ import xarray as xr
 from tsara.align import PairedSpecies, TsaraAlignError, pair_species
 from tsara.core.naming import sigma_rand_name, sigma_sys_name
 from tsara.core.propagation import propagate_random, propagate_systematic
-from tsara.core.support import CellBounds
+from tsara.core.support import CellBounds, TsaraSupportError
 from tsara.core.timebase import SECOND_NS as SECOND
 
 
@@ -686,7 +686,7 @@ def test_a_stream_without_cells_is_refused_by_name() -> None:
         {"co2": ("time", np.arange(4.0))},
         coords={"time": np.arange(4).astype("datetime64[s]").astype("datetime64[ns]")},
     )
-    with pytest.raises(TsaraAlignError, match="carries no 'time_bnds'"):
+    with pytest.raises(TsaraSupportError, match="carries no 'time_bnds'"):
         pair_species({"fast": fast, "bare": bare}, "ch4", "co2")
 
 
@@ -799,7 +799,7 @@ def test_an_empty_stream_is_refused_by_name() -> None:
         },
     )
     empty["time"].attrs["bounds"] = "time_bnds"
-    with pytest.raises(TsaraAlignError, match="no cells to bin from"):
+    with pytest.raises(TsaraSupportError, match="no cells to bin from"):
         pair_species({"fast": fast, "empty": empty}, "ch4", "co2")
 
 
