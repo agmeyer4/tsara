@@ -20,11 +20,21 @@ with two variables selected and incomplete rows dropped.
 Deliberately variable-agnostic
 -------------------------------
 This function does not know what a species is. It takes whatever variables it
-is handed — raw concentrations today, baselines and enhancements once Phase 5
-computes them, met, anything a later stage invents — and puts them on the
-support asked for. That is the point: TSARA is a loader and transformer for
-sweeping analysis choices, so the joining block must not need editing every
-time a new kind of variable appears upstream of it.
+is handed — raw concentrations, the baselines and enhancements of the rolling
+state, met, anything a later stage invents — and puts them on the support
+asked for. That is the point: TSARA is a loader and transformer for sweeping
+analysis choices, so the joining block must not need editing every time a new
+kind of variable appears upstream of it.
+
+A variable may carry *sweep dimensions* beside ``time``: a baseline over
+``(time, baseline_window, baseline_quantile)`` is nine versions of one
+variable, one per point of the sweep (``docs/METHODS.md`` §6.2). Each version
+is averaged onto the target cells exactly as a plain variable is, with the
+overlaps found once for the instrument, because the weights depend on the
+readings' cells and not on their values. Count, coverage and borrowed share
+are per version too, since a version may be blank where another is not; the
+column's record pools every version; the sweep coordinates travel into the
+product.
 
 What travels with a variable
 -----------------------------
@@ -81,6 +91,7 @@ from tsara.core.naming import (
     CELL_METHODS_ATTR,
     DISPERSION_SUFFIX,
     RESULTANT_LENGTH_SUFFIX,
+    TIME_BOUNDS_VAR,
     TIME_COORD,
     borrowed_name,
     coverage_name,
@@ -180,6 +191,12 @@ SupportTransform = Literal["passthrough", "averaged", "straddled", "narrowed", "
 #: Named rather than repeated as a literal in four places, where a typo in one
 #: of them would silently restore a cell method to a variable that was binned.
 _BINNED_HERE = "__binned__"
+
+
+#: One column of the product as the per-variable step hands it back: its
+#: dimensions (``time`` first, then any sweep dimensions of the variable it
+#: came from), its values, and its attributes.
+_Column = tuple[tuple[str, ...], np.ndarray, dict[str, object]]
 
 
 @dataclass(frozen=True)
@@ -295,7 +312,7 @@ def bin_streams_onto_cells(
     # 4. Put each variable on the target cells: its value, its companions
     # (count, coverage, borrowed share, sigmas or angular quality), its
     # attributes, and the record of what the join did to its support.
-    data_vars: dict[str, tuple[str, np.ndarray, dict[str, object]]] = {}
+    data_vars: dict[str, _Column] = {}
     # Per column: the cell method a passed-through variable declared, or a
     # sentinel saying this call averaged it. Needed to fix cell_methods below.
     native: dict[str, str | None] = {}
@@ -314,14 +331,20 @@ def bin_streams_onto_cells(
             pairs=pairs,
             ratios=ratios,
         )
-        data_vars.update({name: (TIME_COORD, *rest) for name, rest in columns.items()})
+        data_vars.update(columns)
         native[column] = declared_method
         changes[column] = change
 
-    # 5. Assemble the product: one row per target cell, `time` at each midpoint.
+    # 5. Assemble the product: one row per target cell, `time` at each
+    # midpoint, plus the coordinate of every sweep dimension a selected
+    # variable carries, copied from the stream that declared it.
+    coords: dict[str, object] = {
+        TIME_COORD: np.asarray(target.midpoint_ns, dtype="datetime64[ns]"),
+        **_sweep_coords(streams, selection),
+    }
     dataset = xr.Dataset(
         data_vars=data_vars,
-        coords={TIME_COORD: np.asarray(target.midpoint_ns, dtype="datetime64[ns]")},
+        coords=coords,
         attrs={
             "tsara_version": __version__,
             "tsara_stage": "binned",
@@ -437,7 +460,7 @@ def _one_variable(
     readings: CellBounds,
     pairs: OverlapPairs | None,
     ratios: np.ndarray | None,
-) -> tuple[dict[str, tuple[np.ndarray, dict[str, object]]], str | None, _SupportChange]:
+) -> tuple[dict[str, _Column], str | None, _SupportChange]:
     """Return one variable's columns on the target cells, and what the join did to it.
 
     ``readings`` are the variable's own cells, which its values describe;
@@ -446,25 +469,39 @@ def _one_variable(
     target cells, so that there is nothing to search and the variable passes
     through.
 
+    A variable over ``time`` alone is one version; one over ``time`` and sweep
+    dimensions is a version per point of the sweep, and every version is put
+    on the target cells with the same pairs (§6.2). The columns come back
+    with their dimensions, ``time`` first and the sweep dimensions after it in
+    the stream's own order.
+
     The second return value says whether the variable was already on the
     target support, and if so what cell method its own stream declared — the
     only thing the caller cannot re-derive from the columns themselves. The
     third is the column's support record, already written into its attrs and
     returned so the caller can warn about all columns at once.
     """
-    if stream[variable].dims != (TIME_COORD,):
-        # Named rather than broadcast against: without this the cell
-        # boundaries, or any other array carrying a second dimension, reach
-        # the weighting as a shape mismatch and surface as an untyped
-        # `ValueError: operands could not be broadcast together`, which says
-        # nothing about which stream or which variable was at fault.
+    array = stream[variable]
+    if variable == TIME_BOUNDS_VAR or TIME_COORD not in array.dims:
+        # Named rather than broadcast against: the cell boundaries, or any
+        # other array that does not vary over `time`, would otherwise reach
+        # the weighting as a shape or dtype mismatch and surface as an
+        # untyped `ValueError`, which says nothing about which stream or
+        # which variable was at fault.
         raise TsaraAlignError(
-            f"'{variable}' on stream '{instrument}' has dimensions "
-            f"{stream[variable].dims}, and only one value per cell can be binned. "
-            f"A variable over ('{TIME_COORD}',) is what this operation averages; "
-            "anything else describes the cells rather than varying over them."
+            f"'{variable}' on stream '{instrument}' has dimensions {array.dims}, and only "
+            f"a value per cell can be binned. A variable over ('{TIME_COORD}',), or over "
+            f"'{TIME_COORD}' and sweep dimensions, is what this operation averages; the "
+            "cell boundaries describe the cells rather than varying over them."
         )
-    values = np.asarray(stream[variable].values, dtype=np.float64)
+    # `time` first whatever order the stream keeps, so that every version of
+    # the variable is one column of a (readings, versions) array.
+    if array.dims[0] != TIME_COORD:
+        array = array.transpose(TIME_COORD, ...)
+    dims = tuple(str(name) for name in array.dims)
+    sweep_shape = tuple(int(array.sizes[name]) for name in dims[1:])
+    values = np.asarray(array.values, dtype=np.float64)
+    versions = values.reshape(len(values), -1)
     # Everything the input stream declared travels with the column, plus where it came from.
     attrs: dict[str, object] = dict(stream[variable].attrs)
     attrs[INSTRUMENT_ATTR] = instrument
@@ -473,6 +510,12 @@ def _one_variable(
     # auxiliary interpolator, which has to make the same decision.
     circular = is_circular(attrs)
     if circular:
+        if sweep_shape:
+            raise TsaraAlignError(
+                f"'{variable}' on stream '{instrument}' is circular and carries sweep "
+                f"dimensions {dims[1:]}. A direction is vector-averaged one value per cell "
+                "(METHODS §11.5), and no stage produces a swept direction."
+            )
         _warn_of_a_dropped_direction_sigma(stream, variable, instrument)
     # Already on the target cells (the caller found nothing to search)? Then
     # pass through rather than average onto itself.
@@ -484,23 +527,28 @@ def _one_variable(
         # columns and their meaning do not depend on whether a stream happened
         # to share the target's cells. A masked value contributes nothing,
         # there as here: no count, no coverage, no borrowed share, no quality
-        # number.
+        # number. Per version, since a version may be blank where another is not.
         present = np.isfinite(values)
-        columns: dict[str, tuple[np.ndarray, dict[str, object]]] = {column: (values, attrs)}
+        columns: dict[str, _Column] = {column: (dims, values, attrs)}
         columns[n_readings_name(column)] = (
+            dims,
             present.astype(np.int64),
             _count_attrs(column, native=True),
         )
         columns[coverage_name(column)] = (
+            dims,
             present.astype(np.float64),
             _coverage_attrs(column, native=True),
         )
         # A reading on its own cell borrows nothing from beyond it.
         columns[borrowed_name(column)] = (
+            dims,
             np.where(present, 0.0, np.nan),
             _borrowed_attrs(column, native=True),
         )
-        n_present = int(np.count_nonzero(present))
+        # Rows: the most any one version holds; a reading present in every
+        # version is one reading, not one per version.
+        n_present = int(np.isfinite(versions).sum(axis=0).max())
         change = _SupportChange("passthrough", 1.0, 0.0, n_present, n_present)
         _record(attrs, change)
         if circular:
@@ -508,10 +556,12 @@ def _one_variable(
             # which is what vector-averaging that single reading returns.
             # No sigma, matching the binned path (§11.5).
             columns[f"{column}{RESULTANT_LENGTH_SUFFIX}"] = (
+                dims,
                 np.where(present, 1.0, np.nan),
                 _resultant_attrs(column),
             )
             columns[f"{column}{DISPERSION_SUFFIX}"] = (
+                dims,
                 np.where(present, 0.0, np.nan),
                 _dispersion_attrs(column, str(attrs.get("units", "degrees"))),
             )
@@ -524,8 +574,9 @@ def _one_variable(
             )
             if resolved is None:
                 continue
-            sigma_values, provenance = resolved
+            sigma_values, sigma_dims, provenance = resolved
             columns[sigma_name(column)] = (
+                sigma_dims,
                 sigma_values,
                 _sigma_attrs(stream, variable, component, provenance, form="native"),
             )
@@ -533,18 +584,41 @@ def _one_variable(
 
     # Not on the target cells: average it, as a direction or as a number.
     if circular:
-        columns, borrowed, weight = _bin_circular(
+        columns, borrowed, weights = _bin_circular(
             stream, variable, column, readings, target, attrs, pairs
         )
     else:
-        columns, borrowed, weight = _bin_scalar(
-            stream, variable, column, readings, target, values, attrs, propagation_form, pairs
+        columns, borrowed, weights = _bin_scalar(
+            stream,
+            variable,
+            column,
+            dims,
+            readings,
+            target,
+            versions,
+            attrs,
+            propagation_form,
+            pairs,
         )
-    # The third qualifier, per cell, and the four-number record, per column.
-    columns[borrowed_name(column)] = (borrowed, _borrowed_attrs(column, native=False))
-    change = _summarize(pairs, ratios, weight, borrowed, columns[column][0])
+    # The third qualifier, per cell and per version, and the four-number
+    # record, per column, pooled over every version.
+    columns[borrowed_name(column)] = (
+        dims,
+        _shaped(borrowed, sweep_shape),
+        _borrowed_attrs(column, native=False),
+    )
+    change = _summarize(pairs, ratios, weights, borrowed, columns[column][1])
     _record(attrs, change)
     return columns, _BINNED_HERE, change
+
+
+def _shaped(stacked: np.ndarray, sweep_shape: tuple[int, ...]) -> np.ndarray:
+    """Return a ``(cells, versions)`` array with the versions unfolded into the sweep dimensions.
+
+    A plain variable has one version and no sweep dimensions, so its column
+    comes back one-dimensional, exactly as before versions existed.
+    """
+    return stacked.reshape((stacked.shape[0], *sweep_shape))
 
 
 def _warn_of_a_dropped_direction_sigma(stream: xr.Dataset, variable: str, instrument: str) -> None:
@@ -583,28 +657,40 @@ def _sigma_on_cells(
     sigma_variable: str,
     cell_width_s: float,
     form: PropagationForm,
-) -> tuple[np.ndarray, str] | None:
-    """Return a declared sigma restated on the stream's own cells, and how.
+) -> tuple[np.ndarray, tuple[str, ...], str] | None:
+    """Return a declared sigma restated on the stream's own cells, its dimensions, and how.
 
     Ingestion stores a declared figure exactly as declared and records the
     interval it was quoted at, deliberately performing no arithmetic on it
     (§10.8). This is the point of use, so this is where the arithmetic
-    happens — or is refused and says so.
+    happens — or is refused and says so. A sigma may carry the sweep
+    dimensions of its variable (the baseline's sigma does) or ``time`` alone;
+    moving it is the same scaling of every value either way.
     """
     if sigma_variable not in stream.data_vars:
         # This component was never declared or reported for the variable.
         return None
-    values = np.asarray(stream[sigma_variable].values, dtype=np.float64)
+    array = stream[sigma_variable]
+    # In its variable's order when it has the variable's dimensions, so that
+    # the versions line up however the stream stored either; `time` first
+    # otherwise, which is the order every column of the product keeps.
+    wanted = (TIME_COORD, *(str(d) for d in stream[variable].dims if d != TIME_COORD))
+    if set(map(str, array.dims)) == set(wanted):
+        array = array.transpose(*wanted)
+    elif array.dims[0] != TIME_COORD:
+        array = array.transpose(TIME_COORD, ...)
+    dims = tuple(str(name) for name in array.dims)
+    values = np.asarray(array.values, dtype=np.float64)
     quoted = stream[variable].attrs.get("uncertainty_at_width")
     if quoted is None:
         # No quoted interval: the sigma already describes the stream's own cells.
-        return values, "unchanged"
+        return values, dims, "unchanged"
     # A figure quoted at another interval: moving it needs a decorrelation
     # timescale, and `sigma_at_support` refuses (returns "unscaled") without one.
     tau = stream[variable].attrs.get("decorrelation_timescale")
     tau_s = float(pd.Timedelta(tau).total_seconds()) if tau is not None else None
     moved, provenance = sigma_at_support(
-        values,
+        values.reshape(-1),
         quoted_width_s=float(pd.Timedelta(quoted).total_seconds()),
         target_width_s=cell_width_s,
         tau_s=tau_s,
@@ -619,7 +705,7 @@ def _sigma_on_cells(
             quoted,
             cell_width_s,
         )
-    return np.asarray(moved, dtype=np.float64), provenance
+    return np.asarray(moved, dtype=np.float64).reshape(values.shape), dims, provenance
 
 
 def _bin_circular(
@@ -630,47 +716,53 @@ def _bin_circular(
     target: CellBounds,
     attrs: dict[str, object],
     pairs: OverlapPairs,
-) -> tuple[dict[str, tuple[np.ndarray, dict[str, object]]], np.ndarray, np.ndarray]:
+) -> tuple[dict[str, _Column], np.ndarray, list[np.ndarray]]:
     """Vector-average an angular variable and carry its quality numbers.
 
     An angle has no meaningful arithmetic mean, so it gets none. What it gets
     instead is the mean resultant length, which is the honest statement of
     how well determined the direction is, and the exact circular standard
     deviation derived from it (§11.5). Returns the columns, the per-cell
-    borrowed share, and the per-pair weights the caller's record needs.
+    borrowed share as a one-version ``(cells, 1)`` array, and the per-pair
+    weights of that one version, the shapes the caller's record reads for
+    any variable.
     """
     angles = np.asarray(stream[variable].values, dtype=np.float64)
     # The same overlaps as a scalar, different arithmetic on the pairs.
     result = bin_circular_onto_cells(readings, angles, target, pairs=pairs)
     units = str(attrs.get("units", "degrees"))
-    columns = {
-        column: (result.mean_deg, attrs),
-        n_readings_name(column): (result.n_readings, _count_attrs(column, native=False)),
-        coverage_name(column): (result.coverage, _coverage_attrs(column, native=False)),
+    dims = (TIME_COORD,)
+    columns: dict[str, _Column] = {
+        column: (dims, result.mean_deg, attrs),
+        n_readings_name(column): (dims, result.n_readings, _count_attrs(column, native=False)),
+        coverage_name(column): (dims, result.coverage, _coverage_attrs(column, native=False)),
         f"{column}{RESULTANT_LENGTH_SUFFIX}": (
+            dims,
             result.resultant_length,
             _resultant_attrs(column),
         ),
         f"{column}{DISPERSION_SUFFIX}": (
+            dims,
             result.dispersion_deg,
             _dispersion_attrs(column, units),
         ),
     }
-    return columns, result.borrowed, contributing_weights(pairs, angles)
+    return columns, result.borrowed[:, np.newaxis], [contributing_weights(pairs, angles)]
 
 
 def _bin_scalar(
     stream: xr.Dataset,
     variable: str,
     column: str,
+    dims: tuple[str, ...],
     readings: CellBounds,
     target: CellBounds,
-    values: np.ndarray,
+    versions: np.ndarray,
     attrs: dict[str, object],
     propagation_form: PropagationForm,
     pairs: OverlapPairs,
-) -> tuple[dict[str, tuple[np.ndarray, dict[str, object]]], np.ndarray, np.ndarray]:
-    """Overlap-weighted mean of one scalar variable, with its uncertainty.
+) -> tuple[dict[str, _Column], np.ndarray, list[np.ndarray]]:
+    """Overlap-weighted mean of one scalar variable, every version of it, with its uncertainty.
 
     The mean, the count, the coverage and the borrowed share are
     :func:`~tsara.core.support.bin_onto_cells`, called with the overlaps the
@@ -678,15 +770,26 @@ def _bin_scalar(
     a second spelling of that arithmetic, and two implementations of one
     idea is the shape the Phase-4 reframe rejected. What is added here is the
     uncertainty, propagated through exactly the weights that formed the value.
-    Returns the columns, the per-cell borrowed share, and the per-pair weights
-    the caller's record needs.
+
+    ``versions`` is the variable as a ``(readings, versions)`` array: one
+    column for a plain variable, one per sweep point for a swept one. Each
+    version is binned on its own, because the weights are zero where a
+    version is masked and a version may be masked where another is not; the
+    pairs are the same for all of them. Returns the columns, the per-cell
+    borrowed share as a ``(cells, versions)`` array, and each version's
+    per-pair weights, which the caller's record pools.
     """
     n_target = len(target)
-    binned = bin_onto_cells(readings, values, target, pairs=pairs)
-    columns: dict[str, tuple[np.ndarray, dict[str, object]]] = {
-        column: (binned.values, attrs),
-        n_readings_name(column): (binned.n_readings, _count_attrs(column, native=False)),
-        coverage_name(column): (binned.coverage, _coverage_attrs(column, native=False)),
+    sweep_shape = tuple(int(stream[variable].sizes[name]) for name in dims[1:])
+    binned = [bin_onto_cells(readings, version, target, pairs=pairs) for version in versions.T]
+
+    def stacked(field: str) -> np.ndarray:
+        return _shaped(np.stack([getattr(one, field) for one in binned], axis=1), sweep_shape)
+
+    columns: dict[str, _Column] = {
+        column: (dims, stacked("values"), attrs),
+        n_readings_name(column): (dims, stacked("n_readings"), _count_attrs(column, native=False)),
+        coverage_name(column): (dims, stacked("coverage"), _coverage_attrs(column, native=False)),
     }
     # Uncertainty, propagated through exactly the weights that formed the value
     # (docs/METHODS.md §3): each pair's overlap, or zero where the reading is
@@ -694,51 +797,88 @@ def _bin_scalar(
     # says how correlated the random errors of neighbouring readings are;
     # without one they are independent, which is what declaring a component
     # random means.
-    weight = contributing_weights(pairs, values)
+    weights = [contributing_weights(pairs, version) for version in versions.T]
     tau = stream[variable].attrs.get("decorrelation_timescale")
     tau_s = float(pd.Timedelta(tau).total_seconds()) if tau is not None else None
     # How far apart readings are (for the correlated-error forms), and how wide
     # each is (for moving a sigma quoted at another interval onto the cells).
     spacing = cadence_s(readings)
     cell_width = median_width_s(readings)
+    # Long-form sample times, which only the pairwise form uses. Built here
+    # rather than inside the propagation module because this is where the
+    # readings are.
+    times_s = readings.midpoint_ns[pairs.reading_index].astype(np.float64) / NS_PER_S
     for component, sigma_name in (("random", sigma_rand_name), ("systematic", sigma_sys_name)):
         resolved = _sigma_on_cells(
             stream, variable, sigma_name(variable), cell_width, propagation_form
         )
         if resolved is None:
             continue
-        sigma_values, provenance = resolved
-        # Each pair's sigma, aligned with `weight` and `pairs.target_index`.
-        long_form = sigma_values[pairs.reading_index]
-        if component == "random":
-            # sqrt(sum w^2 sigma^2) / sum w, inflated for correlation when tau is declared.
-            result = propagate_random_binned(
-                long_form,
-                weight,
-                pairs.target_index,
-                n_target,
-                spacing_s=spacing,
-                # Long-form sample times, which only the pairwise form uses.
-                # Built here rather than inside the propagation module because
-                # this is where the readings are.
-                times_s=readings.midpoint_ns[pairs.reading_index].astype(np.float64) / NS_PER_S,
-                tau_s=tau_s,
-                form=propagation_form,
-            )
-        else:
-            # sum w sigma / sum w: shared errors do not average down.
-            result = propagate_systematic_binned(long_form, weight, pairs.target_index, n_target)
+        sigma_values, sigma_dims, provenance = resolved
+        sigma_versions = _sigma_versions(
+            sigma_values, sigma_dims, dims, versions.shape[1], variable, sigma_name(variable)
+        )
+        propagated = []
+        for version, sigma_version in zip(weights, sigma_versions, strict=True):
+            # Each pair's sigma, aligned with the version's weights and `pairs.target_index`.
+            long_form = sigma_version[pairs.reading_index]
+            if component == "random":
+                # sqrt(sum w^2 sigma^2) / sum w, inflated for correlation when tau is declared.
+                result = propagate_random_binned(
+                    long_form,
+                    version,
+                    pairs.target_index,
+                    n_target,
+                    spacing_s=spacing,
+                    times_s=times_s,
+                    tau_s=tau_s,
+                    form=propagation_form,
+                )
+            else:
+                # sum w sigma / sum w: shared errors do not average down.
+                result = propagate_systematic_binned(
+                    long_form, version, pairs.target_index, n_target
+                )
+            propagated.append(result.sigma)
         columns[sigma_name(column)] = (
-            result.sigma,
+            dims,
+            _shaped(np.stack(propagated, axis=1), sweep_shape),
             _sigma_attrs(stream, variable, component, provenance, form=result.form),
         )
-    return columns, binned.borrowed, weight
+    return columns, np.stack([one.borrowed for one in binned], axis=1), weights
+
+
+def _sigma_versions(
+    sigma: np.ndarray,
+    sigma_dims: tuple[str, ...],
+    dims: tuple[str, ...],
+    n_versions: int,
+    variable: str,
+    sigma_variable: str,
+) -> list[np.ndarray]:
+    """Return one sigma column per version of the variable, in version order.
+
+    A sigma over ``time`` alone applies to every version, as a declared
+    instrument precision does to every baseline of a sweep. A sigma over the
+    variable's own sweep dimensions is one figure per version, as the
+    baseline's sampling uncertainty is. Anything else -- a sigma carrying a
+    sweep its variable does not, or the same dimensions in another order --
+    cannot be lined up with the versions and is refused rather than guessed.
+    """
+    if sigma_dims == (TIME_COORD,):
+        return [sigma] * n_versions
+    if sigma_dims != dims:
+        raise TsaraAlignError(
+            f"'{sigma_variable}' has dimensions {sigma_dims} but '{variable}' has {dims}; a "
+            f"sigma carries either ('{TIME_COORD}',) or exactly its variable's dimensions."
+        )
+    return list(sigma.reshape(len(sigma), -1).T)
 
 
 def _summarize(
     pairs: OverlapPairs,
     ratios: np.ndarray,
-    weight: np.ndarray,
+    weights: list[np.ndarray],
     borrowed: np.ndarray,
     values: np.ndarray,
 ) -> _SupportChange:
@@ -746,21 +886,32 @@ def _summarize(
 
     Over the pairs that formed a value, not over the cells: a masked reading
     took part in nothing, so it neither widens the worst ratio nor counts as
-    a reading behind the column.
+    a reading behind the column. Pooled over every version of the column,
+    ``weights`` holding each version's per-pair weights and ``borrowed`` a
+    ``(cells, versions)`` array: a pair that formed any version's value
+    counts, the borrowed share is every version's contributing time over
+    every version's time, and the rows are the most any one version holds,
+    since a reading present in nine versions is one reading in one row.
     """
-    contributing = weight > 0
+    contributing = np.any(np.stack(weights, axis=1) > 0, axis=1)
     ratio_max = float(ratios[contributing].max()) if contributing.any() else float("nan")
     # The column's share: every contributing pair's borrowed time over every
     # contributing pair's time -- the per-cell shares weighted by how much of
     # each cell was measured, so a sliver cell cannot dominate it.
-    weight_sum = np.bincount(pairs.target_index, weights=weight, minlength=pairs.n_target)
-    covered = weight_sum > 0
-    if covered.any():
-        share = float(np.sum(borrowed[covered] * weight_sum[covered]) / weight_sum[covered].sum())
-        borrowed_max = float(np.max(borrowed[covered]))
+    shares: list[np.ndarray] = []
+    times: list[np.ndarray] = []
+    for index, weight in enumerate(weights):
+        weight_sum = np.bincount(pairs.target_index, weights=weight, minlength=pairs.n_target)
+        covered = weight_sum > 0
+        shares.append(borrowed[covered, index])
+        times.append(weight_sum[covered])
+    pooled_shares, pooled_times = np.concatenate(shares), np.concatenate(times)
+    if pooled_times.size:
+        share = float(np.sum(pooled_shares * pooled_times) / pooled_times.sum())
+        borrowed_max = float(np.max(pooled_shares))
     else:
         share = borrowed_max = float("nan")
-    rows = int(np.count_nonzero(np.isfinite(values)))
+    rows = int(np.isfinite(values.reshape(len(values), -1)).sum(axis=0).max())
     readings = int(np.unique(pairs.reading_index[contributing]).size)
     return _SupportChange(_label(ratio_max, borrowed_max), ratio_max, share, rows, readings)
 
@@ -782,6 +933,51 @@ def _label(ratio_max: float, borrowed_max: float) -> SupportTransform:
     if borrowed_max > 0.0:
         return "straddled"
     return "averaged"
+
+
+def _sweep_coords(
+    streams: Mapping[str, xr.Dataset], selection: Sequence[tuple[str, str]]
+) -> dict[str, tuple[tuple[str, ...], np.ndarray, dict[str, object]]]:
+    """Return the coordinate of every sweep dimension a selected variable carries.
+
+    A variable over ``(time, baseline_window, baseline_quantile)`` brings its
+    two sweep dimensions into the product, and the product needs their
+    coordinates -- the window lengths and the quantiles -- so that a value
+    can be looked up by them rather than by position. They are copied, with
+    their attributes, from the stream that declared them. Two selected
+    variables naming one dimension must agree about it exactly: a product
+    holds one sweep per dimension name, and xarray's own answer to a
+    disagreement (a ``ValueError`` about conflicting sizes, or a silent outer
+    join padded with NaN) names neither stream.
+    """
+    found: dict[str, tuple[tuple[str, ...], np.ndarray, dict[str, object]]] = {}
+    sizes: dict[str, tuple[int, str]] = {}
+    for instrument, variable in selection:
+        array = streams[instrument][variable]
+        for dim in map(str, array.dims):
+            if dim == TIME_COORD:
+                continue
+            size = int(array.sizes[dim])
+            if dim in sizes and sizes[dim][0] != size:
+                raise TsaraAlignError(
+                    f"Dimension '{dim}' has {size} entries on '{instrument}.{variable}' and "
+                    f"{sizes[dim][0]} on '{sizes[dim][1]}'; a product holds one sweep per "
+                    "dimension name, so join them in separate calls."
+                )
+            sizes.setdefault(dim, (size, f"{instrument}.{variable}"))
+            if dim not in array.coords:
+                continue
+            coordinate = array.coords[dim]
+            entry = ((dim,), np.asarray(coordinate.values), dict(coordinate.attrs))
+            if dim in found and not np.array_equal(found[dim][1], entry[1]):
+                raise TsaraAlignError(
+                    f"'{instrument}.{variable}' carries a '{dim}' coordinate "
+                    f"({entry[1].tolist()}) that differs from the one another selected "
+                    f"variable carries ({found[dim][1].tolist()}); a product holds one "
+                    "sweep per dimension name, so join them in separate calls."
+                )
+            found.setdefault(dim, entry)
+    return found
 
 
 def _correct_cell_methods(

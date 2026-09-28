@@ -11,6 +11,8 @@ for is handled the same as one it has.
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -638,10 +640,19 @@ def test_cell_boundaries_carried_as_a_data_variable_are_not_selected() -> None:
 
 
 def test_a_variable_that_is_not_one_value_per_cell_is_named_not_broadcast() -> None:
-    """Asking for the boundaries explicitly is a mistake worth a clear error."""
+    """Asking for the boundaries explicitly is a mistake worth a clear error.
+
+    The boundaries have a second dimension, as a swept variable does, so the
+    refusal is by name and by the absence of `time`, not by shape: a swept
+    baseline is nine values per cell and is averaged; the boundaries describe
+    the cells and are not.
+    """
     stream = make_stream(0.0, 1.0, 20, {"ch4": np.arange(20.0)}).reset_coords("time_bnds")
-    with pytest.raises(TsaraAlignError, match="only one value per cell can be binned"):
+    with pytest.raises(TsaraAlignError, match="describe the cells rather than varying"):
         bin_streams_onto_cells({"a": stream}, cells(0.0, 5.0, 4), [("a", "time_bnds")])
+    no_time = stream.assign(constant=(("nv",), np.array([1.0, 2.0])))
+    with pytest.raises(TsaraAlignError, match="only a value per cell can be binned"):
+        bin_streams_onto_cells({"a": no_time}, cells(0.0, 5.0, 4), [("a", "constant")])
 
 
 # ---------------------------------------------------------------------------
@@ -1206,3 +1217,227 @@ def test_a_direction_without_a_sigma_is_not_warned_about(caplog: pytest.LogCaptu
 # ---------------------------------------------------------------------------
 # The one exact blend test, shared by the grid and pairing (METHODS §11.9.1)
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Variables that carry sweep dimensions (METHODS §6.2, §11.2)
+# ---------------------------------------------------------------------------
+
+
+WINDOWS_S = np.array([120.0, 600.0])
+QUANTILES = np.array([0.01, 0.05, 0.10])
+
+
+def swept_stream(
+    n: int = 20,
+    *,
+    width_s: float = 1.0,
+    blank: dict[tuple[int, int], slice] | None = None,
+    sigma_swept: bool = False,
+    order: tuple[str, ...] = ("time", "baseline_window", "baseline_quantile"),
+) -> xr.Dataset:
+    """A stream whose `baseline_ch4` carries a 2 x 3 sweep beside `ch4`.
+
+    Every version is a different, recognisable series (an offset per sweep
+    point on a ramp), so a version put in the wrong place cannot pass. `blank`
+    masks a slice of readings in the named versions only.
+    """
+    stream = make_stream(0.0, width_s, n, {"ch4": np.arange(n, dtype=float)})
+    versions = np.empty((n, 2, 3))
+    for i in range(2):
+        for j in range(3):
+            versions[:, i, j] = np.arange(n, dtype=float) * 0.5 + 100 * i + 10 * j
+    for (i, j), rows in (blank or {}).items():
+        versions[rows, i, j] = np.nan
+    array = xr.DataArray(
+        versions,
+        dims=("time", "baseline_window", "baseline_quantile"),
+        coords={
+            "baseline_window": ("baseline_window", WINDOWS_S, {"units": "s"}),
+            "baseline_quantile": ("baseline_quantile", QUANTILES),
+        },
+        attrs={"units": "ppb", "cell_methods": "time: point", "field": "ch4"},
+    )
+    stream["baseline_ch4"] = array.transpose(*order)
+    if sigma_swept:
+        stream["sigma_rand_baseline_ch4"] = (array * 0.01).transpose(*order)
+        stream["sigma_rand_baseline_ch4"].attrs = {
+            "units": "ppb",
+            "uncertainty_component": "random",
+        }
+    else:
+        stream["sigma_rand_baseline_ch4"] = ("time", np.full(n, 0.3), {"units": "ppb"})
+    stream["baseline_ch4"].attrs["uncertainty_provenance_random"] = "declared"
+    return stream
+
+
+def one_version(stream: xr.Dataset, i: int, j: int) -> xr.Dataset:
+    """The same stream with version (i, j) of the baseline as a plain variable."""
+    plain = stream[["ch4"]].copy()
+    plain.coords["time_bnds"] = stream["time_bnds"]
+    plain["baseline_ch4"] = (
+        "time",
+        stream["baseline_ch4"].values[:, i, j],
+        dict(stream["baseline_ch4"].attrs),
+    )
+    sigma = stream["sigma_rand_baseline_ch4"]
+    plain["sigma_rand_baseline_ch4"] = (
+        "time",
+        sigma.values[:, i, j] if sigma.ndim == 3 else sigma.values,
+        dict(sigma.attrs),
+    )
+    return plain
+
+
+def _same(a: np.ndarray, b: np.ndarray) -> bool:
+    return bool(np.array_equal(a, b, equal_nan=True))
+
+
+@pytest.mark.parametrize("sigma_swept", [False, True])
+def test_a_swept_variable_is_averaged_version_by_version(sigma_swept: bool) -> None:
+    """Each version of the product equals binning that version as a plain variable.
+
+    Value, count, coverage, borrowed share and the propagated sigma, exactly:
+    the pairs and the arithmetic are the same, only the bookkeeping changed.
+    A sigma over `time` alone is shared by every version; one over the sweep
+    is propagated per version.
+    """
+    stream = swept_stream(
+        blank={(0, 1): slice(3, 9), (1, 2): slice(15, 20)}, sigma_swept=sigma_swept
+    )
+    target = cells(0.0, 4.0, 5)
+    joined = bin_streams_onto_cells({"a": stream}, target)
+    assert joined["baseline_ch4"].dims == ("time", "baseline_window", "baseline_quantile")
+    for i in range(2):
+        for j in range(3):
+            reference = bin_streams_onto_cells({"a": one_version(stream, i, j)}, target)
+            for prefix in ("", "n_readings_", "coverage_", "borrowed_", "sigma_rand_"):
+                name = f"{prefix}baseline_ch4"
+                assert joined[name].dims[0] == "time"
+                assert _same(joined[name].values[:, i, j], reference[name].values), (name, i, j)
+    # The plain variable beside it is untouched by its neighbour's sweep.
+    assert joined["ch4"].dims == ("time",)
+
+
+def test_versions_with_different_blanks_get_their_own_companions() -> None:
+    """A version blank at a short window is not blank at a long one; the counts must say so."""
+    stream = swept_stream(blank={(0, 0): slice(0, 20)})
+    joined = bin_streams_onto_cells({"a": stream}, cells(0.0, 4.0, 5))
+    assert np.all(np.isnan(joined["baseline_ch4"].values[:, 0, 0]))
+    assert (joined["n_readings_baseline_ch4"].values[:, 0, 0] == 0).all()
+    assert (joined["coverage_baseline_ch4"].values[:, 0, 0] == 0).all()
+    assert (joined["n_readings_baseline_ch4"].values[:, 1, 2] == 4).all()
+    assert (joined["coverage_baseline_ch4"].values[:, 1, 2] == 1.0).all()
+
+
+def test_sweep_coordinates_travel_into_the_product_with_their_attrs() -> None:
+    joined = bin_streams_onto_cells({"a": swept_stream()}, cells(0.0, 4.0, 5))
+    assert _same(joined["baseline_window"].values, WINDOWS_S)
+    assert joined["baseline_window"].attrs == {"units": "s"}
+    assert _same(joined["baseline_quantile"].values, QUANTILES)
+    # The sweep is addressable by value, which is what the coordinates are for.
+    picked = joined["baseline_ch4"].sel(baseline_window=600.0, baseline_quantile=0.05)
+    assert _same(picked.values, joined["baseline_ch4"].values[:, 1, 1])
+
+
+def test_a_swept_variable_passes_through_on_its_own_cells() -> None:
+    """On its own cells every version is untouched, and the companions are per version."""
+    stream = swept_stream(blank={(1, 1): slice(0, 5)})
+    joined = bin_streams_onto_cells({"a": stream}, stream_cells(stream, "a"))
+    assert _same(joined["baseline_ch4"].values, stream["baseline_ch4"].values)
+    assert joined["baseline_ch4"].attrs["tsara_binned"] == 0
+    assert joined["n_readings_baseline_ch4"].values[:5, 1, 1].tolist() == [0] * 5
+    assert joined["n_readings_baseline_ch4"].values[:5, 0, 0].tolist() == [1] * 5
+    assert joined["sigma_rand_baseline_ch4"].dims == ("time",)  # a plain sigma stays plain
+    assert joined["baseline_ch4"].attrs["tsara_n_readings"] == 20
+
+
+def test_time_need_not_be_the_first_dimension_of_a_swept_variable() -> None:
+    """The product puts `time` first whatever order the stream keeps."""
+    ordered = swept_stream(order=("baseline_quantile", "time", "baseline_window"))
+    assert ordered["baseline_ch4"].dims[0] != "time"
+    joined = bin_streams_onto_cells({"a": ordered}, cells(0.0, 4.0, 5))
+    assert joined["baseline_ch4"].dims == ("time", "baseline_quantile", "baseline_window")
+    reference = bin_streams_onto_cells({"a": swept_stream()}, cells(0.0, 4.0, 5))
+    assert _same(joined["baseline_ch4"].values, np.moveaxis(reference["baseline_ch4"].values, 2, 1))
+
+
+def test_the_column_record_pools_every_version() -> None:
+    """Readings behind the column are the union over versions; rows, the most any holds."""
+    stream = swept_stream(blank={(0, 0): slice(0, 10), (1, 2): slice(10, 20)})
+    joined = bin_streams_onto_cells({"a": stream}, cells(0.0, 4.0, 5))
+    attrs = joined["baseline_ch4"].attrs
+    assert attrs["tsara_n_readings"] == 20
+    assert attrs["tsara_support_transform"] == "averaged"
+    assert attrs["tsara_borrowed_share"] == 0.0
+
+
+def test_two_variables_disagreeing_about_a_sweep_are_refused_by_name() -> None:
+    first = swept_stream()
+    other = swept_stream().assign_coords(
+        baseline_window=("baseline_window", np.array([60.0, 600.0]))
+    )
+    with pytest.raises(TsaraAlignError, match="'b.baseline_ch4' carries a 'baseline_window'"):
+        bin_streams_onto_cells({"a": first, "b": other}, cells(0.0, 4.0, 5))
+    shorter = swept_stream().isel(baseline_window=[0])
+    with pytest.raises(TsaraAlignError, match="Dimension 'baseline_window' has 1 entries"):
+        bin_streams_onto_cells({"a": first, "b": shorter}, cells(0.0, 4.0, 5))
+
+
+def test_a_sigma_with_a_sweep_its_variable_lacks_is_refused() -> None:
+    """Refused whichever order the sigma stores its dimensions in."""
+    stream = swept_stream(sigma_swept=True)
+    stream["sigma_rand_ch4"] = stream["sigma_rand_baseline_ch4"]
+    with pytest.raises(TsaraAlignError, match="'sigma_rand_ch4' has dimensions \\('time'"):
+        bin_streams_onto_cells({"a": stream}, cells(0.0, 4.0, 5), [("a", "ch4")])
+    stream["sigma_rand_ch4"] = stream["sigma_rand_baseline_ch4"].transpose(
+        "baseline_window", "time", "baseline_quantile"
+    )
+    with pytest.raises(TsaraAlignError, match="'sigma_rand_ch4' has dimensions \\('time'"):
+        bin_streams_onto_cells({"a": stream}, cells(0.0, 4.0, 5), [("a", "ch4")])
+
+
+def test_a_swept_direction_is_refused() -> None:
+    stream = swept_stream()
+    stream["baseline_ch4"].attrs["circular"] = 1
+    with pytest.raises(TsaraAlignError, match="circular and carries sweep dimensions"):
+        bin_streams_onto_cells({"a": stream}, cells(0.0, 4.0, 5), [("a", "baseline_ch4")])
+
+
+def test_a_swept_variable_is_not_reported_as_shared_across_its_versions(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Six versions in one row are one row, not six; the sharing warning must stay quiet.
+
+    The warning compares rows with distinct readings on disjoint targets. Rows
+    counted over every version would be six times the cells, exceed the
+    readings, and report a sharing that never happened.
+    """
+    stream = swept_stream()
+    with caplog.at_level(logging.WARNING, logger="tsara.align.binning"):
+        joined = bin_streams_onto_cells({"a": stream}, cells(0.0, 4.0, 5))
+    assert joined["baseline_ch4"].attrs["tsara_n_readings"] == 20
+    assert not [r for r in caplog.records if "rows from" in r.getMessage()]
+
+
+def test_a_swept_sigma_is_put_time_first_like_its_variable() -> None:
+    """A sigma stored (quantile, time, window) lines up with its variable's versions."""
+    stream = swept_stream(sigma_swept=True)
+    stream["sigma_rand_baseline_ch4"] = stream["sigma_rand_baseline_ch4"].transpose(
+        "baseline_quantile", "time", "baseline_window"
+    )
+    joined = bin_streams_onto_cells({"a": stream}, cells(0.0, 4.0, 5))
+    reference = bin_streams_onto_cells({"a": swept_stream(sigma_swept=True)}, cells(0.0, 4.0, 5))
+    assert _same(
+        joined["sigma_rand_baseline_ch4"].values, reference["sigma_rand_baseline_ch4"].values
+    )
+
+
+def test_a_sweep_dimension_without_a_coordinate_is_carried_by_size() -> None:
+    """A dimension may have no coordinate; the product then has the dimension and no labels."""
+    stream = swept_stream().drop_vars("baseline_quantile")
+    assert "baseline_quantile" not in stream.coords
+    joined = bin_streams_onto_cells({"a": stream}, cells(0.0, 4.0, 5))
+    assert joined["baseline_ch4"].sizes["baseline_quantile"] == 3
+    assert "baseline_quantile" not in joined.coords
+    assert _same(joined["baseline_window"].values, WINDOWS_S)

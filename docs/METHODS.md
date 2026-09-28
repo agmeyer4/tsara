@@ -220,8 +220,11 @@ propagated uncertainties and `n_readings_<name>` counts carried alongside
 values. Grid cells carry CF boundaries like any other stream and
 `cell_methods = "time: mean"`. Earlier versions of this section said the string
 also records the resolution of what went in, as `time: mean (interval:
-<native>)`; the binner has never written that (found 2026-09-24), and whether
-it should is for the phase that builds an export. Validation refuses a period
+<native>)`; the binner has never written that (found 2026-09-24). Phase 5,
+the first to join a product of TSARA's own, left it unwritten on purpose: a
+column joined from readings of several widths has no one interval to name,
+and the qualifier is for the phase that builds an export, if that export's
+reader wants it. Validation refuses a period
 at which a selected reading would be **at least twice as wide as a grid cell it
 touches**, copied across rows, unless `finer_support: allow` asks for it
 (§11.2.4, §11.7); everything narrower is recorded per column and named in one
@@ -821,13 +824,15 @@ Native rate is thirteen times smaller than the spanning grid and loses nothing.
 Thirty species at native rate is about 1.3 GB, which eager NumPy carries; the
 Dask question stays with Phase 7's cube.
 
-A per-reading product keeps each reading's cell, so it is joined like a stream
-(§11.2.3): putting a dense instrument's baseline onto a canister's fills
-(§6.5) is an ordinary join. One mechanical gap stands in the way. The join
-accepts a variable with a time axis and nothing else, and a swept baseline
-carries 3 × 3 = 9 versions per reading. The join's weights depend only on the
-readings and the cells, so they are the same for all nine, and averaging every
-version at once is a generalisation of the binner, not a redesign.
+A per-reading product keeps each reading's cell, so it is joined like a
+stream (§11.2.3): putting a dense instrument's baseline onto a canister's fills
+(§6.5) is an ordinary join. The join used to accept a variable with a time
+axis and nothing else, and a swept baseline carries 3 × 3 = 9 versions per
+reading; since Phase 5 it averages every version at once (§11.2, *swept
+variables*). The join's weights depend only on the readings and the cells, so
+the overlaps are found once for all nine; the versions differ only in which
+readings are blank, and that is why count, coverage and borrowed share are
+kept per version.
 
 ### 6.3 Which readings belong to a window **[decided 2026-09-24 — Phase 5]**
 
@@ -3109,6 +3114,30 @@ suffixed with their instrument rather than one silently winning. The spelling
 therefore depends on the selection, which is why every column also records the
 instrument it came from, and keeps the `field` its stream declared: `ch4_picarro` and
 `ch4_aeris` both still say `field: ch4` (§1.6).
+
+**Swept variables (Phase 5).** A variable may carry sweep dimensions beside
+`time`: the rolling state's `baseline_<x>` is one variable over `(time,
+baseline_window, baseline_quantile)`, nine versions per reading. The join
+treats each version exactly as it treats a plain variable, with the pairs
+found once for the instrument: the value is the overlap-weighted mean, the
+uncertainty is propagated through the same weights, and `n_readings_`,
+`coverage_` and `borrowed_` are written **per version**, because a version
+can be blank where another is not (a window too thin for one quantile is not
+too thin for another) and a blank reading weighs nothing. The column's
+record (`tsara_support_transform`, `tsara_width_ratio_max`,
+`tsara_borrowed_share`, `tsara_n_readings`) pools every version: a pair that
+formed any version's value counts, the borrowed share is every version's
+contributing time over every version's time, the readings behind the column
+are the union, and the rows are the most any one version holds, so that the
+sharing warning does not count one row six times. The sweep coordinates
+travel into the product with their attributes, and two selected variables
+naming one dimension must agree about it exactly, or the join refuses naming
+both. A sigma over `time` alone applies to every version, as a declared
+precision does to every baseline of a sweep; a sigma over the variable's own
+sweep dimensions is one figure per version. A plain variable is one version,
+and the product for it is byte-identical to what the join gave before
+versions existed (checked on 252 arrays over five joins of a generated
+campaign, 2026-09-28).
 
 #### 11.2.1 The operation is symmetric in the code and must not be in use
 
