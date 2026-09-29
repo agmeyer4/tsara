@@ -138,14 +138,12 @@ def test_the_state_lives_on_the_streams_own_cells_with_the_sweep_as_dimensions(
             "sigma_sys_baseline_ch4",
             "sigma_rand_enhancement_ch4",
             "sigma_sys_enhancement_ch4",
-            "noise_ch4",
             "co2",
             "baseline_co2",
             "enhancement_co2",
             "n_readings_window_co2",
             "coverage_window_co2",
             "sigma_rand_baseline_co2",
-            "noise_co2",
         ]
     )
 
@@ -237,10 +235,135 @@ def test_a_sweep_point_blank_everywhere_is_warned_once_with_the_count_it_needed(
         state = rolling_state(minute, instrument="ground", baseline=config())
     warnings = [r for r in caplog.records if "blank at every reading" in r.getMessage()]
     assert len(warnings) == 1
-    assert "ch4 at 2min/0.05 (needs 20 readings)" in warnings[0].getMessage()
-    assert "10min/0.5" not in warnings[0].getMessage()
+    message = warnings[0].getMessage()
+    # The count rule, with what the windows held beside what the quantile needs.
+    assert "ch4: 2min/0.05 (windows held at most 3 readings; 20 needed)" in message
+    assert "10min/0.05 (windows held at most 11 readings; 20 needed)" in message
+    assert "10min/0.5" not in message and "2min/0.5" not in message
     assert np.isnan(state["baseline_ch4"].values[:, 0, 0]).all()
     assert np.isfinite(state["baseline_ch4"].values[:, 1, 1]).all()
+
+
+def blank_warning(caplog: pytest.LogCaptureFixture) -> str:
+    """The one warning about sweep points blank everywhere, as the reader sees it."""
+    found = [r.getMessage() for r in caplog.records if "blank at every reading" in r.getMessage()]
+    assert len(found) == 1, found
+    return found[0]
+
+
+def test_the_warning_names_the_width_rule_when_the_count_was_met(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """60 s cells every 30 s under a 30 s window: two or three readings, each twice too wide.
+
+    The count of two is met, so naming the count as the reason -- which the
+    first version of this warning did -- would send the reader to the wrong fix.
+    """
+    stream = make_stream(cells(0.0, 60.0, 40, step_s=30.0), {"ch4": 1900 + np.arange(40.0)})
+    with caplog.at_level(logging.WARNING, logger="tsara.rolling.state"):
+        rolling_state(
+            stream,
+            instrument="a",
+            baseline=config(windows=("30s", "10min"), quantiles=(0.5,), min_readings=2),
+        )
+    message = blank_warning(caplog)
+    assert "30s/0.5 (every window held a reading at least 2x as wide as itself)" in message
+    assert "needed" not in message
+
+
+def test_the_warning_says_count_or_width_when_windows_failed_one_or_the_other(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Running 60 s means every 5 s, then 1 s readings every 10 s, under a 30 s window.
+
+    The first stretch's windows hold plenty of readings, each too wide; the
+    second's hold three narrow ones, fewer than four. Every window fails, not
+    all for the same rule.
+    """
+    running = cells(0.0, 60.0, 50, step_s=5.0)
+    sparse = cells(400.0, 1.0, 30, step_s=10.0)
+    both = CellBounds(
+        start_ns=np.concatenate([running.start_ns, sparse.start_ns]),
+        stop_ns=np.concatenate([running.stop_ns, sparse.stop_ns]),
+    )
+    stream = make_stream(both, {"ch4": 1900 + np.arange(80.0)})
+    with caplog.at_level(logging.WARNING, logger="tsara.rolling.state"):
+        rolling_state(
+            stream,
+            instrument="a",
+            baseline=config(windows=("30s",), quantiles=(0.5,), min_readings=4),
+        )
+    message = blank_warning(caplog)
+    assert "30s/0.5 (too few readings, or a reading too wide, in every window)" in message
+
+
+def test_the_warning_states_a_shared_pattern_once_and_names_at_most_eight(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ten variables on one instrument's minute cells: one pattern, eight names, 'and 2 more'."""
+    minute = cells(0.0, 60.0, 60)
+    stream = make_stream(minute, {f"voc{k}": 1900 + np.arange(60.0) for k in range(10)})
+    with caplog.at_level(logging.WARNING, logger="tsara.rolling.state"):
+        rolling_state(stream, instrument="can", baseline=config())
+    message = blank_warning(caplog)
+    assert "voc0, voc1, voc2, voc3, voc4, voc5, voc6, voc7 and 2 more:" in message
+    assert "voc8" not in message
+    assert message.count("2min/0.05") == 1  # the pattern once, not once per variable
+
+
+def test_the_warning_separates_variables_whose_patterns_differ(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A variable masked but for every fifth minute is blank at a point the other is not."""
+    values = 1900 + np.arange(60.0)
+    thin = values.copy()
+    thin[np.arange(60) % 5 != 0] = np.nan
+    stream = make_stream(cells(0.0, 60.0, 60), {"full": values, "thin": thin})
+    with caplog.at_level(logging.WARNING, logger="tsara.rolling.state"):
+        rolling_state(stream, instrument="a", baseline=config())
+    message = blank_warning(caplog)
+    assert " | " in message
+    full, thin_part = message.split(" -- ")[1].split(" | ")
+    assert full.startswith("full:") and thin_part.startswith("thin:")
+    # Every fifth minute leaves a 2 min window one reading: blank for the median too.
+    assert "2min/0.5 (windows held at most 1 reading; 2 needed)" in thin_part
+    assert "2min/0.5" not in full
+
+
+def test_the_warning_counts_patterns_past_eight_rather_than_listing_them(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Asked of the formatter directly: nine distinct patterns are rare enough in a stream
+    that building one would test the fixture more than the rule."""
+    from tsara.rolling.state import _BlankPoint, _warn_blank_everywhere
+
+    blank = [_BlankPoint(f"v{k}", f"{k + 1}min/0.05", "count", 20, 3) for k in range(9)]
+    with caplog.at_level(logging.WARNING, logger="tsara.rolling.state"):
+        _warn_blank_everywhere("a", blank)
+    message = blank_warning(caplog)
+    assert "and 1 more pattern(s)" in message
+    assert "v8:" not in message
+
+
+def test_an_adopted_baseline_blank_everywhere_is_warned_as_adopted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The donor cannot make a 0.5th percentile from a 2 min window of 121 readings (it needs
+    200), so the canister's adopted baseline is blank there, and says why."""
+    dense, sparse = sparse_and_dense()
+    settings = config(
+        quantiles=(0.005, 0.5),
+        methods={"can.benzene_can": {"method": "from_field", "instrument": "ptr"}},
+    )
+    donor = rolling_state(dense, instrument="ptr", baseline=settings)
+    joined = bin_streams_onto_cells(
+        {"ptr": donor}, stream_cells(sparse, "can"), [("ptr", "baseline_benzene")]
+    )
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tsara.rolling.state"):
+        rolling_state(sparse, instrument="can", baseline=settings, provided={"benzene_can": joined})
+    message = blank_warning(caplog)
+    assert "benzene_can: 2min/0.005 (the adopted baseline is blank there)" in message
 
 
 def test_a_reading_too_wide_for_the_window_blanks_it_with_the_reason_recorded() -> None:
@@ -326,6 +449,31 @@ def test_without_a_declared_sigma_no_enhancement_sigma_is_invented() -> None:
     assert "sigma_sys_enhancement_ch4" not in state.data_vars
     assert "sigma_sys_baseline_ch4" not in state.data_vars
     assert "sigma_rand_baseline_ch4" in state.data_vars  # the sampling figure needs no declaration
+    # ... and the enhancement says so, rather than leaving the absence to be guessed (§6.7).
+    attrs = state["enhancement_ch4"].attrs
+    assert attrs["uncertainty_provenance_random"] == "unknown"
+    assert attrs["uncertainty_provenance_systematic"] == "unknown"
+
+
+def test_a_component_declared_zero_is_carried_as_zero_not_unknown() -> None:
+    """A budget that omits a component states it is negligible; that is not ignorance (§2.4)."""
+    stream = make_stream(
+        cells(0.0, 1.0, 300),
+        {"ch4": 1900 + np.zeros(300), "sigma_rand_ch4": np.full(300, 0.7)},
+        attrs={
+            "sigma_rand_ch4": {"uncertainty_component": "random"},
+            "ch4": {
+                "uncertainty_provenance_random": "declared",
+                "uncertainty_provenance_systematic": "zero",
+            },
+        },
+    )
+    state = rolling_state(stream, instrument="a", baseline=config())
+    attrs = state["enhancement_ch4"].attrs
+    assert attrs["uncertainty_provenance_systematic"] == "zero"
+    # The random component has its column, which carries its own provenance.
+    assert "uncertainty_provenance_random" not in attrs
+    assert state["sigma_rand_enhancement_ch4"].attrs["uncertainty_provenance"] == "declared"
 
 
 # ---------------------------------------------------------------------------

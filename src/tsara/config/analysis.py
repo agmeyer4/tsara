@@ -38,8 +38,8 @@ class OutputGridConfig(_StrictModel):
 
     A grid is not where any science happens. Baselines, detection and
     regression run per stream at native rate ("synchronize late", METHODS.md
-    §1.1), and the continuous rolling state -- baseline, enhancement and
-    noise scale for every reading at every sweep point -- lives beside each
+    §1.1), and the continuous rolling state -- baseline and enhancement, with
+    their uncertainties, for every reading at every sweep point -- lives beside each
     stream's own readings (§6.2), not on this grid: measured, native rate is
     thirteen times smaller than a grid spanning a campaign and loses nothing.
     What a tiling is for is a rectangular table at the end, a receptor
@@ -434,12 +434,14 @@ class BaselineConfig(_StrictModel):
 # ---------------------------------------------------------------------------
 
 
-#: Registered empirical noise estimators (METHODS.md §2.5). Used only as the
-#: *fallback* noise scale for a species with no declared/reported random
+#: Empirical noise estimators (METHODS.md §2.5), detection's to run. Used only
+#: as the *fallback* noise scale for a species with no declared/reported random
 #: uncertainty (METHODS.md §2.3/§6) — the provenance order itself (declared
 #: > reported > empirical) is automatic, not a user choice; this field only
-#: picks the algorithm backing the empirical rung of that ladder.
-NoiseEstimator = Literal["diff_mad", "mad"]
+#: picks the algorithm backing the empirical rung of that ladder. One name:
+#: the signal's rolling MAD (`mad`) was built, measured and rejected on
+#: 2026-09-29 (§2.5).
+NoiseEstimator = Literal["diff_mad"]
 
 
 class DetectionConfig(_StrictModel):
@@ -471,12 +473,10 @@ class DetectionConfig(_StrictModel):
     noise_estimator: NoiseEstimator = Field(
         default="diff_mad",
         description=(
-            "Registered empirical noise estimator (METHODS.md §2.5), used "
-            "only when a species has no declared/reported random "
-            "uncertainty. 'diff_mad' (default) is the plume-immune robust "
-            "first-difference estimator; 'mad' (rolling MAD of the signal "
-            "itself) is kept for comparison but breaks down in plume-dense "
-            "records."
+            "Empirical noise estimator (METHODS.md §2.5), used only when a "
+            "species has no declared/reported random uncertainty. 'diff_mad' "
+            "is the robust first-difference estimator; a rolling MAD of the "
+            "signal itself was measured and rejected (§2.5)."
         ),
     )
     noise_window: str = Field(

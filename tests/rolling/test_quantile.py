@@ -188,7 +188,7 @@ def test_many_small_blocks_give_the_same_answer_as_one() -> None:
 
 
 def test_windows_need_not_be_centred_on_the_readings() -> None:
-    """Any cells will do: the noise estimator rolls differences over windows centred elsewhere."""
+    """Any cells will do: samples on their own cells, rolled over windows centred elsewhere."""
     readings, values = jittered_record(n=500)
     windows = cells(100.0, 45.0, 20, step_s=37.0)
     got = rolling_quantile(readings, values, windows, np.array([0.5]))

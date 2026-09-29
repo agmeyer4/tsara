@@ -30,13 +30,12 @@ no low quantile.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 import xarray as xr
 
 from tsara._version import __version__
-from tsara.config.analysis import DetectionConfig
 from tsara.core.bundle import pin_time_encoding
 from tsara.core.naming import (
     CELL_METHODS_ATTR,
@@ -48,11 +47,10 @@ from tsara.core.naming import (
     is_circular,
     is_companion_name,
     n_readings_window_name,
-    noise_name,
     sigma_rand_name,
     sigma_sys_name,
 )
-from tsara.core.support import CellBounds, stream_cells
+from tsara.core.support import COPY_RATIO, stream_cells
 from tsara.core.timebase import NS_PER_S
 from tsara.rolling.methods import (
     QUANTILE_DIM,
@@ -61,7 +59,6 @@ from tsara.rolling.methods import (
     BaselineResult,
     get_baseline_method,
 )
-from tsara.rolling.noise import MIN_NOISE_SAMPLES, noise_scale
 from tsara.rolling.quantile import MAX_BLOCK_ELEMENTS
 from tsara.rolling.windows import TsaraRollingError, duration_ns
 
@@ -79,12 +76,6 @@ __all__ = [
     "BASELINE_MIN_READINGS_ATTR",
     "BASELINE_TOO_WIDE_ATTR",
     "BASELINE_WINDOWS_ATTR",
-    "NOISE_BLANK_FRACTION_ATTR",
-    "NOISE_ESTIMATOR_ATTR",
-    "NOISE_FLOOR_FRACTION_ATTR",
-    "NOISE_MIN_SAMPLES_ATTR",
-    "NOISE_RESOLUTION_ATTR",
-    "NOISE_WINDOW_ATTR",
     "ROLLING_STAGE",
     "SIGMA_ASSUMPTION_ATTR",
     "SIGMA_RULE_ATTR",
@@ -112,19 +103,34 @@ BASELINE_TOO_WIDE_ATTR = "tsara_baseline_too_wide_fraction"
 SIGMA_ASSUMPTION_ATTR = "tsara_sigma_assumption"
 SIGMA_RULE_ATTR = "tsara_sigma_rule"
 
-#: Attrs on the noise scale (§2.5): the estimator used (absent for a declared
-#: or reported figure), its window, the reporting resolution the floor was
-#: built from, the share of readings the floor raised, the fewest samples a
-#: window may hold, and the share of readings left without a scale.
-NOISE_ESTIMATOR_ATTR = "tsara_noise_estimator"
-NOISE_WINDOW_ATTR = "tsara_noise_window"
-NOISE_RESOLUTION_ATTR = "tsara_noise_resolution"
-NOISE_FLOOR_FRACTION_ATTR = "tsara_noise_floor_fraction"
-NOISE_MIN_SAMPLES_ATTR = "tsara_noise_min_samples"
-NOISE_BLANK_FRACTION_ATTR = "tsara_noise_blank_fraction"
-
 #: How readings meet a window, the one rule (§6.3).
 _MEMBERSHIP = "overlap"
+
+#: At most this many variable names in the one warning about blank sweep
+#: points: a canister's fifty-odd VOCs share one sampling pattern and would
+#: otherwise repeat one sentence fifty times (measured: 18 716 characters for
+#: the 2024-07-18 iWAS file). The same cap, for the same reason, as the join's
+#: support warning in `align.binning`.
+_MAX_NAMED = 8
+
+
+class _BlankPoint(NamedTuple):
+    """One sweep point blank at every reading of one variable, and why.
+
+    ``kind`` is the rule that blanked it: ``count`` (every window held fewer
+    readings than the quantile needs), ``width`` (every window held a reading
+    at least ``COPY_RATIO`` times as wide as itself), ``count or width`` (each
+    window failed one or the other), or ``adopted`` (an adopted baseline,
+    blank because the donor's was). ``held`` is the most readings any window
+    held, for the count rule's message.
+    """
+
+    variable: str
+    point: str
+    kind: str
+    needs: int
+    held: int
+
 
 #: What Woodruff's figure assumes, written where the figure is (§6.7).
 _WOODRUFF_ASSUMPTION = (
@@ -145,7 +151,6 @@ def rolling_state(
     baseline: BaselineConfig,
     variables: Sequence[str] | None = None,
     provided: Mapping[str, xr.Dataset] | None = None,
-    noise: DetectionConfig | None = None,
     block_elements: int = MAX_BLOCK_ELEMENTS,
 ) -> xr.Dataset:
     """Compute one stream's rolling state.
@@ -165,10 +170,6 @@ def rolling_state(
     provided : mapping of str to xarray.Dataset, optional
         For each ``from_field`` variable, the donor's baseline joined onto
         this stream's cells (see :func:`~tsara.rolling.methods.baseline_from_field`).
-    noise : DetectionConfig, optional
-        Where the noise scale's two knobs live, ``noise_estimator`` and
-        ``noise_window`` (the sigma exists for detection's thresholds);
-        the defaults of that config when omitted.
     block_elements : int, optional
         The rolling engine's per-block budget; not a configuration.
 
@@ -178,9 +179,10 @@ def rolling_state(
         The rolling state: on the stream's ``time`` and ``time_bnds``, with
         ``baseline_window`` (seconds) and ``baseline_quantile`` as further
         dimensions; per variable ``x`` the reading and its sigmas copied,
-        ``baseline_x``, ``enhancement_x``, their sigma companions, ``noise_x``,
-        and for a rolling quantile ``n_readings_window_x`` and
-        ``coverage_window_x``.
+        ``baseline_x``, ``enhancement_x``, their sigma companions, and for a
+        rolling quantile ``n_readings_window_x`` and ``coverage_window_x``.
+        The noise scale detection quotes thresholds in is not here: it is
+        detection's, since its fix is a loop with detection (§6.8).
 
     Raises
     ------
@@ -190,12 +192,11 @@ def rolling_state(
     """
     readings = stream_cells(stream, instrument)
     selection = _select(stream, instrument, variables)
-    detection = DetectionConfig() if noise is None else noise
     windows_ns = tuple(duration_ns(window) for window in baseline.windows)
     quantiles = tuple(float(q) for q in baseline.quantiles)
     minimum = tuple(baseline.min_readings_for(q) for q in quantiles)
     data_vars: dict[str, xr.DataArray | tuple[tuple[str, ...], np.ndarray, dict[str, object]]] = {}
-    blank_everywhere: list[str] = []
+    blank_everywhere: list[_BlankPoint] = []
     for variable in selection:
         request = BaselineRequest(
             stream=stream,
@@ -211,9 +212,6 @@ def rolling_state(
         )
         result = get_baseline_method(request.method.method)(request)
         columns, fully_blank = _one_variable(stream, request, result, baseline, minimum)
-        columns[noise_name(variable)] = _noise_column(
-            stream, variable, readings, detection, block_elements
-        )
         data_vars.update(columns)
         blank_everywhere.extend(fully_blank)
     coords: dict[str, object] = {
@@ -244,16 +242,7 @@ def rolling_state(
     dataset.coords[TIME_BOUNDS_VAR] = stream[TIME_BOUNDS_VAR]
     dataset[TIME_COORD].attrs.update(stream[TIME_COORD].attrs)
     if blank_everywhere:
-        logger.warning(
-            "Rolling state of '%s': %d sweep point(s) are blank at every reading -- %s. A "
-            "window that holds fewer readings than the count rule asks (METHODS 6.4), or a "
-            "reading at least twice as wide as the window (6.3), leaves that point blank "
-            "with the reason recorded; choose a longer window, a lower count, or another "
-            "baseline method (6.5) for these variables.",
-            instrument,
-            len(blank_everywhere),
-            "; ".join(blank_everywhere),
-        )
+        _warn_blank_everywhere(instrument, blank_everywhere)
     pin_time_encoding(dataset)
     return dataset
 
@@ -263,7 +252,6 @@ def rolling_states(
     baseline: BaselineConfig,
     *,
     provided: Mapping[str, Mapping[str, xr.Dataset]] | None = None,
-    noise: DetectionConfig | None = None,
     block_elements: int = MAX_BLOCK_ELEMENTS,
 ) -> dict[str, xr.Dataset]:
     """Compute the rolling state of every stream of a campaign.
@@ -280,9 +268,6 @@ def rolling_states(
     provided : mapping of str to mapping, optional
         Per instrument, per ``from_field`` variable, the joined donor
         baseline.
-    noise : DetectionConfig, optional
-        The noise scale's estimator and window; that config's defaults when
-        omitted.
     block_elements : int, optional
         The rolling engine's per-block budget.
 
@@ -301,7 +286,6 @@ def rolling_states(
             instrument=instrument,
             baseline=baseline,
             provided=None if provided is None else provided.get(instrument),
-            noise=noise,
             block_elements=block_elements,
         )
     return states
@@ -362,7 +346,8 @@ def _one_variable(
     baseline: BaselineConfig,
     minimum: tuple[int, ...],
 ) -> tuple[
-    dict[str, xr.DataArray | tuple[tuple[str, ...], np.ndarray, dict[str, object]]], list[str]
+    dict[str, xr.DataArray | tuple[tuple[str, ...], np.ndarray, dict[str, object]]],
+    list[_BlankPoint],
 ]:
     """Return one variable's columns of the state, and its sweep points blank everywhere.
 
@@ -387,8 +372,9 @@ def _one_variable(
     # adopted baseline blank where its donor was reports it the same way.
     blank_fraction = np.isnan(baseline_values).mean(axis=0)  # (windows, quantiles)
     fully_blank = [
-        f"{variable} at {baseline.windows[w]}/{request.quantiles[q]:g}"
-        f" (needs {minimum[q]} readings)"
+        _blank_reason(
+            result, variable, f"{baseline.windows[w]}/{request.quantiles[q]:g}", w, minimum[q]
+        )
         for w in range(n_windows)
         for q in range(n_quantiles)
         if blank_fraction[w, q] == 1.0
@@ -454,12 +440,48 @@ def _one_variable(
     enhancement_attrs[BASELINE_METHOD_ATTR] = request.method.method
     if CELL_METHODS_ATTR in reading.attrs:
         enhancement_attrs[CELL_METHODS_ATTR] = reading.attrs[CELL_METHODS_ATTR]
-    columns[enhancement_name(variable)] = (dims, enhancement, enhancement_attrs)
     # 6. The uncertainties, under the rules of §6.7.
-    columns.update(
-        _sigma_columns(stream, request, result, baseline_values, enhancement, blank, dims)
-    )
+    sigmas = _sigma_columns(stream, request, result, baseline_values, enhancement, blank, dims)
+    # A component with no sigma column is said so on the enhancement, not left
+    # to silence: the reading's own provenance for that component, `unknown`
+    # when the reading states none (§6.7). No estimate stands in for it here:
+    # the noise scale that could is detection's (§6.8).
+    enh = enhancement_name(variable)
+    for key, companion in (
+        ("uncertainty_provenance_random", sigma_rand_name(enh)),
+        ("uncertainty_provenance_systematic", sigma_sys_name(enh)),
+    ):
+        if companion not in sigmas:
+            enhancement_attrs[key] = str(reading.attrs.get(key, "unknown"))
+    columns[enh] = (dims, enhancement, enhancement_attrs)
+    columns.update(sigmas)
     return columns, fully_blank
+
+
+def _blank_reason(
+    result: BaselineResult, variable: str, point: str, window: int, needs: int
+) -> _BlankPoint:
+    """Return which rule left one sweep point blank at every reading of a variable.
+
+    Asked per reading and summarized: the count rule where every window held
+    fewer readings than ``needs``, the width rule where every window held a
+    reading too wide for it, both where each window failed one of them. A
+    baseline with no windows of its own is blank only because the product it
+    adopted is.
+    """
+    if result.n_readings is None or result.too_wide is None:
+        # No windows of its own: an adopted baseline, blank because the product is.
+        return _BlankPoint(variable, point, "adopted", needs, 0)
+    counts = result.n_readings[:, window]
+    held = int(counts.max())
+    short = counts < needs
+    if short.all():
+        kind = "count"
+    elif result.too_wide[:, window].all():
+        kind = "width"
+    else:
+        kind = "count or width"
+    return _BlankPoint(variable, point, kind, needs, held)
 
 
 def _sigma_columns(
@@ -587,37 +609,54 @@ def _companion(stream: xr.Dataset, name: str) -> np.ndarray | None:
     return np.asarray(stream[name].values, dtype=np.float64)
 
 
-def _noise_column(
-    stream: xr.Dataset,
-    variable: str,
-    readings: CellBounds,
-    detection: DetectionConfig,
-    block_elements: int,
-) -> tuple[tuple[str, ...], np.ndarray, dict[str, object]]:
-    """Return the noise scale of a variable at every reading, with its record (§2.5)."""
-    result = noise_scale(
-        stream,
-        variable,
-        readings,
-        estimator=detection.noise_estimator,
-        window_ns=duration_ns(detection.noise_window),
-        block_elements=block_elements,
+def _warn_blank_everywhere(instrument: str, blank: Sequence[_BlankPoint]) -> None:
+    """Warn once per stream about the sweep points blank at every reading, and why.
+
+    Variables that share one pattern -- the same points, blank for the same
+    rule and the same required count, as every variable of one instrument
+    normally does, since they share its cells -- are named together, at most
+    :data:`_MAX_NAMED` of them, and the pattern is stated once. The most
+    readings any window held is the largest over the variables named.
+    """
+    patterns: dict[tuple[tuple[str, str, int], ...], list[str]] = {}
+    held: dict[tuple[str, str, int], int] = {}
+    for variable in dict.fromkeys(entry.variable for entry in blank):
+        mine = [entry for entry in blank if entry.variable == variable]
+        key = tuple((entry.point, entry.kind, entry.needs) for entry in mine)
+        patterns.setdefault(key, []).append(variable)
+        for entry in mine:
+            slot = (entry.point, entry.kind, entry.needs)
+            held[slot] = max(held.get(slot, 0), entry.held)
+    groups = []
+    for key, variables in list(patterns.items())[:_MAX_NAMED]:
+        named = ", ".join(variables[:_MAX_NAMED])
+        if len(variables) > _MAX_NAMED:
+            named += f" and {len(variables) - _MAX_NAMED} more"
+        points = "; ".join(
+            _describe_blank(point, kind, needs, held[(point, kind, needs)])
+            for point, kind, needs in key
+        )
+        groups.append(f"{named}: {points}")
+    if len(patterns) > _MAX_NAMED:
+        groups.append(f"and {len(patterns) - _MAX_NAMED} more pattern(s)")
+    logger.warning(
+        "Rolling state of '%s': sweep points blank at every reading -- %s. A window "
+        "holding fewer readings than the count rule asks (METHODS 6.4), or a reading at "
+        "least twice as wide as the window (6.3), leaves that point blank with the "
+        "reason recorded; choose a longer window, a lower count, or another baseline "
+        "method (6.5) for these variables.",
+        instrument,
+        " | ".join(groups),
     )
-    attrs: dict[str, object] = {
-        "units": stream[variable].attrs.get("units", ""),
-        "description": (
-            f"Random noise scale of {variable} at each reading, the sigma detection "
-            "thresholds are quoted in: the declared or reported random sigma when the "
-            "variable has one, else an estimate from the record (METHODS 2.5)."
-        ),
-        "uncertainty_component": "random",
-        "uncertainty_provenance": result.provenance,
-        NOISE_BLANK_FRACTION_ATTR: result.blank_fraction,
-    }
-    if result.estimator is not None:
-        attrs[NOISE_ESTIMATOR_ATTR] = result.estimator
-        attrs[NOISE_WINDOW_ATTR] = detection.noise_window
-        attrs[NOISE_RESOLUTION_ATTR] = result.resolution
-        attrs[NOISE_FLOOR_FRACTION_ATTR] = result.floor_fraction
-        attrs[NOISE_MIN_SAMPLES_ATTR] = MIN_NOISE_SAMPLES
-    return (TIME_COORD,), result.sigma, attrs
+
+
+def _describe_blank(point: str, kind: str, needs: int, held: int) -> str:
+    """Return one blank sweep point and the rule behind it, in a few words."""
+    if kind == "count":
+        noun = "reading" if held == 1 else "readings"
+        return f"{point} (windows held at most {held} {noun}; {needs} needed)"
+    if kind == "width":
+        return f"{point} (every window held a reading at least {COPY_RATIO:g}x as wide as itself)"
+    if kind == "adopted":
+        return f"{point} (the adopted baseline is blank there)"
+    return f"{point} (too few readings, or a reading too wide, in every window)"

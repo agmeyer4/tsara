@@ -46,7 +46,6 @@ __all__ = [
     "LATITUDE_COORD",
     "LOD_COUNT_KEY",
     "LONGITUDE_COORD",
-    "NOISE_PREFIX",
     "N_READINGS_PREFIX",
     "N_READINGS_WINDOW_PREFIX",
     "RAW_TIME_START_COLUMN",
@@ -80,7 +79,6 @@ __all__ = [
     "is_sigma_name",
     "n_readings_name",
     "n_readings_window_name",
-    "noise_name",
     "sigma_rand_name",
     "sigma_sys_name",
 ]
@@ -320,12 +318,10 @@ DISPERSION_SUFFIX = "_dispersion"
 #: coverage qualify the baseline and are companions by the existing
 #: ``n_readings_`` / ``coverage_`` prefixes, spelled with ``window`` so that a
 #: later join's own ``n_readings_baseline_<x>`` cannot be mistaken for them.
-#: The noise scale qualifies the reading and is a companion.
 BASELINE_PREFIX = "baseline_"
 ENHANCEMENT_PREFIX = "enhancement_"
 N_READINGS_WINDOW_PREFIX = "n_readings_window_"
 COVERAGE_WINDOW_PREFIX = "coverage_window_"
-NOISE_PREFIX = "noise_"
 
 
 def n_readings_name(variable: str) -> str:
@@ -440,30 +436,13 @@ def coverage_window_name(variable: str) -> str:
     return f"{COVERAGE_WINDOW_PREFIX}{variable}"
 
 
-def noise_name(variable: str) -> str:
-    """Return the name of a variable's noise scale in the rolling state.
-
-    Parameters
-    ----------
-    variable : str
-        Canonical variable name, e.g. ``'ch4'``.
-
-    Returns
-    -------
-    str
-        e.g. ``'noise_ch4'``.
-    """
-    return f"{NOISE_PREFIX}{variable}"
-
-
 def is_companion_name(name: str) -> bool:
     """Return whether a name describes another variable rather than being one.
 
-    Six families of column exist only to qualify the column they are named
+    Five families of column exist only to qualify the column they are named
     after: the two uncertainty components, the contributing-cell count, the
-    coverage fraction, the borrowed share, the two an angular variable
-    carries instead of a sigma, and the noise scale the rolling state writes
-    beside a reading. None is a measurement in its own right, and each is
+    coverage fraction, the borrowed share, and the two an angular variable
+    carries instead of a sigma. None is a measurement in its own right, and each is
     produced automatically alongside its parent. A baseline and an
     enhancement are *not* companions: each is a value with units and a
     field, joined like any reading (§6.2).
@@ -488,7 +467,7 @@ def is_companion_name(name: str) -> bool:
     """
     return (
         is_sigma_name(name)
-        or name.startswith((N_READINGS_PREFIX, COVERAGE_PREFIX, BORROWED_PREFIX, NOISE_PREFIX))
+        or name.startswith((N_READINGS_PREFIX, COVERAGE_PREFIX, BORROWED_PREFIX))
         or name.endswith((RESULTANT_LENGTH_SUFFIX, DISPERSION_SUFFIX))
     )
 

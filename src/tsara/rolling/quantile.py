@@ -156,9 +156,9 @@ def rolling_quantile(
         One value per reading; ``nan`` where masked.
     windows : CellBounds
         The windows, in any order: normally :func:`~tsara.rolling.windows.window_cells`
-        centred on the readings themselves, but any cells will do, which is
-        what lets the noise estimator roll a median of differences over
-        windows centred on readings (§2.5).
+        centred on the readings themselves, but any cells will do: a
+        statistic of other samples, such as the differences between
+        consecutive readings, can be rolled over windows centred on readings.
     quantiles : array-like
         The quantiles wanted, each in [0, 1]; every one is read from the same
         sort.

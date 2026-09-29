@@ -419,40 +419,72 @@ $\hat\sigma \ge \delta/\sqrt{12}$, where δ is the declared or detected
 reporting resolution (δ/√12 = the standard deviation of uniform rounding
 error).
 
-Registered estimator names: `diff_mad` (default), `mad` (rolling MAD of the
-signal, kept for comparison).
+The estimator is `diff_mad`. The rolling MAD of the signal itself (`mad`)
+was built beside it in Phase 5, measured below, and rejected on 2026-09-29:
+it is never better than `diff_mad` in any case measured, and it is the same
+idea as the QA/QC spike rule deleted in Phase 3 (§9.5), a spread of the
+signal, which on plume-dense records measures the plumes.
 
-**As built (Phase 5, `rolling.noise`).** The ladder is
-:func:`noise_scale`: a variable with a `sigma_rand_<x>` companion gets it
-as its noise scale, provenance carried and no floor, since a declared figure
-is not an estimate; otherwise the estimator named by
-`DetectionConfig.noise_estimator` runs over `DetectionConfig.noise_window`,
-and the result is `empirical`. Both estimators are registered by decorator,
-like the file readers and the baseline methods, and both run through the
-rolling engine of §6.3 at *q* = 0.5, so their window membership is the
-join's: a sample enters a window in proportion to the share of its cell
-inside it. For `diff_mad` a sample is the absolute difference of two
-consecutive finite readings, on the cell between their midpoints, divided
-by √2 and scaled by 1.4826. **A difference across a dropout is dropped**:
-two readings farther apart than `DROPOUT_SPACING_FACTOR` = 1.5 times the
-record's median spacing between consecutive *finite* readings measure the
-air between them, not the instrument. On spacing rather than on cell width, because the 07-18 drive's analyzer
-reports every 2 or 3 s on 1 s cells (median spacing 2.00 s, mean 2.31 s) and
-a rule on width would drop every difference it has; 1.5 keeps every jittered
-step and drops a single missing row. `mad` is two passes at *q* = 0.5, the
-rolling median and then the median of each reading's distance from the
-median at its own cell. A window holding fewer than `MIN_NOISE_SAMPLES` = 10
+**Built in Phase 5, withdrawn to detection (Phase 6) on 2026-09-29.** The
+design below was built in the rolling state (code and tests at commit
+`59bd6ef`) and is recorded here as the design Phase 6 restores. Three
+reasons moved it: its two settings are detection's (`DetectionConfig.
+noise_estimator`, `DetectionConfig.noise_window`), so the rolling stage was
+reading another stage's configuration, which Phases 3 and 3.5 had both
+declined to do for this estimator; its meaning on a moving platform is not
+settled (measured below: on a real drive it follows the air); and its
+remedy is a loop with detection (estimate, detect, re-estimate outside the
+events found, detect again, §6.8), which should not be cut across a stage
+boundary. Nothing in Phase 5 read the column it wrote.
+
+The ladder: a variable with a `sigma_rand_<x>` companion gets it as its
+noise scale, provenance carried and no floor, since a declared figure is not
+an estimate; otherwise the configured estimator runs over the configured
+window, and the result is `empirical`. The estimator ran through the rolling
+engine of §6.3 at *q* = 0.5, so its window membership is the join's: a
+sample enters a window in proportion to the share of its cell inside it.
+For `diff_mad` a sample is the absolute difference of two consecutive
+finite readings, on the cell between their midpoints, divided by √2 and
+scaled by 1.4826. **A difference across a dropout is dropped**: two readings
+farther apart than 1.5 times the record's median spacing between
+consecutive *finite* readings measure the air between them, not the
+instrument. On spacing rather than on cell width, because the 07-18 drive's
+analyzer reports every 2 or 3 s on 1 s cells (median spacing 2.00 s, mean
+2.31 s) and a rule on width would drop every difference it has; 1.5 keeps
+every jittered step and drops a single missing row. `mad` was two passes at
+*q* = 0.5, the rolling median and then the median of each reading's
+distance from the median at its own cell. A window holding fewer than 10
 samples is blank: a MAD is about 37 % efficient at the Gaussian, so ten
 differences already jitter by a third, and fewer is a number rather than a
 noise scale. δ for the floor is the variable's declared `quantization` when
 the stream carries one (the generator writes it), else the smallest
 positive gap between the record's distinct finite values: exact for a
-record written in steps, negligible for a continuous one. The noise scale
-is written into the rolling state as `noise_<x>` (§6.6) with
-`uncertainty_provenance`, and for an estimate `tsara_noise_estimator`,
-`tsara_noise_window`, `tsara_noise_resolution` (δ),
-`tsara_noise_floor_fraction` (the share of readings the floor raised),
-`tsara_noise_min_samples` and `tsara_noise_blank_fraction`.
+record written in steps, negligible for a continuous one. The column
+recorded its provenance, and for an estimate the estimator, its window, the
+resolution δ, the share of readings the floor raised, the minimum sample
+count and the share of readings left blank.
+
+**On a real drive the estimate follows the air (measured 2026-09-29).**
+Rule: the 2024-07-18 drive, `diff_mad` over a 10 min window at every
+reading (the NOy file's reported sigma set aside so that the estimator
+runs), and the ratios of percentiles of that estimate across the drive:
+
+| stream, 07-18 | typical window ÷ quietest 5 % | busiest 5 % ÷ quietest 5 % |
+|---|---|---|
+| Picarro CO₂ | 6.5 | 30 |
+| NOy-LIF | 3.9 | 17 |
+| Picarro CH₄ | 2.0 | 4.3 |
+| PTR-MS benzene | 1.7 | 3.7 |
+
+An analyzer's precision does not change thirtyfold between two stretches of
+road; the air does. On an urban drive the empirical noise scale is mostly
+the atmosphere's variability at the sampling interval, rising where plumes
+crowd together, so thresholds quoted in it would rise and fall with the
+traffic. The floor never acted on this drive (every record is written in
+steps far finer than its noise). Declaring each analyzer's precision in the
+manifest puts a declared figure above the estimate on the ladder; what
+detection should mean by noise on a moving platform, the instrument's
+precision or the local variability, is Phase 6's first question (§6.8).
 
 Measured against the generator (rule: the example campaign's 2 s Picarro
 with its sigma columns removed, `diff_mad` over 10 min, the ratio of the
@@ -865,13 +897,15 @@ mixing with another scale. That is the stability cube (§5) read per event.
 ### 6.2 The continuous rolling state lives beside the readings **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
 
 For every reading of every instrument and every point of the sweep, the rolling
-state holds the baseline, the enhancement Δ, and the noise scale σ that
-detection thresholds are quoted in. All three are per-reading quantities. They
-live on the reading's own cell at native rate, with the sweep
-(`baseline_window`, `baseline_quantile`) as extra dimensions, and are saved
-beside the stream they came from. They are not a grid product (§1.4). Size for
-one species at 3 windows × 3 quantiles × (baseline, Δ, σ) in float64, over the
-ten 2024 drive days:
+state holds the baseline and the enhancement Δ, with their uncertainties. Both
+are per-reading quantities. They live on the reading's own cell at native
+rate, with the sweep (`baseline_window`, `baseline_quantile`) as extra
+dimensions, and are saved beside the stream they came from. They are not a
+grid product (§1.4). The noise scale detection quotes its thresholds in was
+decided here on 2026-09-24 as a third per-reading quantity, built in Phase 5,
+and moved to detection on 2026-09-29 (§2.5 gives the three reasons). Size for
+one species at 3 windows × 3 quantiles × (baseline, Δ, one sigma) in float64,
+over the ten 2024 drive days:
 
 | stored on | rows | size |
 |---|---|---|
@@ -1113,8 +1147,7 @@ direction is refused):
 | `n_readings_window_x`, `coverage_window_x` | (time, window) | the window's contributing count and covered share (§6.4); `rolling_quantile` only, since a constant has no window and an adopted baseline's windows are the donor's |
 | `sigma_rand_baseline_x` | (time, window, quantile) | Woodruff (§6.7), `empirical`; for `from_field`, the donor's, joined |
 | `sigma_sys_baseline_x` | (time, window, quantile) | the reading's systematic sigma at the quantile position; for `from_field`, the donor's, joined |
-| `sigma_rand_enhancement_x`, `sigma_sys_enhancement_x` | (time, window, quantile) | under the rules of §6.7; written only when the reading has the component |
-| `noise_x` | (time) | the noise scale thresholds are quoted in: the declared or reported random sigma, else the estimate of §2.5, floored; a companion |
+| `sigma_rand_enhancement_x`, `sigma_sys_enhancement_x` | (time, window, quantile) | under the rules of §6.7; written only when the reading has the component, and when it does not, `enhancement_x` says so in `uncertainty_provenance_random` / `uncertainty_provenance_systematic` |
 
 The window companions are companions by the existing `n_readings_` and
 `coverage_` prefixes, spelled with `window` so that a later join's own
@@ -1203,6 +1236,16 @@ Its random component is the reading's and the baseline's in quadrature,
 `sigma_rand_enhancement_<x>` = √(σ²_rand(*x*) + σ²_b), treating one
 reading's noise as independent of a quantile of hundreds; the reading's own
 share of its window is neglected, which overstates the figure by a hair.
+**A component the reading has no sigma for gets no column, and the
+enhancement says so** (decided 2026-09-29): `enhancement_<x>` carries
+`uncertainty_provenance_random` and `uncertainty_provenance_systematic` for
+each component without a column, holding the reading's own provenance for
+it, `unknown` when the reading states none and `zero` when its budget omits
+it (§2.4). Nothing estimated stands in: the empirical noise scale that could
+(§2.5) is detection's, and on a drive it measures the air as much as the
+instrument. On the 2024-07-18 drive this is the Picarro's and the PTR-MS's
+case (neither declares a random sigma), and the NOy-LIF's reported sigma is
+the only one carried through.
 Its systematic component depends on where the baseline came from. For a
 `rolling_quantile` baseline of the same instrument, an error common to
 reading and baseline is either an offset, which cancels exactly in the
@@ -1230,12 +1273,16 @@ Phase-7 regression that follows.
   declared or reported $\sigma^{\mathrm{rand}}$ when available, else the
   empirical estimator named by `DetectionConfig.noise_estimator` (default
   `diff_mad`, §2.5); detection has no private definition of noise, and the §2.5 quantization
-  floor applies to whichever estimate is used. Phase 5 built that ladder as
-  `noise_<x>` in the rolling state and measured its cost on a plume-dense
-  record: `diff_mad` reads 1.30 times the true sigma when a third of the
-  readings sit inside plumes (§2.5). The remedy is detection's to build,
-  since only detection knows where the plumes are: re-estimate the noise
-  outside the events found, and iterate once. Also decided:
+  floor applies to whichever estimate is used. Phase 5 built that ladder in
+  the rolling state, measured its cost on a plume-dense record (`diff_mad`
+  reads 1.30 times the true sigma when a third of the readings sit inside
+  plumes, §2.5), and on 2026-09-29 it moved here, because its remedy is a
+  loop with detection: estimate, detect, re-estimate the noise outside the
+  events found, detect again. Phase 6 restores it from the Phase-5 build
+  (§2.5), with the weighted rolling quantile moved into `core` so that this
+  stage and the rolling stage share one engine, and answers first what
+  detection means by noise on a moving platform: measured, on a real drive
+  the estimate follows the air (§2.5). Also decided:
   **quantile-offset correction** — because the baseline
   is a low quantile q, even pure noise has a positive median enhancement of
   $-z_q\,\sigma$ (≈ 1.64σ at q = 0.05, Gaussian), so thresholds are applied

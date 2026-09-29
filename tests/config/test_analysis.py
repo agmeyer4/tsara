@@ -195,10 +195,10 @@ def test_unknown_noise_estimator_rejected() -> None:
         DetectionConfig(noise_estimator="qn")  # type: ignore[arg-type]  # not a registered name
 
 
-def test_mad_noise_estimator_accepted() -> None:
-    """'mad' is registered (kept for comparison against the diff_mad default)."""
-    config = DetectionConfig(noise_estimator="mad")
-    assert config.noise_estimator == "mad"
+def test_mad_noise_estimator_rejected() -> None:
+    """'mad' was measured and rejected (METHODS §2.5): never better than diff_mad."""
+    with pytest.raises(ValidationError):
+        DetectionConfig(noise_estimator="mad")  # type: ignore[arg-type]  # rejected 2026-09-29
 
 
 # ---------------------------------------------------------------------------

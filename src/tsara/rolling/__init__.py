@@ -1,9 +1,10 @@
 """The continuous rolling state: baselines and enhancements per stream, at native rate.
 
 For every reading of every instrument and every point of the sweep, this
-stage computes the baseline, the enhancement, and the noise scale that
-detection thresholds are quoted in, and keeps them on the reading's own cell
-beside the reading (``docs/METHODS.md`` §6.2). Nothing here changes a
+stage computes the baseline, the enhancement and their uncertainties, and
+keeps them on the reading's own cell beside the reading (``docs/METHODS.md``
+§6.2). The noise scale detection quotes its thresholds in is detection's,
+not this stage's: its remedy is a loop with detection (§6.8). Nothing here changes a
 stream's support: a window is an interval the statistic looks at, and the
 value it yields belongs to the cell the window is centred on.
 
@@ -20,15 +21,10 @@ Shape of the subpackage
     The baseline methods, registered by name (§6.5): the rolling quantile
     of the variable's own readings, another instrument's baseline of the
     same field handed in as a joined product, and a constant.
-``noise``
-    The noise scale at every reading (§2.5): the declared or reported random
-    sigma when the variable has one, else an estimate by a registered
-    estimator (``diff_mad``, ``mad``) floored at the quantization scale.
 ``state``
     The product: the rules of §6.3 and §6.4 applied to what a method found,
-    the enhancement formed unclipped with its uncertainties (§6.7), the
-    noise scale beside the reading, and what every column records (§6.6),
-    on the stream's own cells.
+    the enhancement formed unclipped with its uncertainties (§6.7), and what
+    every column records (§6.6), on the stream's own cells.
 ``bundle``
     Saving and reloading the states, one file per instrument beside the
     streams, with the analysis configuration that produced them.
@@ -48,14 +44,6 @@ from tsara.rolling.methods import (
     get_baseline_method,
     register_baseline_method,
 )
-from tsara.rolling.noise import (
-    NoiseRequest,
-    NoiseResult,
-    available_noise_estimators,
-    get_noise_estimator,
-    noise_scale,
-    register_noise_estimator,
-)
 from tsara.rolling.quantile import (
     MAX_BLOCK_ELEMENTS,
     RollingQuantile,
@@ -69,20 +57,14 @@ __all__ = [
     "BaselineRequest",
     "BaselineResult",
     "MAX_BLOCK_ELEMENTS",
-    "NoiseRequest",
-    "NoiseResult",
     "RollingQuantile",
     "RollingStates",
     "TsaraRollingError",
     "available_baseline_methods",
-    "available_noise_estimators",
     "duration_ns",
     "get_baseline_method",
-    "get_noise_estimator",
     "load_state",
-    "noise_scale",
     "register_baseline_method",
-    "register_noise_estimator",
     "rolling_quantile",
     "rolling_state",
     "rolling_states",

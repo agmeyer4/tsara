@@ -24,7 +24,7 @@ give. Three ship:
 
 Why a registry rather than ``if method == "rolling_quantile": ...``
 --------------------------------------------------------------------
-The same reasons the file readers and the noise estimators are registered
+The same reasons the file readers are registered
 (:mod:`tsara.ingest.registry`): a swappable implementation selected by a
 string in a config file is one kind of thing throughout TSARA; a new method
 is a decorated function, not a dispatch table to edit; and a group with a
