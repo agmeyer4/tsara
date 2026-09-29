@@ -2,8 +2,9 @@
 
 Each function here is exact in integer nanoseconds with no tolerance, so the
 tests are pencil-checkable fixtures (METHODS §11.1): a reading over two cells,
-a reading the search visits at zero overlap, a single nanosecond of overlap,
-a tiling half a cell out of phase. The width ratio and the copy line are
+a reading the search visits at zero overlap, a tiling half a cell out of
+phase. The geometry itself (a stream's cells, the width ratio, whether
+targets overlap) is tested with `core.support`. The width ratio and the copy line are
 exercised through the binner's refusals in `test_binning.py`, including the
 27-row probe table, because the verdict is the binner's.
 """
@@ -14,14 +15,8 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from tsara.align.cells import (
-    phase_offset_s,
-    readings_behind,
-    shared_readings,
-    stream_cells,
-    targets_overlap,
-)
-from tsara.core.support import CellBounds
+from tsara.align.cells import phase_offset_s, readings_behind, shared_readings
+from tsara.core.support import CellBounds, stream_cells
 from tsara.core.timebase import SECOND_NS as SECOND
 
 
@@ -102,19 +97,6 @@ def test_readings_behind_counts_distinct_finite_contributors() -> None:
     stream = make_stream(0.0, 1.0, 5, {"ch4": np.array([1.0, np.nan, 3.0, 4.0, 5.0])})
     count = readings_behind(stream, "ch4", stream_cells(stream, "a"), cells(0.0, 2.0, 3))
     assert count == 4
-
-
-def test_targets_overlap_is_exact_and_order_free() -> None:
-    assert not targets_overlap(spaced(0, 60, 5, 60))
-    assert targets_overlap(bounds([0, 1], [2, 3]))
-    # A single nanosecond of overlap counts; abutting cells do not.
-    one_ns = CellBounds(
-        start_ns=np.array([0, SECOND - 1], dtype=np.int64),
-        stop_ns=np.array([SECOND, 2 * SECOND], dtype=np.int64),
-    )
-    assert targets_overlap(one_ns)
-    assert not targets_overlap(bounds([5, 0], [6, 5]))  # unsorted, abutting
-    assert not targets_overlap(bounds([0], [1]))
 
 
 def test_phase_offset_is_reported_only_for_equal_widths_out_of_phase() -> None:

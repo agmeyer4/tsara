@@ -11,13 +11,14 @@
 #     a = load_analysis("analysis_example.yaml")
 # ============================================================================
 
-# --- Output grid --------------------------------------------------------
-# NOT what streams are synchronized onto (that's native-rate, "synchronize
-# late" -- see METHODS.md §1.1). This grid exists only for the continuous
-# rolling state and the PMF export matrix, the two products that inherently
-# need a common (time x species) cube.
+# --- Output grid (optional) ----------------------------------------------
+# A uniform tiling of cells: one kind of cell set, built when an export wants
+# a rectangular table (METHODS.md §1.4). NOT what streams are synchronized
+# onto ("synchronize late", §1.1), and NOT where the continuous baseline state
+# lives -- that is per stream at native rate, beside the readings (§6.2).
+# Leave the whole block out when nothing is exported on a tiling.
 output_grid:
-  freq: 1s                # cadence of the continuous-state / PMF output cube
+  freq: 1s                # the tiling's period, chosen for the export
   start: 2024-07-18T18:00:00   # optional; default = first timestamp across streams
   end: 2024-07-19T00:00:00     # optional; default = last timestamp across streams
 # There is deliberately no choice of binning statistic. A median option was
@@ -45,14 +46,36 @@ alignment:
 pairing:
   min_coverage: 0.0       # 0.0 drops nothing; raise to exclude thin pairs
 
-# --- Rolling baselines -------------------------------------------------------
+# --- Baselines (the baseline stage, tsara.baseline) --------------------------
+# Per stream, at native rate: for every reading and every (window, quantile)
+# of the sweep, the baseline and the enhancement, with their uncertainties
+# (METHODS.md §6). Windows are durations centred on each reading; a reading
+# counts in proportion to the share of its cell inside the window (§6.3).
 baseline:
   # Strictly increasing, short -> long. Also defines the multi-scale
   # hierarchy for nested-plume attribution (short window catches the sharp
   # blip riding on the broad plume caught by the long window).
   windows: [2min, 10min, 60min]
   quantiles: [0.01, 0.05, 0.10]
-  min_valid_fraction: 0.5
+  # Validity is a COUNT of readings in the window, tied to the quantile
+  # (§6.4): null means ceil(1/q) for each quantile -- 100, 20 and 10 here --
+  # the count at which a window holds, on average, one reading below its
+  # q-quantile; with fewer it usually holds none that low. An integer applies
+  # to every quantile. A thinner window is blank, with its count recorded.
+  min_readings: null
+  # How each variable's baseline is built (§6.5), keyed instrument.variable;
+  # anything not named uses rolling_quantile. The names below are those of
+  # examples/configs/manifest_multiformat_example.yaml, and are checked
+  # against the manifest when the two configs are combined (load_config).
+  methods:
+    # The Picarro's methane baseline, joined onto the Aeris's cells: both
+    # declare field ch4, and one atmosphere has one methane background.
+    aeris.ch4_aeris: {method: from_field, instrument: picarro}
+    # A canister fills every nine minutes and cannot see a background at
+    # minutes; at zero the enhancement is the concentration (§6.1).
+    voc_pfp.toluene: {method: constant, value: 0.0}
+    # Spelled out for the default, which needs no entry at all.
+    voc_pfp.benzene: {method: rolling_quantile}
 
 # --- Plume detection ---------------------------------------------------------
 detection:

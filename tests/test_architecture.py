@@ -226,6 +226,12 @@ UNREFERENCED: dict[str, str] = {
         "Reached by name through the reader registry (@register_reader), "
         "which is a lookup rather than a call site the parser can see."
     ),
+    "baseline_by_rolling_quantile": (
+        "Reached by name through the baseline-method registry "
+        "(@register_baseline_method), as read_icartt is through the reader registry."
+    ),
+    "baseline_from_field": "Reached by name through the baseline-method registry.",
+    "baseline_by_constant": "Reached by name through the baseline-method registry.",
     "propagate_systematic": (
         "The readable reference implementation of §3.3, which the vectorized "
         "`propagate_systematic_binned` is scored against by test and which "
@@ -569,7 +575,7 @@ def test_no_attr_exemption_is_stale() -> None:
 LAYERS: tuple[tuple[str, ...], ...] = (
     ("core",),
     ("config",),
-    ("synthetic", "ingest", "align"),
+    ("synthetic", "ingest", "align", "baseline"),
 )
 
 #: Layer index of every package that has one.

@@ -36,6 +36,7 @@ attributes and this document, because each was once used for several:
 | **provenance** | where a number or a fact came from: `declared`, `reported`, `inferred`, `assumed`, `empirical` … (`uncertainty_provenance`, `tsara_support_label_provenance`) | |
 | **field** | the physical quantity a variable measures (§1.6) | |
 | **baseline at window w** | the low quantile of a variable over a window of length w around a reading; always stated with its window (§6.1) | "the baseline" or "the true background": what is baseline at one window is signal at another |
+| **rolling** | the operation: a statistic over a window centred on each reading, moved along the record (`rolling_quantile`; Phase 7's fits over windows) | a stage or a product. The stage that computes baselines and enhancements is `baseline` (`tsara.baseline`); its product is the **baseline state**, saved under `baseline/` in a bundle. Both were named `rolling` until Phase 5 merged; no bundle under the old name exists outside that branch, so none is migrated |
 | **borrowed** | the share of a joined value resting on air outside its own cell (`borrowed_<name>`, `tsara_borrowed_share`, §11.2.4) | an uncertainty; it is a magnitude, and no threshold on it separates a blend from jitter |
 | **averaged / straddled / narrowed / copied** | what a join did to the readings behind a column (`tsara_support_transform`, §11.2.4): wholly inside their cells; lying across a boundary; wider than a cell they fill; at least twice as wide, which is refused unless asked for by name | |
 | **shared** | a reading that formed more than one row of a product, so those rows share its error (`tsara_shared_readings`, the sharing warnings, §11.4.1) | the support label: a straddled reading is shared only when both cells it lies across are rows of the product, which a sparse partner's are not |
@@ -61,7 +62,7 @@ The pipeline defers any change of clock to the last possible moment:
 | Stage | Clock used | Support (§10) |
 |---|---|---|
 | QA/QC, unit conversion | native | unchanged; both are pointwise |
-| Rolling baseline, enhancement Δ, noise σ — the continuous rolling state | native (time-based windows), per stream (§6.2) | windows are durations, so cells of any width fit; each reading is weighted by the share of its cell inside the window (§6.3) |
+| Baseline, enhancement Δ — the continuous baseline state | native (time-based windows), per stream (§6.2) | windows are durations, so cells of any width fit; each reading is weighted by the share of its cell inside the window (§6.3) |
 | Plume detection | native → events are time **intervals** | an event's bounds are the union of the cells above threshold; the smallest resolvable event is one cell |
 | Ratio regression | **pairing clock** (§1.3), per event/window | the **wider-supported** stream's cells, with its partner averaged onto them by overlap |
 | Receptor-model (PMF) export | a **cell set** chosen for it (§1.4) | one join onto those cells |
@@ -189,7 +190,7 @@ The word "grid" used to hide three different needs:
 
 Only the first is about the science, and it never requires uniformity.
 
-**What this settles.** The continuous rolling state is not a grid product: it
+**What this settles.** The continuous baseline state is not a grid product: it
 lives per stream at native rate, beside the readings (§6.2). A receptor-model
 table is one join onto a cell set chosen for it, and there is no
 receptor-matrix object (§11.7). Three candidate cell sets, measured on the ten
@@ -220,8 +221,11 @@ propagated uncertainties and `n_readings_<name>` counts carried alongside
 values. Grid cells carry CF boundaries like any other stream and
 `cell_methods = "time: mean"`. Earlier versions of this section said the string
 also records the resolution of what went in, as `time: mean (interval:
-<native>)`; the binner has never written that (found 2026-09-24), and whether
-it should is for the phase that builds an export. Validation refuses a period
+<native>)`; the binner has never written that (found 2026-09-24). Phase 5,
+the first to join a product of TSARA's own, left it unwritten on purpose: a
+column joined from readings of several widths has no one interval to name,
+and the qualifier is for the phase that builds an export, if that export's
+reader wants it. Validation refuses a period
 at which a selected reading would be **at least twice as wide as a grid cell it
 touches**, copied across rows, unless `finer_support: allow` asks for it
 (§11.2.4, §11.7); everything narrower is recorded per column and named in one
@@ -231,10 +235,10 @@ never interpolated. Config: `OutputGridConfig` (`tsara.config.analysis`).
 **Put off, deliberately (2026-09-24).** What else produces cell sets (an
 instrument's own cells, the event catalog), how a configuration names that
 choice, and the export writer are decided when the export is built.
-`AnalysisConfig.output_grid` is required today and validated against the
-shortest baseline window, a grid the baseline never rolls over; it is to become
-optional, and the validator is replaced by the rule of §6.4. Nothing yet names
-a *segment*, a contiguous run of a record such as one drive, though per-drive
+`AnalysisConfig.output_grid` is optional since Phase 5: a run that never
+exports a table declares none, and the validator that once compared it with
+the shortest baseline window, a grid the baseline never rolls over, is gone,
+replaced by the count of §6.4. Nothing yet names a *segment*, a contiguous run of a record such as one drive, though per-drive
 cells, per-drive export and Phase 8's segment-wise filtering all need one.
 
 ### 1.5 Circular statistics for angular variables
@@ -416,8 +420,100 @@ $\hat\sigma \ge \delta/\sqrt{12}$, where δ is the declared or detected
 reporting resolution (δ/√12 = the standard deviation of uniform rounding
 error).
 
-Registered estimator names: `diff_mad` (default), `mad` (rolling MAD of the
-signal, kept for comparison). MAD-family estimators are only ~37% efficient
+The estimator is `diff_mad`. The rolling MAD of the signal itself (`mad`)
+was built beside it in Phase 5, measured below, and rejected on 2026-09-29:
+it is never better than `diff_mad` in any case measured, and it is the same
+idea as the QA/QC spike rule deleted in Phase 3 (§9.5), a spread of the
+signal, which on plume-dense records measures the plumes.
+
+**Built in Phase 5, withdrawn to detection (Phase 6) on 2026-09-29.** The
+design below was built in the baseline state (code and tests at commit
+`59bd6ef`) and is recorded here as the design Phase 6 restores. Three
+reasons moved it: its two settings are detection's (`DetectionConfig.
+noise_estimator`, `DetectionConfig.noise_window`), so the baseline stage was
+reading another stage's configuration, which Phases 3 and 3.5 had both
+declined to do for this estimator; its meaning on a moving platform is not
+settled (measured below: on a real drive it follows the air); and its
+remedy is a loop with detection (estimate, detect, re-estimate outside the
+events found, detect again, §6.8), which should not be cut across a stage
+boundary. Nothing in Phase 5 read the column it wrote.
+
+The ladder: a variable with a `sigma_rand_<x>` companion gets it as its
+noise scale, provenance carried and no floor, since a declared figure is not
+an estimate; otherwise the configured estimator runs over the configured
+window, and the result is `empirical`. The estimator ran through the rolling
+engine of §6.3 at *q* = 0.5, so its window membership is the join's: a
+sample enters a window in proportion to the share of its cell inside it.
+For `diff_mad` a sample is the absolute difference of two consecutive
+finite readings, on the cell between their midpoints, divided by √2 and
+scaled by 1.4826. **A difference across a dropout is dropped**: two readings
+farther apart than 1.5 times the record's median spacing between
+consecutive *finite* readings measure the air between them, not the
+instrument. On spacing rather than on cell width, because the 07-18 drive's
+analyzer reports every 2 or 3 s on 1 s cells (median spacing 2.00 s, mean
+2.31 s) and a rule on width would drop every difference it has; 1.5 keeps
+every jittered step and drops a single missing row. `mad` was two passes at
+*q* = 0.5, the rolling median and then the median of each reading's
+distance from the median at its own cell. A window holding fewer than 10
+samples is blank: a MAD is about 37 % efficient at the Gaussian, so ten
+differences already jitter by a third, and fewer is a number rather than a
+noise scale. δ for the floor is the variable's declared `quantization` when
+the stream carries one (the generator writes it), else the smallest
+positive gap between the record's distinct finite values: exact for a
+record written in steps, negligible for a continuous one. The column
+recorded its provenance, and for an estimate the estimator, its window, the
+resolution δ, the share of readings the floor raised, the minimum sample
+count and the share of readings left blank.
+
+**On a real drive the estimate follows the air (measured 2026-09-29).**
+Rule: the 2024-07-18 drive, `diff_mad` over a 10 min window at every
+reading (the NOy file's reported sigma set aside so that the estimator
+runs), and the ratios of percentiles of that estimate across the drive:
+
+| stream, 07-18 | typical window ÷ quietest 5 % | busiest 5 % ÷ quietest 5 % |
+|---|---|---|
+| Picarro CO₂ | 6.5 | 30 |
+| NOy-LIF | 3.9 | 17 |
+| Picarro CH₄ | 2.0 | 4.3 |
+| PTR-MS benzene | 1.7 | 3.7 |
+
+An analyzer's precision does not change thirtyfold between two stretches of
+road; the air does. On an urban drive the empirical noise scale is mostly
+the atmosphere's variability at the sampling interval, rising where plumes
+crowd together, so thresholds quoted in it would rise and fall with the
+traffic. The floor never acted on this drive (every record is written in
+steps far finer than its noise). Declaring each analyzer's precision in the
+manifest puts a declared figure above the estimate on the ladder; what
+detection should mean by noise on a moving platform, the instrument's
+precision or the local variability, is Phase 6's first question (§6.8). The
+table is re-measured by Phase 6's real-data notebook, where the estimator
+returns; notebook 05b re-measures only the one noise figure §6.5 uses.
+
+Measured against the generator (rule: the example campaign's 2 s Picarro
+with its sigma columns removed, `diff_mad` over 10 min, the ratio of the
+estimate to the true random sigma the generator wrote beside each reading,
+median over the readings with an estimate; the true sigma is 0.60 ppb and
+the readings' error against the true value has a standard deviation of
+0.60): **1.30**, and 1.21 over the readings outside plumes. Not 1.00,
+because the record is plume-dense: 30 % of readings sit inside plumes
+(enhancement above 3σ) whose slopes exceed the noise per step, so a
+window's median absolute difference lands near the 70th percentile of the
+noise differences, and a quiet reading's window still holds plumes. That is
+the estimator's cost on such a record, and it is a bias in the safe
+direction for detection (thresholds 30 % higher where plumes are dense),
+but it is a bias; the remedy is Phase 6's to build, re-estimating the noise
+outside the plumes it has detected, since only then is the quiet air known.
+On flat air with 0.7 ppb white noise both estimators recover 0.7 within
+5 %. Under a Gaussian plume at the centre of a 10 min
+window (1 s readings, seed 4), `diff_mad` reads 0.80 for 300 ppb at 240 s
+width, 0.79 for 100 ppb at 100 s, 1.11 for 300 ppb at 100 s and 1.15 for
+300 ppb at 60 s, where `mad` reads 2.29, 2.34, 2.58 and 2.77: the difference
+estimator is inflated by the plume's slope, a fraction of a ppb per second
+against a difference noise of a ppb, and the signal's MAD by the plume's
+shape, three to four times the noise. `mad` as built takes each reading's
+residual against the median of its *own* window, which removes what is
+broader than the window and is why it does not collapse outright; the
+classic rolling MAD, one centre per window, would. MAD-family estimators are only ~37% efficient
 at the Gaussian (their own sampling jitter is ~1.6× that of a standard
 deviation on clean data); if threshold jitter ever proves limiting, the
 Rousseeuw–Croux $Q_n$ estimator (~82% efficiency at the same 50% breakdown,
@@ -490,8 +586,10 @@ that produced it, `independent` included, so the two cases are distinguishable
 in the product rather than only by the absence of a label.
 
 **Implementation.** `tsara.core.propagation` — one module, because §1.3
-binning, §5 rolling and §4.3 fit weighting all need this answered identically,
-and because moving a declared σ onto a different support (§10.8) is the same
+binning and §4.3 fit weighting both need this answered identically (the
+baseline stage does not: its Woodruff interval counts a window's readings by
+Kish's effective number, assumes them independent and says so, §6.7), and
+because moving a declared σ onto a different support (§10.8) is the same
 arithmetic again. Ingestion deliberately performs none of it (§10.8, §9.6).
 
 **Registered forms.** All three assume the same AR(1) autocorrelation and
@@ -522,8 +620,9 @@ approximation costs on a given cell.
 `ar1_double_sum` builds an $N \times N$ float64 correlation matrix — 200 MB
 at 5 000 readings, 3.2 GB at 20 000 — so it refuses a cell above
 `DOUBLE_SUM_MAX_POINTS = 5000` readings with a `TsaraPropagationError` naming
-`ar1_neff`, rather than a MemoryError naming nothing. A rolling stage pays
-whichever form it chooses once per window.
+`ar1_neff`, rather than a MemoryError naming nothing. A stage that computes
+over rolling windows (Phase 7's rolling fits) pays whichever form it chooses
+once per window.
 
 `ar1_asymptotic` is the large-$N$ limit, $N_{\mathrm{eff}} = N(1-\rho_1)/(1+\rho_1)$.
 It is the form this document specified before the finite-$N$ version existed,
@@ -750,10 +849,11 @@ not a sole objective. **[estimator details — Phase 7]**
 
 ## 6. Baselines, detection, smoothing, clustering
 
-Baselines were scoped on 2026-09-24 and are decided in §6.1–6.6, to be built in
-Phase 5; the numbers quoted were measured on the permitted 2024 archive under
-the rules stated beside them. Detection, smoothing and clustering remain stubs
-(§6.8).
+Baselines were scoped on 2026-09-24 and built in Phase 5 (2026-09-28):
+§6.1–6.7 say what was decided and, marked *built*, what the package now does
+(`tsara.baseline`). The numbers quoted were measured on the permitted 2024
+archive or on generated data under the rules stated beside them. Detection,
+smoothing and clustering remain stubs (§6.8).
 
 ### 6.1 What a baseline is for **[decided 2026-09-24 — Phase 5]**
 
@@ -800,16 +900,57 @@ decided: an event's ratio is judged across the windows at which that event is
 found; a ratio flat across them belongs to the source, and one that drifts is
 mixing with another scale. That is the stability cube (§5) read per event.
 
-### 6.2 The continuous rolling state lives beside the readings **[decided 2026-09-24 — Phase 5]**
+**Measured (2026-09-29): the parent's ratio is the hard one.** Event intervals
+from the answer key, so that detection is set aside. Rule: 12 h of generated
+air at 1 s, seed 5; methane at 1900 ppb with 0.7 ppb of noise and ethane at
+1.5 ppb with 0.03 ppb; a landfill (0.6 plumes an hour, Gaussian σ 8 min,
+median 60 ppb methane, no ethane) and a gas line (10 blips an hour,
+exponentially modified Gaussian 6 s / 12 s, median 120 ppb, ethane/methane
+exactly 0.050); the 5th percentile at 2 min, 20 min and 2 h; a blip's
+interval from 18 s before its peak to 54 s after, a landfill plume's ± 12 min
+around its peak; least-squares slope of Δethane on Δmethane. 270 blips, 40
+of them inside a landfill plume (over 20 ppb of landfill at the blip); 7
+landfill plumes, each with 4 to 12 blips inside.
 
-For every reading of every instrument and every point of the sweep, the rolling
-state holds the baseline, the enhancement Δ, and the noise scale σ that
-detection thresholds are quoted in. All three are per-reading quantities. They
-live on the reading's own cell at native rate, with the sweep
-(`baseline_window`, `baseline_quantile`) as extra dimensions, and are saved
-beside the stream they came from. They are not a grid product (§1.4). Size for
-one species at 3 windows × 3 quantiles × (baseline, Δ, σ) in float64, over the
-ten 2024 drive days:
+| quantity | 2 min | 20 min | 2 h | truth |
+|---|---|---|---|---|
+| blip: slope in its own interval, clean air (median) | 0.050 | 0.050 | 0.050 | 0.050 |
+| blip: slope in its own interval, inside a landfill plume (median) | 0.049 | 0.050 | 0.050 | 0.050 |
+| blip: single-reading ratio at its peak, inside a landfill plume (median) | 0.049 | 0.043 | 0.036 | 0.050 |
+| landfill: slope over its interval, all readings (range over 7) | 0.0491–0.0502 | 0.0462–0.0510 | 0.0335–0.0464 | 0 |
+
+A slope inside the child's own interval does not depend on the window: a
+parent nearly flat across 70 s moves the intercept, not the slope. A
+single-reading ratio does, and so would a receptor model's row. Fitting the
+**parent** over its interval measures the **children**, at every window,
+because they are its largest excursions. Two readings of the state recover
+the parent, both measured over the same seven plumes. The band between two
+baselines, since at every reading Δ at the long window = (baseline at the
+short window − baseline at the long window) + Δ at the short window,
+exactly: its slope is −0.0008 to +0.0018. And one long baseline with the
+children's readings masked (10 to 29 % of the parent's readings): −0.0005 to
++0.0007. The second needs the children found first, which needs a reference
+that follows the parent (a short window, or a local fit). Both fail the same
+way on a cluster of short plumes, which a short window absorbs as it would
+one long plume (notebook 05 §2: four blips within three minutes lift the
+2 min baseline 23 ppb above the true background): scale is not source.
+Neither is a Phase-5 decision, since the baseline state holds the baseline at
+every window and both read it. A candidate division, not decided: masked
+children for the event catalog, bands for the continuous state and receptor
+rows.
+
+### 6.2 The continuous baseline state lives beside the readings **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
+
+For every reading of every instrument and every point of the sweep, the baseline
+state holds the baseline and the enhancement Δ, with their uncertainties. Both
+are per-reading quantities. They live on the reading's own cell at native
+rate, with the sweep (`baseline_window`, `baseline_quantile`) as extra
+dimensions, and are saved beside the stream they came from. They are not a
+grid product (§1.4). The noise scale detection quotes its thresholds in was
+decided here on 2026-09-24 as a third per-reading quantity, built in Phase 5,
+and moved to detection on 2026-09-29 (§2.5 gives the three reasons). Size for
+one species at 3 windows × 3 quantiles × (baseline, Δ, one sigma) in float64,
+over the ten 2024 drive days:
 
 | stored on | rows | size |
 |---|---|---|
@@ -821,68 +962,174 @@ Native rate is thirteen times smaller than the spanning grid and loses nothing.
 Thirty species at native rate is about 1.3 GB, which eager NumPy carries; the
 Dask question stays with Phase 7's cube.
 
-A per-reading product keeps each reading's cell, so it is joined like a stream
-(§11.2.3): putting a dense instrument's baseline onto a canister's fills
-(§6.5) is an ordinary join. One mechanical gap stands in the way. The join
-accepts a variable with a time axis and nothing else, and a swept baseline
-carries 3 × 3 = 9 versions per reading. The join's weights depend only on the
-readings and the cells, so they are the same for all nine, and averaging every
-version at once is a generalisation of the binner, not a redesign.
+A per-reading product keeps each reading's cell, so it is joined like a
+stream (§11.2.3): putting a dense instrument's baseline onto a canister's fills
+(§6.5) is an ordinary join. The join used to accept a variable with a time
+axis and nothing else, and a swept baseline carries 3 × 3 = 9 versions per
+reading; since Phase 5 it averages every version at once (§11.2, *swept
+variables*). The join's weights depend only on the readings and the cells, so
+the overlaps are found once for all nine; the versions differ only in which
+readings are blank, and that is why count, coverage and borrowed share are
+kept per version.
 
-### 6.3 Which readings belong to a window **[decided 2026-09-24 — Phase 5]**
+### 6.3 Which readings belong to a window **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
 
 Windows are durations, centred on each reading. **A reading contributes in
 proportion to the share of its own cell lying inside the window**, which is the
 interval model and the weight every join already uses, so the baseline is a
 weighted quantile. The width rule of every join holds here too: a reading at
 least `COPY_RATIO` = 2 times as wide as the window is not stood on it
-(§11.2.4). In practice the count of §6.4 refuses those windows first, because a
-window shorter than half a reading touches at most two readings; the width rule
-is the backstop for a quantile such as the median, whose required count is
-small.
+(§11.2.4). When readings abut, the count of §6.4 refuses those windows
+first: a window narrower than a reading and centred on it touches only that
+reading, and the count is never below two, at any quantile. The width rule
+decides only when readings **overlap**, a running mean logged more often
+than its length, where the count is no protection: a 60 s running mean
+logged every second puts 89 readings in a 30 s window (measured 2026-09-29),
+which passes the 5th and 10th percentiles' counts, and every one of them is
+twice as wide as the window. TSARA infers one cadence per file as a
+reading's width, so readings abut up to jitter; overlapping cells come from a
+declared width longer than the cadence or from a stop column. A window is a duration, so on a moving platform it is a stretch of
+road as much as an interval of air: the cell model's limitation (CLAUDE.md,
+open flags) is inherited here, not resolved.
+
+**The weighted quantile, defined once (built 2026-09-28, `baseline.quantile`).**
+Sort the contributing readings by value; a reading contributes when it holds
+a finite value and overlaps the window by a positive amount. Its weight is
+the overlap, and its *position* is the midpoint of its weight mass over the
+total: (*S_k* − *w_k*/2)/*S_N* for the cumulative weight *S_k*. The
+*q*-quantile is the value interpolated linearly at position *q*, clamped to
+the lowest and highest reading. With equal weights the positions are
+(*k* − ½)/*N*, Hazen's plotting position (numpy's `method="hazen"`), which is
+the convention the table below was measured with. Numpy's default rule,
+(*N* − 1)*q*, has no canonical weighted form; Hazen's is exactly "each
+reading's weight mass centred on its value", so it is the one. The window at
+a record's edge is no special case: it holds the readings it holds, its
+count and coverage say so, and the count rule of §6.4 decides. Two forms
+share one expression: a per-window reference written from the definition,
+and a block form that brackets each window's candidates (contiguous, since
+readings are sorted), measures every overlap exactly, sorts each window
+once and reads every quantile from that sort. Their values agree to the
+last bit on the test record; the qualifiers beside them are summed in
+different orders and agree to rounding.
+
+Cost, measured on a synthetic record shaped like the ten-drive Picarro
+(200 000 readings, 1 s cells every 2.3 s with dropouts, 2 % masked), all
+three quantiles from one sort:
+
+| window | per species | readings per window (median) |
+|---|---|---|
+| 2 min | 0.9 s | 52 |
+| 10 min | 3.8 s | 256 |
+| 60 min | 26.5 s | 1 531 |
+
+Linear in the readings times the readings per window, so a 6 h window is
+about three minutes per species. Memory is bounded by a per-block budget in
+*elements* (`MAX_BLOCK_ELEMENTS`, 2 million: about 160 MB live), not in
+windows, so that a 6 h window on a 10 Hz record (216 000 readings per
+window) still fits; there the limit is time (26 million windows each sorting
+216 000 values), and the sorted-sweep form, one sorted window maintained as
+it slides in O(*N* log *N*), is the upgrade path if such a record arrives.
+Nothing in the archive is within a factor of a hundred of it.
 
 Not xarray's `rolling().construct()`: that is count-based and cannot take a
 duration. On the 07-18 drive a 600-reading window spans about 23 minutes
 (600 × the analyzer's mean spacing of 2.31 s) and changes length at every
 dropout.
 
-**Rejected: membership by midpoint** (a reading belongs if its midpoint lies in
-the window, which is what pandas' time-based rolling gives). Measured, the two
-rules differ in the second order. Rule: 5th percentile; a window centred on
-every finite reading's midpoint; the overlap rule is a weighted quantile
-interpolated at cumulative-weight midpoints; "differ" means any difference
-above 10⁻⁹ ppb.
+**Rejected: membership by midpoint** (a reading belongs if its midpoint lies
+in the window, which is what pandas' time-based rolling gives). Measured, the
+two rules differ in the second order. Rule (re-stated 2026-09-28, when
+notebook 05b could not reproduce the first table): the 5th percentile; a
+window centred on every finite reading's midpoint; **both** rules
+interpolated at cumulative-weight midpoints (§6.3's quantile, Hazen's
+positions), the midpoint rule with equal weights and the overlap rule with
+overlap weights, so that the table shows membership alone; "differ" means
+any difference above 10⁻⁹ ppb. On the 07-18 drive's Picarro (8,448 readings
+on 1 s cells, reporting every 2 or 3 s):
 
-| stream | window | windows | differ | median | p95 | max (ppb) |
-|---|---|---|---|---|---|---|
-| ground Picarro, 60 s means, 07-15 to 07-17 | 2 min | 4,092 | 97 % | 0.09 | 2.62 | 28.96 |
-| ground Picarro, 60 s means | 10 min | 4,092 | 92 % | 0.14 | 1.75 | 13.65 |
-| ground Picarro, 60 s means | 60 min | 4,092 | 78 % | 0.05 | 0.85 | 7.22 |
-| drive Picarro, 1 s cells, 07-18 | 2 min | 8,448 | 83 % | 0.09 | 0.67 | 21.79 |
-| drive Picarro, 1 s cells | 10 min | 8,448 | 62 % | 0.04 | 0.19 | 2.18 |
-| drive Picarro, 1 s cells | 60 min | 8,448 | 27 % | 0.00 | 0.05 | 0.59 |
+| window | windows | differ | median | p95 | max (ppb) |
+|---|---|---|---|---|---|
+| 2 min | 8,448 | 43 % | 0.00 | 0.27 | 12.00 |
+| 10 min | 8,448 | 37 % | 0.00 | 0.05 | 2.04 |
+| 60 min | 8,448 | 11 % | 0.00 | 0.00 | 0.38 |
 
-The difference is sub-ppb typically and large only where a window holds a
-handful of wide cells, which is the regime where a 5th percentile of three
-readings is not a background anyway. Overlap weighting was chosen because the
-package says a value describes an interval, not because of the size of the
-effect. What would not be defensible is leaving the rule unstated, since every
+The first version of this table (2026-09-24) read 83 %, 62 % and 27 % of
+windows differing, with medians of 0.09, 0.04 and 0.00 ppb, 95th percentiles
+of 0.67, 0.19 and 0.05 and maxima of 21.79, 2.18 and 0.59, and carried three
+rows for the ground Picarro's 60 s means as well. Notebook 05b reproduces
+those twelve numbers exactly with pandas' own centred time-based rolling
+quantile at its default closure (a window open at its start and closed at
+its end, linear interpolation at (*N* − 1)*q*): the first table had compared
+the overlap rule against that, so most of its "difference" was the
+interpolation convention and the closure, not the membership. The ground
+rows were measured the same way and are withdrawn rather than left beside a
+rule they were not measured under. Under one convention the difference is
+zero at the median and comes from the readings at a window's edges, which
+overlap weighting counts at half and midpoint membership wholly or not at
+all: at 2 min, every one of the 228 windows differing by more than 0.5 ppb
+has an edge reading among its lowest three, and at 10 min all ten such
+windows have one among their lowest ten, which is where the 5th percentile's
+position falls (2.7 and 13 readings in); at 60 min no window differs by that
+much. Overlap weighting was chosen because the package says a value
+describes an interval (§1.3), not because of the size of the effect. What
+would not be defensible is leaving the rule unstated, since every
 window's reading count depends on it.
 
-### 6.4 When a window is valid: a count **[decided 2026-09-24 — Phase 5]**
+### 6.4 When a window is valid: a count **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
 
 **Validity is a count of readings, `min_readings`, with a stated relation to
-the quantile.** With *N* readings and linear interpolation, a *q*-quantile lies
-between the two lowest readings whenever (*N* − 1)·*q* < 1; at *q* = 0.05 that
-is any window of twenty readings or fewer, so the default follows 1/*q*. Every
+the quantile.** A *q*-quantile is the value a fraction *q* of the air falls
+below, so a window of *N* readings holds, on average, *N*·*q* readings below
+it. **At *N* = ⌈1/*q*⌉ that is one reading**: the count at which a window can
+be expected to reach the quantile at all. With fewer it usually holds nothing
+that low (eleven readings hold none below their 1st percentile 89.5 % of the
+time, 0.99¹¹), and whatever it reports is too high. So
+`BaselineConfig.min_readings` is `null` by default, meaning ⌈1/*q*⌉ for each
+quantile of the sweep: 100 readings for the 1st percentile, 20 for the 5th,
+10 for the 10th. An integer applies to every quantile. Under the Hazen
+positions of §6.3 the same count reads: at *N* = 1/*q* the *q*-quantile sits
+halfway between the two lowest readings, below that it slides onto the
+lowest reading, and at *N* ≤ 1/(2*q*) it *is* the minimum. (An earlier
+version of this paragraph derived the count from numpy's default
+interpolation, (*N* − 1)·*q*, which TSARA does not use; corrected
+2026-09-29.)
+
+Measured, the count is where the estimate becomes right on average (rule:
+4 000 windows of *N* independent standard-normal readings per row, each row
+from its own generator seeded 7; numpy's Hazen quantile, which is TSARA's
+with equal weights; "lands at" is the true cumulative probability of the
+estimate, median over the windows, with the 10th–90th percentiles; the last
+column is the median distance above the true quantile):
+
+| asked for *q* | *N* | lands at | above the true quantile |
+|---|---|---|---|
+| 0.01 | 11 | 0.061 (0.009–0.189) | +0.78 σ |
+| 0.01 | 20 | 0.034 (0.005–0.110) | +0.50 σ |
+| 0.01 | **100** (default) | **0.010** (0.003–0.028) | +0.02 σ |
+| 0.05 | 11 | 0.064 (0.010–0.194) | +0.12 σ |
+| 0.05 | **20** (default) | **0.052** (0.014–0.136) | +0.02 σ |
+| 0.10 | **10** (default) | **0.106** (0.028–0.254) | +0.04 σ |
+
+Below the count the estimate slides toward the window's minimum, whose
+median lands at 1 − 0.5^(1/*N*), whatever *q* was asked: a "1st percentile" of
+eleven readings is, on the median, a 6th. At the count single windows still
+scatter widely (the 10th–90th columns); that is the baseline's own sampling
+uncertainty (§6.7). The readings here are independent; correlated air
+behaves like fewer readings, so on real air the count is a floor. The engine
+applies the definition to every window and reports its count, coverage and
+whether a contributing reading was at least `COPY_RATIO` times as wide as the
+window; the baseline state applies the rule and blanks (§6.6). Every
 window records `n_readings_` and `coverage_` as every join does. One warning
-per stream at run time names the windows too short for the quantile. This
+per stream at run time names the sweep points blank at every reading, with
+the rule that blanked each: the count (with the most readings any window
+held), the width rule of §6.3, either, or, for an adopted baseline, the
+donor's blank. This
 replaces `BaselineConfig.min_valid_fraction` and the `AnalysisConfig` validator
 that compares the shortest window with the output grid (both removed in
-Phase 5). Proposed with the decision and to be confirmed in the Phase-5 plan: a
-window that fails the count or the width rule of §6.3 leaves that sweep point
-blank for that instrument, with the reason recorded, instead of raising, so
-one short window on a 60 s instrument does not stop a whole sweep.
+Phase 5). Confirmed with the Phase-5 plan (2026-09-28): a window that fails
+the count or the width rule of §6.3 leaves that sweep point blank for that
+instrument, with the reason recorded, instead of raising, so one short window
+on a 60 s instrument does not stop a whole sweep.
 
 **Why not a fraction.** `min_valid_fraction` never said what it was a fraction
 of, and on real data the three readings disagree completely. Share of windows,
@@ -902,11 +1149,11 @@ measure the merge file's 1 s rows (§9.2.3), not the analyzer. The third passes
 the drive, but it is relative to the stream itself, so a canister passes with
 one fill in the window. None of them is what a quantile needs; a count is.
 
-### 6.5 Baseline methods: options, not one rule **[decided 2026-09-24 — Phase 5]**
+### 6.5 Baseline methods: options, not one rule **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
 
 Because a baseline is not a single thing (§6.1), a sparse instrument does not
 get one policy. Each option is a baseline method registered by name, like the
-file readers and the noise estimators, and chosen **per variable** in the
+file readers, and chosen **per variable** in the
 analysis configuration. Whether the method itself becomes a sweep axis is left
 until a sweep needs it.
 
@@ -917,12 +1164,40 @@ until a sweep needs it.
   `field` (§1.6), at the same window and quantile, joined onto this
   instrument's cells. The atmosphere has one benzene background, and a PTR-MS
   samples it every second beside the canister. It fails exactly when the two
-  instruments disagree in calibration. It needs the join to accept a swept
-  variable (§6.2).
+  instruments disagree in calibration. It also hands the adopter the
+  **donor's** quantile offset: a low quantile of noisy readings sits about
+  *z_q*·σ below the true background (§6.8), with σ the donor's noise, so every
+  enhancement of a quieter adopter is lifted by that much (measured
+  2026-09-29, below). Built as three calls, because the
+  stages hand each other Datasets and never import each other: roll the
+  donor, join its swept baseline onto the adopter's cells with
+  `bin_streams_onto_cells` (§11.2, *swept variables*), roll the adopter with
+  the product as `provided=`. The adopter checks that the product is that
+  join -- built by a join, on exactly its own cells, at this sweep, the
+  donor's baseline of this field, and one of them -- and carries the join's
+  record of what it did to the donor's support (§11.2.4) on the adopted
+  baseline, with `tsara_baseline_from` naming the donor.
 - **`constant`.** A declared number, zero included; at zero the enhancement is
   the concentration. A slope fitted inside an event loses nothing by it
   (§6.1), and a receptor model run on concentrations rather than enhancements
   is common practice, with the background appearing as a factor of its own.
+  A non-zero constant is a claim about the background, and it carries no
+  uncertainty of its own: its error, the same at every reading, shifts every
+  enhancement and enters no budget. An optional sigma for it is a declaration
+  rather than a model, and is not built until a configuration uses a
+  non-zero constant. A constant is stored at every sweep point so that every
+  variable has one shape, and its spread across the sweep is therefore zero
+  by construction, not by stability: the stability cube of Phase 7 has to
+  read `tsara_baseline_method` before it reads that spread as agreement.
+
+The method is chosen per variable under `baseline.methods`, keyed
+`<instrument>.<variable>` because a variable's name is unique per instrument
+(§1.6); a variable not named there uses `rolling_quantile`. A `from_field`
+entry names the instrument the baseline comes from, and the combined
+configuration refuses one that measures no variable of the same field, that
+names the variable's own instrument, or whose own baseline for that field is
+`from_field` (a chain would make the record of where a baseline came from name
+the wrong instrument).
 
 **Why a sparse instrument needs options.** Fills of the iWAS canister in a
 window centred on each fill, over all 261 fills of the ten 2024 drive days,
@@ -939,25 +1214,171 @@ A canister species has a `rolling_quantile` baseline only at windows of hours,
 while the 1 s analyzers beside it have baselines at minutes. What stands in at
 the scales it cannot see is a choice made per variable, not a rule.
 
-### 6.6 What a baseline records **[decided 2026-09-24 — Phase 5]**
+**What `from_field` hands the adopter, measured (2026-09-29).** On generated
+air (notebook 05 §5's campaign: a PTR at 1 s with 0.02 ppb of noise beside a
+canister with 0.01 ppb, the 60 min 5th percentile adopted), the canister's
+enhancement over the 22 fills whose true enhancement is under 0.01 ppb has a
+median of +0.031 ppb, against a predicted 1.645 × 0.02 = +0.033: the donor's
+offset, landed on the adopter. With 0.2 ppb of PTR noise it is +0.27 ppb on a
+0.5 ppb background. On the 2024-07-18 drive (rule: the PTR-MS's benzene rolled
+at 10 and 60 min, q = 0.05, its baseline joined onto the 32 iWAS fills): the
+PTR's noise estimate (§2.5, `diff_mad` over 10 min, median) is 0.032 ppb, so
+its 5th percentile sits about 0.053 ppb below its background; its 60 min
+baseline is negative at 65 % of its readings; and the canister's lowest fill
+all day is 0.040 ppb. Every canister enhancement therefore carries about
++0.05 ppb of the PTR's noise, a quarter to a half of a clean-ish fill. The
+calibration assumption itself held on that drive on average: the PTR's
+readings averaged over each fill against the fill have a median difference
+of +0.000 ppb (ratio 1.01) over the 32 fills, the disagreement sitting in
+plumes (least-squares slope of canister on PTR 0.73, plausibly timing across
+sharp plumes; not measured). The offset is §6.8's quantile-offset correction
+applied with the donor's σ; how that σ reaches the adopter is Phase 6's.
+
+### 6.6 What a baseline records **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
 
 CF's `cell_methods` vocabulary (Appendix E of the conventions) has no general
 quantile, and asks for bounds with any method other than `point`. A baseline at
 a reading is a statistic over a window stated at a cell inside it: two
-supports, and no CF string is true of both. TSARA already has the precedent:
-the sigma companions carry no `cell_methods`, because nothing CF can say about
-them is true (§10.2). So a baseline carries **no `cell_methods`**, and instead
-TSARA attributes naming its method, window, quantile and membership rule, with
-per-window `n_readings_` and `coverage_` beside it; the names are fixed in
-Phase 5 and documented here then. The enhancement inherits the reading's own
-`cell_methods`, since subtracting a per-reading number changes nothing about
-what the cell is. A rolling slope in Phase 7 is a product whose cells are its
-windows, under the same no-false-method rule.
+supports, and no CF string is true of both. TSARA already has the precedent: the sigma companions carry no `cell_methods`,
+because nothing CF can say about them is true (§10.2). So a baseline carries
+**no `cell_methods`**, and instead TSARA attributes naming its method, window,
+quantile and membership rule, with per-window `n_readings_` and `coverage_`
+beside it. The enhancement inherits the reading's own `cell_methods`, since
+subtracting a per-reading number changes nothing about what the cell is. A
+rolling slope in Phase 7 is a product whose cells are its windows, under the
+same no-false-method rule.
 
-### 6.7 Baseline uncertainty **[stub — Phase 5]**
+**The product (built 2026-09-28, `baseline.state`).** One `xarray.Dataset`
+per instrument, `tsara_stage = "baseline"`, on the stream's own `time` and
+`time_bnds` and every other coordinate the stream carries, with two more
+dimensions: `baseline_window` (the configured windows in seconds, their
+spelling kept in `tsara_baseline_windows`) and `baseline_quantile`. For each
+rolled variable `x` (by default every non-circular `role: gas` variable; a
+direction is refused):
 
-Order-statistic variance or block bootstrap, to be specified in Phase 5; it
-feeds the uncertainty of Δ.
+| variable | dims | what it is |
+|---|---|---|
+| `x`, `sigma_rand_x`, `sigma_sys_x` | (time) | the reading and its declared sigmas, copied, so the file stands alone |
+| `baseline_x` | (time, window, quantile) | the baseline; `nan` where blank |
+| `enhancement_x` | (time, window, quantile) | `x` − baseline, never clipped |
+| `n_readings_window_x`, `coverage_window_x` | (time, window) | the window's contributing count and covered share (§6.4); `rolling_quantile` only, since a constant has no window and an adopted baseline's windows are the donor's |
+| `sigma_rand_baseline_x` | (time, window, quantile) | Woodruff (§6.7), `empirical`; for `from_field`, the donor's, joined |
+| `sigma_sys_baseline_x` | (time, window, quantile) | the reading's systematic sigma at the quantile position; for `from_field`, the donor's, joined |
+| `sigma_rand_enhancement_x`, `sigma_sys_enhancement_x` | (time, window, quantile) | under the rules of §6.7; written only when the reading has the component, and when it does not, `enhancement_x` says so in `uncertainty_provenance_random` / `uncertainty_provenance_systematic` |
+
+The window companions are companions by the existing `n_readings_` and
+`coverage_` prefixes, spelled with `window` so that a later join's own
+`n_readings_baseline_x` (the rows it drew on) cannot be mistaken for them.
+`baseline_x` and `enhancement_x` are variables, not companions: each has
+units and a field and is joined like any reading (§11.2, *swept variables*).
+
+The baseline's attributes, in place of a cell method: `tsara_baseline_method`
+(the registered name), `tsara_baseline_membership` (`overlap`, §6.3),
+`tsara_baseline_windows` (the configured spellings), `tsara_baseline_min_readings`
+(one count per quantile, §6.4), `tsara_baseline_blank_fraction` (one number
+per sweep point, window-major, the share of readings at which that point is
+blank for either reason), `tsara_baseline_too_wide_fraction` (per window, the
+share of readings whose window held a reading at least `COPY_RATIO` times as
+wide, §6.3); a `from_field` baseline adds `tsara_baseline_from` (the donor
+instrument) and carries the join's own record of what it did to the donor's
+support (§11.2.4); a `constant` adds `tsara_baseline_value`. The sampling
+sigma carries `tsara_sigma_assumption`, naming Woodruff's exchangeability
+assumption and that the figure is a floor (§6.7); each enhancement sigma
+carries `tsara_sigma_rule`, naming which rule of §6.7 formed it
+(`quadrature`; `same instrument: sigma_sys(x) |enhancement| / |x|`;
+`quadrature with the donor's`; `reading`). A sweep point blank at every reading is named in one warning per stream,
+with the count it needed.
+
+**Persistence (Phase 5, `baseline.bundle`).** `save_state` writes one netCDF
+file per instrument, `baseline/<instrument>.nc`, into a bundle directory
+beside `streams/`, and the analysis configuration that produced them as
+`baseline/analysis.yaml`, as the resolved manifest is written beside the
+streams; `bundle.json` is not touched, for the grid's reason (§11.7). State
+files for instruments the run did not roll are removed, so the directory is
+the record of what ran. An optional zlib level compresses every array, the
+time axis and bounds included, as `save_grid` does; measured on the example
+campaign's states (two gas variables per instrument, a 3 × 3 sweep), level 4
+takes the 2 s Picarro's file from 6.5 MB to 2.8 MB and the 0.25 s Aeris's
+from 25.5 MB to 12.7 MB, values identical.
+`load_state` brings every variable, coordinate (the CF bounds as a
+coordinate) and attribute back exactly, the per-sweep-point records as the
+numeric arrays they are, refuses a file whose `tsara_stage` is not
+`baseline`, and reads the configuration through the one YAML door so a
+hand-edited copy with a key written twice is refused there too (§10.2). A
+reloaded state is joined like a stream (§6.2), which the round-trip test
+checks last. The bundle format version is unchanged: a new directory beside
+the streams is additive, and an older reader ignores it.
+
+### 6.7 Baseline uncertainty **[decided and built 2026-09-28 — Phase 5]**
+
+**The baseline's own sampling uncertainty is Woodruff's order-statistic
+interval** (Woodruff 1952): the same sorted window read at positions
+*q* ± √(*q*(1 − *q*)/*N*_eff), with *N*_eff Kish's effective count
+(Σ*w*)²/Σ*w*² of the contributing weights, and half that interval reported as
+a one-sigma figure, `sigma_rand_baseline_<x>`, provenance `empirical`. It is
+distribution-free, needs no density estimate (which Maritz–Jarrett does) and
+no resampling (which a block bootstrap does, at *B* times the cost and with
+a block length to choose), and it costs two more interpolations on a sort
+already done.
+
+Measured (rule: 2 000 windows of *N* independent standard-normal draws,
+seed 7; "ratio" is the mean reported sigma over the standard deviation of
+the estimated quantile across windows; "cover" is the share of windows whose
+interval holds the true quantile):
+
+| *N* | *q* | ratio | cover |
+|---|---|---|---|
+| 200 | 0.05 | 1.03 | 0.66 |
+| 200 | 0.01 | 1.21 | 0.69 |
+| 200 | 0.10 | 1.00 | 0.65 |
+| 50 | 0.05 | 1.15 | 0.68 |
+| 1 000 | 0.05 | 1.02 | 0.69 |
+| 200 | 0.50 | 1.01 | 0.66 |
+
+A factor, not a percent: the interval is asymmetric in the tail (the
+density is lower below a low quantile than above it) and a half-width
+summarises it; at *q* = 0.01 with 200 readings the lower position is
+clamped at the minimum and the figure runs 21 % high.
+
+The assumption is that the readings in a window are exchangeable draws,
+which air is not. On an AR(1) record with lag-one correlation 0.99 per
+reading (same rule, seed 7), the ratio is **0.08**: the reported figure is a
+thirteenth of the true scatter. It is therefore a **floor** on the sampling
+error, labelled as such (`empirical`, with the assumption named in the
+attribute), and not the spread of the baseline; that spread, across windows
+and quantiles, is the sweep's and is read in Phase 7's stability cube.
+
+**The enhancement's uncertainty (built with the baseline state, `baseline.state`; each figure names its rule in `tsara_sigma_rule`).**
+Its random component is the reading's and the baseline's in quadrature,
+`sigma_rand_enhancement_<x>` = √(σ²_rand(*x*) + σ²_b), treating one
+reading's noise as independent of a quantile of hundreds; the reading's own
+share of its window is neglected, which overstates the figure by a hair.
+**A component the reading has no sigma for gets no column, and the
+enhancement says so** (decided 2026-09-29): `enhancement_<x>` carries
+`uncertainty_provenance_random` and `uncertainty_provenance_systematic` for
+each component without a column, holding the reading's own provenance for
+it, `unknown` when the reading states none and `zero` when its budget omits
+it (§2.4). Nothing estimated stands in: the empirical noise scale that could
+(§2.5) is detection's, and on a drive it measures the air as much as the
+instrument. On the 2024-07-18 drive this is the Picarro's and the PTR-MS's
+case (neither declares a random sigma), and the NOy-LIF's reported sigma is
+the only one carried through.
+Its systematic component depends on where the baseline came from. For a
+`rolling_quantile` baseline of the same instrument, an error common to
+reading and baseline is either an offset, which cancels exactly in the
+difference, or a gain, which scales it: with reading = (1 + *g*)·true + *o*
+and the same *g*, *o* in the baseline, Δ_measured = (1 + *g*)·Δ_true, so
+σ_sys(Δ) = ε|Δ| for a relative term ε and 0 for an absolute one. The stream
+records only the combined per-point σ_sys(*x*) ≥ ε*x*, so TSARA writes
+`sigma_sys_enhancement_<x>` = σ_sys(*x*)·|Δ|/|*x*|: exact for a pure gain
+error and an upper bound for any mix. For a `from_field` baseline the two
+instruments' errors do not cancel (§6.5), so the terms add in quadrature,
+and the dense state carries `sigma_sys_baseline_<x>`, the reading sigma
+interpolated at the quantile position, for that purpose. For a `constant`
+nothing cancels and σ_sys(Δ) = σ_sys(*x*). Enhancements are **never
+clipped** at zero: noise makes Δ negative in clean air and on plume edges,
+and clipping would shift the noise distribution's mean and bias every
+Phase-7 regression that follows.
 
 ### 6.8 Detection, smoothing, clustering **[stubs]**
 
@@ -968,14 +1389,27 @@ feeds the uncertainty of Δ.
   scale σ comes from the measurement-uncertainty system in provenance order —
   declared or reported $\sigma^{\mathrm{rand}}$ when available, else the
   empirical estimator named by `DetectionConfig.noise_estimator` (default
-  `diff_mad`, §2.5); detection has no private definition of noise, and the
-  §2.5 quantization floor applies to whichever estimate is used. Also decided:
+  `diff_mad`, §2.5); detection has no private definition of noise, and the §2.5 quantization
+  floor applies to whichever estimate is used. Phase 5 built that ladder in
+  the baseline state, measured its cost on a plume-dense record (`diff_mad`
+  reads 1.30 times the true sigma when a third of the readings sit inside
+  plumes, §2.5), and on 2026-09-29 it moved here, because its remedy is a
+  loop with detection: estimate, detect, re-estimate the noise outside the
+  events found, detect again. Phase 6 restores it from the Phase-5 build
+  (§2.5), with the weighted rolling quantile moved into `core` so that this
+  stage and the baseline stage share one engine, and answers first what
+  detection means by noise on a moving platform: measured, on a real drive
+  the estimate follows the air (§2.5). Also decided:
   **quantile-offset correction** — because the baseline
   is a low quantile q, even pure noise has a positive median enhancement of
   $-z_q\,\sigma$ (≈ 1.64σ at q = 0.05, Gaussian), so thresholds are applied
   to the offset-corrected enhancement; otherwise the effective threshold
   silently depends on the swept quantile and false-positive rates differ
-  across sweep points. Exact segmentation details specified in Phase 6.
+  across sweep points. For an adopted (`from_field`) baseline σ here is the
+  **donor's**, not the adopter's: the offset came with the donor's readings
+  (§6.5, measured). Carrying the donor's noise scale onto the adopter's cells
+  in the same join is the leading candidate for supplying it; left to the
+  Phase-6 scoping on 2026-09-29. Exact segmentation details specified in Phase 6.
   Nested events (an event at a short baseline window inside an event at a
   longer one) are recorded with parent–child links in the catalog —
   detection-level bookkeeping only; no area mathematics (§7). How windows
@@ -3099,6 +3533,30 @@ therefore depends on the selection, which is why every column also records the
 instrument it came from, and keeps the `field` its stream declared: `ch4_picarro` and
 `ch4_aeris` both still say `field: ch4` (§1.6).
 
+**Swept variables (Phase 5).** A variable may carry sweep dimensions beside
+`time`: the baseline state's `baseline_<x>` is one variable over `(time,
+baseline_window, baseline_quantile)`, nine versions per reading. The join
+treats each version exactly as it treats a plain variable, with the pairs
+found once for the instrument: the value is the overlap-weighted mean, the
+uncertainty is propagated through the same weights, and `n_readings_`,
+`coverage_` and `borrowed_` are written **per version**, because a version
+can be blank where another is not (a window too thin for one quantile is not
+too thin for another) and a blank reading weighs nothing. The column's
+record (`tsara_support_transform`, `tsara_width_ratio_max`,
+`tsara_borrowed_share`, `tsara_n_readings`) pools every version: a pair that
+formed any version's value counts, the borrowed share is every version's
+contributing time over every version's time, the readings behind the column
+are the union, and the rows are the most any one version holds, so that the
+sharing warning does not count one row six times. The sweep coordinates
+travel into the product with their attributes, and two selected variables
+naming one dimension must agree about it exactly, or the join refuses naming
+both. A sigma over `time` alone applies to every version, as a declared
+precision does to every baseline of a sweep; a sigma over the variable's own
+sweep dimensions is one figure per version. A plain variable is one version,
+and the product for it is byte-identical to what the join gave before
+versions existed (checked on 252 arrays over five joins of a generated
+campaign, 2026-09-28).
+
 #### 11.2.1 The operation is symmetric in the code and must not be in use
 
 Averaging a fast stream onto slow cells discards resolution the slow
@@ -3130,7 +3588,7 @@ exactly and archive jitter tops out at 1.024 against a refusal at 2.
 
 **The rule: a reading at least twice as wide as a target cell it touches
 would be copied across rows, and is refused** unless `finer_support: allow`
-asks for it (`tsara.align.cells.pair_width_ratios`, `COPY_RATIO`; the
+asks for it (`tsara.core.support.pair_width_ratios`, `COPY_RATIO`; the
 whole family, the two numbers and the record are §11.2.4).
 
 | reading cells | target cells | width ratio | outcome |
@@ -3324,7 +3782,7 @@ Two numbers describe every row of every case, both computed from the overlap
 pairs the binner already has (`tsara.core.support.overlap_pairs`):
 
 * **The width ratio, per pair**, `r = |R| / |T|`, reading width over target
-  width (`tsara.align.cells.pair_width_ratios`). The *category*: `r ≤ 1`
+  width (`tsara.core.support.pair_width_ratios`). The *category*: `r ≤ 1`
   averaged or straddled, `1 < r < 2` narrowed, `r ≥ 2` copied. The line sits
   at exactly 2 by counting, not by taste: two disjoint cells of width *W*
   occupy 2*W* of distinct time, so one reading of width *R* can be the entire
@@ -4134,7 +4592,7 @@ convention everywhere else.
 
 Implemented in `tsara.align.grid`, specified in §1.4. A uniform
 `(time × variable)` table: one kind of cell set, a tiling. Its role was scoped
-on 2026-09-24 (§1.4): the continuous rolling state does not live on it (§6.2),
+on 2026-09-24 (§1.4): the continuous baseline state does not live on it (§6.2),
 and a receptor-model table is one join onto a cell set chosen for it, of which
 a tiling per drive is one candidate beside the canister fills and plume
 events. What else the grid is for is put off until an export needs it. This

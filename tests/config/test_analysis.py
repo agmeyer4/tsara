@@ -11,8 +11,12 @@ from pydantic import ValidationError
 from tsara.config.analysis import (
     AlignmentConfig,
     AnalysisConfig,
+    BaselineConfig,
+    ConstantMethod,
     DetectionConfig,
+    FromFieldMethod,
     OutputGridConfig,
+    RollingQuantileMethod,
 )
 
 # ---------------------------------------------------------------------------
@@ -22,8 +26,11 @@ from tsara.config.analysis import (
 
 def test_minimal_analysis_parses(analysis_dict: dict[str, Any]) -> None:
     config = AnalysisConfig.model_validate(analysis_dict)
+    assert config.output_grid is not None
     assert config.output_grid.freq == "1s"
     assert config.baseline.windows == ("2min", "10min")
+    assert config.baseline.min_readings is None
+    assert config.baseline.methods == {}
     # Optional stages exist with safe defaults instead of being None.
     assert config.alignment.max_interp_gap == "10s"
     assert config.detection.exit_sigma == 1.0
@@ -140,12 +147,31 @@ def test_empty_windows_rejected(analysis_dict: dict[str, Any]) -> None:
         AnalysisConfig.model_validate(bad)
 
 
-def test_grid_must_resolve_shortest_window(analysis_dict: dict[str, Any]) -> None:
-    """A 5-min grid cannot support a 2-min rolling window."""
-    bad = copy.deepcopy(analysis_dict)
-    bad["output_grid"]["freq"] = "5min"
-    with pytest.raises(ValidationError, match="10x"):
-        AnalysisConfig.model_validate(bad)
+def test_the_grid_is_optional_and_absent_by_default(analysis_dict: dict[str, Any]) -> None:
+    """The baseline state lives per stream at native rate (METHODS §6.2), so a run
+    that exports nothing on a tiling declares no grid, and the field is None
+    rather than a disabled stage: a grid has no default period to fall back on."""
+    without = copy.deepcopy(analysis_dict)
+    del without["output_grid"]
+    config = AnalysisConfig.model_validate(without)
+    assert config.output_grid is None
+
+
+def test_a_coarse_grid_no_longer_constrains_the_shortest_window(
+    analysis_dict: dict[str, Any],
+) -> None:
+    """The baseline never rolled over the grid, so the grid cannot invalidate it.
+
+    Before Phase 5 a 5 min grid with a 2 min window was refused with a message
+    about the quantile having nothing to chew on -- a rule about a product the
+    baseline does not use. Validity is now a count of readings in the window,
+    asked of the stream itself (METHODS §6.4).
+    """
+    ok = copy.deepcopy(analysis_dict)
+    ok["output_grid"]["freq"] = "5min"
+    config = AnalysisConfig.model_validate(ok)
+    assert config.output_grid is not None
+    assert config.output_grid.freq == "5min"
 
 
 # ---------------------------------------------------------------------------
@@ -169,10 +195,10 @@ def test_unknown_noise_estimator_rejected() -> None:
         DetectionConfig(noise_estimator="qn")  # type: ignore[arg-type]  # not a registered name
 
 
-def test_mad_noise_estimator_accepted() -> None:
-    """'mad' is registered (kept for comparison against the diff_mad default)."""
-    config = DetectionConfig(noise_estimator="mad")
-    assert config.noise_estimator == "mad"
+def test_mad_noise_estimator_rejected() -> None:
+    """'mad' was measured and rejected (METHODS §2.5): never better than diff_mad."""
+    with pytest.raises(ValidationError):
+        DetectionConfig(noise_estimator="mad")  # type: ignore[arg-type]  # rejected 2026-09-29
 
 
 # ---------------------------------------------------------------------------
@@ -242,3 +268,97 @@ def test_finer_support_has_no_third_value() -> None:
     """A copy is refused or made; there is no 'warn' that makes it silently."""
     with pytest.raises(ValidationError, match="finer_support"):
         AlignmentConfig(finer_support="warn")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Baseline: the count rule (METHODS §6.4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("quantile", "expected"),
+    [(0.01, 100), (0.05, 20), (0.10, 10), (0.03, 34), (0.07, 15), (0.5, 2)],
+)
+def test_min_readings_defaults_to_one_over_the_quantile(quantile: float, expected: int) -> None:
+    """ceil(1/q) per quantile, and a whole number where 1/q is one in arithmetic.
+
+    1/0.05 is 20.000000000000004 in float64; a naive ceiling would demand 21
+    readings of a window that needs 20.
+    """
+    config = BaselineConfig(windows=("2min",), quantiles=(quantile,))
+    assert config.min_readings_for(quantile) == expected
+
+
+def test_an_explicit_min_readings_applies_to_every_quantile() -> None:
+    config = BaselineConfig(windows=("2min",), quantiles=(0.01, 0.05), min_readings=30)
+    assert config.min_readings_for(0.01) == 30
+    assert config.min_readings_for(0.05) == 30
+
+
+def test_min_readings_below_two_rejected() -> None:
+    """A quantile of one reading is that reading."""
+    with pytest.raises(ValidationError, match="min_readings"):
+        BaselineConfig(windows=("2min",), quantiles=(0.05,), min_readings=1)
+
+
+def test_min_valid_fraction_is_gone(analysis_dict: dict[str, Any]) -> None:
+    """The retired knob is an unknown key now, refused like any typo (METHODS §6.4)."""
+    bad = copy.deepcopy(analysis_dict)
+    bad["baseline"]["min_valid_fraction"] = 0.5
+    with pytest.raises(ValidationError, match="min_valid_fraction"):
+        AnalysisConfig.model_validate(bad)
+
+
+# ---------------------------------------------------------------------------
+# Baseline: the method per variable (METHODS §6.5)
+# ---------------------------------------------------------------------------
+
+
+def test_baseline_methods_dispatch_on_the_method_key(analysis_dict: dict[str, Any]) -> None:
+    full = copy.deepcopy(analysis_dict)
+    full["baseline"]["methods"] = {
+        "iwas.benzene": {"method": "from_field", "instrument": "ptr"},
+        "iwas.toluene": {"method": "constant", "value": 0.0},
+        "ptr.benzene": {"method": "rolling_quantile"},
+    }
+    config = AnalysisConfig.model_validate(full)
+    assert config.baseline.method_for("iwas", "benzene") == FromFieldMethod(instrument="ptr")
+    assert config.baseline.method_for("iwas", "toluene") == ConstantMethod(value=0.0)
+    assert config.baseline.method_for("ptr", "benzene") == RollingQuantileMethod()
+
+
+def test_a_variable_not_named_in_methods_uses_the_rolling_quantile() -> None:
+    config = BaselineConfig(windows=("2min",), quantiles=(0.05,))
+    assert config.method_for("picarro", "ch4") == RollingQuantileMethod()
+
+
+@pytest.mark.parametrize("key", ["ch4", "picarro.", ".ch4", "a.b.c", "pic arro.ch4", "1x.ch4"])
+def test_method_keys_must_be_instrument_dot_variable(key: str) -> None:
+    """The shape is checked here; whether the names exist is the combined config's job."""
+    with pytest.raises(ValidationError, match="'<instrument>.<variable>'"):
+        _baseline({key: {"method": "constant", "value": 0}})
+
+
+def test_an_unregistered_baseline_method_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="method"):
+        _baseline({"a.b": {"method": "lowess"}})
+
+
+def test_from_field_needs_an_instrument_and_constant_needs_a_value() -> None:
+    with pytest.raises(ValidationError, match="instrument"):
+        _baseline({"a.b": {"method": "from_field"}})
+    with pytest.raises(ValidationError, match="value"):
+        _baseline({"a.b": {"method": "constant"}})
+
+
+def test_a_method_rejects_a_key_of_another_method() -> None:
+    """A constant with an `instrument` is a pasted-together entry, refused like any unknown key."""
+    with pytest.raises(ValidationError, match="instrument"):
+        _baseline({"a.b": {"method": "constant", "value": 0.0, "instrument": "c"}})
+
+
+def _baseline(methods: dict[str, dict[str, Any]]) -> BaselineConfig:
+    """Validate a one-window baseline config carrying ``methods`` as YAML would deliver it."""
+    return BaselineConfig.model_validate(
+        {"windows": ["2min"], "quantiles": [0.05], "methods": methods}
+    )

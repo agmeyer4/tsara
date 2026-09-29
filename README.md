@@ -6,7 +6,8 @@ campaign's archive as described by a YAML manifest, keeps every instrument on it
 own clock, computes rolling baselines, detects plume events, and fits ratios
 between species with the measurement error in *both* axes carried through to the
 answer. The output is both a catalog of discrete plume events and a continuous
-rolling state, ready for source fingerprinting and downstream receptor modeling
+record (a baseline and an enhancement at every reading, and ratios over rolling
+windows), ready for source fingerprinting and downstream receptor modeling
 (e.g. PMF).
 
 The mathematics, the rationale, and the alternatives that were rejected all live
@@ -16,7 +17,7 @@ section there before it has a caller.
 
 ## Status
 
-**Alpha — phases 1–4.6 of the roadmap are complete.** The package is
+**Alpha — phases 1–5 of the roadmap are complete.** The package is
 built one phase per review cycle, and only what is listed as done below exists.
 
 | Phase | | |
@@ -28,7 +29,7 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 4 | Alignment & pairing (one joining operation, error propagation, circular stats, output grid) | ✅ done |
 | 4.5 | One atmosphere, realized once and sampled by every instrument; a variable's `field` | ✅ done |
 | 4.6 | How support may be changed at all: one per-pair rule, a record on every column of what the join did, the borrowed share | ✅ done |
-| 5 | Baselines + continuous rolling state | planned |
+| 5 | The baseline state: a baseline and an enhancement at every reading, per stream on its own cells, a window × quantile sweep, three baseline methods, uncertainties for both | ✅ done |
 | 6 | Plume detection + nested-event bookkeeping | planned |
 | 7 | Regression (OLS / York / ODR), combined UQ, stability cube | planned |
 | 8 | Smoothing + spatiotemporal source complexes | planned |
@@ -37,11 +38,14 @@ built one phase per review cycle, and only what is listed as done below exists.
 
 So today TSARA can **manufacture a campaign with a known answer key, read a
 real one into analysis-ready streams whose values each carry the time interval
-they describe, and put any set of those variables onto a common support with
-their uncertainty propagated through the same weights**. A manufactured campaign
-holds one atmosphere that every instrument samples, so any disagreement between
-two records of one gas is the instruments' own noise, rounding and support. It cannot yet compute
-baselines, ratios, or the stability cube; there is no CLI yet (phase 9).
+they describe, put any set of those variables onto a common support with
+their uncertainty propagated through the same weights, and roll every stream
+into its continuous state: a baseline and an enhancement, with their
+uncertainties, for each reading at every point of a window × quantile sweep, on
+the stream's own cells, saved beside it**. A manufactured campaign holds one atmosphere that
+every instrument samples, so any disagreement between two records of one gas
+is the instruments' own noise, rounding and support. It cannot yet detect
+plumes, fit ratios, or build the stability cube; there is no CLI yet (phase 9).
 
 ## Install
 
@@ -87,6 +91,19 @@ for name in streams:
 
 # 4. Checkpoint the stage product.
 save_streams(streams, "demo_bundle")
+
+# 5. Roll every stream: for each reading, the baseline and the enhancement,
+#    with their uncertainties, at every point of the window x quantile sweep,
+#    on the stream's own cells. Then checkpoint that too, beside the streams.
+from tsara import load_analysis
+from tsara.baseline import baseline_states, save_state
+
+analysis = load_analysis("examples/configs/analysis_example.yaml")
+states = baseline_states(streams, analysis.baseline)
+picarro = states["picarro"]
+print(dict(picarro.sizes))
+print(sorted(v for v in picarro.data_vars if v.endswith("ch4")))
+save_state(states, "demo_bundle", analysis=analysis)
 ```
 
 ```
@@ -104,6 +121,22 @@ dimension holds each row's cell boundaries: every value describes an interval
 of air, not an instant. And two of the instruments report `ch4`: both measure
 the one methane the atmosphere holds, each through its own clock and error, and
 each variable records that in its `field` attribute.
+
+Step 5 prints, after about ninety seconds (most of it the 4 Hz analyzer's
+60 min window):
+
+```
+{'time': 10800, 'baseline_window': 3, 'baseline_quantile': 3, 'nv': 2}
+['baseline_ch4', 'ch4', 'coverage_window_ch4', 'enhancement_ch4', 'n_readings_window_ch4', 'sigma_rand_baseline_ch4', 'sigma_rand_ch4', 'sigma_rand_enhancement_ch4', 'sigma_sys_baseline_ch4', 'sigma_sys_ch4', 'sigma_sys_enhancement_ch4']
+```
+
+The state keeps the Picarro's 10 800 cells and adds the sweep as two
+dimensions; for each reading it holds the baseline, the enhancement, the
+window's count and coverage, and the sigmas of each. It also warns, once, that
+the 2 s Picarro's 2 min window holds at most 61 readings where the 1st
+percentile asks for 100, so that sweep point is blank everywhere for both of its
+gases, with the reason recorded (`METHODS.md` §6.4). The met and GPS streams have no gas and
+are skipped with a note.
 
 ## Reading your own campaign
 
@@ -176,15 +209,18 @@ that does not, each either declared in the manifest or read from a per-point
 error column the instrument reports. Components propagate separately — quadrature
 for random, weighted mean of sigmas for systematic — and every value carries a
 provenance label (`declared`, `reported`, `empirical`, `zero`, `unknown`), so a
-budget nobody stated can never be mistaken for a budget that is zero.
+budget nobody stated can never be mistaken for a budget that is zero. On a
+moving platform, declare each analyzer's precision: an estimate from the record
+itself measures the air as much as the instrument (measured on a real drive, it
+varies up to thirtyfold along the road), and a declared figure outranks it.
 (`METHODS.md` §2)
 
 **One reader seam.** A reader's entire job is `(path, loader config) → RawTable`:
 a frame on UTC nanosecond timestamps, columns still named as the raw file names
 them. Everything after that — units, QA/QC, uncertainty, assembly — is written
 once and is format-independent. New formats register themselves by name
-(`@register_reader("csv")`), the same pattern used for swappable noise and
-regression estimators. (`METHODS.md` §9.1)
+(`@register_reader("csv")`), the same pattern the baseline methods use and the
+noise and regression estimators will. (`METHODS.md` §9.1)
 
 **Files are read as they actually are.** Real archives are not
 specification-compliant, so the ICARTT reader settles disagreements by measuring
@@ -205,7 +241,24 @@ delivered on. (`METHODS.md` §10)
 **Every stage saves itself.** Each phase ships persistence for the products it
 introduces, so a long run can be inspected in a notebook, resumed after a crash,
 and audited later. A bundle is a plain directory: `bundle.json`, the resolved
-`manifest.yaml`, and one netCDF per stream under `streams/`.
+`manifest.yaml`, one netCDF per stream under `streams/`, and one baseline state
+per instrument under `baseline/` with the analysis configuration beside them.
+
+**A baseline is stated with its window.** There is no single true baseline: a
+rolling low quantile over a window of length *w* follows everything slower than
+*w* and leaves what is shorter standing as enhancement, so the window and the
+quantile are sweep dimensions of the baseline state rather than settings to get
+right. Each reading in a window counts in proportion to the share of its cell
+inside it, a window holding fewer readings than the quantile can use is blank
+with the reason recorded, and a baseline carries no CF cell method, because a
+statistic over a window stated at a cell inside it has two supports; the
+attributes say what it is instead. An instrument too sparse to see a background
+at the windows that matter has options: another instrument's baseline of the
+same field, joined onto its cells, or a declared constant. Enhancements are
+never clipped at zero, and their uncertainty follows from the reading's: where
+the reading declares none, the enhancement says `unknown` rather than borrowing
+an estimate. The noise scale plume detection quotes its thresholds in belongs to
+detection (phase 6). (`METHODS.md` §6, §2.5)
 
 ## Repository layout
 
@@ -221,8 +274,10 @@ src/tsara/
                bundles
   align/       Which variables, which cells, the one joining operation; pairing,
                auxiliary fields, output grid
+  baseline/    Windows as cells, the weighted rolling quantile, the baseline
+               methods, the baseline state, its bundle
   synthetic/   Ground-truth data generation, profiling, raw-file export
-               The three stages import core and config and never each other:
+               The four stages import core and config and never each other:
                they hand each other xarray Datasets
 docs/METHODS.md   The methods document: mathematics, rationale, rejected options
 examples/configs/    Commented YAML for every schema
@@ -238,7 +293,7 @@ reading order true.
 
 ## Notebooks
 
-The four walkthroughs are committed with their outputs, so they read on GitHub
+The five walkthroughs are committed with their outputs, so they read on GitHub
 without being run, and none needs any real data:
 
 - [`01_synthetic_data_walkthrough.ipynb`](examples/notebooks/01_synthetic_data_walkthrough.ipynb)
@@ -261,8 +316,19 @@ without being run, and none needs any real data:
   prints ✔ checks comparing TSARA with a calculation written independently from
   the definition, and ends with "Try it" changes whose outcomes were run. A
   closing scoreboard collects every check.
+- [`05_baseline_state_walkthrough.ipynb`](examples/notebooks/05_baseline_state_walkthrough.ipynb)
+  — the continuous baseline state: one weighted quantile at every reading (the
+  window in time, the weights, the quantile), three baselines on one record
+  against the true background (what a window follows and what it absorbs),
+  the count rule and the edge of a record, the width rule on overlapping
+  running means, a canister adopting a PTR's baseline as three calls and the
+  offset it inherits, a constant, the uncertainty of a baseline against random
+  draws and a manufactured gain and offset, and the state saved, reloaded and
+  joined like a stream. Same interactive shape as 04: parameters cells, ✔
+  checks, "Try it" notes whose every prediction is run as a parameter
+  override before the notebook is committed, a scoreboard.
 
-One companion runs on the real campaign archive instead, and is therefore
+Two companions run on the real campaign archive instead, and are therefore
 committed **without** outputs:
 
 - [`04b_alignment_real_data.ipynb`](examples/notebooks/04b_alignment_real_data.ipynb)
@@ -273,6 +339,12 @@ committed **without** outputs:
   measured under. Set `TSARA_ARCHIVE` to the directory holding the archive's `2024/` and
   `2026/` trees before starting Jupyter; without it the first cell stops and
   says so.
+- [`05b_baseline_state_real_data.ipynb`](examples/notebooks/05b_baseline_state_real_data.ipynb)
+  — notebook 05's operations on the 2024-07-18 drive and the ten drive days:
+  the methane baselines at three windows, the membership rule measured, the
+  canister's windows, its adopted baseline and the offset that comes with it;
+  its ledger re-measures the archive numbers `docs/METHODS.md` §6 and §2.5
+  quote. Same gate as 04b.
 
 ## Development
 
@@ -281,8 +353,9 @@ ruff check . && ruff format --check .
 mypy --strict src tests
 pytest --cov=tsara --cov-branch     # suite; the 100% line+branch floor fails the run
 TSARA_ARCHIVE=/path/to/Data TSARA_NOTEBOOKS=1 pytest tests/test_notebooks.py
-                            # opt-in: executes notebooks 04b (against the archive)
-                            # and 04, and requires every check and ledger row to hold
+                            # opt-in: executes notebooks 04b and 05b (against the
+                            # archive) and 04 and 05, and requires every check and
+                            # ledger row to hold
 ```
 
 The first three are what continuous integration runs on every pull request

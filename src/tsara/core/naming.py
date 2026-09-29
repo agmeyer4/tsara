@@ -9,8 +9,8 @@ agree — exactly — on what a species' random-error variable is called.
 
 Before this module the agreement was two f-strings in two packages that
 happened to match. That is the kind of coupling that survives review and
-then breaks silently: rename one and nothing fails until a baseline stage
-quietly finds no sigma and falls back to an empirical estimate, which is a
+then breaks silently: rename one and nothing fails until detection quietly
+finds no sigma and falls back to an empirical noise estimate, which is a
 *plausible* answer rather than an error.
 
 The composition that has to keep working
@@ -30,18 +30,27 @@ if TYPE_CHECKING:  # pragma: no cover
 
 __all__ = [
     "ALTITUDE_COORD",
+    "BASELINE_PREFIX",
+    "BINNED_ATTR",
+    "BORROWED_ATTR",
     "BORROWED_PREFIX",
     "BOUNDS_ATTR",
     "BOUNDS_DIM",
     "CELL_METHODS_ATTR",
     "COVERAGE_PREFIX",
+    "COVERAGE_WINDOW_PREFIX",
     "DISPERSION_SUFFIX",
+    "ENHANCEMENT_PREFIX",
+    "INSTRUMENT_ATTR",
+    "JOIN_RECORD_ATTRS",
     "LATITUDE_COORD",
     "LOD_COUNT_KEY",
     "LONGITUDE_COORD",
     "N_READINGS_PREFIX",
+    "N_READINGS_WINDOW_PREFIX",
     "RAW_TIME_START_COLUMN",
     "RAW_TIME_STOP_COLUMN",
+    "READINGS_ATTR",
     "RESULTANT_LENGTH_SUFFIX",
     "SIGMA_RAND_PREFIX",
     "SIGMA_SYS_PREFIX",
@@ -58,12 +67,18 @@ __all__ = [
     "TIME_BOUNDS_VAR",
     "TIME_COORD",
     "TIME_SHIFT_ATTR",
+    "TRANSFORM_ATTR",
+    "WIDTH_RATIO_ATTR",
+    "baseline_name",
     "borrowed_name",
     "coverage_name",
+    "coverage_window_name",
+    "enhancement_name",
     "is_circular",
     "is_companion_name",
     "is_sigma_name",
     "n_readings_name",
+    "n_readings_window_name",
     "sigma_rand_name",
     "sigma_sys_name",
 ]
@@ -296,6 +311,18 @@ BORROWED_PREFIX = "borrowed_"
 RESULTANT_LENGTH_SUFFIX = "_resultant_length"
 DISPERSION_SUFFIX = "_dispersion"
 
+#: What the baseline state writes beside a variable (``docs/METHODS.md`` §6.2,
+#: §6.6). The baseline and the enhancement are variables in their own right --
+#: each has units, a field, and is joined like any reading -- so they carry
+#: prefixes of their own and are NOT companions. The window's count and
+#: coverage qualify the baseline and are companions by the existing
+#: ``n_readings_`` / ``coverage_`` prefixes, spelled with ``window`` so that a
+#: later join's own ``n_readings_baseline_<x>`` cannot be mistaken for them.
+BASELINE_PREFIX = "baseline_"
+ENHANCEMENT_PREFIX = "enhancement_"
+N_READINGS_WINDOW_PREFIX = "n_readings_window_"
+COVERAGE_WINDOW_PREFIX = "coverage_window_"
+
 
 def n_readings_name(variable: str) -> str:
     """Return the name of a variable's contributing-cell count.
@@ -345,14 +372,80 @@ def borrowed_name(variable: str) -> str:
     return f"{BORROWED_PREFIX}{variable}"
 
 
+def baseline_name(variable: str) -> str:
+    """Return the name of a variable's baseline in the baseline state.
+
+    Parameters
+    ----------
+    variable : str
+        Canonical variable name, e.g. ``'ch4'``.
+
+    Returns
+    -------
+    str
+        e.g. ``'baseline_ch4'``.
+    """
+    return f"{BASELINE_PREFIX}{variable}"
+
+
+def enhancement_name(variable: str) -> str:
+    """Return the name of a variable's enhancement in the baseline state.
+
+    Parameters
+    ----------
+    variable : str
+        Canonical variable name, e.g. ``'ch4'``.
+
+    Returns
+    -------
+    str
+        e.g. ``'enhancement_ch4'``.
+    """
+    return f"{ENHANCEMENT_PREFIX}{variable}"
+
+
+def n_readings_window_name(variable: str) -> str:
+    """Return the name of the count of readings in each baseline window of a variable.
+
+    Parameters
+    ----------
+    variable : str
+        Canonical variable name, e.g. ``'ch4'``.
+
+    Returns
+    -------
+    str
+        e.g. ``'n_readings_window_ch4'``.
+    """
+    return f"{N_READINGS_WINDOW_PREFIX}{variable}"
+
+
+def coverage_window_name(variable: str) -> str:
+    """Return the name of the coverage of each baseline window of a variable.
+
+    Parameters
+    ----------
+    variable : str
+        Canonical variable name, e.g. ``'ch4'``.
+
+    Returns
+    -------
+    str
+        e.g. ``'coverage_window_ch4'``.
+    """
+    return f"{COVERAGE_WINDOW_PREFIX}{variable}"
+
+
 def is_companion_name(name: str) -> bool:
     """Return whether a name describes another variable rather than being one.
 
     Five families of column exist only to qualify the column they are named
     after: the two uncertainty components, the contributing-cell count, the
     coverage fraction, the borrowed share, and the two an angular variable
-    carries instead of a sigma. None is a measurement in its own right, and
-    each is produced automatically alongside its parent.
+    carries instead of a sigma. None is a measurement in its own right, and each is
+    produced automatically alongside its parent. A baseline and an
+    enhancement are *not* companions: each is a value with units and a
+    field, joined like any reading (§6.2).
 
     The distinction is load-bearing rather than tidy. A stage that selects
     "every variable" and gets these too will bin a coverage fraction as though
@@ -378,6 +471,35 @@ def is_companion_name(name: str) -> bool:
         or name.endswith((RESULTANT_LENGTH_SUFFIX, DISPERSION_SUFFIX))
     )
 
+
+#: What a join records on every column it writes (``docs/METHODS.md`` §11.2,
+#: §11.2.4): which instrument the column came from and whether this call
+#: averaged it; then the worst thing the join did to any reading behind the
+#: column, in a word, the largest reading-to-cell width ratio among the
+#: readings that formed a value, the share of the column's covered time
+#: whose value rests on air outside its cell, and how many distinct readings
+#: stand behind the column's rows.
+#:
+#: Here rather than beside the join, because a second stage reads them: an
+#: adopted baseline (§6.5) carries the record of the join that made it, and
+#: the stages never import each other. Two spellings of one record is the
+#: coupling this module exists to remove.
+INSTRUMENT_ATTR = "tsara_instrument"
+BINNED_ATTR = "tsara_binned"
+TRANSFORM_ATTR = "tsara_support_transform"
+WIDTH_RATIO_ATTR = "tsara_width_ratio_max"
+BORROWED_ATTR = "tsara_borrowed_share"
+READINGS_ATTR = "tsara_n_readings"
+
+#: The join's record, as one tuple, for a stage that carries it forward.
+JOIN_RECORD_ATTRS = (
+    INSTRUMENT_ATTR,
+    BINNED_ATTR,
+    TRANSFORM_ATTR,
+    WIDTH_RATIO_ATTR,
+    BORROWED_ATTR,
+    READINGS_ATTR,
+)
 
 #: Attr key under which a reader reports per-raw-column counts of samples
 #: masked as out-of-detection-range.
