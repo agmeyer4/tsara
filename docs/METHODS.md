@@ -484,7 +484,9 @@ traffic. The floor never acted on this drive (every record is written in
 steps far finer than its noise). Declaring each analyzer's precision in the
 manifest puts a declared figure above the estimate on the ladder; what
 detection should mean by noise on a moving platform, the instrument's
-precision or the local variability, is Phase 6's first question (§6.8).
+precision or the local variability, is Phase 6's first question (§6.8). The
+table is re-measured by Phase 6's real-data notebook, where the estimator
+returns; notebook 05b re-measures only the one noise figure §6.5 uses.
 
 Measured against the generator (rule: the example campaign's 2 s Picarro
 with its sigma columns removed, `diff_mad` over 10 min, the ratio of the

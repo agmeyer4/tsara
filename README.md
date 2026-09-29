@@ -341,10 +341,9 @@ committed **without** outputs:
 - [`05b_rolling_state_real_data.ipynb`](examples/notebooks/05b_rolling_state_real_data.ipynb)
   — notebook 05's operations on the 2024-07-18 drive and the ten drive days:
   the methane baselines at three windows, the membership rule measured, the
-  canister's windows, its adopted baseline and the offset that comes with it,
-  and what a noise scale estimated from the record follows on a drive (why it
-  moved to Phase 6); its ledger re-measures the archive numbers
-  `docs/METHODS.md` §6 and §2.5 quote. Same gate as 04b.
+  canister's windows, its adopted baseline and the offset that comes with it;
+  its ledger re-measures the archive numbers `docs/METHODS.md` §6 and §2.5
+  quote. Same gate as 04b.
 
 ## Development
 
