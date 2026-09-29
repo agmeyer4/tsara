@@ -208,7 +208,10 @@ that does not, each either declared in the manifest or read from a per-point
 error column the instrument reports. Components propagate separately — quadrature
 for random, weighted mean of sigmas for systematic — and every value carries a
 provenance label (`declared`, `reported`, `empirical`, `zero`, `unknown`), so a
-budget nobody stated can never be mistaken for a budget that is zero.
+budget nobody stated can never be mistaken for a budget that is zero. On a
+moving platform, declare each analyzer's precision: an estimate from the record
+itself measures the air as much as the instrument (measured on a real drive, it
+varies up to thirtyfold along the road), and a declared figure outranks it.
 (`METHODS.md` §2)
 
 **One reader seam.** A reader's entire job is `(path, loader config) → RawTable`:

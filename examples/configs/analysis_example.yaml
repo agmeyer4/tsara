@@ -59,7 +59,8 @@ baseline:
   quantiles: [0.01, 0.05, 0.10]
   # Validity is a COUNT of readings in the window, tied to the quantile
   # (§6.4): null means ceil(1/q) for each quantile -- 100, 20 and 10 here --
-  # below which a q-quantile is the lowest reading alone. An integer applies
+  # the count at which a window holds, on average, one reading below its
+  # q-quantile; with fewer it usually holds none that low. An integer applies
   # to every quantile. A thinner window is blank, with its count recorded.
   min_readings: null
   # How each variable's baseline is built (§6.5), keyed instrument.variable;

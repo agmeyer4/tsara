@@ -894,6 +894,45 @@ decided: an event's ratio is judged across the windows at which that event is
 found; a ratio flat across them belongs to the source, and one that drifts is
 mixing with another scale. That is the stability cube (§5) read per event.
 
+**Measured (2026-09-29): the parent's ratio is the hard one.** Event intervals
+from the answer key, so that detection is set aside. Rule: 12 h of generated
+air at 1 s, seed 5; methane at 1900 ppb with 0.7 ppb of noise and ethane at
+1.5 ppb with 0.03 ppb; a landfill (0.6 plumes an hour, Gaussian σ 8 min,
+median 60 ppb methane, no ethane) and a gas line (10 blips an hour,
+exponentially modified Gaussian 6 s / 12 s, median 120 ppb, ethane/methane
+exactly 0.050); the 5th percentile at 2 min, 20 min and 2 h; a blip's
+interval from 18 s before its peak to 54 s after, a landfill plume's ± 12 min
+around its peak; least-squares slope of Δethane on Δmethane. 270 blips, 40
+of them inside a landfill plume (over 20 ppb of landfill at the blip); 7
+landfill plumes, each with 4 to 12 blips inside.
+
+| quantity | 2 min | 20 min | 2 h | truth |
+|---|---|---|---|---|
+| blip: slope in its own interval, clean air (median) | 0.050 | 0.050 | 0.050 | 0.050 |
+| blip: slope in its own interval, inside a landfill plume (median) | 0.049 | 0.050 | 0.050 | 0.050 |
+| blip: single-reading ratio at its peak, inside a landfill plume (median) | 0.049 | 0.043 | 0.036 | 0.050 |
+| landfill: slope over its interval, all readings (range over 7) | 0.0491–0.0502 | 0.0462–0.0510 | 0.0335–0.0464 | 0 |
+
+A slope inside the child's own interval does not depend on the window: a
+parent nearly flat across 70 s moves the intercept, not the slope. A
+single-reading ratio does, and so would a receptor model's row. Fitting the
+**parent** over its interval measures the **children**, at every window,
+because they are its largest excursions. Two readings of the state recover
+the parent, both measured over the same seven plumes. The band between two
+baselines, since at every reading Δ at the long window = (baseline at the
+short window − baseline at the long window) + Δ at the short window,
+exactly: its slope is −0.0008 to +0.0018. And one long baseline with the
+children's readings masked (10 to 29 % of the parent's readings): −0.0005 to
++0.0007. The second needs the children found first, which needs a reference
+that follows the parent (a short window, or a local fit). Both fail the same
+way on a cluster of short plumes, which a short window absorbs as it would
+one long plume (notebook 05 §2: four blips within three minutes lift the
+2 min baseline 23 ppb above the true background): scale is not source.
+Neither is a Phase-5 decision, since the rolling state holds the baseline at
+every window and both read it. A candidate division, not decided: masked
+children for the event catalog, bands for the continuous state and receptor
+rows.
+
 ### 6.2 The continuous rolling state lives beside the readings **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
 
 For every reading of every instrument and every point of the sweep, the rolling
@@ -934,9 +973,16 @@ proportion to the share of its own cell lying inside the window**, which is the
 interval model and the weight every join already uses, so the baseline is a
 weighted quantile. The width rule of every join holds here too: a reading at
 least `COPY_RATIO` = 2 times as wide as the window is not stood on it
-(§11.2.4). In practice the count of §6.4 refuses those windows first, because a
-window shorter than half a reading touches at most two readings; the width rule is the backstop for a quantile such as the median, whose required count is
-small. A window is a duration, so on a moving platform it is a stretch of
+(§11.2.4). When readings abut, the count of §6.4 refuses those windows
+first: a window narrower than a reading and centred on it touches only that
+reading, and the count is never below two, at any quantile. The width rule
+decides only when readings **overlap**, a running mean logged more often
+than its length, where the count is no protection: a 60 s running mean
+logged every second puts 89 readings in a 30 s window (measured 2026-09-29),
+which passes the 5th and 10th percentiles' counts, and every one of them is
+twice as wide as the window. TSARA infers one cadence per file as a
+reading's width, so readings abut up to jitter; overlapping cells come from a
+declared width longer than the cadence or from a stop column. A window is a duration, so on a moving platform it is a stretch of
 road as much as an interval of air: the cell model's limitation (CLAUDE.md,
 open flags) is inherited here, not resolved.
 
@@ -1026,19 +1072,52 @@ window's reading count depends on it.
 ### 6.4 When a window is valid: a count **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
 
 **Validity is a count of readings, `min_readings`, with a stated relation to
-the quantile.** With *N* readings and linear interpolation, a *q*-quantile lies
-between the two lowest readings whenever (*N* − 1)·*q* < 1; at *q* = 0.05 that
-is any window of twenty readings or fewer, so the default follows 1/*q*:
+the quantile.** A *q*-quantile is the value a fraction *q* of the air falls
+below, so a window of *N* readings holds, on average, *N*·*q* readings below
+it. **At *N* = ⌈1/*q*⌉ that is one reading**: the count at which a window can
+be expected to reach the quantile at all. With fewer it usually holds nothing
+that low (eleven readings hold none below their 1st percentile 89.5 % of the
+time, 0.99¹¹), and whatever it reports is too high. So
 `BaselineConfig.min_readings` is `null` by default, meaning ⌈1/*q*⌉ for each
-quantile of the sweep, and an integer applies to every quantile. Under the
-Hazen positions of §6.3 the guarantee reads: at *N* = 1/*q* the *q*-quantile
-sits halfway between the two lowest readings, below that it slides onto the
-lowest reading, and at *N* ≤ 1/(2*q*) it *is* the minimum. The engine
+quantile of the sweep: 100 readings for the 1st percentile, 20 for the 5th,
+10 for the 10th. An integer applies to every quantile. Under the Hazen
+positions of §6.3 the same count reads: at *N* = 1/*q* the *q*-quantile sits
+halfway between the two lowest readings, below that it slides onto the
+lowest reading, and at *N* ≤ 1/(2*q*) it *is* the minimum. (An earlier
+version of this paragraph derived the count from numpy's default
+interpolation, (*N* − 1)·*q*, which TSARA does not use; corrected
+2026-09-29.)
+
+Measured, the count is where the estimate becomes right on average (rule:
+4 000 windows of *N* independent standard-normal readings per row, each row
+from its own generator seeded 7; numpy's Hazen quantile, which is TSARA's
+with equal weights; "lands at" is the true cumulative probability of the
+estimate, median over the windows, with the 10th–90th percentiles; the last
+column is the median distance above the true quantile):
+
+| asked for *q* | *N* | lands at | above the true quantile |
+|---|---|---|---|
+| 0.01 | 11 | 0.061 (0.009–0.189) | +0.78 σ |
+| 0.01 | 20 | 0.034 (0.005–0.110) | +0.50 σ |
+| 0.01 | **100** (default) | **0.010** (0.003–0.028) | +0.02 σ |
+| 0.05 | 11 | 0.064 (0.010–0.194) | +0.12 σ |
+| 0.05 | **20** (default) | **0.052** (0.014–0.136) | +0.02 σ |
+| 0.10 | **10** (default) | **0.106** (0.028–0.254) | +0.04 σ |
+
+Below the count the estimate slides toward the window's minimum, whose
+median lands at 1 − 0.5^(1/*N*), whatever *q* was asked: a "1st percentile" of
+eleven readings is, on the median, a 6th. At the count single windows still
+scatter widely (the 10th–90th columns); that is the baseline's own sampling
+uncertainty (§6.7). The readings here are independent; correlated air
+behaves like fewer readings, so on real air the count is a floor. The engine
 applies the definition to every window and reports its count, coverage and
 whether a contributing reading was at least `COPY_RATIO` times as wide as the
 window; the rolling state applies the rule and blanks (§6.6). Every
 window records `n_readings_` and `coverage_` as every join does. One warning
-per stream at run time names the windows too short for the quantile. This
+per stream at run time names the sweep points blank at every reading, with
+the rule that blanked each: the count (with the most readings any window
+held), the width rule of §6.3, either, or, for an adopted baseline, the
+donor's blank. This
 replaces `BaselineConfig.min_valid_fraction` and the `AnalysisConfig` validator
 that compares the shortest window with the output grid (both removed in
 Phase 5). Confirmed with the Phase-5 plan (2026-09-28): a window that fails
@@ -1068,7 +1147,7 @@ one fill in the window. None of them is what a quantile needs; a count is.
 
 Because a baseline is not a single thing (§6.1), a sparse instrument does not
 get one policy. Each option is a baseline method registered by name, like the
-file readers and the noise estimators, and chosen **per variable** in the
+file readers, and chosen **per variable** in the
 analysis configuration. Whether the method itself becomes a sweep axis is left
 until a sweep needs it.
 
@@ -1079,7 +1158,11 @@ until a sweep needs it.
   `field` (§1.6), at the same window and quantile, joined onto this
   instrument's cells. The atmosphere has one benzene background, and a PTR-MS
   samples it every second beside the canister. It fails exactly when the two
-  instruments disagree in calibration. Built as three calls, because the
+  instruments disagree in calibration. It also hands the adopter the
+  **donor's** quantile offset: a low quantile of noisy readings sits about
+  *z_q*·σ below the true background (§6.8), with σ the donor's noise, so every
+  enhancement of a quieter adopter is lifted by that much (measured
+  2026-09-29, below). Built as three calls, because the
   stages hand each other Datasets and never import each other: roll the
   donor, join its swept baseline onto the adopter's cells with
   `bin_streams_onto_cells` (§11.2, *swept variables*), roll the adopter with
@@ -1092,6 +1175,14 @@ until a sweep needs it.
   the concentration. A slope fitted inside an event loses nothing by it
   (§6.1), and a receptor model run on concentrations rather than enhancements
   is common practice, with the background appearing as a factor of its own.
+  A non-zero constant is a claim about the background, and it carries no
+  uncertainty of its own: its error, the same at every reading, shifts every
+  enhancement and enters no budget. An optional sigma for it is a declaration
+  rather than a model, and is not built until a configuration uses a
+  non-zero constant. A constant is stored at every sweep point so that every
+  variable has one shape, and its spread across the sweep is therefore zero
+  by construction, not by stability: the stability cube of Phase 7 has to
+  read `tsara_baseline_method` before it reads that spread as agreement.
 
 The method is chosen per variable under `baseline.methods`, keyed
 `<instrument>.<variable>` because a variable's name is unique per instrument
@@ -1116,6 +1207,26 @@ counting fills whose midpoints fall inside, the fill itself included:
 A canister species has a `rolling_quantile` baseline only at windows of hours,
 while the 1 s analyzers beside it have baselines at minutes. What stands in at
 the scales it cannot see is a choice made per variable, not a rule.
+
+**What `from_field` hands the adopter, measured (2026-09-29).** On generated
+air (notebook 05 §5's campaign: a PTR at 1 s with 0.02 ppb of noise beside a
+canister with 0.01 ppb, the 60 min 5th percentile adopted), the canister's
+enhancement over the 22 fills whose true enhancement is under 0.01 ppb has a
+median of +0.031 ppb, against a predicted 1.645 × 0.02 = +0.033: the donor's
+offset, landed on the adopter. With 0.2 ppb of PTR noise it is +0.27 ppb on a
+0.5 ppb background. On the 2024-07-18 drive (rule: the PTR-MS's benzene rolled
+at 10 and 60 min, q = 0.05, its baseline joined onto the 32 iWAS fills): the
+PTR's noise estimate (§2.5, `diff_mad` over 10 min, median) is 0.032 ppb, so
+its 5th percentile sits about 0.053 ppb below its background; its 60 min
+baseline is negative at 65 % of its readings; and the canister's lowest fill
+all day is 0.040 ppb. Every canister enhancement therefore carries about
++0.05 ppb of the PTR's noise, a quarter to a half of a clean-ish fill. The
+calibration assumption itself held on that drive on average: the PTR's
+readings averaged over each fill against the fill have a median difference
+of +0.000 ppb (ratio 1.01) over the 32 fills, the disagreement sitting in
+plumes (least-squares slope of canister on PTR 0.73, plausibly timing across
+sharp plumes; not measured). The offset is §6.8's quantile-offset correction
+applied with the donor's σ; how that σ reaches the adopter is Phase 6's.
 
 ### 6.6 What a baseline records **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
 
@@ -1288,7 +1399,11 @@ Phase-7 regression that follows.
   $-z_q\,\sigma$ (≈ 1.64σ at q = 0.05, Gaussian), so thresholds are applied
   to the offset-corrected enhancement; otherwise the effective threshold
   silently depends on the swept quantile and false-positive rates differ
-  across sweep points. Exact segmentation details specified in Phase 6.
+  across sweep points. For an adopted (`from_field`) baseline σ here is the
+  **donor's**, not the adopter's: the offset came with the donor's readings
+  (§6.5, measured). Carrying the donor's noise scale onto the adopter's cells
+  in the same join is the leading candidate for supplying it; left to the
+  Phase-6 scoping on 2026-09-29. Exact segmentation details specified in Phase 6.
   Nested events (an event at a short baseline window inside an event at a
   longer one) are recorded with parent–child links in the catalog —
   detection-level bookkeeping only; no area mathematics (§7). How windows

@@ -249,6 +249,11 @@ class ConstantMethod(_StrictModel):
     the intercept and not the slope (METHODS.md §6.1), and a receptor model
     run on concentrations rather than enhancements is common practice, with
     the background appearing as a factor of its own.
+
+    A non-zero value is a claim about the background and carries no
+    uncertainty of its own: its error shifts every enhancement alike and
+    enters no budget (METHODS.md §6.5). An optional sigma for it waits for a
+    configuration that uses a non-zero constant.
     """
 
     method: Literal["constant"] = "constant"
@@ -314,9 +319,10 @@ class BaselineConfig(_StrictModel):
             "How many readings a window must hold for its baseline to be "
             "reported at a quantile; a thinner window is blank, with the count "
             "recorded beside it. `null` (the default) means ceil(1/q) for each "
-            "quantile q: with fewer readings than that, a q-quantile is set by "
-            "the lowest reading alone, and at exactly 1/q it is a blend of the "
-            "two lowest (METHODS.md §6.4). An integer applies to every quantile. "
+            "quantile q: the count at which a window holds, on average, one "
+            "reading below its q-quantile. With fewer it usually holds none that "
+            "low, so what it reports is too high (METHODS.md §6.4). An integer "
+            "applies to every quantile. "
             "A count rather than a fraction, because a fraction never said what "
             "it was a fraction of, and its three possible denominators disagree "
             "completely on real records."
@@ -344,9 +350,9 @@ class BaselineConfig(_StrictModel):
         -------
         int
             ``min_readings`` when set; otherwise the smallest integer not
-            below 1/q, the count at which the q-quantile is still a blend of
-            the two lowest readings rather than the minimum alone (METHODS.md
-            §6.4). Rounded before the ceiling so that a quantile whose
+            below 1/q, the count at which a window holds, on average, one
+            reading below its q-quantile (METHODS.md §6.4). Rounded before
+            the ceiling so that a quantile whose
             reciprocal is a whole number in arithmetic but not in float64
             (1/0.05 is 20.000000000000004) gives that whole number.
         """
