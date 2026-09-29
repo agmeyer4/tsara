@@ -316,14 +316,16 @@ without being run, and none needs any real data:
   the definition, and ends with "Try it" changes whose outcomes were run. A
   closing scoreboard collects every check.
 - [`05_rolling_state_walkthrough.ipynb`](examples/notebooks/05_rolling_state_walkthrough.ipynb)
-  — the continuous rolling state: one weighted quantile by hand, three
-  baselines on one record against the true background (what a window follows
-  and what it leaves standing), the count rule and the edge of a record, the
-  width rule, a canister adopting a PTR's baseline as three calls, a constant,
-  the uncertainty of a baseline against random draws and a manufactured gain
-  and offset, the noise scale's ladder, floor and plume-dense bias, and the
-  state saved, reloaded and joined like a stream. Same interactive shape as 04:
-  parameters cells, ✔ checks, "Try it" notes, a scoreboard.
+  — the continuous rolling state: one weighted quantile at every reading (the
+  window in time, the weights, the quantile), three baselines on one record
+  against the true background (what a window follows and what it absorbs),
+  the count rule and the edge of a record, the width rule on overlapping
+  running means, a canister adopting a PTR's baseline as three calls and the
+  offset it inherits, a constant, the uncertainty of a baseline against random
+  draws and a manufactured gain and offset, and the state saved, reloaded and
+  joined like a stream. Same interactive shape as 04: parameters cells, ✔
+  checks, "Try it" notes whose every prediction is run as a parameter
+  override before the notebook is committed, a scoreboard.
 
 Two companions run on the real campaign archive instead, and are therefore
 committed **without** outputs:
