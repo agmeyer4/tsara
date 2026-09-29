@@ -10,7 +10,7 @@ it at all. Those answers live in :mod:`tsara.core.support`; this module only
 builds the windows.
 
 This module is the vocabulary of the subpackage, and holds its error class;
-:mod:`tsara.rolling.quantile` is the operation spoken in it.
+:mod:`tsara.baseline.quantile` is the operation spoken in it.
 """
 
 from __future__ import annotations
@@ -20,11 +20,11 @@ import pandas as pd
 from tsara.core.exceptions import TsaraError
 from tsara.core.support import CellBounds
 
-__all__ = ["TsaraRollingError", "duration_ns", "window_cells"]
+__all__ = ["TsaraBaselineError", "duration_ns", "window_cells"]
 
 
-class TsaraRollingError(TsaraError):
-    """Raised when a rolling statistic cannot be computed as asked.
+class TsaraBaselineError(TsaraError):
+    """Raised when a baseline, or the rolling statistic behind one, cannot be computed as asked.
 
     Its own type because the failures are about *windows and sweeps* rather
     than about reading or joining data: a window of no duration, a quantile
@@ -44,7 +44,7 @@ def window_cells(cells: CellBounds, window_ns: int) -> CellBounds:
     Parameters
     ----------
     cells : CellBounds
-        The cells to centre windows on: a stream's own, for the rolling state
+        The cells to centre windows on: a stream's own, for the baseline state
         (§6.2), or any other cells a caller wants a statistic evaluated at.
     window_ns : int
         The window's duration in nanoseconds; strictly positive.
@@ -56,11 +56,11 @@ def window_cells(cells: CellBounds, window_ns: int) -> CellBounds:
 
     Raises
     ------
-    TsaraRollingError
+    TsaraBaselineError
         If the window has no duration.
     """
     if window_ns <= 0:
-        raise TsaraRollingError(
+        raise TsaraBaselineError(
             f"A window must have a positive duration, got {window_ns} ns: a window of "
             "no duration holds no readings and a quantile over it is undefined."
         )
@@ -87,13 +87,13 @@ def duration_ns(spec: str) -> int:
 
     Raises
     ------
-    TsaraRollingError
+    TsaraBaselineError
         If the string is not a duration, or is not strictly positive.
     """
     try:
         value = pd.Timedelta(spec)
     except (ValueError, TypeError) as exc:
-        raise TsaraRollingError(f"'{spec}' is not a duration: {exc}") from exc
+        raise TsaraBaselineError(f"'{spec}' is not a duration: {exc}") from exc
     if pd.isna(value) or value <= pd.Timedelta(0):
-        raise TsaraRollingError(f"A window must be a positive duration, got '{spec}'.")
+        raise TsaraBaselineError(f"A window must be a positive duration, got '{spec}'.")
     return int(value.value)

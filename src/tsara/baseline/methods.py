@@ -42,6 +42,8 @@ from typing import TYPE_CHECKING, Protocol, TypeVar
 
 import numpy as np
 
+from tsara.baseline.quantile import rolling_quantile
+from tsara.baseline.windows import TsaraBaselineError, window_cells
 from tsara.config.analysis import BaselineMethod, ConstantMethod, FromFieldMethod
 from tsara.core.naming import (
     BASELINE_PREFIX,
@@ -52,8 +54,6 @@ from tsara.core.naming import (
 )
 from tsara.core.support import CellBounds, same_cells, stream_cells
 from tsara.core.timebase import NS_PER_S
-from tsara.rolling.quantile import rolling_quantile
-from tsara.rolling.windows import TsaraRollingError, window_cells
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Callable
@@ -80,7 +80,7 @@ __all__ = [
 ]
 
 
-#: The two sweep dimensions of the rolling state (``docs/METHODS.md`` §6.2).
+#: The two sweep dimensions of the baseline state (``docs/METHODS.md`` §6.2).
 WINDOW_DIM = "baseline_window"
 QUANTILE_DIM = "baseline_quantile"
 
@@ -281,13 +281,13 @@ def get_baseline_method(name: str) -> BaselineMethodFunction:
 
     Raises
     ------
-    TsaraRollingError
+    TsaraBaselineError
         If nothing is registered under ``name``; the message lists what is.
     """
     try:
         return _METHODS[name]
     except KeyError:
-        raise TsaraRollingError(
+        raise TsaraBaselineError(
             f"No baseline method registered as '{name}'. Available: "
             f"{list(available_baseline_methods())}. A method must have been imported to "
             "be registered."
@@ -388,14 +388,14 @@ def baseline_from_field(request: BaselineRequest, /) -> BaselineResult:
 
     Raises
     ------
-    TsaraRollingError
+    TsaraBaselineError
         If no product was provided, or the product is not the join described.
     """
     method = request.method
     assert isinstance(method, FromFieldMethod)  # the registry name guarantees it
     where = f"'{request.variable}' on '{request.instrument}'"
     if request.provided is None:
-        raise TsaraRollingError(
+        raise TsaraBaselineError(
             f"{where} adopts its baseline from '{method.instrument}' (from_field), and no "
             "product was provided. Roll the donor stream first, join its baseline onto this "
             "stream's cells with tsara.align.bin_streams_onto_cells(donor_state, "
@@ -405,7 +405,7 @@ def baseline_from_field(request: BaselineRequest, /) -> BaselineResult:
     provided = request.provided
     stage = provided.attrs.get("tsara_stage")
     if stage != "binned":
-        raise TsaraRollingError(
+        raise TsaraBaselineError(
             f"The product provided for {where} has tsara_stage '{stage}', not 'binned'; "
             "a from_field baseline is the donor's baseline joined onto this stream's cells."
         )
@@ -418,14 +418,14 @@ def baseline_from_field(request: BaselineRequest, /) -> BaselineResult:
         and provided[name].attrs.get("tsara_instrument") == method.instrument
     ]
     if len(columns) != 1:
-        raise TsaraRollingError(
+        raise TsaraBaselineError(
             f"The product provided for {where} holds {len(columns)} baseline column(s) of "
             f"field '{field}' from '{method.instrument}' ({columns}); exactly one is adopted. "
             f"Its columns: {sorted(map(str, provided.data_vars))}."
         )
     column = columns[0]
     if not same_cells(stream_cells(provided, "the provided product"), request.readings):
-        raise TsaraRollingError(
+        raise TsaraBaselineError(
             f"The product provided for {where} does not sit on this stream's cells; a "
             "from_field baseline is joined onto exactly the cells of the stream that adopts "
             "it (target=stream_cells(stream, instrument))."
@@ -477,13 +477,13 @@ def _check_sweep(provided: xr.Dataset, request: BaselineRequest, where: str) -> 
     }
     for dim, values in wanted.items():
         if dim not in provided.coords:
-            raise TsaraRollingError(
+            raise TsaraBaselineError(
                 f"The product provided for {where} carries no '{dim}' coordinate; a "
                 "from_field baseline is a swept baseline joined onto this stream's cells."
             )
         found = np.asarray(provided[dim].values, dtype=np.float64)
         if found.shape != values.shape or not np.array_equal(found, values):
-            raise TsaraRollingError(
+            raise TsaraBaselineError(
                 f"The product provided for {where} was rolled at {dim} = {found.tolist()}, "
                 f"but this configuration sweeps {values.tolist()}; the donor and the adopter "
                 "must be rolled at the same sweep (METHODS §6.5)."

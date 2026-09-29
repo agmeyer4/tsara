@@ -3,7 +3,7 @@
 The geometry a join needs *before* it averages anything -- a stream's cells,
 their widths and spacing, the per-pair width ratio and the copy line, whether
 two target cells overlap -- lives in :mod:`tsara.core.support`, because the
-rolling stage asks the same questions of its windows and the stages never
+baseline stage asks the same questions of its windows and the stages never
 import each other. What stays here is what only a *product* can be asked:
 how many distinct readings stand behind a set of target cells and how many of
 them formed more than one (``docs/METHODS.md`` §11.4.1), and whether a

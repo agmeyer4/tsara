@@ -10,8 +10,8 @@ target:
 * two species compared for a regression — the target is the cells of the
   wider-supported member (:mod:`tsara.align.pairing`, ``docs/METHODS.md``
   §1.3);
-* a campaign-wide matrix for receptor modelling or a continuous rolling
-  state — the target is a uniform grid (§1.4).
+* a campaign-wide matrix for receptor modelling — the target is a cell set
+  chosen for it, a uniform grid being one kind (§1.4).
 
 They are not two designs. Writing them as two implementations was the
 mistake this module exists to undo: the pairwise form is the general form
@@ -20,7 +20,7 @@ with two variables selected and incomplete rows dropped.
 Deliberately variable-agnostic
 -------------------------------
 This function does not know what a species is. It takes whatever variables it
-is handed — raw concentrations, the baselines and enhancements of the rolling
+is handed — raw concentrations, the baselines and enhancements of the baseline
 state, met, anything a later stage invents — and puts them on the support
 asked for. That is the point: TSARA is a loader and transformer for sweeping
 analysis choices, so the joining block must not need editing every time a new
@@ -147,7 +147,7 @@ __all__ = [
 #: Attrs the joined product's sigma companions carry, documented in
 #: ``docs/METHODS.md`` §11.2. The record every column carries -- instrument,
 #: binned, and the four support numbers of §11.2.4 -- is spelled once in
-#: :mod:`tsara.core.naming`, because the rolling stage carries it forward on
+#: :mod:`tsara.core.naming`, because the baseline stage carries it forward on
 #: an adopted baseline and the stages never import each other.
 PROPAGATION_FORM_ATTR = "tsara_propagation_form"
 SIGMA_AT_SUPPORT_ATTR = "tsara_sigma_at_support"

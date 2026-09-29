@@ -1,4 +1,4 @@
-"""Assembling the rolling state: one product per instrument, on its own cells.
+"""Assembling the baseline state: one product per instrument, on its own cells.
 
 For every reading of a stream and every point of the sweep, the state holds
 the baseline, the enhancement, and their uncertainties, beside the reading
@@ -9,7 +9,7 @@ two more dimensions, ``baseline_window`` (seconds) and ``baseline_quantile``.
 
 What this module decides, and what it leaves to the methods
 -----------------------------------------------------------
-A method (:mod:`tsara.rolling.methods`) applies its definition to every
+A method (:mod:`tsara.baseline.methods`) applies its definition to every
 window and reports what it found. This module applies the *rules*: the count
 rule of §6.4 and the width rule of §6.3 blank a sweep point at a reading,
 with the reason recorded three ways (the count column beside it, the rule in
@@ -36,6 +36,15 @@ import numpy as np
 import xarray as xr
 
 from tsara._version import __version__
+from tsara.baseline.methods import (
+    QUANTILE_DIM,
+    WINDOW_DIM,
+    BaselineRequest,
+    BaselineResult,
+    get_baseline_method,
+)
+from tsara.baseline.quantile import MAX_BLOCK_ELEMENTS
+from tsara.baseline.windows import TsaraBaselineError, duration_ns
 from tsara.core.bundle import pin_time_encoding
 from tsara.core.naming import (
     CELL_METHODS_ATTR,
@@ -52,15 +61,6 @@ from tsara.core.naming import (
 )
 from tsara.core.support import COPY_RATIO, stream_cells
 from tsara.core.timebase import NS_PER_S
-from tsara.rolling.methods import (
-    QUANTILE_DIM,
-    WINDOW_DIM,
-    BaselineRequest,
-    BaselineResult,
-    get_baseline_method,
-)
-from tsara.rolling.quantile import MAX_BLOCK_ELEMENTS
-from tsara.rolling.windows import TsaraRollingError, duration_ns
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Mapping, Sequence
@@ -74,18 +74,18 @@ __all__ = [
     "BASELINE_MEMBERSHIP_ATTR",
     "BASELINE_METHOD_ATTR",
     "BASELINE_MIN_READINGS_ATTR",
+    "BASELINE_STAGE",
     "BASELINE_TOO_WIDE_ATTR",
     "BASELINE_WINDOWS_ATTR",
-    "ROLLING_STAGE",
     "SIGMA_ASSUMPTION_ATTR",
     "SIGMA_RULE_ATTR",
-    "rolling_state",
-    "rolling_states",
+    "baseline_state",
+    "baseline_states",
 ]
 
 
-#: What a rolling state's ``tsara_stage`` says.
-ROLLING_STAGE = "rolling"
+#: What a baseline state's ``tsara_stage`` says.
+BASELINE_STAGE = "baseline"
 
 #: Attrs the baseline column carries instead of a ``cell_methods`` (§6.6):
 #: the method that made it, the membership rule, the windows as configured,
@@ -144,7 +144,7 @@ _WOODRUFF_ASSUMPTION = (
 # ---------------------------------------------------------------------------
 
 
-def rolling_state(
+def baseline_state(
     stream: xr.Dataset,
     *,
     instrument: str,
@@ -153,7 +153,7 @@ def rolling_state(
     provided: Mapping[str, xr.Dataset] | None = None,
     block_elements: int = MAX_BLOCK_ELEMENTS,
 ) -> xr.Dataset:
-    """Compute one stream's rolling state.
+    """Compute one stream's baseline state.
 
     Parameters
     ----------
@@ -169,14 +169,14 @@ def rolling_state(
         ``role: gas`` variable.
     provided : mapping of str to xarray.Dataset, optional
         For each ``from_field`` variable, the donor's baseline joined onto
-        this stream's cells (see :func:`~tsara.rolling.methods.baseline_from_field`).
+        this stream's cells (see :func:`~tsara.baseline.methods.baseline_from_field`).
     block_elements : int, optional
         The rolling engine's per-block budget; not a configuration.
 
     Returns
     -------
     xarray.Dataset
-        The rolling state: on the stream's ``time`` and ``time_bnds``, with
+        The baseline state: on the stream's ``time`` and ``time_bnds``, with
         ``baseline_window`` (seconds) and ``baseline_quantile`` as further
         dimensions; per variable ``x`` the reading and its sigmas copied,
         ``baseline_x``, ``enhancement_x``, their sigma companions, and for a
@@ -186,7 +186,7 @@ def rolling_state(
 
     Raises
     ------
-    TsaraRollingError
+    TsaraBaselineError
         If a named variable is missing, circular or not over ``time``; if no
         variable is selected; or if a method refuses its request.
     """
@@ -233,7 +233,7 @@ def rolling_state(
         attrs={
             **stream.attrs,
             "tsara_version": __version__,
-            "tsara_stage": ROLLING_STAGE,
+            "tsara_stage": BASELINE_STAGE,
             "tsara_instrument": instrument,
             BASELINE_WINDOWS_ATTR: ", ".join(baseline.windows),
         },
@@ -247,14 +247,14 @@ def rolling_state(
     return dataset
 
 
-def rolling_states(
+def baseline_states(
     streams: Mapping[str, xr.Dataset],
     baseline: BaselineConfig,
     *,
     provided: Mapping[str, Mapping[str, xr.Dataset]] | None = None,
     block_elements: int = MAX_BLOCK_ELEMENTS,
 ) -> dict[str, xr.Dataset]:
-    """Compute the rolling state of every stream of a campaign.
+    """Compute the baseline state of every stream of a campaign.
 
     The default variables of each stream; a stream with none is skipped
     with a note rather than refused, since a GPS or met stream has no gas.
@@ -274,14 +274,14 @@ def rolling_states(
     Returns
     -------
     dict of str to xarray.Dataset
-        One rolling state per stream that had a variable to roll.
+        One baseline state per stream that had a variable to roll.
     """
     states: dict[str, xr.Dataset] = {}
     for instrument, stream in streams.items():
         if not _default_variables(stream):
             logger.info("Stream '%s' has no gas variable to roll; skipped.", instrument)
             continue
-        states[instrument] = rolling_state(
+        states[instrument] = baseline_state(
             stream,
             instrument=instrument,
             baseline=baseline,
@@ -301,28 +301,28 @@ def _select(stream: xr.Dataset, instrument: str, variables: Sequence[str] | None
     if variables is None:
         chosen = _default_variables(stream)
         if not chosen:
-            raise TsaraRollingError(
+            raise TsaraBaselineError(
                 f"Stream '{instrument}' has no non-circular role='gas' variable to roll; "
                 "name the variables to roll, or roll another stream."
             )
         return chosen
     if not variables:
-        raise TsaraRollingError("No variables named to roll.")
+        raise TsaraBaselineError("No variables named to roll.")
     for variable in variables:
         if variable not in stream.data_vars:
-            raise TsaraRollingError(
+            raise TsaraBaselineError(
                 f"Stream '{instrument}' has no variable '{variable}'; its variables: "
                 f"{sorted(map(str, stream.data_vars))}."
             )
         if is_circular(stream[variable].attrs):
-            raise TsaraRollingError(
+            raise TsaraBaselineError(
                 f"'{variable}' on '{instrument}' is circular; a direction has no low "
                 "quantile and no baseline."
             )
         if stream[variable].dims != (TIME_COORD,):
-            raise TsaraRollingError(
+            raise TsaraBaselineError(
                 f"'{variable}' on '{instrument}' has dimensions {stream[variable].dims}; "
-                f"a rolling state is computed for one value per cell, over ('{TIME_COORD}',)."
+                f"a baseline state is computed for one value per cell, over ('{TIME_COORD}',)."
             )
     return list(dict.fromkeys(variables))
 
@@ -640,7 +640,7 @@ def _warn_blank_everywhere(instrument: str, blank: Sequence[_BlankPoint]) -> Non
     if len(patterns) > _MAX_NAMED:
         groups.append(f"and {len(patterns) - _MAX_NAMED} more pattern(s)")
     logger.warning(
-        "Rolling state of '%s': sweep points blank at every reading -- %s. A window "
+        "Baseline state of '%s': sweep points blank at every reading -- %s. A window "
         "holding fewer readings than the count rule asks (METHODS 6.4), or a reading at "
         "least twice as wide as the window (6.3), leaves that point blank with the "
         "reason recorded; choose a longer window, a lower count, or another baseline "

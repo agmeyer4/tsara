@@ -1,4 +1,4 @@
-"""The continuous rolling state: baselines and enhancements per stream, at native rate.
+"""The continuous baseline state: baselines and enhancements per stream, at native rate.
 
 For every reading of every instrument and every point of the sweep, this
 stage computes the baseline, the enhancement and their uncertainties, and
@@ -29,45 +29,45 @@ Shape of the subpackage
     Saving and reloading the states, one file per instrument beside the
     streams, with the analysis configuration that produced them.
 
-The joining of a rolling state onto other cells is not here: a per-reading
+The joining of a baseline state onto other cells is not here: a per-reading
 product is joined like a stream by :mod:`tsara.align`, which hands its result
 back as a Dataset (§11.2, *swept variables*).
 """
 
 from __future__ import annotations
 
-from tsara.rolling.bundle import RollingStates, load_state, save_state
-from tsara.rolling.methods import (
+from tsara.baseline.bundle import BaselineStates, load_state, save_state
+from tsara.baseline.methods import (
     BaselineRequest,
     BaselineResult,
     available_baseline_methods,
     get_baseline_method,
     register_baseline_method,
 )
-from tsara.rolling.quantile import (
+from tsara.baseline.quantile import (
     MAX_BLOCK_ELEMENTS,
     RollingQuantile,
     rolling_quantile,
     weighted_quantile,
 )
-from tsara.rolling.state import rolling_state, rolling_states
-from tsara.rolling.windows import TsaraRollingError, duration_ns, window_cells
+from tsara.baseline.state import baseline_state, baseline_states
+from tsara.baseline.windows import TsaraBaselineError, duration_ns, window_cells
 
 __all__ = [
     "BaselineRequest",
     "BaselineResult",
+    "BaselineStates",
     "MAX_BLOCK_ELEMENTS",
     "RollingQuantile",
-    "RollingStates",
-    "TsaraRollingError",
+    "TsaraBaselineError",
     "available_baseline_methods",
+    "baseline_state",
+    "baseline_states",
     "duration_ns",
     "get_baseline_method",
     "load_state",
     "register_baseline_method",
     "rolling_quantile",
-    "rolling_state",
-    "rolling_states",
     "save_state",
     "weighted_quantile",
     "window_cells",

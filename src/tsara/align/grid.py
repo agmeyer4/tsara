@@ -3,10 +3,10 @@
 What it is for, and what it is not for
 ---------------------------------------
 ``docs/METHODS.md`` §1.4: a single uniform ``(time × variable)`` cube is built
-**only** for the products that inherently need one — the continuous rolling
-state, and the matrix a receptor model such as PMF consumes. Baselines,
-detection and cross-species regression all run at native rate and never see
-it (§1.1, "synchronize late").
+**only** for the products that inherently need one, such as the matrix a
+receptor model like PMF consumes. Baselines and their enhancements (the
+baseline state, §6.2), detection and cross-species regression all run at
+native rate and never see it (§1.1, "synchronize late").
 
 It is not an alternative to pairing (§11.4) and the difference is resolution.
 A grid's period is set by the **worst** instrument in it; a pair's clock by

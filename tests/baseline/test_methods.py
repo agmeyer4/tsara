@@ -1,4 +1,4 @@
-"""Tests for the baseline method registry (tsara.rolling.methods).
+"""Tests for the baseline method registry (tsara.baseline.methods).
 
 The methods themselves are exercised through the state in `test_state.py`,
 where their results are visible as columns; here is the registry's own
@@ -13,16 +13,16 @@ from typing import Any
 import pytest
 from pydantic import TypeAdapter
 
-from tsara.config.analysis import BaselineMethod
-from tsara.rolling import (
+from tsara.baseline import (
     BaselineRequest,
     BaselineResult,
-    TsaraRollingError,
+    TsaraBaselineError,
     available_baseline_methods,
     get_baseline_method,
     register_baseline_method,
 )
-from tsara.rolling.methods import _METHODS
+from tsara.baseline.methods import _METHODS
+from tsara.config.analysis import BaselineMethod
 
 
 def test_the_three_configured_methods_are_registered() -> None:
@@ -39,7 +39,7 @@ def test_the_three_configured_methods_are_registered() -> None:
 
 
 def test_an_unregistered_name_is_refused_listing_what_exists() -> None:
-    with pytest.raises(TsaraRollingError, match="lowess.*Available.*rolling_quantile"):
+    with pytest.raises(TsaraBaselineError, match="lowess.*Available.*rolling_quantile"):
         get_baseline_method("lowess")
 
 
@@ -53,7 +53,7 @@ def test_a_name_is_registered_once_unless_replacement_is_asked_for(
         register_baseline_method("test_method")(method)
         with pytest.raises(ValueError, match="already registered as 'test_method'"):
             register_baseline_method("test_method")(method)
-        with caplog.at_level(logging.WARNING, logger="tsara.rolling.methods"):
+        with caplog.at_level(logging.WARNING, logger="tsara.baseline.methods"):
             register_baseline_method("test_method", replace=True)(method)
         assert "Replacing baseline method 'test_method'" in caplog.text
         assert get_baseline_method("test_method") is method

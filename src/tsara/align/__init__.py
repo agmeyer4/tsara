@@ -19,7 +19,7 @@ Shape of the subpackage
     cells and how many formed more than one, and the phase of a same-width
     stream against a tiling. A stream's cells, widths, the per-pair width
     ratio and the copy line live in :mod:`tsara.core.support`, where the
-    rolling stage can reach them too.
+    baseline stage can reach them too.
 ``binning``
     The one joining operation: any set of variables onto any set of cells,
     with uncertainty, counts and coverage travelling automatically. Everything
@@ -41,7 +41,7 @@ Shape of the subpackage
 The arithmetic itself is not here. Overlap-weighted binning lives in
 :mod:`tsara.core.support`, angular averaging in :mod:`tsara.core.circular`,
 and uncertainty propagation in :mod:`tsara.core.propagation` — all three
-because Phase 5 rolling and Phase 7 fitting need the same operations and must
+because Phase 5's baselines and Phase 7's fitting need the same operations and must
 get the same answers. This subpackage is the part that knows about
 configuration, streams and provenance.
 """

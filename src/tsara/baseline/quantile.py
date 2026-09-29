@@ -72,8 +72,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from tsara.baseline.windows import TsaraBaselineError
 from tsara.core.support import COPY_RATIO, CellBounds, candidate_ranges, overlap_lengths
-from tsara.rolling.windows import TsaraRollingError
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt
@@ -155,7 +155,7 @@ def rolling_quantile(
     values : array-like
         One value per reading; ``nan`` where masked.
     windows : CellBounds
-        The windows, in any order: normally :func:`~tsara.rolling.windows.window_cells`
+        The windows, in any order: normally :func:`~tsara.baseline.windows.window_cells`
         centred on the readings themselves, but any cells will do: a
         statistic of other samples, such as the differences between
         consecutive readings, can be rolled over windows centred on readings.
@@ -179,22 +179,22 @@ def rolling_quantile(
 
     Raises
     ------
-    TsaraRollingError
+    TsaraBaselineError
         If ``values`` is not one per reading, a quantile is outside [0, 1], a
         window has no width, or the budget is not positive.
     """
     q = _quantiles(quantiles)
     v = np.asarray(values, dtype=np.float64)
     if v.shape != (len(readings),):
-        raise TsaraRollingError(
+        raise TsaraBaselineError(
             f"rolling_quantile got {v.size} value(s) for {len(readings)} reading(s); "
             "they must correspond one to one."
         )
     if block_elements < 1:
-        raise TsaraRollingError(f"block_elements must be positive, got {block_elements}.")
+        raise TsaraBaselineError(f"block_elements must be positive, got {block_elements}.")
     carried_values = None if carry is None else np.asarray(carry, dtype=np.float64)
     if carried_values is not None and carried_values.shape != v.shape:
-        raise TsaraRollingError(
+        raise TsaraBaselineError(
             f"carry has shape {carried_values.shape} but there are {v.size} reading(s); "
             "it is one number per reading."
         )
@@ -215,7 +215,7 @@ def rolling_quantile(
         return result
     window_width = windows.width_ns.astype(np.float64)
     if np.any(window_width <= 0):
-        raise TsaraRollingError(
+        raise TsaraBaselineError(
             "Every window must have a positive duration; a window of no duration holds no readings."
         )
     # 1. The bracket: which readings may touch each window, by index range.
@@ -302,9 +302,9 @@ def _quantiles(quantiles: npt.ArrayLike) -> npt.NDArray[np.float64]:
     """Return the requested quantiles as a 1-D float array, each in [0, 1]."""
     q = np.atleast_1d(np.asarray(quantiles, dtype=np.float64))
     if q.ndim != 1 or q.size == 0:
-        raise TsaraRollingError("quantiles must be a non-empty one-dimensional sequence.")
+        raise TsaraBaselineError("quantiles must be a non-empty one-dimensional sequence.")
     if np.any(~np.isfinite(q)) or np.any(q < 0) or np.any(q > 1):
-        raise TsaraRollingError(f"Every quantile must lie in [0, 1]; got {q.tolist()}.")
+        raise TsaraBaselineError(f"Every quantile must lie in [0, 1]; got {q.tolist()}.")
     return q
 
 
@@ -386,7 +386,7 @@ def weighted_quantile(
 
     Raises
     ------
-    TsaraRollingError
+    TsaraBaselineError
         If the two arrays differ in shape or are not one-dimensional, a
         weight is negative, or a quantile is outside [0, 1].
     """
@@ -394,12 +394,12 @@ def weighted_quantile(
     v = np.asarray(values, dtype=np.float64)
     w = np.asarray(weights, dtype=np.float64)
     if v.ndim != 1 or v.shape != w.shape:
-        raise TsaraRollingError(
+        raise TsaraBaselineError(
             f"values and weights must be one-dimensional and the same length; got shapes "
             f"{v.shape} and {w.shape}."
         )
     if np.any(w < 0):
-        raise TsaraRollingError("A weight cannot be negative; an overlap never is.")
+        raise TsaraBaselineError("A weight cannot be negative; an overlap never is.")
     keep = np.isfinite(v) & np.isfinite(w) & (w > 0)
     if not keep.any():
         return np.full(q.shape, np.nan, dtype=np.float64)

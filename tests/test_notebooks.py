@@ -131,7 +131,7 @@ def clean_env() -> dict[str, str]:
 
 
 @requires_archive
-@pytest.mark.parametrize("name", ["04b_alignment_real_data", "05b_rolling_state_real_data"])
+@pytest.mark.parametrize("name", ["04b_alignment_real_data", "05b_baseline_state_real_data"])
 def test_real_data_notebook_executes_and_its_ledger_agrees(tmp_path: Path, name: str) -> None:
     nb = execute(NOTEBOOKS / f"{name}.ipynb", tmp_path, env=clean_env())
     errors = list(error_outputs(nb))
@@ -154,7 +154,7 @@ def test_real_data_notebook_executes_and_its_ledger_agrees(tmp_path: Path, name:
 
 
 @requires_opt_in
-@pytest.mark.parametrize("name", ["04_alignment_walkthrough", "05_rolling_state_walkthrough"])
+@pytest.mark.parametrize("name", ["04_alignment_walkthrough", "05_baseline_state_walkthrough"])
 def test_generated_data_notebook_executes_and_every_check_holds(tmp_path: Path, name: str) -> None:
     env = clean_env()
     env.pop(ARCHIVE_ENV, None)  # these notebooks read no real data

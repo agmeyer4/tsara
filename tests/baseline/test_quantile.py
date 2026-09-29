@@ -1,4 +1,4 @@
-"""Tests for the weighted rolling quantile (tsara.rolling.quantile).
+"""Tests for the weighted rolling quantile (tsara.baseline.quantile).
 
 Five kinds of evidence (METHODS §11.1): pencil-checkable fixtures for the
 definition, the per-window reference against the block form (bitwise), the
@@ -12,16 +12,16 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from tsara.core.support import COPY_RATIO, CellBounds, overlap_pairs
-from tsara.core.timebase import SECOND_NS as SECOND
-from tsara.rolling import (
+from tsara.baseline import (
     MAX_BLOCK_ELEMENTS,
     RollingQuantile,
-    TsaraRollingError,
+    TsaraBaselineError,
     rolling_quantile,
     weighted_quantile,
     window_cells,
 )
+from tsara.core.support import COPY_RATIO, CellBounds, overlap_pairs
+from tsara.core.timebase import SECOND_NS as SECOND
 
 
 def cells(start_s: float, width_s: float, n: int, step_s: float | None = None) -> CellBounds:
@@ -143,14 +143,14 @@ def test_one_reading_is_every_quantile() -> None:
 
 @pytest.mark.parametrize("bad", [[-0.1], [1.5], [np.nan], []])
 def test_a_quantile_outside_the_unit_interval_is_refused(bad: list[float]) -> None:
-    with pytest.raises(TsaraRollingError, match="quantile"):
+    with pytest.raises(TsaraBaselineError, match="quantile"):
         weighted_quantile([1.0, 2.0], [1.0, 1.0], bad)
 
 
 def test_mismatched_or_negative_weights_are_refused() -> None:
-    with pytest.raises(TsaraRollingError, match="same length"):
+    with pytest.raises(TsaraBaselineError, match="same length"):
         weighted_quantile([1.0, 2.0], [1.0], 0.5)
-    with pytest.raises(TsaraRollingError, match="negative"):
+    with pytest.raises(TsaraBaselineError, match="negative"):
         weighted_quantile([1.0, 2.0], [1.0, -1.0], 0.5)
 
 
@@ -283,14 +283,14 @@ def test_a_reading_at_least_twice_as_wide_as_the_window_is_flagged() -> None:
 def test_bad_arguments_are_refused_by_name() -> None:
     readings = cells(0.0, 1.0, 5)
     windows = window_cells(readings, 10 * SECOND)
-    with pytest.raises(TsaraRollingError, match="one to one"):
+    with pytest.raises(TsaraBaselineError, match="one to one"):
         rolling_quantile(readings, np.arange(4.0), windows, [0.5])
-    with pytest.raises(TsaraRollingError, match="block_elements"):
+    with pytest.raises(TsaraBaselineError, match="block_elements"):
         rolling_quantile(readings, np.arange(5.0), windows, [0.5], block_elements=0)
-    with pytest.raises(TsaraRollingError, match="quantile"):
+    with pytest.raises(TsaraBaselineError, match="quantile"):
         rolling_quantile(readings, np.arange(5.0), windows, [2.0])
     flat = CellBounds(start_ns=np.array([0, SECOND]), stop_ns=np.array([0, SECOND]))
-    with pytest.raises(TsaraRollingError, match="positive duration"):
+    with pytest.raises(TsaraBaselineError, match="positive duration"):
         rolling_quantile(readings, np.arange(5.0), flat, [0.5])
 
 
@@ -362,7 +362,7 @@ def test_a_window_holding_one_reading_has_that_value_and_no_spread() -> None:
 
 def test_a_carried_number_of_the_wrong_shape_is_refused() -> None:
     readings = cells(0.0, 1.0, 5)
-    with pytest.raises(TsaraRollingError, match="carry has shape"):
+    with pytest.raises(TsaraBaselineError, match="carry has shape"):
         rolling_quantile(
             readings, np.arange(5.0), window_cells(readings, 10 * SECOND), [0.5], carry=np.ones(4)
         )

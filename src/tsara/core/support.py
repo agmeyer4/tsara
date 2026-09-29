@@ -590,7 +590,7 @@ def candidate_ranges(
 
     The bracket half of the overlap search, and the membership rule's one
     spelling: :func:`overlap_pairs` expands these ranges into pairs, and the
-    rolling engine (:mod:`tsara.rolling.quantile`) walks them in blocks,
+    rolling engine (:mod:`tsara.baseline.quantile`) walks them in blocks,
     because a long window over a dense record has more (window, reading)
     pairs than fit in memory. Both then decide membership by the exact
     overlap, :func:`overlap_lengths`.

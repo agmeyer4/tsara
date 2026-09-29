@@ -148,7 +148,7 @@ def test_empty_windows_rejected(analysis_dict: dict[str, Any]) -> None:
 
 
 def test_the_grid_is_optional_and_absent_by_default(analysis_dict: dict[str, Any]) -> None:
-    """The rolling state lives per stream at native rate (METHODS §6.2), so a run
+    """The baseline state lives per stream at native rate (METHODS §6.2), so a run
     that exports nothing on a tiling declares no grid, and the field is None
     rather than a disabled stage: a grid has no default period to fall back on."""
     without = copy.deepcopy(analysis_dict)

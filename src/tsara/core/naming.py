@@ -9,8 +9,8 @@ agree — exactly — on what a species' random-error variable is called.
 
 Before this module the agreement was two f-strings in two packages that
 happened to match. That is the kind of coupling that survives review and
-then breaks silently: rename one and nothing fails until a baseline stage
-quietly finds no sigma and falls back to an empirical estimate, which is a
+then breaks silently: rename one and nothing fails until detection quietly
+finds no sigma and falls back to an empirical noise estimate, which is a
 *plausible* answer rather than an error.
 
 The composition that has to keep working
@@ -311,7 +311,7 @@ BORROWED_PREFIX = "borrowed_"
 RESULTANT_LENGTH_SUFFIX = "_resultant_length"
 DISPERSION_SUFFIX = "_dispersion"
 
-#: What the rolling state writes beside a variable (``docs/METHODS.md`` §6.2,
+#: What the baseline state writes beside a variable (``docs/METHODS.md`` §6.2,
 #: §6.6). The baseline and the enhancement are variables in their own right --
 #: each has units, a field, and is joined like any reading -- so they carry
 #: prefixes of their own and are NOT companions. The window's count and
@@ -373,7 +373,7 @@ def borrowed_name(variable: str) -> str:
 
 
 def baseline_name(variable: str) -> str:
-    """Return the name of a variable's baseline in the rolling state.
+    """Return the name of a variable's baseline in the baseline state.
 
     Parameters
     ----------
@@ -389,7 +389,7 @@ def baseline_name(variable: str) -> str:
 
 
 def enhancement_name(variable: str) -> str:
-    """Return the name of a variable's enhancement in the rolling state.
+    """Return the name of a variable's enhancement in the baseline state.
 
     Parameters
     ----------

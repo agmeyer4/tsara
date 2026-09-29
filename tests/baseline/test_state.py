@@ -1,4 +1,4 @@
-"""Tests for the rolling state (tsara.rolling.state) and the methods it runs.
+"""Tests for the baseline state (tsara.baseline.state) and the methods it runs.
 
 Evidence, per METHODS §11.1: pencil-checkable fixtures (a flat background,
 a step, a masked stretch), the engine's own result as the reference for the
@@ -15,17 +15,17 @@ import pytest
 import xarray as xr
 
 from tsara.align import bin_streams_onto_cells
+from tsara.baseline import (
+    TsaraBaselineError,
+    baseline_state,
+    baseline_states,
+    rolling_quantile,
+    window_cells,
+)
+from tsara.baseline.state import BASELINE_STAGE
 from tsara.config.analysis import BaselineConfig
 from tsara.core.support import CellBounds, stream_cells
 from tsara.core.timebase import SECOND_NS as SECOND
-from tsara.rolling import (
-    TsaraRollingError,
-    rolling_quantile,
-    rolling_state,
-    rolling_states,
-    window_cells,
-)
-from tsara.rolling.state import ROLLING_STAGE
 
 
 def cells(start_s: float, width_s: float, n: int, step_s: float | None = None) -> CellBounds:
@@ -112,8 +112,8 @@ def drive() -> xr.Dataset:
 def test_the_state_lives_on_the_streams_own_cells_with_the_sweep_as_dimensions(
     drive: xr.Dataset,
 ) -> None:
-    state = rolling_state(drive, instrument="van", baseline=config())
-    assert state.attrs["tsara_stage"] == ROLLING_STAGE
+    state = baseline_state(drive, instrument="van", baseline=config())
+    assert state.attrs["tsara_stage"] == BASELINE_STAGE
     assert state.attrs["tsara_instrument"] == "van"
     assert state.attrs["tsara_support_label"] == "mid"  # the stream's own attrs carried
     assert np.array_equal(state["time"].values, drive["time"].values)
@@ -149,17 +149,17 @@ def test_the_state_lives_on_the_streams_own_cells_with_the_sweep_as_dimensions(
 
 
 def test_the_default_selection_is_gas_and_not_circular_or_a_companion(drive: xr.Dataset) -> None:
-    state = rolling_state(drive, instrument="van", baseline=config())
+    state = baseline_state(drive, instrument="van", baseline=config())
     assert "baseline_wind_dir" not in state.data_vars
     assert "baseline_sigma_rand_ch4" not in state.data_vars
-    only = rolling_state(drive, instrument="van", baseline=config(), variables=["co2"])
+    only = baseline_state(drive, instrument="van", baseline=config(), variables=["co2"])
     assert "baseline_co2" in only.data_vars and "baseline_ch4" not in only.data_vars
 
 
 def test_the_baseline_carries_no_cell_method_and_the_enhancement_inherits_the_readings(
     drive: xr.Dataset,
 ) -> None:
-    state = rolling_state(drive, instrument="van", baseline=config())
+    state = baseline_state(drive, instrument="van", baseline=config())
     assert "cell_methods" not in state["baseline_ch4"].attrs
     assert state["enhancement_ch4"].attrs["cell_methods"] == "time: point"
     attrs = state["baseline_ch4"].attrs
@@ -176,7 +176,7 @@ def test_the_baseline_carries_no_cell_method_and_the_enhancement_inherits_the_re
 
 
 def test_the_baseline_is_the_engine_result_blanked_by_the_count_rule(drive: xr.Dataset) -> None:
-    state = rolling_state(drive, instrument="van", baseline=config())
+    state = baseline_state(drive, instrument="van", baseline=config())
     readings = stream_cells(drive, "van")
     for w, window_s in enumerate((120.0, 600.0)):
         rolled = rolling_quantile(
@@ -199,7 +199,7 @@ def test_the_baseline_is_the_engine_result_blanked_by_the_count_rule(drive: xr.D
 def test_the_enhancement_is_the_reading_minus_the_baseline_and_is_never_clipped(
     drive: xr.Dataset,
 ) -> None:
-    state = rolling_state(drive, instrument="van", baseline=config())
+    state = baseline_state(drive, instrument="van", baseline=config())
     baseline = state["baseline_ch4"].values
     want = drive["ch4"].values[:, None, None] - baseline
     assert np.array_equal(state["enhancement_ch4"].values, want, equal_nan=True)
@@ -210,7 +210,7 @@ def test_the_enhancement_is_the_reading_minus_the_baseline_and_is_never_clipped(
 
 def test_the_edge_blanks_by_the_count_rule_and_the_record_says_so(drive: xr.Dataset) -> None:
     """The first 2 min window holds ~30 readings: enough for the median, too few for q = 0.01."""
-    state = rolling_state(drive, instrument="van", baseline=config(quantiles=(0.01, 0.5)))
+    state = baseline_state(drive, instrument="van", baseline=config(quantiles=(0.01, 0.5)))
     counts = state["n_readings_window_ch4"].values[:, 0]
     assert 25 <= counts[0] <= 32
     assert np.isnan(state["baseline_ch4"].values[0, 0, 0])  # needs 100
@@ -231,8 +231,8 @@ def test_a_sweep_point_blank_everywhere_is_warned_once_with_the_count_it_needed(
     minute = make_stream(
         cells(0.0, 60.0, 60), {"ch4": 1900 + np.arange(60.0)}, cell_methods="time: mean"
     )
-    with caplog.at_level(logging.WARNING, logger="tsara.rolling.state"):
-        state = rolling_state(minute, instrument="ground", baseline=config())
+    with caplog.at_level(logging.WARNING, logger="tsara.baseline.state"):
+        state = baseline_state(minute, instrument="ground", baseline=config())
     warnings = [r for r in caplog.records if "blank at every reading" in r.getMessage()]
     assert len(warnings) == 1
     message = warnings[0].getMessage()
@@ -260,8 +260,8 @@ def test_the_warning_names_the_width_rule_when_the_count_was_met(
     first version of this warning did -- would send the reader to the wrong fix.
     """
     stream = make_stream(cells(0.0, 60.0, 40, step_s=30.0), {"ch4": 1900 + np.arange(40.0)})
-    with caplog.at_level(logging.WARNING, logger="tsara.rolling.state"):
-        rolling_state(
+    with caplog.at_level(logging.WARNING, logger="tsara.baseline.state"):
+        baseline_state(
             stream,
             instrument="a",
             baseline=config(windows=("30s", "10min"), quantiles=(0.5,), min_readings=2),
@@ -287,8 +287,8 @@ def test_the_warning_says_count_or_width_when_windows_failed_one_or_the_other(
         stop_ns=np.concatenate([running.stop_ns, sparse.stop_ns]),
     )
     stream = make_stream(both, {"ch4": 1900 + np.arange(80.0)})
-    with caplog.at_level(logging.WARNING, logger="tsara.rolling.state"):
-        rolling_state(
+    with caplog.at_level(logging.WARNING, logger="tsara.baseline.state"):
+        baseline_state(
             stream,
             instrument="a",
             baseline=config(windows=("30s",), quantiles=(0.5,), min_readings=4),
@@ -303,8 +303,8 @@ def test_the_warning_states_a_shared_pattern_once_and_names_at_most_eight(
     """Ten variables on one instrument's minute cells: one pattern, eight names, 'and 2 more'."""
     minute = cells(0.0, 60.0, 60)
     stream = make_stream(minute, {f"voc{k}": 1900 + np.arange(60.0) for k in range(10)})
-    with caplog.at_level(logging.WARNING, logger="tsara.rolling.state"):
-        rolling_state(stream, instrument="can", baseline=config())
+    with caplog.at_level(logging.WARNING, logger="tsara.baseline.state"):
+        baseline_state(stream, instrument="can", baseline=config())
     message = blank_warning(caplog)
     assert "voc0, voc1, voc2, voc3, voc4, voc5, voc6, voc7 and 2 more:" in message
     assert "voc8" not in message
@@ -319,8 +319,8 @@ def test_the_warning_separates_variables_whose_patterns_differ(
     thin = values.copy()
     thin[np.arange(60) % 5 != 0] = np.nan
     stream = make_stream(cells(0.0, 60.0, 60), {"full": values, "thin": thin})
-    with caplog.at_level(logging.WARNING, logger="tsara.rolling.state"):
-        rolling_state(stream, instrument="a", baseline=config())
+    with caplog.at_level(logging.WARNING, logger="tsara.baseline.state"):
+        baseline_state(stream, instrument="a", baseline=config())
     message = blank_warning(caplog)
     assert " | " in message
     full, thin_part = message.split(" -- ")[1].split(" | ")
@@ -335,10 +335,10 @@ def test_the_warning_counts_patterns_past_eight_rather_than_listing_them(
 ) -> None:
     """Asked of the formatter directly: nine distinct patterns are rare enough in a stream
     that building one would test the fixture more than the rule."""
-    from tsara.rolling.state import _BlankPoint, _warn_blank_everywhere
+    from tsara.baseline.state import _BlankPoint, _warn_blank_everywhere
 
     blank = [_BlankPoint(f"v{k}", f"{k + 1}min/0.05", "count", 20, 3) for k in range(9)]
-    with caplog.at_level(logging.WARNING, logger="tsara.rolling.state"):
+    with caplog.at_level(logging.WARNING, logger="tsara.baseline.state"):
         _warn_blank_everywhere("a", blank)
     message = blank_warning(caplog)
     assert "and 1 more pattern(s)" in message
@@ -355,13 +355,15 @@ def test_an_adopted_baseline_blank_everywhere_is_warned_as_adopted(
         quantiles=(0.005, 0.5),
         methods={"can.benzene_can": {"method": "from_field", "instrument": "ptr"}},
     )
-    donor = rolling_state(dense, instrument="ptr", baseline=settings)
+    donor = baseline_state(dense, instrument="ptr", baseline=settings)
     joined = bin_streams_onto_cells(
         {"ptr": donor}, stream_cells(sparse, "can"), [("ptr", "baseline_benzene")]
     )
     caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="tsara.rolling.state"):
-        rolling_state(sparse, instrument="can", baseline=settings, provided={"benzene_can": joined})
+    with caplog.at_level(logging.WARNING, logger="tsara.baseline.state"):
+        baseline_state(
+            sparse, instrument="can", baseline=settings, provided={"benzene_can": joined}
+        )
     message = blank_warning(caplog)
     assert "benzene_can: 2min/0.005 (the adopted baseline is blank there)" in message
 
@@ -369,7 +371,7 @@ def test_an_adopted_baseline_blank_everywhere_is_warned_as_adopted(
 def test_a_reading_too_wide_for_the_window_blanks_it_with_the_reason_recorded() -> None:
     """60 s cells stepping every 30 s under a 30 s window: enough readings, each twice too wide."""
     stream = make_stream(cells(0.0, 60.0, 40, step_s=30.0), {"ch4": 1900 + np.arange(40.0)})
-    state = rolling_state(
+    state = baseline_state(
         stream,
         instrument="a",
         baseline=config(windows=("30s", "10min"), quantiles=(0.5,), min_readings=2),
@@ -386,7 +388,7 @@ def test_a_reading_too_wide_for_the_window_blanks_it_with_the_reason_recorded() 
 
 
 def test_the_enhancements_sigmas_follow_the_same_instrument_rules(drive: xr.Dataset) -> None:
-    state = rolling_state(drive, instrument="van", baseline=config())
+    state = baseline_state(drive, instrument="van", baseline=config())
     reading_random = drive["sigma_rand_ch4"].values[:, None, None]
     reading_systematic = drive["sigma_sys_ch4"].values[:, None, None]
     baseline_random = state["sigma_rand_baseline_ch4"].values
@@ -414,7 +416,7 @@ def test_the_enhancements_sigmas_follow_the_same_instrument_rules(drive: xr.Data
 
 
 def test_the_baselines_systematic_sigma_is_the_readings_at_the_quantile(drive: xr.Dataset) -> None:
-    state = rolling_state(drive, instrument="van", baseline=config())
+    state = baseline_state(drive, instrument="van", baseline=config())
     readings = stream_cells(drive, "van")
     rolled = rolling_quantile(
         readings,
@@ -437,14 +439,14 @@ def test_a_reading_of_exactly_zero_has_no_systematic_enhancement_sigma() -> None
         {"ch4": values, "sigma_sys_ch4": np.full(120, 0.05)},
         attrs={"sigma_sys_ch4": {"uncertainty_component": "systematic"}},
     )
-    state = rolling_state(stream, instrument="a", baseline=config(quantiles=(0.5,)))
+    state = baseline_state(stream, instrument="a", baseline=config(quantiles=(0.5,)))
     assert np.isnan(state["sigma_sys_enhancement_ch4"].values[60]).all()
     assert np.isfinite(state["sigma_sys_enhancement_ch4"].values[59]).all()
 
 
 def test_without_a_declared_sigma_no_enhancement_sigma_is_invented() -> None:
     stream = make_stream(cells(0.0, 1.0, 300), {"ch4": 1900 + np.zeros(300)})
-    state = rolling_state(stream, instrument="a", baseline=config())
+    state = baseline_state(stream, instrument="a", baseline=config())
     assert "sigma_rand_enhancement_ch4" not in state.data_vars
     assert "sigma_sys_enhancement_ch4" not in state.data_vars
     assert "sigma_sys_baseline_ch4" not in state.data_vars
@@ -468,7 +470,7 @@ def test_a_component_declared_zero_is_carried_as_zero_not_unknown() -> None:
             },
         },
     )
-    state = rolling_state(stream, instrument="a", baseline=config())
+    state = baseline_state(stream, instrument="a", baseline=config())
     attrs = state["enhancement_ch4"].attrs
     assert attrs["uncertainty_provenance_systematic"] == "zero"
     # The random component has its column, which carries its own provenance.
@@ -494,7 +496,7 @@ def test_the_median_tracks_the_background_and_the_low_quantile_sits_a_noise_offs
     bounds = cells(0.0, 1.0, n)
     truth = np.full(n, 1900.0)
     stream = make_stream(bounds, {"ch4": truth + rng.normal(0, 0.7, n)})
-    state = rolling_state(stream, instrument="a", baseline=config(windows=("10min",)))
+    state = baseline_state(stream, instrument="a", baseline=config(windows=("10min",)))
     inside = slice(300, 3300)
     median = state["baseline_ch4"].values[inside, 0, 1] - truth[inside]
     low = state["baseline_ch4"].values[inside, 0, 0] - truth[inside]
@@ -508,7 +510,7 @@ def test_the_median_tracks_the_background_and_the_low_quantile_sits_a_noise_offs
 
 
 def test_a_constant_baseline_makes_the_enhancement_the_concentration(drive: xr.Dataset) -> None:
-    state = rolling_state(
+    state = baseline_state(
         drive,
         instrument="van",
         baseline=config(methods={"van.ch4": {"method": "constant", "value": 0.0}}),
@@ -562,11 +564,11 @@ def test_from_field_adopts_the_donors_baseline_joined_onto_these_cells() -> None
     dense, sparse = sparse_and_dense()
     settings = config(methods={"can.benzene_can": {"method": "from_field", "instrument": "ptr"}})
     # 1. Roll the donor.  2. Join its swept baseline onto the adopter's cells.  3. Roll the adopter.
-    donor = rolling_state(dense, instrument="ptr", baseline=settings)
+    donor = baseline_state(dense, instrument="ptr", baseline=settings)
     joined = bin_streams_onto_cells(
         {"ptr": donor}, stream_cells(sparse, "can"), [("ptr", "baseline_benzene")]
     )
-    state = rolling_state(
+    state = baseline_state(
         sparse, instrument="can", baseline=settings, provided={"benzene_can": joined}
     )
     base = state["baseline_benzene_can"]
@@ -599,45 +601,47 @@ def test_from_field_adopts_the_donors_baseline_joined_onto_these_cells() -> None
 def test_from_field_without_a_provided_product_names_the_three_calls() -> None:
     dense, sparse = sparse_and_dense()
     settings = config(methods={"can.benzene_can": {"method": "from_field", "instrument": "ptr"}})
-    with pytest.raises(TsaraRollingError, match="no product was provided.*bin_streams_onto_cells"):
-        rolling_state(sparse, instrument="can", baseline=settings)
+    with pytest.raises(TsaraBaselineError, match="no product was provided.*bin_streams_onto_cells"):
+        baseline_state(sparse, instrument="can", baseline=settings)
 
 
 def test_from_field_refuses_a_product_that_is_not_the_join_described() -> None:
     dense, sparse = sparse_and_dense()
     settings = config(methods={"can.benzene_can": {"method": "from_field", "instrument": "ptr"}})
-    donor = rolling_state(dense, instrument="ptr", baseline=settings)
+    donor = baseline_state(dense, instrument="ptr", baseline=settings)
     good = bin_streams_onto_cells(
         {"ptr": donor}, stream_cells(sparse, "can"), [("ptr", "baseline_benzene")]
     )
 
     def attempt(product: xr.Dataset) -> None:
-        rolling_state(
+        baseline_state(
             sparse, instrument="can", baseline=settings, provided={"benzene_can": product}
         )
 
-    with pytest.raises(TsaraRollingError, match="tsara_stage 'rolling', not 'binned'"):
+    with pytest.raises(TsaraBaselineError, match="tsara_stage 'baseline', not 'binned'"):
         attempt(donor)
-    with pytest.raises(TsaraRollingError, match="does not sit on this stream's cells"):
+    with pytest.raises(TsaraBaselineError, match="does not sit on this stream's cells"):
         attempt(
             bin_streams_onto_cells(
                 {"ptr": donor}, cells(100.0, 15.0, 6, step_s=531.0), [("ptr", "baseline_benzene")]
             )
         )
-    other_sweep = rolling_state(dense, instrument="ptr", baseline=config(windows=("5min", "10min")))
-    with pytest.raises(TsaraRollingError, match="rolled at baseline_window = \\[300.0, 600.0\\]"):
+    other_sweep = baseline_state(
+        dense, instrument="ptr", baseline=config(windows=("5min", "10min"))
+    )
+    with pytest.raises(TsaraBaselineError, match="rolled at baseline_window = \\[300.0, 600.0\\]"):
         attempt(
             bin_streams_onto_cells(
                 {"ptr": other_sweep}, stream_cells(sparse, "can"), [("ptr", "baseline_benzene")]
             )
         )
-    with pytest.raises(TsaraRollingError, match="holds 0 baseline column"):
+    with pytest.raises(TsaraBaselineError, match="holds 0 baseline column"):
         attempt(good.rename({"baseline_benzene": "other_benzene"}))
     two = good.assign(baseline_again=good["baseline_benzene"])
-    with pytest.raises(TsaraRollingError, match="holds 2 baseline column"):
+    with pytest.raises(TsaraBaselineError, match="holds 2 baseline column"):
         attempt(two)
     no_sweep = good.drop_vars("baseline_quantile")
-    with pytest.raises(TsaraRollingError, match="carries no 'baseline_quantile'"):
+    with pytest.raises(TsaraBaselineError, match="carries no 'baseline_quantile'"):
         attempt(no_sweep)
 
 
@@ -647,28 +651,28 @@ def test_from_field_refuses_a_product_that_is_not_the_join_described() -> None:
 
 
 def test_naming_what_cannot_be_rolled_is_refused_by_name(drive: xr.Dataset) -> None:
-    with pytest.raises(TsaraRollingError, match="no variable 'sf6'"):
-        rolling_state(drive, instrument="van", baseline=config(), variables=["sf6"])
-    with pytest.raises(TsaraRollingError, match="circular"):
-        rolling_state(drive, instrument="van", baseline=config(), variables=["wind_dir"])
-    with pytest.raises(TsaraRollingError, match="No variables named"):
-        rolling_state(drive, instrument="van", baseline=config(), variables=[])
+    with pytest.raises(TsaraBaselineError, match="no variable 'sf6'"):
+        baseline_state(drive, instrument="van", baseline=config(), variables=["sf6"])
+    with pytest.raises(TsaraBaselineError, match="circular"):
+        baseline_state(drive, instrument="van", baseline=config(), variables=["wind_dir"])
+    with pytest.raises(TsaraBaselineError, match="No variables named"):
+        baseline_state(drive, instrument="van", baseline=config(), variables=[])
     flat = drive.assign(matrix=(("time", "nv"), np.zeros((drive.sizes["time"], 2))))
-    with pytest.raises(TsaraRollingError, match="dimensions"):
-        rolling_state(flat, instrument="van", baseline=config(), variables=["matrix"])
+    with pytest.raises(TsaraBaselineError, match="dimensions"):
+        baseline_state(flat, instrument="van", baseline=config(), variables=["matrix"])
     met = drive[["wind_dir"]].copy()
     met.coords["time_bnds"] = drive["time_bnds"]
-    with pytest.raises(TsaraRollingError, match="no non-circular role='gas' variable"):
-        rolling_state(met, instrument="met", baseline=config())
+    with pytest.raises(TsaraBaselineError, match="no non-circular role='gas' variable"):
+        baseline_state(met, instrument="met", baseline=config())
 
 
-def test_rolling_states_rolls_every_stream_with_a_gas_and_skips_the_rest(
+def test_baseline_states_rolls_every_stream_with_a_gas_and_skips_the_rest(
     drive: xr.Dataset, caplog: pytest.LogCaptureFixture
 ) -> None:
     met = drive[["wind_dir"]].copy()
     met.coords["time_bnds"] = drive["time_bnds"]
-    with caplog.at_level(logging.INFO, logger="tsara.rolling.state"):
-        states = rolling_states({"van": drive, "met": met}, config())
+    with caplog.at_level(logging.INFO, logger="tsara.baseline.state"):
+        states = baseline_states({"van": drive, "met": met}, config())
     assert sorted(states) == ["van"]
     assert "Stream 'met' has no gas variable to roll" in caplog.text
 
@@ -677,7 +681,7 @@ def test_an_enhancement_of_a_reading_without_a_cell_method_declares_none() -> No
     """The enhancement inherits the reading's cell method, and inherits its absence too."""
     stream = make_stream(cells(0.0, 1.0, 300), {"ch4": 1900 + np.zeros(300)})
     del stream["ch4"].attrs["cell_methods"]
-    state = rolling_state(stream, instrument="a", baseline=config())
+    state = baseline_state(stream, instrument="a", baseline=config())
     assert "cell_methods" not in state["enhancement_ch4"].attrs
 
 
@@ -689,7 +693,7 @@ def test_a_window_holding_exactly_the_required_count_is_kept() -> None:
     window is valid and only the two edge windows on each side are blank.
     """
     stream = make_stream(cells(0.0, 1.0, 100), {"ch4": 1900 + np.arange(100.0)})
-    state = rolling_state(
+    state = baseline_state(
         stream, instrument="a", baseline=config(windows=("5s",), quantiles=(0.5,), min_readings=5)
     )
     counts = state["n_readings_window_ch4"].values[:, 0]
@@ -701,10 +705,12 @@ def test_a_window_holding_exactly_the_required_count_is_kept() -> None:
 def test_from_field_refuses_a_baseline_of_the_field_from_another_instrument() -> None:
     dense, sparse = sparse_and_dense()
     settings = config(methods={"can.benzene_can": {"method": "from_field", "instrument": "ptr"}})
-    donor = rolling_state(dense, instrument="ptr", baseline=settings)
+    donor = baseline_state(dense, instrument="ptr", baseline=settings)
     joined = bin_streams_onto_cells(
         {"ptr": donor}, stream_cells(sparse, "can"), [("ptr", "baseline_benzene")]
     )
     joined["baseline_benzene"].attrs["tsara_instrument"] = "another_ptr"
-    with pytest.raises(TsaraRollingError, match="holds 0 baseline column.*from 'ptr'"):
-        rolling_state(sparse, instrument="can", baseline=settings, provided={"benzene_can": joined})
+    with pytest.raises(TsaraBaselineError, match="holds 0 baseline column.*from 'ptr'"):
+        baseline_state(
+            sparse, instrument="can", baseline=settings, provided={"benzene_can": joined}
+        )

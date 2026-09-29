@@ -1,4 +1,4 @@
-"""Tests for saving and reloading the rolling state (tsara.rolling.bundle)."""
+"""Tests for saving and reloading the baseline state (tsara.baseline.bundle)."""
 
 from __future__ import annotations
 
@@ -10,16 +10,16 @@ import pytest
 import xarray as xr
 
 from tsara.align import bin_streams_onto_cells
+from tsara.baseline import baseline_state, load_state, save_state
 from tsara.config.analysis import AnalysisConfig, BaselineConfig
 from tsara.core.bundle import (
     BUNDLE_ANALYSIS_CONFIG,
-    BUNDLE_ROLLING_DIR,
+    BUNDLE_BASELINE_DIR,
     TsaraBundleError,
     pin_time_encoding,
 )
 from tsara.core.support import CellBounds, declared_bounds_name
 from tsara.core.timebase import SECOND_NS as SECOND
-from tsara.rolling import load_state, rolling_state, save_state
 
 
 def cells(start_s: float, width_s: float, n: int, step_s: float | None = None) -> CellBounds:
@@ -86,8 +86,8 @@ def states(analysis: AnalysisConfig) -> dict[str, xr.Dataset]:
     stream = make_stream(cells(0.0, 1.0, n, step_s=2.0), values)
     other = make_stream(cells(3.0, 1.0, n, step_s=2.0), values + 5)
     return {
-        "van": rolling_state(stream, instrument="van", baseline=analysis.baseline),
-        "aeris": rolling_state(other, instrument="aeris", baseline=analysis.baseline),
+        "van": baseline_state(stream, instrument="van", baseline=analysis.baseline),
+        "aeris": baseline_state(other, instrument="aeris", baseline=analysis.baseline),
     }
 
 
@@ -120,7 +120,7 @@ def test_the_round_trip_is_exact_and_brings_the_config_back(
     tmp_path: Path, states: dict[str, xr.Dataset], analysis: AnalysisConfig
 ) -> None:
     target = save_state(states, tmp_path / "bundle", analysis=analysis)
-    assert target == tmp_path / "bundle" / BUNDLE_ROLLING_DIR
+    assert target == tmp_path / "bundle" / BUNDLE_BASELINE_DIR
     assert sorted(p.name for p in target.iterdir()) == [
         "aeris.nc",
         BUNDLE_ANALYSIS_CONFIG,
@@ -132,7 +132,7 @@ def test_the_round_trip_is_exact_and_brings_the_config_back(
         assert_identical(state, back.states[name])
         assert "time_bnds" in back.states[name].coords
     assert back.analysis == analysis
-    # The rolling directory itself is also a valid path to load from.
+    # The baseline directory itself is also a valid path to load from.
     assert sorted(load_state(target).states) == ["aeris", "van"]
 
 
@@ -181,7 +181,7 @@ def test_compression_changes_the_size_and_nothing_else(
 def test_saving_without_a_config_writes_none_and_says_so(
     tmp_path: Path, states: dict[str, xr.Dataset], caplog: pytest.LogCaptureFixture
 ) -> None:
-    with caplog.at_level(logging.INFO, logger="tsara.rolling.bundle"):
+    with caplog.at_level(logging.INFO, logger="tsara.baseline.bundle"):
         target = save_state(states, tmp_path)
     assert not (target / BUNDLE_ANALYSIS_CONFIG).exists()
     assert "without an analysis configuration" in caplog.text
@@ -193,18 +193,18 @@ def test_a_stale_state_file_is_removed_on_save(
 ) -> None:
     """A bundle is the record of what ran; a file from an earlier, wider run is not."""
     save_state(states, tmp_path)
-    (tmp_path / BUNDLE_ROLLING_DIR / "notes.txt").write_text("kept")
-    with caplog.at_level(logging.INFO, logger="tsara.rolling.bundle"):
+    (tmp_path / BUNDLE_BASELINE_DIR / "notes.txt").write_text("kept")
+    with caplog.at_level(logging.INFO, logger="tsara.baseline.bundle"):
         save_state({"van": states["van"]}, tmp_path)
-    names = sorted(p.name for p in (tmp_path / BUNDLE_ROLLING_DIR).iterdir())
+    names = sorted(p.name for p in (tmp_path / BUNDLE_BASELINE_DIR).iterdir())
     assert names == ["notes.txt", "van.nc"]
-    assert "Removing stale rolling state file" in caplog.text
+    assert "Removing stale baseline state file" in caplog.text
 
 
-def test_what_is_not_a_rolling_state_is_refused_at_save_and_at_load(
+def test_what_is_not_a_baseline_state_is_refused_at_save_and_at_load(
     tmp_path: Path, states: dict[str, xr.Dataset]
 ) -> None:
-    with pytest.raises(TsaraBundleError, match="No rolling states"):
+    with pytest.raises(TsaraBundleError, match="No baseline states"):
         save_state({}, tmp_path)
     stream = make_stream(cells(0.0, 1.0, 10), np.arange(10.0))
     with pytest.raises(TsaraBundleError, match="tsara_stage 'synthetic'"):
@@ -215,11 +215,11 @@ def test_what_is_not_a_rolling_state_is_refused_at_save_and_at_load(
         save_state(states, blocker)
     with pytest.raises(TsaraBundleError, match="not an existing directory"):
         load_state(tmp_path / "missing")
-    (tmp_path / BUNDLE_ROLLING_DIR).mkdir()
-    with pytest.raises(TsaraBundleError, match="holds no rolling state file"):
+    (tmp_path / BUNDLE_BASELINE_DIR).mkdir()
+    with pytest.raises(TsaraBundleError, match="holds no baseline state file"):
         load_state(tmp_path)
     pin_time_encoding(stream)
-    stream.to_netcdf(tmp_path / BUNDLE_ROLLING_DIR / "raw.nc")
+    stream.to_netcdf(tmp_path / BUNDLE_BASELINE_DIR / "raw.nc")
     with pytest.raises(TsaraBundleError, match="written by the 'synthetic' stage"):
         load_state(tmp_path)
 

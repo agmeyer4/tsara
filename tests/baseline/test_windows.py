@@ -1,13 +1,13 @@
-"""Tests for windows as cells (tsara.rolling.windows)."""
+"""Tests for windows as cells (tsara.baseline.windows)."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
+from tsara.baseline import TsaraBaselineError, duration_ns, window_cells
 from tsara.core.support import CellBounds
 from tsara.core.timebase import SECOND_NS as SECOND
-from tsara.rolling import TsaraRollingError, duration_ns, window_cells
 
 
 def cells(start_s: float, width_s: float, n: int, step_s: float | None = None) -> CellBounds:
@@ -36,7 +36,7 @@ def test_an_odd_window_is_centred_the_way_a_cell_is_centred_on_its_timestamp() -
 
 @pytest.mark.parametrize("window_ns", [0, -1, -SECOND])
 def test_a_window_of_no_duration_is_refused(window_ns: int) -> None:
-    with pytest.raises(TsaraRollingError, match="positive duration"):
+    with pytest.raises(TsaraBaselineError, match="positive duration"):
         window_cells(cells(0.0, 1.0, 3), window_ns)
 
 
@@ -58,5 +58,5 @@ def test_duration_ns_parses_the_config_spelling(spec: str, expected_s: float) ->
 
 @pytest.mark.parametrize("spec", ["0s", "-5min", "soon", ""])
 def test_a_non_positive_or_unparsable_duration_is_refused(spec: str) -> None:
-    with pytest.raises(TsaraRollingError, match="duration"):
+    with pytest.raises(TsaraBaselineError, match="duration"):
         duration_ns(spec)

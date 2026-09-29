@@ -36,6 +36,7 @@ attributes and this document, because each was once used for several:
 | **provenance** | where a number or a fact came from: `declared`, `reported`, `inferred`, `assumed`, `empirical` … (`uncertainty_provenance`, `tsara_support_label_provenance`) | |
 | **field** | the physical quantity a variable measures (§1.6) | |
 | **baseline at window w** | the low quantile of a variable over a window of length w around a reading; always stated with its window (§6.1) | "the baseline" or "the true background": what is baseline at one window is signal at another |
+| **rolling** | the operation: a statistic over a window centred on each reading, moved along the record (`rolling_quantile`; Phase 7's fits over windows) | a stage or a product. The stage that computes baselines and enhancements is `baseline` (`tsara.baseline`); its product is the **baseline state**, saved under `baseline/` in a bundle. Both were named `rolling` until Phase 5 merged; no bundle under the old name exists outside that branch, so none is migrated |
 | **borrowed** | the share of a joined value resting on air outside its own cell (`borrowed_<name>`, `tsara_borrowed_share`, §11.2.4) | an uncertainty; it is a magnitude, and no threshold on it separates a blend from jitter |
 | **averaged / straddled / narrowed / copied** | what a join did to the readings behind a column (`tsara_support_transform`, §11.2.4): wholly inside their cells; lying across a boundary; wider than a cell they fill; at least twice as wide, which is refused unless asked for by name | |
 | **shared** | a reading that formed more than one row of a product, so those rows share its error (`tsara_shared_readings`, the sharing warnings, §11.4.1) | the support label: a straddled reading is shared only when both cells it lies across are rows of the product, which a sparse partner's are not |
@@ -61,7 +62,7 @@ The pipeline defers any change of clock to the last possible moment:
 | Stage | Clock used | Support (§10) |
 |---|---|---|
 | QA/QC, unit conversion | native | unchanged; both are pointwise |
-| Rolling baseline, enhancement Δ, noise σ — the continuous rolling state | native (time-based windows), per stream (§6.2) | windows are durations, so cells of any width fit; each reading is weighted by the share of its cell inside the window (§6.3) |
+| Baseline, enhancement Δ — the continuous baseline state | native (time-based windows), per stream (§6.2) | windows are durations, so cells of any width fit; each reading is weighted by the share of its cell inside the window (§6.3) |
 | Plume detection | native → events are time **intervals** | an event's bounds are the union of the cells above threshold; the smallest resolvable event is one cell |
 | Ratio regression | **pairing clock** (§1.3), per event/window | the **wider-supported** stream's cells, with its partner averaged onto them by overlap |
 | Receptor-model (PMF) export | a **cell set** chosen for it (§1.4) | one join onto those cells |
@@ -189,7 +190,7 @@ The word "grid" used to hide three different needs:
 
 Only the first is about the science, and it never requires uniformity.
 
-**What this settles.** The continuous rolling state is not a grid product: it
+**What this settles.** The continuous baseline state is not a grid product: it
 lives per stream at native rate, beside the readings (§6.2). A receptor-model
 table is one join onto a cell set chosen for it, and there is no
 receptor-matrix object (§11.7). Three candidate cell sets, measured on the ten
@@ -426,10 +427,10 @@ idea as the QA/QC spike rule deleted in Phase 3 (§9.5), a spread of the
 signal, which on plume-dense records measures the plumes.
 
 **Built in Phase 5, withdrawn to detection (Phase 6) on 2026-09-29.** The
-design below was built in the rolling state (code and tests at commit
+design below was built in the baseline state (code and tests at commit
 `59bd6ef`) and is recorded here as the design Phase 6 restores. Three
 reasons moved it: its two settings are detection's (`DetectionConfig.
-noise_estimator`, `DetectionConfig.noise_window`), so the rolling stage was
+noise_estimator`, `DetectionConfig.noise_window`), so the baseline stage was
 reading another stage's configuration, which Phases 3 and 3.5 had both
 declined to do for this estimator; its meaning on a moving platform is not
 settled (measured below: on a real drive it follows the air); and its
@@ -585,8 +586,10 @@ that produced it, `independent` included, so the two cases are distinguishable
 in the product rather than only by the absence of a label.
 
 **Implementation.** `tsara.core.propagation` — one module, because §1.3
-binning, §5 rolling and §4.3 fit weighting all need this answered identically,
-and because moving a declared σ onto a different support (§10.8) is the same
+binning and §4.3 fit weighting both need this answered identically (the
+baseline stage does not: its Woodruff interval counts a window's readings by
+Kish's effective number, assumes them independent and says so, §6.7), and
+because moving a declared σ onto a different support (§10.8) is the same
 arithmetic again. Ingestion deliberately performs none of it (§10.8, §9.6).
 
 **Registered forms.** All three assume the same AR(1) autocorrelation and
@@ -617,8 +620,9 @@ approximation costs on a given cell.
 `ar1_double_sum` builds an $N \times N$ float64 correlation matrix — 200 MB
 at 5 000 readings, 3.2 GB at 20 000 — so it refuses a cell above
 `DOUBLE_SUM_MAX_POINTS = 5000` readings with a `TsaraPropagationError` naming
-`ar1_neff`, rather than a MemoryError naming nothing. A rolling stage pays
-whichever form it chooses once per window.
+`ar1_neff`, rather than a MemoryError naming nothing. A stage that computes
+over rolling windows (Phase 7's rolling fits) pays whichever form it chooses
+once per window.
 
 `ar1_asymptotic` is the large-$N$ limit, $N_{\mathrm{eff}} = N(1-\rho_1)/(1+\rho_1)$.
 It is the form this document specified before the finite-$N$ version existed,
@@ -847,7 +851,7 @@ not a sole objective. **[estimator details — Phase 7]**
 
 Baselines were scoped on 2026-09-24 and built in Phase 5 (2026-09-28):
 §6.1–6.7 say what was decided and, marked *built*, what the package now does
-(`tsara.rolling`). The numbers quoted were measured on the permitted 2024
+(`tsara.baseline`). The numbers quoted were measured on the permitted 2024
 archive or on generated data under the rules stated beside them. Detection,
 smoothing and clustering remain stubs (§6.8).
 
@@ -930,14 +934,14 @@ that follows the parent (a short window, or a local fit). Both fail the same
 way on a cluster of short plumes, which a short window absorbs as it would
 one long plume (notebook 05 §2: four blips within three minutes lift the
 2 min baseline 23 ppb above the true background): scale is not source.
-Neither is a Phase-5 decision, since the rolling state holds the baseline at
+Neither is a Phase-5 decision, since the baseline state holds the baseline at
 every window and both read it. A candidate division, not decided: masked
 children for the event catalog, bands for the continuous state and receptor
 rows.
 
-### 6.2 The continuous rolling state lives beside the readings **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
+### 6.2 The continuous baseline state lives beside the readings **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
 
-For every reading of every instrument and every point of the sweep, the rolling
+For every reading of every instrument and every point of the sweep, the baseline
 state holds the baseline and the enhancement Δ, with their uncertainties. Both
 are per-reading quantities. They live on the reading's own cell at native
 rate, with the sweep (`baseline_window`, `baseline_quantile`) as extra
@@ -988,7 +992,7 @@ declared width longer than the cadence or from a stop column. A window is a dura
 road as much as an interval of air: the cell model's limitation (CLAUDE.md,
 open flags) is inherited here, not resolved.
 
-**The weighted quantile, defined once (built 2026-09-28, `rolling.quantile`).**
+**The weighted quantile, defined once (built 2026-09-28, `baseline.quantile`).**
 Sort the contributing readings by value; a reading contributes when it holds
 a finite value and overlaps the window by a positive amount. Its weight is
 the overlap, and its *position* is the midpoint of its weight mass over the
@@ -1114,7 +1118,7 @@ uncertainty (§6.7). The readings here are independent; correlated air
 behaves like fewer readings, so on real air the count is a floor. The engine
 applies the definition to every window and reports its count, coverage and
 whether a contributing reading was at least `COPY_RATIO` times as wide as the
-window; the rolling state applies the rule and blanks (§6.6). Every
+window; the baseline state applies the rule and blanks (§6.6). Every
 window records `n_readings_` and `coverage_` as every join does. One warning
 per stream at run time names the sweep points blank at every reading, with
 the rule that blanked each: the count (with the most readings any window
@@ -1244,8 +1248,8 @@ subtracting a per-reading number changes nothing about what the cell is. A
 rolling slope in Phase 7 is a product whose cells are its windows, under the
 same no-false-method rule.
 
-**The product (built 2026-09-28, `rolling.state`).** One `xarray.Dataset`
-per instrument, `tsara_stage = "rolling"`, on the stream's own `time` and
+**The product (built 2026-09-28, `baseline.state`).** One `xarray.Dataset`
+per instrument, `tsara_stage = "baseline"`, on the stream's own `time` and
 `time_bnds` and every other coordinate the stream carries, with two more
 dimensions: `baseline_window` (the configured windows in seconds, their
 spelling kept in `tsara_baseline_windows`) and `baseline_quantile`. For each
@@ -1285,10 +1289,10 @@ carries `tsara_sigma_rule`, naming which rule of §6.7 formed it
 `quadrature with the donor's`; `reading`). A sweep point blank at every reading is named in one warning per stream,
 with the count it needed.
 
-**Persistence (Phase 5, `rolling.bundle`).** `save_state` writes one netCDF
-file per instrument, `rolling/<instrument>.nc`, into a bundle directory
+**Persistence (Phase 5, `baseline.bundle`).** `save_state` writes one netCDF
+file per instrument, `baseline/<instrument>.nc`, into a bundle directory
 beside `streams/`, and the analysis configuration that produced them as
-`rolling/analysis.yaml`, as the resolved manifest is written beside the
+`baseline/analysis.yaml`, as the resolved manifest is written beside the
 streams; `bundle.json` is not touched, for the grid's reason (§11.7). State
 files for instruments the run did not roll are removed, so the directory is
 the record of what ran. An optional zlib level compresses every array, the
@@ -1299,7 +1303,7 @@ from 25.5 MB to 12.7 MB, values identical.
 `load_state` brings every variable, coordinate (the CF bounds as a
 coordinate) and attribute back exactly, the per-sweep-point records as the
 numeric arrays they are, refuses a file whose `tsara_stage` is not
-`rolling`, and reads the configuration through the one YAML door so a
+`baseline`, and reads the configuration through the one YAML door so a
 hand-edited copy with a key written twice is refused there too (§10.2). A
 reloaded state is joined like a stream (§6.2), which the round-trip test
 checks last. The bundle format version is unchanged: a new directory beside
@@ -1344,7 +1348,7 @@ error, labelled as such (`empirical`, with the assumption named in the
 attribute), and not the spread of the baseline; that spread, across windows
 and quantiles, is the sweep's and is read in Phase 7's stability cube.
 
-**The enhancement's uncertainty (built with the rolling state, `rolling.state`; each figure names its rule in `tsara_sigma_rule`).**
+**The enhancement's uncertainty (built with the baseline state, `baseline.state`; each figure names its rule in `tsara_sigma_rule`).**
 Its random component is the reading's and the baseline's in quadrature,
 `sigma_rand_enhancement_<x>` = √(σ²_rand(*x*) + σ²_b), treating one
 reading's noise as independent of a quantile of hundreds; the reading's own
@@ -1387,13 +1391,13 @@ Phase-7 regression that follows.
   empirical estimator named by `DetectionConfig.noise_estimator` (default
   `diff_mad`, §2.5); detection has no private definition of noise, and the §2.5 quantization
   floor applies to whichever estimate is used. Phase 5 built that ladder in
-  the rolling state, measured its cost on a plume-dense record (`diff_mad`
+  the baseline state, measured its cost on a plume-dense record (`diff_mad`
   reads 1.30 times the true sigma when a third of the readings sit inside
   plumes, §2.5), and on 2026-09-29 it moved here, because its remedy is a
   loop with detection: estimate, detect, re-estimate the noise outside the
   events found, detect again. Phase 6 restores it from the Phase-5 build
   (§2.5), with the weighted rolling quantile moved into `core` so that this
-  stage and the rolling stage share one engine, and answers first what
+  stage and the baseline stage share one engine, and answers first what
   detection means by noise on a moving platform: measured, on a real drive
   the estimate follows the air (§2.5). Also decided:
   **quantile-offset correction** — because the baseline
@@ -3530,7 +3534,7 @@ instrument it came from, and keeps the `field` its stream declared: `ch4_picarro
 `ch4_aeris` both still say `field: ch4` (§1.6).
 
 **Swept variables (Phase 5).** A variable may carry sweep dimensions beside
-`time`: the rolling state's `baseline_<x>` is one variable over `(time,
+`time`: the baseline state's `baseline_<x>` is one variable over `(time,
 baseline_window, baseline_quantile)`, nine versions per reading. The join
 treats each version exactly as it treats a plain variable, with the pairs
 found once for the instrument: the value is the overlap-weighted mean, the
@@ -4588,7 +4592,7 @@ convention everywhere else.
 
 Implemented in `tsara.align.grid`, specified in §1.4. A uniform
 `(time × variable)` table: one kind of cell set, a tiling. Its role was scoped
-on 2026-09-24 (§1.4): the continuous rolling state does not live on it (§6.2),
+on 2026-09-24 (§1.4): the continuous baseline state does not live on it (§6.2),
 and a receptor-model table is one join onto a cell set chosen for it, of which
 a tiling per drive is one candidate beside the canister fills and plume
 events. What else the grid is for is put off until an export needs it. This

@@ -38,7 +38,7 @@ class OutputGridConfig(_StrictModel):
 
     A grid is not where any science happens. Baselines, detection and
     regression run per stream at native rate ("synchronize late", METHODS.md
-    §1.1), and the continuous rolling state -- baseline and enhancement, with
+    §1.1), and the continuous baseline state -- baseline and enhancement, with
     their uncertainties, for every reading at every sweep point -- lives beside each
     stream's own readings (§6.2), not on this grid: measured, native rate is
     thirteen times smaller than a grid spanning a campaign and loses nothing.
@@ -268,14 +268,14 @@ class ConstantMethod(_StrictModel):
 #: Tagged union of the registered baseline methods, dispatched on ``method``
 #: -- the same discriminator convention as the manifest's QA/QC rules, loaders
 #: and platforms. Every name here is a registered method in
-#: :mod:`tsara.rolling` and has a section in METHODS.md §6.5.
+#: :mod:`tsara.baseline` and has a section in METHODS.md §6.5.
 BaselineMethod = Annotated[
     RollingQuantileMethod | FromFieldMethod | ConstantMethod, Field(discriminator="method")
 ]
 
 
 class BaselineConfig(_StrictModel):
-    """Rolling low-quantile baselines: the sweep, the count rule, and the method per variable.
+    """Baselines: the window × quantile sweep, the count rule, and the method per variable.
 
     The baseline at each reading is a low quantile (e.g. the 5th percentile)
     of the signal within a window of stated duration centred on the reading.
@@ -685,7 +685,7 @@ class AnalysisConfig(_StrictModel):
         default=None,
         description=(
             "Optional uniform tiling for an export (METHODS.md §1.4). Absent by "
-            "default: the continuous rolling state lives per stream at native "
+            "default: the continuous baseline state lives per stream at native "
             "rate (§6.2), so a run that never exports a table needs no grid."
         ),
     )
@@ -700,7 +700,9 @@ class AnalysisConfig(_StrictModel):
         default_factory=PairingConfig,
         description="Sufficiency guard on cross-species pairs (METHODS.md §1.3).",
     )
-    baseline: BaselineConfig = Field(description="Rolling baseline sweep settings.")
+    baseline: BaselineConfig = Field(
+        description="Baseline settings: the sweep, the count rule and the method per variable."
+    )
     detection: DetectionConfig = Field(
         default_factory=DetectionConfig, description="Plume event segmentation settings."
     )

@@ -6,7 +6,8 @@ campaign's archive as described by a YAML manifest, keeps every instrument on it
 own clock, computes rolling baselines, detects plume events, and fits ratios
 between species with the measurement error in *both* axes carried through to the
 answer. The output is both a catalog of discrete plume events and a continuous
-rolling state, ready for source fingerprinting and downstream receptor modeling
+record (a baseline and an enhancement at every reading, and ratios over rolling
+windows), ready for source fingerprinting and downstream receptor modeling
 (e.g. PMF).
 
 The mathematics, the rationale, and the alternatives that were rejected all live
@@ -28,7 +29,7 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 4 | Alignment & pairing (one joining operation, error propagation, circular stats, output grid) | ✅ done |
 | 4.5 | One atmosphere, realized once and sampled by every instrument; a variable's `field` | ✅ done |
 | 4.6 | How support may be changed at all: one per-pair rule, a record on every column of what the join did, the borrowed share | ✅ done |
-| 5 | Baselines + continuous rolling state: per stream on its own cells, a window × quantile sweep, three baseline methods, enhancements with their uncertainties | ✅ done |
+| 5 | The baseline state: a baseline and an enhancement at every reading, per stream on its own cells, a window × quantile sweep, three baseline methods, uncertainties for both | ✅ done |
 | 6 | Plume detection + nested-event bookkeeping | planned |
 | 7 | Regression (OLS / York / ODR), combined UQ, stability cube | planned |
 | 8 | Smoothing + spatiotemporal source complexes | planned |
@@ -95,10 +96,10 @@ save_streams(streams, "demo_bundle")
 #    with their uncertainties, at every point of the window x quantile sweep,
 #    on the stream's own cells. Then checkpoint that too, beside the streams.
 from tsara import load_analysis
-from tsara.rolling import rolling_states, save_state
+from tsara.baseline import baseline_states, save_state
 
 analysis = load_analysis("examples/configs/analysis_example.yaml")
-states = rolling_states(streams, analysis.baseline)
+states = baseline_states(streams, analysis.baseline)
 picarro = states["picarro"]
 print(dict(picarro.sizes))
 print(sorted(v for v in picarro.data_vars if v.endswith("ch4")))
@@ -240,13 +241,13 @@ delivered on. (`METHODS.md` §10)
 **Every stage saves itself.** Each phase ships persistence for the products it
 introduces, so a long run can be inspected in a notebook, resumed after a crash,
 and audited later. A bundle is a plain directory: `bundle.json`, the resolved
-`manifest.yaml`, one netCDF per stream under `streams/`, and one per rolling
-state under `rolling/` with the analysis configuration beside them.
+`manifest.yaml`, one netCDF per stream under `streams/`, and one baseline state
+per instrument under `baseline/` with the analysis configuration beside them.
 
 **A baseline is stated with its window.** There is no single true baseline: a
 rolling low quantile over a window of length *w* follows everything slower than
 *w* and leaves what is shorter standing as enhancement, so the window and the
-quantile are sweep dimensions of the rolling state rather than settings to get
+quantile are sweep dimensions of the baseline state rather than settings to get
 right. Each reading in a window counts in proportion to the share of its cell
 inside it, a window holding fewer readings than the quantile can use is blank
 with the reason recorded, and a baseline carries no CF cell method, because a
@@ -273,8 +274,8 @@ src/tsara/
                bundles
   align/       Which variables, which cells, the one joining operation; pairing,
                auxiliary fields, output grid
-  rolling/     Windows as cells, the weighted rolling quantile, the baseline
-               methods, the rolling state, its bundle
+  baseline/    Windows as cells, the weighted rolling quantile, the baseline
+               methods, the baseline state, its bundle
   synthetic/   Ground-truth data generation, profiling, raw-file export
                The four stages import core and config and never each other:
                they hand each other xarray Datasets
@@ -315,8 +316,8 @@ without being run, and none needs any real data:
   prints ✔ checks comparing TSARA with a calculation written independently from
   the definition, and ends with "Try it" changes whose outcomes were run. A
   closing scoreboard collects every check.
-- [`05_rolling_state_walkthrough.ipynb`](examples/notebooks/05_rolling_state_walkthrough.ipynb)
-  — the continuous rolling state: one weighted quantile at every reading (the
+- [`05_baseline_state_walkthrough.ipynb`](examples/notebooks/05_baseline_state_walkthrough.ipynb)
+  — the continuous baseline state: one weighted quantile at every reading (the
   window in time, the weights, the quantile), three baselines on one record
   against the true background (what a window follows and what it absorbs),
   the count rule and the edge of a record, the width rule on overlapping
@@ -338,7 +339,7 @@ committed **without** outputs:
   measured under. Set `TSARA_ARCHIVE` to the directory holding the archive's `2024/` and
   `2026/` trees before starting Jupyter; without it the first cell stops and
   says so.
-- [`05b_rolling_state_real_data.ipynb`](examples/notebooks/05b_rolling_state_real_data.ipynb)
+- [`05b_baseline_state_real_data.ipynb`](examples/notebooks/05b_baseline_state_real_data.ipynb)
   — notebook 05's operations on the 2024-07-18 drive and the ten drive days:
   the methane baselines at three windows, the membership rule measured, the
   canister's windows, its adopted baseline and the offset that comes with it;
@@ -352,8 +353,9 @@ ruff check . && ruff format --check .
 mypy --strict src tests
 pytest --cov=tsara --cov-branch     # suite; the 100% line+branch floor fails the run
 TSARA_ARCHIVE=/path/to/Data TSARA_NOTEBOOKS=1 pytest tests/test_notebooks.py
-                            # opt-in: executes notebooks 04b (against the archive)
-                            # and 04, and requires every check and ledger row to hold
+                            # opt-in: executes notebooks 04b and 05b (against the
+                            # archive) and 04 and 05, and requires every check and
+                            # ledger row to hold
 ```
 
 The first three are what continuous integration runs on every pull request

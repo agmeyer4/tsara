@@ -1,17 +1,17 @@
-"""Saving and reloading the rolling state.
+"""Saving and reloading the baseline state.
 
-Each instrument's state is one netCDF file, ``rolling/<instrument>.nc``,
+Each instrument's state is one netCDF file, ``baseline/<instrument>.nc``,
 inside a bundle directory beside whatever else that bundle holds; the
 analysis configuration that produced them is written beside the files as
-``rolling/analysis.yaml``, as the resolved manifest is written beside the
+``baseline/analysis.yaml``, as the resolved manifest is written beside the
 streams. ``bundle.json`` is not touched, for the grid's reason: that
 descriptor records which stage created the bundle and what streams it
-wrote, and the rolling state is a later stage's product arriving in the
+wrote, and the baseline state is a later stage's product arriving in the
 same directory (:mod:`tsara.core.bundle`).
 
 Why this ships now rather than with the Phase-9 pipeline: every stage
 product gains persistence in the phase that introduces it (CLAUDE.md §5).
-Rolling a campaign is the second slowest step after ingesting it, and a
+Computing a campaign's baselines is the second slowest step after ingesting it, and a
 notebook that inspects the baselines, or a cluster job that fits ratios
 from them, should not have to roll again.
 
@@ -34,33 +34,33 @@ from typing import TYPE_CHECKING
 import xarray as xr
 import yaml
 
+from tsara.baseline.state import BASELINE_STAGE
 from tsara.config.analysis import AnalysisConfig
 from tsara.config.loader import read_yaml
 from tsara.core.bundle import (
     BUNDLE_ANALYSIS_CONFIG,
-    BUNDLE_ROLLING_DIR,
+    BUNDLE_BASELINE_DIR,
     TsaraBundleError,
     pin_time_encoding,
 )
 from tsara.core.support import check_bounds_intact
-from tsara.rolling.state import ROLLING_STAGE
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Mapping
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["RollingStates", "load_state", "save_state"]
+__all__ = ["BaselineStates", "load_state", "save_state"]
 
 
 @dataclass(frozen=True)
-class RollingStates:
-    """What a bundle's rolling directory holds, reloaded.
+class BaselineStates:
+    """What a bundle's baseline directory holds, reloaded.
 
     Attributes
     ----------
     states : dict of str to xarray.Dataset
-        One rolling state per instrument, keyed by instrument name.
+        One baseline state per instrument, keyed by instrument name.
     analysis : AnalysisConfig or None
         The analysis configuration written beside them, or ``None`` when the
         states were saved without one.
@@ -77,12 +77,12 @@ def save_state(
     analysis: AnalysisConfig | None = None,
     compression: int | None = None,
 ) -> Path:
-    """Write rolling states into a bundle directory.
+    """Write baseline states into a bundle directory.
 
     Parameters
     ----------
     states : mapping of str to xarray.Dataset
-        Rolling states keyed by instrument, as :func:`~tsara.rolling.state.rolling_states`
+        Baseline states keyed by instrument, as :func:`~tsara.baseline.state.baseline_states`
         returns them.
     path : str or pathlib.Path
         Bundle directory. Created if absent. State files for instruments not
@@ -101,25 +101,25 @@ def save_state(
     Returns
     -------
     pathlib.Path
-        The ``rolling`` directory written.
+        The ``baseline`` directory written.
 
     Raises
     ------
     TsaraBundleError
-        If ``states`` is empty, a dataset is not a rolling state, ``path``
+        If ``states`` is empty, a dataset is not a baseline state, ``path``
         exists and is not a directory, a state has lost its cell boundaries,
         or ``compression`` is not a level from 1 to 9.
     """
     if not states:
-        raise TsaraBundleError("No rolling states to save.")
+        raise TsaraBundleError("No baseline states to save.")
     for instrument, state in states.items():
         stage = state.attrs.get("tsara_stage")
-        if stage != ROLLING_STAGE:
+        if stage != BASELINE_STAGE:
             # Refused here for the reason `save_grid` refuses a paired product:
             # a file this function writes must be one `load_state` reads.
             raise TsaraBundleError(
-                f"save_state writes rolling states, and '{instrument}' has tsara_stage "
-                f"'{stage}'. Build one with rolling_state, or write this dataset with "
+                f"save_state writes baseline states, and '{instrument}' has tsara_stage "
+                f"'{stage}'. Build one with baseline_state, or write this dataset with "
                 "to_netcdf."
             )
     if compression is not None and (
@@ -133,7 +133,7 @@ def save_state(
     bundle = Path(path)
     if bundle.exists() and not bundle.is_dir():
         raise TsaraBundleError(f"Bundle path '{bundle}' exists and is not a directory.")
-    target = bundle / BUNDLE_ROLLING_DIR
+    target = bundle / BUNDLE_BASELINE_DIR
     target.mkdir(parents=True, exist_ok=True)
     for instrument, state in states.items():
         # Instrument names are identifiers (the config layer validates them),
@@ -160,10 +160,10 @@ def save_state(
         )
     else:
         logger.info(
-            "Rolling states written to %s without an analysis configuration beside them.",
+            "Baseline states written to %s without an analysis configuration beside them.",
             target,
         )
-    logger.info("Wrote %d rolling state(s) to %s.", len(states), target)
+    logger.info("Wrote %d baseline state(s) to %s.", len(states), target)
     return target
 
 
@@ -176,21 +176,21 @@ def _remove_orphan_states(target: Path, keep: set[str]) -> None:
     """
     for existing in target.glob("*.nc"):
         if existing.is_file() and existing.stem not in keep:
-            logger.info("Removing stale rolling state file %s.", existing)
+            logger.info("Removing stale baseline state file %s.", existing)
             existing.unlink()
 
 
-def load_state(path: str | Path) -> RollingStates:
-    """Read the rolling states written by :func:`save_state`.
+def load_state(path: str | Path) -> BaselineStates:
+    """Read the baseline states written by :func:`save_state`.
 
     Parameters
     ----------
     path : str or pathlib.Path
-        Bundle directory, or its ``rolling`` directory.
+        Bundle directory, or its ``baseline`` directory.
 
     Returns
     -------
-    RollingStates
+    BaselineStates
         The states, keyed by instrument, and the analysis configuration
         beside them if one was written.
 
@@ -202,14 +202,14 @@ def load_state(path: str | Path) -> RollingStates:
         does not validate.
     """
     candidate = Path(path)
-    target = candidate if candidate.name == BUNDLE_ROLLING_DIR else candidate / BUNDLE_ROLLING_DIR
+    target = candidate if candidate.name == BUNDLE_BASELINE_DIR else candidate / BUNDLE_BASELINE_DIR
     if not target.is_dir():
         raise TsaraBundleError(
-            f"'{target}' is not an existing directory; this bundle holds no rolling state."
+            f"'{target}' is not an existing directory; this bundle holds no baseline state."
         )
     files = sorted(target.glob("*.nc"))
     if not files:
-        raise TsaraBundleError(f"'{target}' holds no rolling state file.")
+        raise TsaraBundleError(f"'{target}' holds no baseline state file.")
     states: dict[str, xr.Dataset] = {}
     for file in files:
         # `decode_coords="all"` brings `time_bnds` back as a coordinate, where
@@ -217,10 +217,10 @@ def load_state(path: str | Path) -> RollingStates:
         with xr.open_dataset(file, engine="netcdf4", decode_coords="all") as opened:
             state = opened.load()
         stage = state.attrs.get("tsara_stage")
-        if stage != ROLLING_STAGE:
+        if stage != BASELINE_STAGE:
             raise TsaraBundleError(
-                f"'{file}' was written by the '{stage}' stage, not '{ROLLING_STAGE}'. "
-                "Refusing rather than misreading it as a rolling state."
+                f"'{file}' was written by the '{stage}' stage, not '{BASELINE_STAGE}'. "
+                "Refusing rather than misreading it as a baseline state."
             )
         states[file.stem] = state
     analysis: AnalysisConfig | None = None
@@ -234,5 +234,5 @@ def load_state(path: str | Path) -> RollingStates:
             raise TsaraBundleError(
                 f"Could not read the analysis configuration in '{config_file}': {exc}"
             ) from exc
-    logger.info("Loaded %d rolling state(s) from %s.", len(states), target)
-    return RollingStates(states=states, analysis=analysis)
+    logger.info("Loaded %d baseline state(s) from %s.", len(states), target)
+    return BaselineStates(states=states, analysis=analysis)

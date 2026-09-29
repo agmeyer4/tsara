@@ -14,7 +14,7 @@
 # --- Output grid (optional) ----------------------------------------------
 # A uniform tiling of cells: one kind of cell set, built when an export wants
 # a rectangular table (METHODS.md §1.4). NOT what streams are synchronized
-# onto ("synchronize late", §1.1), and NOT where the continuous rolling state
+# onto ("synchronize late", §1.1), and NOT where the continuous baseline state
 # lives -- that is per stream at native rate, beside the readings (§6.2).
 # Leave the whole block out when nothing is exported on a tiling.
 output_grid:
@@ -46,11 +46,11 @@ alignment:
 pairing:
   min_coverage: 0.0       # 0.0 drops nothing; raise to exclude thin pairs
 
-# --- Rolling baselines -------------------------------------------------------
+# --- Baselines (the baseline stage, tsara.baseline) --------------------------
 # Per stream, at native rate: for every reading and every (window, quantile)
-# of the sweep, the baseline, the enhancement and the noise scale (METHODS.md
-# §6). Windows are durations centred on each reading; a reading counts in
-# proportion to the share of its cell inside the window (§6.3).
+# of the sweep, the baseline and the enhancement, with their uncertainties
+# (METHODS.md §6). Windows are durations centred on each reading; a reading
+# counts in proportion to the share of its cell inside the window (§6.3).
 baseline:
   # Strictly increasing, short -> long. Also defines the multi-scale
   # hierarchy for nested-plume attribution (short window catches the sharp
