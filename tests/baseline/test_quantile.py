@@ -89,14 +89,30 @@ def close(a: np.ndarray, b: np.ndarray) -> bool:
     return bool(np.allclose(a, b, rtol=1e-12, atol=0, equal_nan=True))
 
 
-def agree(got: RollingQuantile, want: RollingQuantile) -> None:
+def close_to_values(a: np.ndarray, b: np.ndarray, values: np.ndarray) -> bool:
+    """Equal to the rounding of the readings: for a difference of two interpolated values.
+
+    Woodruff's sigma is half the gap between the values read at q - delta and
+    q + delta, and delta depends on the effective count, which the two forms
+    sum in different orders. Measured on ``jittered_record`` at 120 s: moving
+    the effective count by one to four units in the last place moves the sigma
+    by up to one unit in the last place of the values (2.3e-13 ppb), which is
+    3.0e-12 of the smallest sigmas, so a tolerance relative to the sigma itself
+    promises more than the arithmetic can. Each form rounds each interpolated
+    value by at most two units, so the halved gap differs by at most four.
+    """
+    unit = np.spacing(np.nanmax(np.abs(values)))
+    return bool(np.allclose(a, b, rtol=1e-12, atol=4 * unit, equal_nan=True))
+
+
+def agree(got: RollingQuantile, want: RollingQuantile, values: np.ndarray) -> None:
     """Values bitwise; counts and flags exact; the differently summed qualifiers to rounding."""
     assert same(got.values, want.values), "values"
     assert same(got.n_readings, want.n_readings), "n_readings"
     assert same(got.too_wide, want.too_wide), "too_wide"
     assert close(got.coverage, want.coverage), "coverage"
     assert close(got.n_effective, want.n_effective), "n_effective"
-    assert close(got.sigma, want.sigma), "sigma"
+    assert close_to_values(got.sigma, want.sigma, values), "sigma"
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +188,7 @@ def test_the_block_form_agrees_with_the_reference(window_s: float) -> None:
     readings, values = jittered_record()
     windows = window_cells(readings, int(window_s * SECOND))
     got = rolling_quantile(readings, values, windows, QUANTILES)
-    agree(got, reference(readings, values, windows, QUANTILES))
+    agree(got, reference(readings, values, windows, QUANTILES), values)
     assert got.values.shape == (len(readings), QUANTILES.size)
 
 
@@ -192,7 +208,7 @@ def test_windows_need_not_be_centred_on_the_readings() -> None:
     readings, values = jittered_record(n=500)
     windows = cells(100.0, 45.0, 20, step_s=37.0)
     got = rolling_quantile(readings, values, windows, np.array([0.5]))
-    agree(got, reference(readings, values, windows, np.array([0.5])))
+    agree(got, reference(readings, values, windows, np.array([0.5])), values)
 
 
 def test_a_window_touching_nothing_is_blank_with_a_count_of_zero() -> None:
@@ -335,7 +351,7 @@ def test_a_position_above_the_highest_reading_clamps_in_a_partly_filled_row() ->
     windows = window_cells(readings, 120 * SECOND)
     top = np.array([0.99, 1.0])
     got = rolling_quantile(readings, values, windows, top)
-    agree(got, reference(readings, values, windows, top))
+    agree(got, reference(readings, values, windows, top), values)
     assert np.isfinite(got.values[got.n_readings > 0]).all()
 
 
