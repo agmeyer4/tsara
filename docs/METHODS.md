@@ -516,17 +516,17 @@ runs), and the ratios of percentiles of that estimate across the drive:
 | PTR-MS benzene | 1.7 | 3.7 |
 
 An analyzer's precision does not change thirtyfold between two stretches of
-road; the air does. On an urban drive the empirical noise scale is mostly
-the atmosphere's variability at the sampling interval, rising where plumes
-crowd together, so thresholds quoted in it would rise and fall with the
-traffic. The floor never acted on this drive (every record is written in
-steps far finer than its noise). Declaring each analyzer's precision in the
-manifest puts a declared figure above the estimate on the ladder; what
-detection should mean by noise on a moving platform, the instrument's
-precision or the local variability, was Phase 6's first question, answered
-by neither (§6.8). The table is re-measured by Phase 6's real-data notebook
-as the record of this rejected meaning; notebook 05b re-measures only the one
-noise figure §6.5 uses.
+road; the air does. On an urban drive the empirical noise scale is mostly the
+atmosphere's variability at the sampling interval, rising where plumes crowd
+together, so thresholds quoted in it would rise and fall with the traffic. The
+floor never acted on this drive (every record is written in steps far finer
+than its noise). Declaring each analyzer's precision in the manifest puts a
+declared figure above the estimate on the ladder; what detection should mean
+by noise on a moving platform, the instrument's precision or the local
+variability, was Phase 6's first question, answered by neither (§6.8). The
+table is re-measured by notebook 06b as the record of this rejected meaning,
+every entry reproducing; notebook 05b re-measures only the one noise figure
+§6.5 uses.
 
 Measured against the generator (rule: the example campaign's 2 s Picarro
 with its sigma columns removed, `diff_mad` over 10 min, the ratio of the
@@ -1553,7 +1553,9 @@ analyzer, finite readings), the share of readings inside an event:
 | C | 59 % | 70 % | 77 % | 40 % |
 
 Most of a drive sits above a 5th-percentile baseline by more than its clean
-spread, which is what urban air is.
+spread, which is what urban air is. Notebook 06b re-measures this table, the
+NOy floor, the clean level's growth, the one-reading shares and the records
+table below through the package, every number reproducing (2026-09-30).
 
 **The clean spread is not a measurement uncertainty** and is never labelled
 or used as one (§2.3). This revises the 2026-07-09 decision that detection
@@ -1682,18 +1684,19 @@ counts, and could not have been re-run from this document:
 
 So 100 is the floor for having a scale at all, not a guarantee of the
 false-alarm rate; the half-sample mode's jitter persists at every count. A
-drive has thousands of readings below its level; a canister's day has about
-16, so a canister takes its events from a dense instrument named as its
-**trigger** (`plumes.triggers`, keyed by instrument or by variable, the
-variable's key winning). A trigger may measure any field (decided
-2026-09-30, revising "the same field"): the 2024 canister's VOCs mostly have
-no dense instrument of their own, and a trigger states when the air holds a
-plume, not what the plume is made of. A variable with a trigger always takes
-the trigger's intervals, and its catalog rows carry its own reading count,
-covered share and largest enhancement, no *z*, and the trigger's name; one
-with neither enough readings nor a trigger is blank with the reason. A
-trigger may not take its events from a trigger of its own, for the reason
-`from_field` refuses a chain (§6.5).
+drive has thousands of readings below its level; a canister's has a few tens
+at most (with a constant zero baseline: 7 of its 32 fills on the 07-18 drive,
+15 of 30 on 07-30; notebook 06b), so a canister takes its events from a dense
+instrument named as its **trigger** (`plumes.triggers`, keyed by instrument or
+by variable, the variable's key winning). A trigger may measure any field
+(decided 2026-09-30, revising "the same field"): the 2024 canister's VOCs
+mostly have no dense instrument of their own, and a trigger states when the
+air holds a plume, not what the plume is made of. A variable with a trigger
+always takes the trigger's intervals, and its catalog rows carry its own
+reading count, covered share and largest enhancement, no *z*, and the
+trigger's name; one with neither enough readings nor a trigger is blank with
+the reason. A trigger may not take its events from a trigger of its own, for
+the reason `from_field` refuses a chain (§6.5).
 
 **Thresholds, both swept.** `enter_multiple` and `exit_multiple` (the old
 names said "sigma", which in TSARA means a measurement uncertainty) are both
@@ -2817,6 +2820,27 @@ results (§11.4, §11.7) were first measured on the `_i` columns and reported
 full coverage that the measured record does not have, and were corrected in
 that phase's final audit. A density check is the quickest guard — count finite
 values *per column*, since a file's widest column can be an interpolated one.
+
+**Held copies are the same trap, one level down** (measured 2026-09-30,
+notebook 06b). A merge can also write an instrument's last value into every
+row until its next arrives, so a column is as dense as the rows and many of
+its values are copies. Rule: TSARA ingestion of all 19 files of the 2024 NOAA
+ARC suite (`USOS-ARL-Suite_ARC_*.ict`, one row a second); each variable's
+finite readings in time order; a held value is one exactly equal to the
+previous reading, and a day's share is quoted for days with at least 1000
+readings; the Aeris with notebook 06b's QA/QC (methane 1500–100000 ppb, ethane
+at least −10 ppb, `Valve` 0 only). The Picarro G2401's methane is held at 52.1
+% of its 1,277,655 readings (51.6–53.4 % per day), the G2201-i's at 69.0 %,
+the Aeris's at 0.2 % (0.2–0.3 % per day): no analyzer measures a value twice
+to ten decimals. TSARA cannot tell a held copy from a reading, and a manifest
+cannot say a column is held. Downstream, tied readings put a baseline quantile
+exactly on a reading, so enhancements are exactly zero far more often (at 2
+min on 07-30, 1.2 % of the G2401's against 0.1 % of the Aeris's) and a clean
+level can be exactly 0 (§6.8); the chance column counts every copy as an
+independent reading; and a pair fitted over a held column counts each value
+twice, the pseudo-replication §11.4 guards against. Whether ingestion should
+learn to drop held repeats is open. Until then, name the analyzer that reports
+at the rows' rate.
 
 ### 9.3 ICARTT revision selection
 

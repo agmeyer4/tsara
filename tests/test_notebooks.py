@@ -17,11 +17,11 @@ Both are opt-in, because each takes longer than the rest of the suite:
   ``docs/METHODS.md`` quotes, re-measured from the files, and a count of the
   checks made from the definitions; the test requires no ledger entry to
   differ and every check to hold.
-* ``04`` and ``05`` run when ``TSARA_NOTEBOOKS`` is set to anything (about a
-  minute each; generated data only). Each scoreboard cell prints ``N of N
-  checks hold``, and the test requires exactly that.
-* ``05b`` runs with ``04b`` when ``TSARA_ARCHIVE`` is set, under the same
-  ledger-and-checks rule.
+* ``04``, ``05`` and ``06`` run when ``TSARA_NOTEBOOKS`` is set to anything
+  (about a minute each; generated data only). Each scoreboard cell prints
+  ``N of N checks hold``, and the test requires exactly that.
+* ``05b`` and ``06b`` run with ``04b`` when ``TSARA_ARCHIVE`` is set, under the
+  same ledger-and-checks rule (``06b`` takes a few minutes).
 
 Neither test compares outputs with the committed ones: log timestamps and
 section 7's machine timings change on every run by design.
@@ -60,11 +60,11 @@ CELL_TIMEOUT_S = 600
 requires_archive = pytest.mark.skipif(
     not os.environ.get(ARCHIVE_ENV),
     reason=f"Set {ARCHIVE_ENV} to the directory holding the archive's 2024/ and 2026/ trees "
-    "to execute notebook 04b against it.",
+    "to execute notebooks 04b, 05b and 06b against it.",
 )
 requires_opt_in = pytest.mark.skipif(
     not os.environ.get(NOTEBOOKS_ENV),
-    reason=f"Set {NOTEBOOKS_ENV}=1 to execute notebooks 04 and 05 (about a minute each, "
+    reason=f"Set {NOTEBOOKS_ENV}=1 to execute notebooks 04, 05 and 06 (about a minute each, "
     "generated data only).",
 )
 
@@ -131,7 +131,10 @@ def clean_env() -> dict[str, str]:
 
 
 @requires_archive
-@pytest.mark.parametrize("name", ["04b_alignment_real_data", "05b_baseline_state_real_data"])
+@pytest.mark.parametrize(
+    "name",
+    ["04b_alignment_real_data", "05b_baseline_state_real_data", "06b_plumes_real_data"],
+)
 def test_real_data_notebook_executes_and_its_ledger_agrees(tmp_path: Path, name: str) -> None:
     nb = execute(NOTEBOOKS / f"{name}.ipynb", tmp_path, env=clean_env())
     errors = list(error_outputs(nb))
@@ -154,7 +157,10 @@ def test_real_data_notebook_executes_and_its_ledger_agrees(tmp_path: Path, name:
 
 
 @requires_opt_in
-@pytest.mark.parametrize("name", ["04_alignment_walkthrough", "05_baseline_state_walkthrough"])
+@pytest.mark.parametrize(
+    "name",
+    ["04_alignment_walkthrough", "05_baseline_state_walkthrough", "06_plumes_walkthrough"],
+)
 def test_generated_data_notebook_executes_and_every_check_holds(tmp_path: Path, name: str) -> None:
     env = clean_env()
     env.pop(ARCHIVE_ENV, None)  # these notebooks read no real data

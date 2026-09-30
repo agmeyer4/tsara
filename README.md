@@ -362,8 +362,16 @@ without being run, and none needs any real data:
   joined like a stream. Same interactive shape as 04: parameters cells, ✔
   checks, "Try it" notes whose every prediction is run as a parameter
   override before the notebook is committed, a scoreboard.
+- [`06_plumes_walkthrough.ipynb`](examples/notebooks/06_plumes_walkthrough.ipynb)
+  — plume events: plume-free air measured (the clean level and spread against
+  truly plume-free readings), records and dropouts, the two-threshold detector
+  against a loop written from its definition, the chance rate against its
+  closed form, what the window decides and the tree that links the scales, the
+  catalog scored against the answer key as a join, a canister taking a dense
+  analyzer's events, and the state and catalog saved and reloaded. Same shape
+  as 05.
 
-Two companions run on the real campaign archive instead, and are therefore
+Three companions run on the real campaign archive instead, and are therefore
 committed **without** outputs:
 
 - [`04b_alignment_real_data.ipynb`](examples/notebooks/04b_alignment_real_data.ipynb)
@@ -380,6 +388,13 @@ committed **without** outputs:
   canister's windows, its adopted baseline and the offset that comes with it;
   its ledger re-measures the archive numbers `docs/METHODS.md` §6 and §2.5
   quote. Same gate as 04b.
+- [`06b_plumes_real_data.ipynb`](examples/notebooks/06b_plumes_real_data.ipynb)
+  — notebook 06's stage on the archive: a day of the NOAA ARC's Aeris methane
+  and ethane (with the QA/QC its file calls for), a second analyzer of the same
+  methane and a column of held copies, records on logs that run for days, and
+  the 2024-07-18 drive's methane, benzene and canister; its ledger re-measures
+  the archive numbers `docs/METHODS.md` §6.8 and §2.5 quote. Same gate as 04b;
+  a few minutes.
 
 ## Development
 
@@ -388,9 +403,12 @@ ruff check . && ruff format --check .
 mypy --strict src tests
 pytest --cov=tsara --cov-branch     # suite; the 100% line+branch floor fails the run
 TSARA_ARCHIVE=/path/to/Data TSARA_NOTEBOOKS=1 pytest tests/test_notebooks.py
-                            # opt-in: executes notebooks 04b and 05b (against the
-                            # archive) and 04 and 05, and requires every check and
-                            # ledger row to hold
+                            # opt-in: executes notebooks 04b, 05b and 06b (against
+                            # the archive) and 04, 05 and 06, and requires every
+                            # check and ledger row to hold
+TSARA_SLOW=1 pytest tests/plumes/test_methods_tables.py
+                            # opt-in: re-runs METHODS §6.8's generated-data tables
+                            # (about 12 minutes)
 ```
 
 The first three are what continuous integration runs on every pull request
