@@ -1,0 +1,246 @@
+"""Tests for records and dropouts (tsara.plumes.records)."""
+
+from __future__ import annotations
+
+from fractions import Fraction
+
+import numpy as np
+import numpy.typing as npt
+import pytest
+
+from tsara.core.support import CellBounds
+from tsara.core.timebase import SECOND_NS as SECOND
+from tsara.plumes import DROPOUT_SPACING_FACTOR, TsaraPlumeError, find_records
+
+HOUR = 3600 * SECOND
+
+
+def cells_at(midpoints_s: npt.ArrayLike, width_s: float = 1.0) -> CellBounds:
+    """Cells of ``width_s`` centred on the given midpoints, in seconds."""
+    mid = np.round(np.asarray(midpoints_s, dtype=np.float64) * SECOND).astype(np.int64)
+    half = int(width_s * SECOND) // 2
+    return CellBounds(start_ns=mid - half, stop_ns=mid + half)
+
+
+def all_finite(n: int) -> npt.NDArray[np.bool_]:
+    return np.ones(n, dtype=bool)
+
+
+# ---------------------------------------------------------------------------
+# Pieces, split at gaps
+# ---------------------------------------------------------------------------
+
+
+def test_a_gap_longer_than_the_rule_splits_and_the_extent_is_the_readings_cells() -> None:
+    mids = [0.0, 1.0, 2.0, 3 * 3600.0, 3 * 3600.0 + 1, 3 * 3600.0 + 2]
+    cells = cells_at(mids)
+    records = find_records(cells, all_finite(6), gap_ns=2 * HOUR, max_length_ns=6 * HOUR)
+    assert records.index.tolist() == [0, 0, 0, 1, 1, 1]
+    assert records.n == 2
+    assert records.start_ns.tolist() == [cells.start_ns[0], cells.start_ns[3]]
+    assert records.stop_ns.tolist() == [cells.stop_ns[2], cells.stop_ns[5]]
+
+
+def test_a_gap_exactly_as_long_as_the_rule_does_not_split() -> None:
+    """More than the gap splits; the gap itself does not."""
+    records = find_records(
+        cells_at([0.0, 7200.0]), all_finite(2), gap_ns=2 * HOUR, max_length_ns=6 * HOUR
+    )
+    assert records.index.tolist() == [0, 0]
+
+
+def test_a_reading_that_is_not_finite_belongs_to_no_record_and_splits_nothing() -> None:
+    finite = np.array([True, True, False, True])
+    records = find_records(
+        cells_at([0.0, 1.0, 2.0, 3.0]), finite, gap_ns=2 * HOUR, max_length_ns=6 * HOUR
+    )
+    assert records.index.tolist() == [0, 0, -1, 0]
+
+
+def test_no_finite_reading_means_no_record() -> None:
+    records = find_records(
+        cells_at([0.0, 1.0]), np.zeros(2, dtype=bool), gap_ns=HOUR, max_length_ns=HOUR
+    )
+    assert records.n == 0
+    assert records.index.tolist() == [-1, -1]
+    assert not records.dropout_before.any()
+
+
+# ---------------------------------------------------------------------------
+# Parts, cut to the maximum length
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("max_hours", "expected"),
+    [
+        # 13 hourly readings span 12 h: two parts of exactly 6 h. The reading at
+        # 6 h opens the second part, and the one at 12 h, on its closing edge,
+        # stays in it.
+        (6, [0] * 6 + [1] * 7),
+        # Three parts of exactly 4 h.
+        (5, [0] * 4 + [1] * 4 + [2] * 5),
+        # A maximum longer than the piece leaves it whole.
+        (13, [0] * 13),
+    ],
+)
+def test_a_long_piece_is_cut_into_the_fewest_equal_parts(
+    max_hours: int, expected: list[int]
+) -> None:
+    records = find_records(
+        cells_at(np.arange(13) * 3600.0),
+        all_finite(13),
+        gap_ns=2 * HOUR,
+        max_length_ns=max_hours * HOUR,
+    )
+    assert records.index.tolist() == expected
+
+
+def test_an_empty_part_is_not_a_record_and_the_numbering_stays_consecutive() -> None:
+    """Readings at 0, 0.1, 1.9 and 2.0 h with no gap over 2 h, cut to 0.5 h:
+    four parts of which the middle two are empty."""
+    records = find_records(
+        cells_at([0.0, 360.0, 6840.0, 7200.0]),
+        all_finite(4),
+        gap_ns=2 * HOUR,
+        max_length_ns=HOUR // 2,
+    )
+    assert records.index.tolist() == [0, 0, 1, 1]
+    assert records.n == 2
+
+
+def test_parts_are_exactly_equal_where_whole_nanoseconds_would_not_be() -> None:
+    """A 10 ns piece cut into three parts has edges at 3.33 and 6.67 ns.
+
+    Whole-nanosecond parts of ceil(10 / 3) = 4 ns would put the reading at
+    7 ns in the second part; exactly equal parts put it in the third.
+    """
+    mids = np.array([0, 3, 4, 6, 7, 10], dtype=np.int64)
+    cells = CellBounds(start_ns=mids, stop_ns=mids + 1)
+    records = find_records(cells, all_finite(6), gap_ns=100, max_length_ns=4)
+    assert records.index.tolist() == [0, 0, 1, 1, 2, 2]
+
+
+def test_a_year_long_piece_is_cut_without_overflow() -> None:
+    """3.2e16 ns cut into ~1 460 six-hour parts: o * n overflows int64 at the end."""
+    year = 365 * 24 * HOUR
+    mids = np.linspace(0, year, 2001).astype(np.int64)
+    cells = CellBounds(start_ns=mids, stop_ns=mids + SECOND)
+    records = find_records(cells, all_finite(mids.size), gap_ns=year, max_length_ns=6 * HOUR)
+    assert records.n == 1460
+    assert np.all(np.diff(records.index) >= 0)
+    assert records.index[-1] == 1459
+
+
+def test_records_match_a_slow_reference_written_from_the_definition() -> None:
+    """The definition, one reading at a time, with part edges as exact fractions."""
+    rng = np.random.default_rng(3)
+    for _ in range(40):
+        steps = rng.choice([1, 2, 3, 900, 9000], size=300, p=[0.5, 0.3, 0.17, 0.02, 0.01])
+        mids = np.cumsum(steps).astype(np.int64) * SECOND
+        finite = rng.random(mids.size) > 0.1
+        cells = CellBounds(start_ns=mids - SECOND // 2, stop_ns=mids + SECOND // 2)
+        gap, cap = 3000 * SECOND, int(rng.integers(600, 20000)) * SECOND
+        found = find_records(cells, finite, gap_ns=gap, max_length_ns=cap)
+        assert found.index.tolist() == _slow_records(mids, finite, gap, cap)
+
+
+def _slow_records(
+    mids: npt.NDArray[np.int64], finite: npt.NDArray[np.bool_], gap: int, cap: int
+) -> list[int]:
+    kept = [i for i in range(mids.size) if finite[i]]
+    pieces: list[list[int]] = []
+    for i in kept:
+        if pieces and int(mids[i]) - int(mids[pieces[-1][-1]]) <= gap:
+            pieces[-1].append(i)
+        else:
+            pieces.append([i])
+    out = [-1] * mids.size
+    record = 0
+    for piece in pieces:
+        first, span = int(mids[piece[0]]), int(mids[piece[-1]]) - int(mids[piece[0]])
+        n = 1
+        while Fraction(span, n) > cap:
+            n += 1
+        used: dict[int, int] = {}
+        for i in piece:
+            part = n - 1
+            for k in range(n):
+                if int(mids[i]) - first < Fraction(span * (k + 1), n):
+                    part = k
+                    break
+            used.setdefault(part, len(used))
+            out[i] = record + used[part]
+        record += len(used)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Dropouts
+# ---------------------------------------------------------------------------
+
+
+def test_a_jittered_record_keeps_its_steps_and_loses_a_missing_row() -> None:
+    """The 07-18 shape: readings every 2 or 3 s, median 2 s. A 3 s step is
+    1.5 x the median and not more, so not a dropout; a 4 s step is."""
+    steps = [2, 3, 2, 2, 3, 2, 4, 2]
+    mids = np.concatenate([[0], np.cumsum(steps)]).astype(float)
+    records = find_records(cells_at(mids), all_finite(mids.size), gap_ns=HOUR, max_length_ns=HOUR)
+    assert records.median_spacing_ns.tolist() == [2 * SECOND]
+    assert records.dropout_before.tolist() == [False] * 7 + [True, False]
+    assert DROPOUT_SPACING_FACTOR == 1.5
+
+
+def test_a_missing_row_of_a_regular_record_is_a_dropout_and_a_masked_one_too() -> None:
+    """1 s readings: a row absent from the file and a row masked to NaN leave the
+    same 2 s hole, and both are dropouts."""
+    absent = find_records(
+        cells_at([0.0, 1.0, 2.0, 4.0, 5.0]), all_finite(5), gap_ns=HOUR, max_length_ns=HOUR
+    )
+    masked = find_records(
+        cells_at([0.0, 1.0, 2.0, 3.0, 4.0, 5.0]),
+        np.array([True, True, True, False, True, True]),
+        gap_ns=HOUR,
+        max_length_ns=HOUR,
+    )
+    assert absent.dropout_before.tolist() == [False, False, False, True, False]
+    assert masked.dropout_before.tolist() == [False, False, False, False, True, False]
+
+
+def test_each_record_judges_dropouts_by_its_own_spacing() -> None:
+    """A 1 s record and a 10 s record: 10 s steps are not dropouts in the second."""
+    first = [0.0, 1.0, 2.0, 3.0]
+    second = [5 * 3600.0 + 10.0 * k for k in range(4)]
+    records = find_records(
+        cells_at(first + second), all_finite(8), gap_ns=2 * HOUR, max_length_ns=6 * HOUR
+    )
+    assert records.median_spacing_ns.tolist() == [SECOND, 10 * SECOND]
+    assert not records.dropout_before.any()
+
+
+def test_a_record_of_one_reading_has_no_spacing() -> None:
+    records = find_records(
+        cells_at([0.0, 5 * 3600.0, 5 * 3600.0 + 1]),
+        all_finite(3),
+        gap_ns=HOUR,
+        max_length_ns=HOUR,
+    )
+    assert np.isnan(records.median_spacing_ns[0])
+    assert records.median_spacing_ns[1] == SECOND
+
+
+# ---------------------------------------------------------------------------
+# Refusals
+# ---------------------------------------------------------------------------
+
+
+def test_what_cannot_be_split_is_refused() -> None:
+    cells = cells_at([0.0, 1.0, 2.0])
+    with pytest.raises(TsaraPlumeError, match="one per reading"):
+        find_records(cells, all_finite(2), gap_ns=HOUR, max_length_ns=HOUR)
+    with pytest.raises(TsaraPlumeError, match="positive gap"):
+        find_records(cells, all_finite(3), gap_ns=0, max_length_ns=HOUR)
+    with pytest.raises(TsaraPlumeError, match="positive gap"):
+        find_records(cells, all_finite(3), gap_ns=HOUR, max_length_ns=-1)
+    with pytest.raises(TsaraPlumeError, match="not in time order"):
+        find_records(cells_at([0.0, 2.0, 1.0]), all_finite(3), gap_ns=HOUR, max_length_ns=HOUR)

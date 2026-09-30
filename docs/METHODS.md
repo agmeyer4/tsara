@@ -1583,12 +1583,37 @@ without a redesign; the candidate is a Gaussian fitted to the lower side of
 the enhancement's histogram peak, which is plume-free whatever the plume
 fraction (not measured; CLAUDE.md open flags).
 
+**The half-sample mode as built** (`tsara.plumes.clean`, 2026-09-30). Sorted,
+the values are narrowed to the shortest interval holding ⌈*n*/2⌉ of them, then
+to the shortest holding half of those, until three or fewer remain; of three,
+the mode is the mean of the closer pair, or the middle value when the two gaps
+are equal; of two, their mean. Where several intervals are equally short the
+earliest (lowest) is kept, which on a record written in steps keeps a plateau
+of identical readings whole. A slow reference written from Bickel and
+Frühwirth agrees exactly on 600 samples with ties, steps and heavy tails. Its
+jitter, one record at a time (rule: plume-free N(0, 0.7) readings, 21,600 of
+them, one 6 h record at 1 s, seeds 0–299): the level scatters by 0.13σ from
+record to record (mean −0.008σ) and the spread by 8 % (mean 0.999σ). The
+spread is unbiased on plume-free air, as the closed form says it must be
+(1.4826 × the median of a half-normal is σ). δ for the floor is the variable's
+declared `quantization`, else the smallest positive gap between the record's
+distinct *readings*, not its enhancements, since a baseline lying between two
+steps moves an enhancement off the grid.
+
 **Records.** The clean level and spread are computed per **record**: a
 stream is split where consecutive finite readings are more than a gap apart
 (default 2 h), and each piece is cut into equal parts no longer than a
 maximum length (default 6 h, about one drive): `record_gap` and
-`max_record_length`. Both are found without declaration; declared segments
-can come later. The cap exists
+`max_record_length`. Each part is exactly *span*/*n* long, *n* the fewest
+parts no longer than the maximum: a reading at offset *o* from the piece's
+first midpoint falls in part ⌊*o*·*n*/*span*⌋ (in exact integer arithmetic;
+whole-nanosecond parts would not be equal), the last reading staying in the
+last part, and a part holding no reading is not a record. Records belong to a
+variable, found from which of its readings are finite, and are the same at
+every sweep point. A reading masked to NaN leaves the same hole as one absent
+from the file, so either is a dropout when the hole breaks the spacing rule.
+Both lengths are found without declaration; declared segments can come later.
+The cap exists
 because the gap rule does not split a record that logs continuously
 (rule: TSARA ingestion, finite readings of one variable, gap = time between
 consecutive cell midpoints):
@@ -1605,13 +1630,19 @@ mix days of different air.
 
 **A minimum count: 100 readings below the clean level** (`min_clean_readings`). Fewer, and that
 record's level and spread are blank with the reason recorded, and the
-variable defines no events there. Rule: draws of N(0, 1) with 30 % of them
-carrying an exponential excess of mean 5, 4000 repetitions per count, seed 11;
-for the half-sample mode, the 10th–90th percentiles of the spread over its
-truth and of the chance that one plume-free reading crosses the entry
-threshold *m* + 3*s*, as a multiple of the nominal 0.00135:
+variable defines no events there. Rule: for a count *n*, round(*n*/0.35)
+draws of N(0, 1) plus, with probability 0.3, an exponential excess of mean 5,
+so that about *n* readings fall below the true centre 0 (drawn as the normals,
+then the uniforms, then the exponentials); 4000 repetitions per count; one
+generator seeded 11, run through the counts 10, 15, 20, 30, 50, 100, 300 and
+1000 in that order; for the half-sample mode, the 10th–90th percentiles of
+the spread over its truth (1) and of the chance that one plume-free reading
+crosses the entry threshold *m* + 3*s*, as a multiple of the nominal 0.00135.
+The package reproduces every number exactly (`tests/plumes/test_clean.py`).
+The rule was first written without the draw count and the order of the
+counts, and could not have been re-run from this document:
 
-| readings below the level | 30 | 100 | 300 | 1000 |
+| readings below the true centre, about | 30 | 100 | 300 | 1000 |
 |---|---|---|---|---|
 | spread ÷ truth | 0.62–1.49 | 0.74–1.36 | 0.81–1.27 | 0.86–1.20 |
 | chance crossing × nominal | 0.00–58 | 0.00–21 | 0.01–11 | 0.03–6 |
