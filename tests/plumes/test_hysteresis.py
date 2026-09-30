@@ -14,6 +14,7 @@ from tsara.plumes import (
     Events,
     Records,
     TsaraPlumeError,
+    describe_events,
     expected_chance_rate,
     find_events,
     find_records,
@@ -66,7 +67,7 @@ def test_a_run_above_exit_that_reaches_entry_is_one_event_and_records_itself() -
     assert events.n == 1
     assert events.first.tolist() == [1] and events.last.tolist() == [3]
     assert events.peak.tolist() == [2]
-    assert events.z_max.tolist() == [3.5]
+    assert events.peak_score.tolist() == [3.5]
     assert events.n_readings.tolist() == [3]
     assert events.start_ns.tolist() == [cells.start_ns[1]]
     assert events.stop_ns.tolist() == [cells.stop_ns[3]]
@@ -264,6 +265,60 @@ def _slow_events(
             dip.append(i)
     close()
     return {"spans": spans, "membership": membership}
+
+
+# ---------------------------------------------------------------------------
+# Describing events from a membership
+# ---------------------------------------------------------------------------
+
+
+def test_describing_a_membership_gives_back_what_the_detector_found() -> None:
+    """find_events ends by describing its membership, so describing that membership
+    again, from nothing but it, z and the cells, returns every field unchanged."""
+    rng = np.random.default_rng(9)
+    for _ in range(20):
+        n = 300
+        mids = np.cumsum(rng.choice([1.0, 2.0, 3.0], size=n, p=[0.6, 0.3, 0.1]))
+        cells = cells_at(mids, rng.choice([1.0, 1.024], size=n))
+        z = np.convolve(rng.normal(size=n), np.ones(4) / 2, mode="same")
+        records = find_records(cells, np.ones(n, dtype=bool), gap_ns=HOUR, max_length_ns=HOUR)
+        found = find_events(z, cells, records, enter=2.5, exit_=0.5, max_internal_gap_ns=0)
+        again = describe_events(found.membership, z, cells)
+        for field in ("number", "first", "last", "peak", "start_ns", "stop_ns", "n_readings"):
+            assert np.array_equal(getattr(again, field), getattr(found, field)), field
+        assert np.array_equal(again.covered, found.covered)
+        assert np.array_equal(again.peak_score, found.peak_score)
+
+
+def test_a_taken_event_keeps_its_number_its_interval_and_a_peak_where_a_score_is_finite() -> None:
+    """Events 4 and 9 of a trigger, taken on a variable of its own cells: the
+    intervals are the trigger's; the peak is the largest finite score, or the
+    first reading when no score is finite, whose score is then NaN."""
+    cells = cells_at([0.0, 1.0, 2.0, 10.0, 11.0])
+    membership = np.array([4, 4, -1, 9, 9])
+    score = np.array([1.0, 2.0, 5.0, NAN, NAN])
+    known = (np.array([4, 9]), np.array([-SECOND, 9 * SECOND]), np.array([3 * SECOND, 13 * SECOND]))
+    events = describe_events(membership, score, cells, intervals=known)
+    assert events.number.tolist() == [4, 9]
+    assert events.peak.tolist() == [1, 3]
+    assert events.peak_score[0] == 2.0 and math.isnan(events.peak_score[1])
+    assert events.start_ns.tolist() == [-SECOND, 9 * SECOND]
+    assert events.n_readings.tolist() == [2, 2]
+    assert events.covered.tolist() == [0.5, 0.5]
+
+
+def test_describing_what_does_not_fit_is_refused() -> None:
+    cells = cells_at([0.0, 1.0, 2.0])
+    with pytest.raises(TsaraPlumeError, match="do not match"):
+        describe_events(np.array([0, 0]), np.zeros(3), cells)
+    with pytest.raises(TsaraPlumeError, match="do not match"):
+        describe_events(np.array([0, 0, -1]), np.zeros(2), cells)
+    one = (np.array([0]), np.array([0]), np.array([SECOND]))
+    with pytest.raises(TsaraPlumeError, match="no interval of its own"):
+        describe_events(np.array([0, 1, -1]), np.zeros(3), cells, intervals=one)
+    none = (np.empty(0, dtype=np.int64),) * 3
+    with pytest.raises(TsaraPlumeError, match="no interval of its own"):
+        describe_events(np.array([0, -1, -1]), np.zeros(3), cells, intervals=none)
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import TypeAlias
 
 import numpy as np
 import numpy.typing as npt
@@ -25,8 +26,10 @@ from tsara.plumes import (
     plume_state,
     plume_states,
 )
+from tsara.synthetic import SyntheticDataset
 
 HOUR = 3600 * SECOND
+ExampleChain: TypeAlias = tuple[SyntheticDataset, xr.Dataset, xr.Dataset]
 BASELINE = BaselineConfig(windows=("2min", "10min"), quantiles=(0.05, 0.1))
 PLUMES = PlumesConfig(enter_multiple=(3.0, 4.0), exit_multiple=(1.0,))
 
@@ -408,26 +411,15 @@ def test_a_trigger_state_missing_or_found_on_another_sweep_is_refused(
 # ---------------------------------------------------------------------------
 
 
-def test_the_example_campaign_reproduces_the_scoping_measurement() -> None:
-    """METHODS §6.8: the example campaign's 2 s Picarro methane (true sigma 0.6 ppb,
-    one 6 h record, plume-dense), rolled at 2, 10 and 60 min with q = 0.05, entry 3,
-    exit 1, nothing bridged. The clean spread is 1.01, 1.02 and 1.45 times the true
-    sigma, and 31, 33 and 42 % of readings lie in events."""
-    from tsara.config.loader import load_synthetic
-    from tsara.synthetic import generate
-
-    campaign = generate(load_synthetic("examples/configs/synthetic_example.yaml"))
-    stream = campaign.observable("picarro")
-    stream = stream.drop_vars([v for v in stream.data_vars if str(v).startswith("sigma_")])
-    state = baseline_state(
-        stream,
-        instrument="picarro",
-        baseline=BaselineConfig(windows=("2min", "10min", "60min"), quantiles=(0.05,)),
-        variables=["ch4"],
-    )
-    found = plume_state(state, instrument="picarro", plumes=PlumesConfig(max_internal_gap="1ns"))
-    spread = found["clean_spread_ch4"].values[:, :, 0]
-    event = found["event_ch4"].values[:, :, 0, 0, 0]
+def test_the_example_campaign_reproduces_the_scoping_measurement(
+    example_chain: ExampleChain,
+) -> None:
+    """METHODS §6.8: through the whole chain (the fixture states the rule) the clean
+    spread is 1.01, 1.02 and 1.45 times the true sigma of 0.6 ppb, and 31, 33 and
+    42 % of readings lie in events."""
+    _, _, plume = example_chain
+    spread = plume["clean_spread_ch4"].values[:, :, 0]
+    event = plume["event_ch4"].values[:, :, 0, 0, 0]
     assert [round(float(np.nanmedian(spread[:, w])) / 0.6, 2) for w in range(3)] == [
         1.01,
         1.02,

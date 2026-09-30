@@ -1739,7 +1739,11 @@ found at 2 min and not at 10 min links to the landfill found at 60 min). The
 link carries both durations. It records containment, not origin: scale is not
 source (§6.1). No area mathematics (§7). The rule for a parent's ratio is
 Phase 7's, and both candidate readings of §6.1 need exactly this tree and the
-per-reading event index below.
+per-reading event index below. An interval holds a peak when start ≤ peak
+< end, as a cell holds its midpoint; an event with no peak (a triggered
+variable none of whose readings has an enhancement) has no parent, and nor
+does an event at the longest window. On the example chain, 95 % of events at
+2 min and 70 % at 10 min have a parent.
 
 **What the stage saves** (names settled in the build):
 
@@ -1778,15 +1782,36 @@ per-reading event index below.
   exit 1, 1.5, 2, so 81 sweep points): 1.9 s, beside 104 s for the baseline
   state it reads, and 121 MB in memory, 65 MB of it the event index, whose
   size on disk is measured with its persistence.
-- **The catalog**, one long Parquet table keyed by `event_id`: one row per
-  event, variable and sweep point, the sweep coordinates as columns, the
-  columns that mean the same as the generator's answer key spelled as it
-  spells them (`GROUND_TRUTH_COLUMNS`, §8.1) so that scoring is a join; per
-  event its record, bounds, peak time, largest Δ and *z*, reading count,
-  covered share, parent link and durations, and the stream's expected chance
-  rate; positions when the stream carries them, the GPS join onto events
-  being Phase 8's. Later stages add tables keyed by `event_id` rather than
-  editing this one; that key is the room §7 keeps for integration.
+- **The catalog** (built 2026-09-30, `tsara.plumes.catalog`), one long table
+  keyed by `event_id`: one row per event, variable and sweep point, the sweep
+  coordinates as columns (`baseline_window`, `baseline_quantile`,
+  `enter_multiple`, `exit_multiple`), and the ten columns that mean what a
+  column of the generator's answer key means spelled as it spells them, with
+  the same types (`event_id`, `parent_event_id`, `instrument`, `species`,
+  `field`, `start_time`, `peak_time`, `end_time`, `latitude`, `longitude`;
+  `GROUND_TRUTH_COLUMNS`, §8.1), so that scoring is a join. Per event: its
+  number at its sweep point, its record, its interval and duration, its peak
+  time (the peak reading's cell midpoint) with the enhancement and *z*
+  there, its reading count and covered share, its record's clean level and
+  spread, the sweep point's count of events and expected chance count, its
+  parent and the parent's duration, and its position at the peak when the
+  stream carries positions (a site's everywhere; the GPS join onto a mobile
+  gas stream's events is Phase 8's). An `event_id` is spelled from the
+  instrument, the variable, the sweep point and the event's number in time
+  order, `van.ch4/w600s/q0.05/e3/x1/17`, so a run repeated on the same data
+  and configuration gives the same keys. A triggered variable's rows hold
+  the trigger's interval, their own reading count, covered share and largest
+  enhancement, no *z*, record or clean air, and name the trigger and the
+  trigger's `event_id`. Rows are rebuilt from the plume state's `event_x` by
+  the detector's own describing step (`describe_events`, the last step of
+  `find_events`), so a saved state and its catalog cannot disagree. Scored as
+  a join (rule: the example chain above; a true event is found when a
+  detected interval holds its peak time, and a detected interval overlapping
+  no true event's [start, end] is false), all 59 true events are found at
+  every window, and the false events are 2.50, 4.00 and 7.67 an hour at 2,
+  10 and 60 min, as the scoping measured. Later stages add tables keyed by
+  `event_id` rather than editing this one; that key is the room §7 keeps for
+  integration.
 
 ### 6.9 Smoothing, clustering **[stubs]**
 

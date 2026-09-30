@@ -46,7 +46,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from tsara.core.support import CellBounds
     from tsara.plumes.records import Records
 
-__all__ = ["Events", "expected_chance_rate", "find_events"]
+__all__ = ["Events", "describe_events", "expected_chance_rate", "find_events"]
 
 
 @dataclass(frozen=True, eq=False)
@@ -58,21 +58,27 @@ class Events:
 
     Attributes
     ----------
+    number : numpy.ndarray of int64
+        The event's number: 0, 1, ... in time order for events found here;
+        the trigger's numbers for events a variable took from its trigger.
     first, last : numpy.ndarray of int64
         The event's first and last readings.
     peak : numpy.ndarray of int64
-        Its reading with the largest z (the earliest, on a tie); within one
-        record that is also its largest enhancement, since z is the
-        enhancement shifted and scaled by the record's own level and spread.
+        Its reading with the largest score (the earliest, on a tie): z for
+        events found here, which within one record is also the largest
+        enhancement, since z is the enhancement shifted and scaled by the
+        record's own level and spread; the enhancement itself for events
+        taken from a trigger. The first reading when no score is finite.
     start_ns, stop_ns : numpy.ndarray of int64
-        The first reading's cell start and the last reading's cell stop.
+        The first reading's cell start and the last reading's cell stop, or
+        the trigger's interval for an event taken from one.
     n_readings : numpy.ndarray of int64
         Finite readings from first to last, a bridged dip's included.
     covered : numpy.ndarray of float64
         The share of [start, stop) its readings' cells cover, counted once
         where cells overlap.
-    z_max : numpy.ndarray of float64
-        z at the peak.
+    peak_score : numpy.ndarray of float64
+        The score at the peak; NaN when none is finite.
     membership : numpy.ndarray of int64
         Per reading of the stream, the event it belongs to, numbered from 0;
         -1 for a reading in none, and for a reading that is not finite even
@@ -80,6 +86,7 @@ class Events:
         belong with.
     """
 
+    number: npt.NDArray[np.int64]
     first: npt.NDArray[np.int64]
     last: npt.NDArray[np.int64]
     peak: npt.NDArray[np.int64]
@@ -87,7 +94,7 @@ class Events:
     stop_ns: npt.NDArray[np.int64]
     n_readings: npt.NDArray[np.int64]
     covered: npt.NDArray[np.float64]
-    z_max: npt.NDArray[np.float64]
+    peak_score: npt.NDArray[np.float64]
     membership: npt.NDArray[np.int64]
 
     @property
@@ -182,42 +189,103 @@ def find_events(
     group_first = run_first[group_opens]
     group_last = run_last[np.r_[group_opens[1:], True]] if run_first.size else run_last
 
-    # 4. Keep the groups that reach entry.
-    peaks = _peaks(zk, group_first, group_last)
-    kept = zk[peaks] >= enter
-    first, last, peak = group_first[kept], group_last[kept], peaks[kept]
+    # 4. Keep the groups that reach entry: each group's largest z, taken over
+    #    its own span (never NaN inside, a blank reading having broken it).
+    member, within = _spans(group_first, group_last)
+    highest = np.full(group_first.size, -np.inf)
+    np.maximum.at(highest, member, zk[within])
+    kept = np.flatnonzero(highest >= enter)
 
-    # 5. What each event records.
-    member, within = _spans(first, last)
-    start_ns, stop_ns = starts[first], stops[last]
-    covered = _covered(starts[within], stops[within], member, start_ns, stop_ns)
+    # 5. Number the kept groups in time order, and describe them.
+    renumber = np.full(group_first.size, -1, dtype=np.int64)
+    renumber[kept] = np.arange(kept.size)
     membership = np.full(values.size, -1, dtype=np.int64)
-    membership[rows[within]] = member
+    membership[rows[within]] = renumber[member]
+    return describe_events(membership, values, cells)
+
+
+def describe_events(
+    membership: npt.NDArray[np.integer],
+    score: npt.NDArray[np.float64],
+    cells: CellBounds,
+    *,
+    intervals: tuple[npt.NDArray[np.int64], npt.NDArray[np.int64], npt.NDArray[np.int64]]
+    | None = None,
+) -> Events:
+    """Describe the events a membership array holds.
+
+    The last step of :func:`find_events`, and on its own the way to describe
+    events found elsewhere: from a saved plume state's ``event_x``, or a
+    variable's share of its trigger's events.
+
+    Parameters
+    ----------
+    membership : numpy.ndarray of int
+        Per reading, the number of the event it belongs to, -1 for none.
+    score : numpy.ndarray of float64
+        Per reading, the value whose largest is an event's peak: z, or for a
+        triggered variable its enhancement. A reading with no finite score
+        is passed over for the peak.
+    cells : CellBounds
+        The stream's cells.
+    intervals : tuple of three numpy arrays, optional
+        ``(numbers, start_ns, stop_ns)``: the interval of each event by
+        number, for events taken from a trigger, whose interval is the
+        trigger's rather than the span of this variable's own readings.
+
+    Returns
+    -------
+    Events
+        One entry per event number present, in increasing number.
+
+    Raises
+    ------
+    TsaraPlumeError
+        If the arrays do not match the cells, or an event has no interval.
+    """
+    member_of = np.asarray(membership, dtype=np.int64)
+    values = np.asarray(score, dtype=np.float64)
+    if member_of.shape != cells.start_ns.shape or values.shape != member_of.shape:
+        raise TsaraPlumeError(
+            f"A membership of shape {member_of.shape} and a score of shape {values.shape} "
+            f"do not match {cells.start_ns.size} cells."
+        )
+    rows = np.flatnonzero(member_of >= 0)
+    number, group = np.unique(member_of[rows], return_inverse=True)
+    # Rows grouped by event, in time order within each: the first of a group
+    # is its first reading, the last its last.
+    order = np.lexsort((rows, group))
+    rows, group = rows[order], group[order]
+    counts = np.bincount(group, minlength=number.size).astype(np.int64)
+    heads = np.cumsum(counts) - counts
+    first, last = rows[heads], rows[heads + counts - 1]
+    # The peak: sorted by group, then by score descending, then by row, the
+    # head of each group. numpy sorts NaN last, so a reading with no score is
+    # never the peak while one of its event has a score.
+    peak = rows[np.lexsort((rows, -values[rows], group))][heads]
+    if intervals is None:
+        start_ns, stop_ns = cells.start_ns[first], cells.stop_ns[last]
+    else:
+        known, starts, stops = intervals
+        where = np.searchsorted(known, number)
+        if np.any(where >= known.size) or np.any(
+            known[np.minimum(where, known.size - 1)] != number
+        ):
+            raise TsaraPlumeError("An event taken from a trigger has no interval of its own.")
+        start_ns, stop_ns = starts[where], stops[where]
+    covered = _covered(cells.start_ns[rows], cells.stop_ns[rows], group, start_ns, stop_ns)
     return Events(
-        first=rows[first],
-        last=rows[last],
-        peak=rows[peak],
+        number=number.astype(np.int64),
+        first=first,
+        last=last,
+        peak=peak,
         start_ns=start_ns,
         stop_ns=stop_ns,
-        n_readings=(last - first + 1).astype(np.int64),
+        n_readings=counts,
         covered=covered,
-        z_max=zk[peak],
-        membership=membership,
+        peak_score=values[peak],
+        membership=member_of,
     )
-
-
-def _peaks(
-    zk: npt.NDArray[np.float64], first: npt.NDArray[np.int64], last: npt.NDArray[np.int64]
-) -> npt.NDArray[np.int64]:
-    """Return, per group, the position of its largest z, the earliest on a tie."""
-    group, position = _spans(first, last)
-    # Sorted by group, then by z descending, then by position: the first entry
-    # of each group is its peak.
-    order = np.lexsort((position, -zk[position], group))
-    lengths = last - first + 1
-    heads = np.cumsum(lengths) - lengths
-    peaks: npt.NDArray[np.int64] = position[order][heads]
-    return peaks
 
 
 def _spans(

@@ -28,10 +28,15 @@ Shape of the subpackage
     The product: every gas variable of a baseline state described, scored
     and searched at every sweep point, on the stream's own cells; a variable
     named in ``plumes.triggers`` takes its trigger's events instead.
+``catalog``
+    The events as rows: one long table keyed by ``event_id``, spelled like
+    the generator's answer key where the meaning is the same, with the
+    parent-child tree along the baseline's window.
 """
 
 from __future__ import annotations
 
+from tsara.plumes.catalog import CATALOG_COLUMNS, link_parents, plume_catalog
 from tsara.plumes.clean import (
     MAD_TO_SIGMA,
     CleanAir,
@@ -45,7 +50,7 @@ from tsara.plumes.clean import (
     quantization_step,
     register_clean_level_estimator,
 )
-from tsara.plumes.hysteresis import Events, expected_chance_rate, find_events
+from tsara.plumes.hysteresis import Events, describe_events, expected_chance_rate, find_events
 from tsara.plumes.records import DROPOUT_SPACING_FACTOR, Records, TsaraPlumeError, find_records
 from tsara.plumes.state import (
     CHANCE_ASSUMPTION_ATTR,
@@ -58,6 +63,7 @@ from tsara.plumes.state import (
 )
 
 __all__ = [
+    "CATALOG_COLUMNS",
     "CHANCE_ASSUMPTION_ATTR",
     "CleanAir",
     "CleanDescription",
@@ -74,11 +80,14 @@ __all__ = [
     "available_clean_level_estimators",
     "clean_air",
     "describe_clean_air",
+    "describe_events",
     "expected_chance_rate",
     "find_events",
     "find_records",
     "get_clean_level_estimator",
     "half_sample_mode",
+    "link_parents",
+    "plume_catalog",
     "plume_state",
     "plume_states",
     "quantization_step",
