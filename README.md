@@ -17,7 +17,7 @@ section there before it has a caller.
 
 ## Status
 
-**Alpha — phases 1–5 of the roadmap are complete.** The package is
+**Alpha — phases 1–6 of the roadmap are complete.** The package is
 built one phase per review cycle, and only what is listed as done below exists.
 
 | Phase | | |
@@ -30,7 +30,7 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 4.5 | One atmosphere, realized once and sampled by every instrument; a variable's `field` | ✅ done |
 | 4.6 | How support may be changed at all: one per-pair rule, a record on every column of what the join did, the borrowed share | ✅ done |
 | 5 | The baseline state: a baseline and an enhancement at every reading, per stream on its own cells, a window × quantile sweep, three baseline methods, uncertainties for both | ✅ done |
-| 6 | Plume detection + nested-event bookkeeping | planned |
+| 6 | Plume events: plume-free air described per record, two-threshold events at every sweep point, triggers for sparse instruments, a catalog spelled like the answer key, the parent–child tree | ✅ done |
 | 7 | Regression (OLS / York / ODR), combined UQ, stability cube | planned |
 | 8 | Smoothing + spatiotemporal source complexes | planned |
 | 9 | `Pipeline` class + `tsara` CLI | planned |
@@ -42,10 +42,13 @@ they describe, put any set of those variables onto a common support with
 their uncertainty propagated through the same weights, and roll every stream
 into its continuous state: a baseline and an enhancement, with their
 uncertainties, for each reading at every point of a window × quantile sweep, on
-the stream's own cells, saved beside it**. A manufactured campaign holds one atmosphere that
+the stream's own cells, saved beside it; and find plume events in every
+enhancement at every point of that sweep and of the event thresholds, as a state
+beside the readings and one catalog whose shared columns are spelled like the
+answer key's**. A manufactured campaign holds one atmosphere that
 every instrument samples, so any disagreement between two records of one gas
-is the instruments' own noise, rounding and support. It cannot yet detect
-plumes, fit ratios, or build the stability cube; there is no CLI yet (phase 9).
+is the instruments' own noise, rounding and support. It cannot yet fit ratios
+or build the stability cube; there is no CLI yet (phase 9).
 
 ## Install
 
@@ -104,6 +107,16 @@ picarro = states["picarro"]
 print(dict(picarro.sizes))
 print(sorted(v for v in picarro.data_vars if v.endswith("ch4")))
 save_state(states, "demo_bundle", baseline=analysis.baseline)
+
+# 6. Find plume events in every enhancement, at every point of the baseline
+#    sweep and of the entry x exit thresholds; list them as one table whose
+#    shared columns are spelled like the answer key's; checkpoint both.
+from tsara.plumes import plume_catalog, plume_states, save_plumes
+
+plumes = plume_states(states, analysis.plumes)
+catalog = plume_catalog(plumes, states)
+print(len(catalog), "events, e.g.", catalog["event_id"].iloc[0])
+save_plumes(plumes, "demo_bundle", catalog=catalog, plumes=analysis.plumes)
 ```
 
 ```
@@ -113,6 +126,9 @@ aeris {'time': 42437, 'nv': 2} ['ch4', 'sigma_rand_ch4', 'sigma_sys_ch4', 'c2h6'
 picarro {'time': 10800, 'nv': 2} ['co2', 'sigma_rand_co2', 'sigma_sys_co2', 'ch4', 'sigma_rand_ch4', 'sigma_sys_ch4']
 met {'time': 2160, 'nv': 2} ['wind_dir', 'wind_speed']
 gps {'time': 21600, 'nv': 2} ['latitude', 'longitude']
+{'time': 10800, 'baseline_window': 3, 'baseline_quantile': 3, 'nv': 2}
+['baseline_ch4', 'ch4', 'coverage_window_ch4', 'enhancement_ch4', 'n_readings_window_ch4', 'sigma_rand_baseline_ch4', 'sigma_rand_ch4', 'sigma_rand_enhancement_ch4', 'sigma_sys_baseline_ch4', 'sigma_sys_ch4', 'sigma_sys_enhancement_ch4']
+13081 events, e.g. aeris.c2h6/w120s/q0.01/e3/x1/0
 ```
 
 Four instruments, four different sampling rates, four `time` axes — that is the
@@ -241,8 +257,10 @@ delivered on. (`METHODS.md` §10)
 **Every stage saves itself.** Each phase ships persistence for the products it
 introduces, so a long run can be inspected in a notebook, resumed after a crash,
 and audited later. A bundle is a plain directory: `bundle.json`, the resolved
-`manifest.yaml`, one netCDF per stream under `streams/`, and one baseline state
-per instrument under `baseline/` with the analysis configuration beside them.
+`manifest.yaml`, one netCDF per stream under `streams/`, one baseline state per
+instrument under `baseline/`, and one plume state per instrument with the event
+catalog under `plumes/`; each stage writes beside its products only the section
+of the analysis configuration it read.
 
 **A baseline is stated with its window.** There is no single true baseline: a
 rolling low quantile over a window of length *w* follows everything slower than
@@ -257,8 +275,23 @@ at the windows that matter has options: another instrument's baseline of the
 same field, joined onto its cells, or a declared constant. Enhancements are
 never clipped at zero, and their uncertainty follows from the reading's: where
 the reading declares none, the enhancement says `unknown` rather than borrowing
-an estimate. Nothing here is a noise scale: plume detection's thresholds are
-multiples of its own clean spread (phase 6). (`METHODS.md` §6)
+an estimate. (`METHODS.md` §6)
+
+**A plume is found against plume-free air, as measured.** Plumes only add, so an
+enhancement's readings below its most common value are plume-free air. For each
+variable, record (a stretch between long gaps, at most six hours) and sweep
+point, TSARA measures that most common value, the *clean level*, and 1.4826
+times the median distance below it, the *clean spread*; an event is a run of
+readings that climbs an entry multiple of the spread above the level and stays
+above an exit multiple, never across a dropout. The spread is not a measurement
+uncertainty: it holds the background's wobble at the window's scale, which is
+why a long window reports only strong plumes and a short one weak ones too.
+Every sweep point records how many events chance alone would make. A canister
+too sparse for a level of its own takes its events from a dense analyzer named
+as its trigger. Events are rows of one catalog keyed by `event_id`, and each
+links to the event holding its peak at the nearest longer window: containment,
+not origin. On a manufactured campaign, scoring the catalog is a join against
+the answer key. (`METHODS.md` §6.8)
 
 ## Repository layout
 
@@ -276,8 +309,10 @@ src/tsara/
                auxiliary fields, output grid
   baseline/    Windows as cells, the weighted rolling quantile, the baseline
                methods, the baseline state, its bundle
+  plumes/      Records, the clean level and spread, the detector, the plume
+               state, the catalog and its tree, their bundle
   synthetic/   Ground-truth data generation, profiling, raw-file export
-               The four stages import core and config and never each other:
+               The five stages import core and config and never each other:
                they hand each other xarray Datasets
 docs/METHODS.md   The methods document: mathematics, rationale, rejected options
 examples/configs/    Commented YAML for every schema

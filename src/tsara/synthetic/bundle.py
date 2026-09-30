@@ -16,9 +16,9 @@ Why each format
 * **netCDF4** for streams — the atmospheric-community interchange standard,
   self-describing, and what ``xarray`` round-trips losslessly including
   attrs and coordinates.
-* **Parquet** for the catalog — columnar, typed, and the format CLAUDE.md
-  fixes for the Phase 6 ``PlumeCatalog``. Using it here means ground truth
-  and detections will be directly comparable on disk with no conversion.
+* **Parquet** for the catalog — columnar, typed, and the format the plume
+  catalog is saved in too (``plumes/catalog.parquet``), so ground truth and
+  detections are directly comparable on disk with no conversion.
 * **YAML** for the config — human-readable and diffable, the same format
   every other TSARA config uses.
 

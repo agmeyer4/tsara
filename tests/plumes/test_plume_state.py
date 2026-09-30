@@ -27,6 +27,7 @@ from tsara.plumes import (
     plume_states,
 )
 from tsara.synthetic import SyntheticDataset
+from tsara.synthetic.noise import quantization_floor
 
 HOUR = 3600 * SECOND
 ExampleChain: TypeAlias = tuple[SyntheticDataset, xr.Dataset, xr.Dataset]
@@ -225,7 +226,7 @@ def test_a_declared_quantization_floors_the_spread() -> None:
     stream["ch4"].attrs["quantization"] = 5.0
     state = baseline_state(stream, instrument="van", baseline=BASELINE)
     spread = plume_state(state, instrument="van", plumes=PLUMES)["clean_spread_ch4"].values
-    assert np.all(spread == 5.0 / np.sqrt(12.0))
+    assert np.all(spread == quantization_floor(5.0))
 
 
 # ---------------------------------------------------------------------------

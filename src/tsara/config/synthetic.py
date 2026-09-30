@@ -1033,8 +1033,10 @@ class NestedSpec(_StrictModel):
     inherits the parent's chemistry instead, describing finer temporal
     structure within one source rather than a second source.
 
-    Phase 6 records the parent-child link in the catalog; the area
-    mathematics that would separate their masses is deferred (METHODS.md §7).
+    The plume catalog links an event to the event holding its peak at a
+    longer window, which records containment rather than this origin
+    (METHODS.md §6.8); the area mathematics that would separate their
+    masses is deferred (§7).
     """
 
     probability: float = Field(

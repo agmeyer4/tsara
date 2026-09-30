@@ -63,7 +63,7 @@ by `tests/test_architecture.py`; the rest is this section.
 ```
 core/        a leaf: imports nothing else from tsara
 config/      every schema plus the one YAML door: imports only core
-synthetic/  ingest/  align/  baseline/
+synthetic/  ingest/  align/  baseline/  plumes/
              the stages: import core, config and themselves, and NEVER each
              other. They hand each other xarray Datasets whose vocabulary
              lives in core/naming.py. That is what lets a new stage be

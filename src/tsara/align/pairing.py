@@ -220,8 +220,9 @@ def pair_species(
         The two species. A bare canonical name is looked up across the
         streams and must be unambiguous; a tuple names the instrument.
     interval : tuple of pandas.Timestamp, optional
-        Restrict pairing to cells overlapping this window -- an event, in
-        Phase 6. ``None`` pairs the whole record.
+        Restrict pairing to cells overlapping this window, such as an
+        event's interval from the plume catalog. ``None`` pairs the whole
+        record.
     target : CellBounds or str, optional
         Cells to pair on instead of the wider-supported member's own: explicit
         cells, or a period such as ``'10s'`` for a uniform grid over the two

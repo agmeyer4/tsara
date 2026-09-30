@@ -291,7 +291,7 @@ class BaselineConfig(_StrictModel):
 
     ``windows`` and ``quantiles`` are sweep dimensions: every (window,
     quantile) pair is evaluated. Windows double as the *multi-scale
-    hierarchy* used for nested-plume parent/child bookkeeping in Phase 6 --
+    hierarchy* of the plume catalog's parent-child tree (METHODS.md §6.8) --
     a sharp blip is an enhancement over the shortest window's baseline, a
     broad plume over the longest. ``min_readings`` is the validity rule, a
     count tied to the quantile (§6.4). ``methods`` chooses, per variable, how

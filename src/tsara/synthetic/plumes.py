@@ -15,9 +15,9 @@ Three concerns live here:
 2. :func:`schedule_events` — draws *physical* events from a Poisson process
    and realizes their per-species amplitudes, ratios, lags, and nesting.
 3. :class:`GroundTruth` — the catalog of what was injected, deliberately
-   schema-compatible with a subset of the future Phase 6 ``PlumeCatalog`` so
-   that scoring detection is a direct column-wise diff rather than a
-   translation layer.
+   schema-compatible with the plume catalog (``tsara.plumes.catalog``): the
+   columns the two share are spelled and typed alike, so scoring detection
+   is a join rather than a translation layer.
 """
 
 from __future__ import annotations
@@ -648,10 +648,11 @@ def _realize_child(
 # Ground truth
 # ---------------------------------------------------------------------------
 
-#: Column order of the ground-truth table. Fixed and explicit because this
-#: schema is the contract that Phase 6's PlumeCatalog must remain
-#: diff-compatible with; a silent column reordering would break scoring code
-#: that positional-indexes the parquet file.
+#: Column order of the ground-truth table. Fixed and explicit because the
+#: plume catalog (``tsara.plumes.catalog.CATALOG_COLUMNS``) spells the ten
+#: columns it shares with this one as this one does, and a test holds the two
+#: to the same names and types; a silent change here would break scoring by
+#: join.
 GROUND_TRUTH_COLUMNS: tuple[str, ...] = (
     "event_id",
     "parent_event_id",
@@ -677,9 +678,9 @@ class GroundTruthEvent:
     """One (event, measured variable) row of the answer key.
 
     One physical event contributes one row per variable that measures a
-    species it emits, mirroring how the Phase 6 catalog will store per-species
-    enhancements: two instruments measuring methane each get a row, because
-    each saw the event through its own clock and cells. Both a continuous and
+    species it emits, as the plume catalog stores its events: two
+    instruments measuring methane each get a row, because each saw the event
+    through its own clock and cells. Both a continuous and
     a sampled amplitude are recorded because they answer different questions:
     ``true_amplitude`` is what the *source* did, while
     ``sampled_peak_amplitude`` is the largest value the instrument could

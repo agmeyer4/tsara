@@ -36,10 +36,10 @@ attributes and this document, because each was once used for several:
 | **provenance** | where a number or a fact came from: `declared`, `reported`, `inferred`, `assumed`, `empirical` … (`uncertainty_provenance`, `tsara_support_label_provenance`) | |
 | **field** | the physical quantity a variable measures (§1.6) | |
 | **baseline at window w** | the low quantile of a variable over a window of length w around a reading; always stated with its window (§6.1) | "the baseline" or "the true background": what is baseline at one window is signal at another |
-| **clean level**, **clean spread** | detection's description of plume-free air at one sweep point over one record: the most common enhancement, and 1.4826 × the median distance below it (§6.8). Detection's thresholds are multiples of the clean spread | a measurement uncertainty or the instrument's noise: the clean spread includes the background's wobble at the window's scale. Not `scale` or `offset`, which are a unit conversion's |
+| **clean level**, **clean spread** | the plumes stage's description of plume-free air at one sweep point over one record: the most common enhancement, and 1.4826 × the median distance below it (§6.8). Detection's thresholds are multiples of the clean spread | a measurement uncertainty or the instrument's noise: the clean spread includes the background's wobble at the window's scale. Not `scale` or `offset`, which are a unit conversion's |
 | **plume** | an enhancement in the air from an emission: what the generator injects and the plumes stage (`tsara.plumes`) looks for | an interval the stage reported, which is an *event* |
 | **event** | an interval the plumes stage reported on one variable at one sweep point (`event_id`): one plume, part of one, several merged, or a chance crossing, which is why the expected chance rate is recorded (§6.8) | a plume, or a source |
-| **record** | a stretch of one stream over which detection computes its clean level and spread: split where consecutive readings are more than a set gap apart, and cut into pieces no longer than a set length (§6.8) | a file, a drive or a campaign |
+| **record** | a stretch of one stream over which the plumes stage computes its clean level and spread: split where consecutive readings are more than a set gap apart, and cut into pieces no longer than a set length (§6.8) | a file, a drive or a campaign |
 | **rolling** | the operation: a statistic over a window centred on each reading, moved along the record (`rolling_quantile`; Phase 7's fits over windows) | a stage or a product. The stage that computes baselines and enhancements is `baseline` (`tsara.baseline`); its product is the **baseline state**, saved under `baseline/` in a bundle. Both were named `rolling` until Phase 5 merged; no bundle under the old name exists outside that branch, so none is migrated |
 | **borrowed** | the share of a joined value resting on air outside its own cell (`borrowed_<name>`, `tsara_borrowed_share`, §11.2.4) | an uncertainty; it is a magnitude, and no threshold on it separates a blend from jitter |
 | **averaged / straddled / narrowed / copied** | what a join did to the readings behind a column (`tsara_support_transform`, §11.2.4): wholly inside their cells; lying across a boundary; wider than a cell they fill; at least twice as wide, which is refused unless asked for by name | |
@@ -467,8 +467,8 @@ signal, which on plume-dense records measures the plumes.
 design below was built in the baseline state (code and tests at commit
 `59bd6ef`) and was to be restored in Phase 6; it was rejected instead (see
 the status note above). Three
-reasons moved it: its two settings are detection's (`DetectionConfig.
-noise_estimator`, `DetectionConfig.noise_window`), so the baseline stage was
+reasons moved it: its two settings were detection's (`DetectionConfig.
+noise_estimator` and `noise_window`, both deleted in Phase 6), so the baseline stage was
 reading another stage's configuration, which Phases 3 and 3.5 had both
 declined to do for this estimator; its meaning on a moving platform is not
 settled (measured below: on a real drive it follows the air); and its
@@ -1446,7 +1446,7 @@ clipped** at zero: noise makes Δ negative in clean air and on plume edges,
 and clipping would shift the noise distribution's mean and bias every
 Phase-7 regression that follows.
 
-### 6.8 Plumes **[decided 2026-09-29, building — Phase 6]**
+### 6.8 Plumes **[decided 2026-09-29, built 2026-09-30 — Phase 6]**
 
 Every stage before this one turns numbers into numbers. Detection turns them
 into a decision, "from here to here there is a plume in methane", and three
@@ -1931,9 +1931,9 @@ field it measures in its `field` attribute (§1.6). Everything prefixed
 `truth_` is the answer key and is excluded from the pipeline-visible view
 (`SyntheticDataset.observable`).
 
-The catalog is deliberately schema-compatible with a subset of the future
-Phase-6 `PlumeCatalog`, so scoring detection is a column-wise diff rather than
-a translation layer. It records both `true_amplitude` (the continuous peak the
+The catalog is deliberately schema-compatible with the plume catalog of
+Phase 6 (§6.8): the ten columns the two share are spelled and typed alike, so
+scoring detection is a join rather than a translation layer. It records both `true_amplitude` (the continuous peak the
 source produced) and `sampled_peak_amplitude` (the largest value the
 instrument's clock could have seen, NaN if the event fell entirely inside a
 gap). These answer different questions, and a detector cannot be faulted for
@@ -2300,7 +2300,8 @@ The components differ in **how they are drawn**, which is the entire point:
 adversarial case: once more than half a window shares one value every
 median-based estimator collapses to exactly zero, making every point a
 detection. `quantization_floor(δ) = δ/√12` exposes the §2.5 guard constant so
-detection tests compare against the same number the generator used.
+the plumes stage's tests of its floor (§6.8) compare against the same number
+the generator used.
 
 ### 8.6 Clocks, gaps, and platforms
 
