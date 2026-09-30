@@ -37,6 +37,8 @@ attributes and this document, because each was once used for several:
 | **field** | the physical quantity a variable measures (§1.6) | |
 | **baseline at window w** | the low quantile of a variable over a window of length w around a reading; always stated with its window (§6.1) | "the baseline" or "the true background": what is baseline at one window is signal at another |
 | **clean level**, **clean spread** | detection's description of plume-free air at one sweep point over one record: the most common enhancement, and 1.4826 × the median distance below it (§6.8). Detection's thresholds are multiples of the clean spread | a measurement uncertainty or the instrument's noise: the clean spread includes the background's wobble at the window's scale. Not `scale` or `offset`, which are a unit conversion's |
+| **plume** | an enhancement in the air from an emission: what the generator injects and the plumes stage (`tsara.plumes`) looks for | an interval the stage reported, which is an *event* |
+| **event** | an interval the plumes stage reported on one variable at one sweep point (`event_id`): one plume, part of one, several merged, or a chance crossing, which is why the expected chance rate is recorded (§6.8) | a plume, or a source |
 | **record** | a stretch of one stream over which detection computes its clean level and spread: split where consecutive readings are more than a set gap apart, and cut into pieces no longer than a set length (§6.8) | a file, a drive or a campaign |
 | **rolling** | the operation: a statistic over a window centred on each reading, moved along the record (`rolling_quantile`; Phase 7's fits over windows) | a stage or a product. The stage that computes baselines and enhancements is `baseline` (`tsara.baseline`); its product is the **baseline state**, saved under `baseline/` in a bundle. Both were named `rolling` until Phase 5 merged; no bundle under the old name exists outside that branch, so none is migrated |
 | **borrowed** | the share of a joined value resting on air outside its own cell (`borrowed_<name>`, `tsara_borrowed_share`, §11.2.4) | an uncertainty; it is a magnitude, and no threshold on it separates a blend from jitter |
@@ -1339,9 +1341,15 @@ with the count it needed.
 
 **Persistence (Phase 5, `baseline.bundle`).** `save_state` writes one netCDF
 file per instrument, `baseline/<instrument>.nc`, into a bundle directory
-beside `streams/`, and the analysis configuration that produced them as
-`baseline/analysis.yaml`, as the resolved manifest is written beside the
-streams; `bundle.json` is not touched, for the grid's reason (§11.7). State
+beside `streams/`, and the baseline section of the analysis configuration
+that produced them as `baseline/analysis.yaml`, as the resolved manifest is
+written beside the streams; `bundle.json` is not touched, for the grid's
+reason (§11.7). **Only that section** (decided 2026-09-30): Phase 5 wrote the
+whole analysis configuration, and the Phase-6 schema, which renamed
+`detection` to `plumes` and deleted its noise fields, would have refused every
+such file, since unknown keys are refused. A stage records the section it
+read, so that another stage's settings can change; `load_state` reads only
+the `baseline` section, which also loads every bundle Phase 5 wrote. State
 files for instruments the run did not roll are removed, so the directory is
 the record of what ran. An optional zlib level compresses every array, the
 time axis and bounds included, as `save_grid` does; measured on the example
@@ -1438,7 +1446,7 @@ clipped** at zero: noise makes Δ negative in clean air and on plume edges,
 and clipping would shift the noise distribution's mean and bias every
 Phase-7 regression that follows.
 
-### 6.8 Detection **[decided 2026-09-29 — Phase 6]**
+### 6.8 Plumes **[decided 2026-09-29, building — Phase 6]**
 
 Every stage before this one turns numbers into numbers. Detection turns them
 into a decision, "from here to here there is a plume in methane", and three
@@ -1453,9 +1461,13 @@ and notebooks 06 and 06b re-measure the numbers that matter.
 
 **Where it runs.** Per variable, on its own cells, at every point of the
 baseline sweep and of detection's own thresholds. Events are time intervals,
-so no common clock is needed (§1.1). An event seen by several variables is
-the union or intersection of their intervals, formed by a separate small
-operation, not by the detector.
+so no common clock is needed (§1.1). The stage is `tsara.plumes` and its
+settings are `analysis.plumes` (named 2026-09-30: "detection" alone could be
+read as source detection, and in TSARA it already names the limit of
+detection, §9.2.1). An event seen by several variables is the union or
+intersection of their intervals, formed by a separate small operation, not
+by the detector; it is built in Phase 7, where fitting a pair over its
+events is its first caller (decided 2026-09-30).
 
 **What the thresholds are multiples of: the clean spread.** At window *w*,
 the enhancement of plume-free air is the instrument's noise, plus the
@@ -1574,8 +1586,9 @@ fraction (not measured; CLAUDE.md open flags).
 **Records.** The clean level and spread are computed per **record**: a
 stream is split where consecutive finite readings are more than a gap apart
 (default 2 h), and each piece is cut into equal parts no longer than a
-maximum length (default 6 h, about one drive). Both are configurable and
-found without declaration; declared segments can come later. The cap exists
+maximum length (default 6 h, about one drive): `record_gap` and
+`max_record_length`. Both are found without declaration; declared segments
+can come later. The cap exists
 because the gap rule does not split a record that logs continuously
 (rule: TSARA ingestion, finite readings of one variable, gap = time between
 consecutive cell midpoints):
@@ -1590,7 +1603,7 @@ The ground site runs 11.7 days without a two-hour gap, and the van's analyzer
 logs parked and driving alike for 7.2 days; a clean spread over either would
 mix days of different air.
 
-**A minimum count: 100 readings below the clean level.** Fewer, and that
+**A minimum count: 100 readings below the clean level** (`min_clean_readings`). Fewer, and that
 record's level and spread are blank with the reason recorded, and the
 variable defines no events there. Rule: draws of N(0, 1) with 30 % of them
 carrying an exponential excess of mean 5, 4000 repetitions per count, seed 11;
@@ -1606,8 +1619,17 @@ threshold *m* + 3*s*, as a multiple of the nominal 0.00135:
 So 100 is the floor for having a scale at all, not a guarantee of the
 false-alarm rate; the half-sample mode's jitter persists at every count. A
 drive has thousands of readings below its level; a canister's day has about
-16, so a canister takes its events from a dense instrument measuring the same
-field (the union operation above).
+16, so a canister takes its events from a dense instrument named as its
+**trigger** (`plumes.triggers`, keyed by instrument or by variable, the
+variable's key winning). A trigger may measure any field (decided
+2026-09-30, revising "the same field"): the 2024 canister's VOCs mostly have
+no dense instrument of their own, and a trigger states when the air holds a
+plume, not what the plume is made of. A variable with a trigger always takes
+the trigger's intervals, and its catalog rows carry its own reading count,
+covered share and largest enhancement, no *z*, and the trigger's name; one
+with neither enough readings nor a trigger is blank with the reason. A
+trigger may not take its events from a trigger of its own, for the reason
+`from_field` refuses a chain (§6.5).
 
 **Thresholds, both swept.** `enter_multiple` and `exit_multiple` (the old
 names said "sigma", which in TSARA means a measurement uncertainty) are both
@@ -2798,16 +2820,16 @@ Sorting is purely the orchestration stage's concern.
 
 ### 9.6 Uncertainty at ingestion, and what it refuses to invent
 
-*(Phase 3.5 added one thing ingestion may now do with a declared budget:
-move it onto the cells it describes, when — and only when — the manifest has
-supplied the timescale that makes the correction knowable. See §10.8.)*
+*(Phase 3.5 briefly let ingestion move a declared budget onto the cells it
+describes; that was withdrawn in its walkthrough, and ingestion now records
+the interval a figure was quoted at and acts on nothing. See §10.8.)*
 
 Ingestion knows the manifest; it does not know the analysis config. So it
 computes exactly the budgets a manifest can state — `declared` and
-`reported` — and **labels** everything else. The empirical estimator's name
-and window belong to `DetectionConfig` (§2.5), so computing it here would
-mean reading a config this stage has no business reading. The obligation is
-recorded instead, which is the shape of §2.3's promise.
+`reported` — and **labels** everything else `unknown`, with nothing
+estimated standing in (§2.3). Until Phase 6 the random component was
+labelled `empirical` instead, promising that a later stage would estimate
+it; none does (§2.4, §2.5), so the promise and the label were withdrawn.
 
 A `reported` column is scaled by `convert.scale` and never by
 `convert.offset`: an uncertainty is a difference on the axis, so the origin
@@ -2823,8 +2845,8 @@ and synthetic truth is the only correctness arbiter available (§9.9). The
 variable-name convention (`sigma_rand_<name>`, `sigma_sys_<name>`) therefore
 lives in one module both producers build from, rather than in two matching
 string literals — a coupling that would break silently, since a rename would
-not fail anything until a later stage found no sigma and fell back to an
-empirical estimate, which is a *plausible* answer rather than an error. The
+not fail anything: a later stage would find no sigma and carry on without
+one, which is a *plausible* answer rather than an error. The
 same holds for the `field` attribute (§1.6): both producers write it on every
 variable they declare, and the round-trip harness checks that they agree.
 
@@ -3439,8 +3461,8 @@ stored exactly as the manifest states them; the variable carries
 below, not $N_{\mathrm{eff}}$), and a mismatch is warned about by name at
 ingestion time.
 
-That boundary is the same one drawn for the empirical noise estimator (§2.3)
-and for the closure diagnostic, and it is worth stating why it is not the same
+That boundary is the same one drawn for the empirical noise estimator (§2.3,
+since rejected, §2.5) and for the closure diagnostic, and it is worth stating why it is not the same
 as a unit conversion. A unit conversion is a declared scale and offset: exact,
 invertible, and assumption-free, so ingestion applies it. Moving a sigma from
 one interval to another is not. It needs a decorrelation timescale, an AR(1)

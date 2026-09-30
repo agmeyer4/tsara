@@ -103,7 +103,7 @@ states = baseline_states(streams, analysis.baseline)
 picarro = states["picarro"]
 print(dict(picarro.sizes))
 print(sorted(v for v in picarro.data_vars if v.endswith("ch4")))
-save_state(states, "demo_bundle", analysis=analysis)
+save_state(states, "demo_bundle", baseline=analysis.baseline)
 ```
 
 ```
@@ -178,7 +178,7 @@ silently keeping the last value. Fuller, commented examples ship in
 | `manifest_mobile_example.yaml` | vehicle, GPS instrument, systematic uncertainty, reported per-point error |
 | `manifest_multiformat_example.yaml` | one campaign mixing CSV, ICARTT and Parquet, several directory layouts |
 | `synthetic_example.yaml`, `synthetic_bootstrap.yaml` | generating data: an atmosphere (fields, backgrounds, sources) and the instruments measuring it, with backgrounds parametric or bootstrapped from a real record's residuals |
-| `analysis_example.yaml` | the analysis side: baseline sweeps, detection, regression, clustering |
+| `analysis_example.yaml` | the analysis side: baseline sweeps, plume events, regression, clustering |
 
 ## The ideas the API is shaped around
 
@@ -257,8 +257,8 @@ at the windows that matter has options: another instrument's baseline of the
 same field, joined onto its cells, or a declared constant. Enhancements are
 never clipped at zero, and their uncertainty follows from the reading's: where
 the reading declares none, the enhancement says `unknown` rather than borrowing
-an estimate. The noise scale plume detection quotes its thresholds in belongs to
-detection (phase 6). (`METHODS.md` §6, §2.5)
+an estimate. Nothing here is a noise scale: plume detection's thresholds are
+multiples of its own clean spread (phase 6). (`METHODS.md` §6)
 
 ## Repository layout
 

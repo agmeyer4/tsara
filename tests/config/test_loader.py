@@ -50,11 +50,7 @@ def test_combined_roundtrip(
 
 
 def test_example_configs_are_valid() -> None:
-    """The shipped examples double as documentation — they must always load.
-
-    (The combined cross-check isn't exercised here because the examples are
-    separate files; each half validates independently.)
-    """
+    """The shipped examples double as documentation — they must always load."""
     from pathlib import Path
 
     examples = Path(__file__).parents[2] / "examples" / "configs"
@@ -62,6 +58,24 @@ def test_example_configs_are_valid() -> None:
     analysis = load_analysis(examples / "analysis_example.yaml")
     assert "benzene" in manifest.gas_species
     assert analysis.regression.reference_species in manifest.gas_species
+
+
+def test_the_example_analysis_combines_with_the_manifest_it_names() -> None:
+    """The example analysis names instruments of the multiformat example manifest.
+
+    Its `baseline.methods` and `plumes.triggers` say they are checked against
+    that manifest when the two are combined; this is the check, so that an
+    example cannot drift into naming variables nothing declares.
+    """
+    from pathlib import Path
+
+    examples = Path(__file__).parents[2] / "examples" / "configs"
+    config = TsaraConfig(
+        manifest=load_manifest(examples / "manifest_multiformat_example.yaml"),
+        analysis=load_analysis(examples / "analysis_example.yaml"),
+    )
+    assert config.analysis.baseline.methods
+    assert config.analysis.plumes.triggers
 
 
 def test_stationary_example_config_is_valid() -> None:
@@ -495,4 +509,56 @@ def test_a_donor_with_two_variables_of_one_field_is_ambiguous(
         "aeris.ch4_aeris": {"method": "from_field", "instrument": "picarro"}
     }
     with pytest.raises(TsaraConfigError, match="ambiguous"):
+        _combined(write_yaml, manifest, analysis)
+
+
+# ---------------------------------------------------------------------------
+# Combined cross-check: plume triggers against the manifest
+# ---------------------------------------------------------------------------
+
+
+def test_triggers_between_declared_gases_are_accepted(
+    write_yaml: WriteYaml, stationary_manifest_dict: dict[str, Any], analysis_dict: dict[str, Any]
+) -> None:
+    """An instrument key, and a variable key naming a sibling on its own instrument."""
+    manifest = _with_a_second_methane_analyzer(stationary_manifest_dict)
+    analysis = copy.deepcopy(analysis_dict)
+    analysis["plumes"] = {"triggers": {"aeris": "picarro.ch4", "picarro.co2": "picarro.ch4"}}
+    plumes = _combined(write_yaml, manifest, analysis).analysis.plumes
+    assert plumes.trigger_for("aeris", "ch4_aeris") == "picarro.ch4"
+    assert plumes.trigger_for("picarro", "co2") == "picarro.ch4"
+    assert plumes.trigger_for("picarro", "ch4") is None
+
+
+@pytest.mark.parametrize(
+    ("triggers", "message"),
+    [
+        ({"lgr": "picarro.ch4"}, "declares no instrument 'lgr'"),
+        ({"picarro.sf6": "picarro.ch4"}, "declares no gas variable 'sf6'"),
+        ({"aeris.wind_dir": "picarro.ch4"}, "declares no gas variable 'wind_dir'"),
+        ({"sonic": "picarro.ch4"}, "would apply to nothing"),
+        ({"aeris": "lgr.ch4"}, "declares no instrument 'lgr'"),
+        ({"aeris": "picarro.sf6"}, "not a gas variable"),
+        ({"picarro.co2": "aeris.wind_dir"}, "not a gas variable"),
+        ({"picarro.ch4": "picarro.ch4"}, "its own trigger"),
+        ({"picarro": "picarro.ch4"}, "its own trigger"),
+        ({"aeris": "picarro.ch4", "picarro": "aeris.ch4_aeris"}, "chain"),
+    ],
+)
+def test_a_trigger_naming_what_cannot_take_or_give_events_is_refused(
+    write_yaml: WriteYaml,
+    stationary_manifest_dict: dict[str, Any],
+    analysis_dict: dict[str, Any],
+    triggers: dict[str, str],
+    message: str,
+) -> None:
+    manifest = _with_a_second_methane_analyzer(stationary_manifest_dict)
+    sonic = copy.deepcopy(manifest["instruments"]["picarro"])
+    sonic["variables"] = {
+        "wind_dir": {"column": "WD", "role": "met", "units": "degrees", "circular": True}
+    }
+    manifest["instruments"]["sonic"] = sonic
+    analysis = copy.deepcopy(analysis_dict)
+    analysis["plumes"] = {"triggers": triggers}
+    with pytest.raises(TsaraConfigError, match=message):
         _combined(write_yaml, manifest, analysis)
