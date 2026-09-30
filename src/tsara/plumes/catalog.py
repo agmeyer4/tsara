@@ -92,6 +92,47 @@ CATALOG_COLUMNS: tuple[str, ...] = (
     "longitude",
 )
 
+#: Each column's type. Declared rather than inferred so that a catalog of any
+#: size, an empty one included, has one shape, and so that it survives a
+#: Parquet round trip exactly: left to inference, a column holding only None
+#: is pandas' `object` and comes back from Parquet as its string type. Missing
+#: text is NaN, as the answer key's own string columns have it.
+_DTYPES: dict[str, str] = {
+    **dict.fromkeys(
+        (
+            "event_id",
+            "parent_event_id",
+            "instrument",
+            "species",
+            "field",
+            "trigger",
+            "trigger_event_id",
+        ),
+        "str",
+    ),
+    **dict.fromkeys(("event_number", "record", "n_readings", "events_at_point"), "int64"),
+    **dict.fromkeys(("start_time", "peak_time", "end_time"), "datetime64[ns]"),
+    **dict.fromkeys(
+        (
+            "baseline_window",
+            "baseline_quantile",
+            "enter_multiple",
+            "exit_multiple",
+            "duration_s",
+            "parent_duration_s",
+            "covered",
+            "peak_enhancement",
+            "peak_z",
+            "clean_level",
+            "clean_spread",
+            "chance_events_at_point",
+            "latitude",
+            "longitude",
+        ),
+        "float64",
+    ),
+}
+
 #: The columns naming one tree: an event's parent is sought only among
 #: events sharing all of these, at longer windows.
 _TREE_KEYS = ["instrument", "species", "baseline_quantile", "enter_multiple", "exit_multiple"]
@@ -145,17 +186,16 @@ def plume_catalog(
         plume, baseline = plume_states[instrument], baseline_states[instrument]
         cells = stream_cells(plume, instrument)
         frames.append(_adopted_rows(instrument, variable, plume, baseline, cells, intervals))
+    # Typed on the way out, below, so an empty catalog needs only its columns.
     frames = [frame for frame in frames if len(frame)]
     catalog = (
-        pd.concat(frames, ignore_index=True)
-        if frames
-        else pd.DataFrame({name: pd.Series(dtype=object) for name in CATALOG_COLUMNS})
+        pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=CATALOG_COLUMNS)
     )
     catalog = catalog.sort_values(
         ["instrument", "species", "baseline_window", *_TREE_KEYS[2:], "event_number"],
         kind="stable",
     ).reset_index(drop=True)
-    return link_parents(catalog)[list(CATALOG_COLUMNS)]
+    return link_parents(catalog)[list(CATALOG_COLUMNS)].astype(_DTYPES)
 
 
 def link_parents(catalog: pd.DataFrame) -> pd.DataFrame:

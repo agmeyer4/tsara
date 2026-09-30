@@ -32,10 +32,14 @@ Shape of the subpackage
     The events as rows: one long table keyed by ``event_id``, spelled like
     the generator's answer key where the meaning is the same, with the
     parent-child tree along the baseline's window.
+``bundle``
+    Saving and reloading the plume states, the catalog and the plumes
+    configuration, in a directory beside the baseline states.
 """
 
 from __future__ import annotations
 
+from tsara.plumes.bundle import PlumeStates, load_plumes, save_plumes
 from tsara.plumes.catalog import CATALOG_COLUMNS, link_parents, plume_catalog
 from tsara.plumes.clean import (
     MAD_TO_SIGMA,
@@ -74,6 +78,7 @@ __all__ = [
     "Events",
     "MAD_TO_SIGMA",
     "PLUMES_STAGE",
+    "PlumeStates",
     "Records",
     "TRIGGER_ATTR",
     "TsaraPlumeError",
@@ -87,9 +92,11 @@ __all__ = [
     "get_clean_level_estimator",
     "half_sample_mode",
     "link_parents",
+    "load_plumes",
     "plume_catalog",
     "plume_state",
     "plume_states",
     "quantization_step",
     "register_clean_level_estimator",
+    "save_plumes",
 ]

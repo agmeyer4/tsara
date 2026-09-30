@@ -29,9 +29,11 @@ if TYPE_CHECKING:  # pragma: no cover
 __all__ = [
     "BUNDLE_ANALYSIS_CONFIG",
     "BUNDLE_BASELINE_DIR",
+    "BUNDLE_CATALOG_FILE",
     "BUNDLE_FORMAT_VERSION",
     "BUNDLE_GRID_FILE",
     "BUNDLE_MANIFEST",
+    "BUNDLE_PLUMES_DIR",
     "BUNDLE_STAGE_KEY",
     "BUNDLE_STREAMS_DIR",
     "BUNDLE_VERSION_WITHOUT_PROMISED_ESTIMATES",
@@ -75,6 +77,13 @@ BUNDLE_GRID_FILE = "grid.nc"
 #: manifest is for the streams.
 BUNDLE_BASELINE_DIR = "baseline"
 BUNDLE_ANALYSIS_CONFIG = "analysis.yaml"
+
+#: Subdirectory holding one netCDF file per instrument's plume state, the
+#: catalog of every event beside them, and the plumes section of the analysis
+#: configuration (``analysis.yaml``, as for the baseline state). A directory
+#: beside the others for the baseline state's reason.
+BUNDLE_PLUMES_DIR = "plumes"
+BUNDLE_CATALOG_FILE = "catalog.parquet"
 
 #: Bumped only when the layout changes incompatibly, so a future reader can
 #: refuse (or migrate) an old bundle rather than misinterpreting it.

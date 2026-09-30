@@ -1813,6 +1813,25 @@ does an event at the longest window. On the example chain, 95 % of events at
   `event_id` rather than editing this one; that key is the room §7 keeps for
   integration.
 
+**Persistence** (built 2026-09-30, `tsara.plumes.bundle`). `save_plumes`
+writes one netCDF file per instrument, `plumes/<instrument>.nc`, the catalog
+as `plumes/catalog.parquet`, and the plumes section of the analysis
+configuration as `plumes/analysis.yaml`, beside the baseline states and for
+the reasons they are saved as they are (§6.6): only the section the stage
+read, `bundle.json` untouched, the bundle format version unchanged since the
+directory is additive, and files a narrower run did not write removed, a
+catalog included, so that the directory is the record of what ran.
+`load_plumes` brings every state back exactly, refuses a file another stage
+wrote, and refuses a table without the catalog's columns. The catalog
+declares a type for every column, so it survives Parquet exactly: left to
+inference, a column holding only missing text is pandas' `object` and comes
+back from Parquet as its string type, which is how the first round trip was
+found to differ. Measured (rule: the drive-scale state above, one variable,
+200,000 readings, 81 sweep points, 36,620 events in its catalog): the state
+file is 120.8 MB uncompressed, 16.9 MB at zlib level 1 and 16.1 MB at level
+4, reloading identical, since its event index is mostly −1; the catalog is
+0.89 MB; writing at level 4 takes 2.0 s and loading 0.9 s.
+
 ### 6.9 Smoothing, clustering **[stubs]**
 
 - **Smoothing** **[stub — Phase 8]**: zero-phase Butterworth per stream at its

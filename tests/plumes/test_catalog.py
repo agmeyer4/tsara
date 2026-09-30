@@ -292,6 +292,9 @@ def test_a_canister_row_is_the_triggers_interval_with_its_own_readings() -> None
     rows = catalog[catalog["instrument"] == "iwas"]
     assert len(rows) > 0
     assert (rows["trigger"] == "van.ch4").all()
+    # One type per column whatever a column holds: text, missing for the analyzer.
+    assert catalog["trigger"].dtype == catalog["trigger_event_id"].dtype == "str"
+    assert catalog.loc[catalog["instrument"] == "van", "trigger"].isna().all()
     triggers = catalog.set_index("event_id").loc[rows["trigger_event_id"]]
     assert (rows["start_time"].to_numpy() == triggers["start_time"].to_numpy()).all()
     assert (rows["end_time"].to_numpy() == triggers["end_time"].to_numpy()).all()
@@ -385,6 +388,8 @@ def test_quiet_air_makes_an_empty_catalog_with_every_column() -> None:
     catalog = plume_catalog({"van": plume}, {"van": baseline})
     assert len(catalog) == 0
     assert tuple(catalog.columns) == CATALOG_COLUMNS
+    assert catalog["start_time"].dtype == "datetime64[ns]"
+    assert catalog["event_id"].dtype == "str" and catalog["n_readings"].dtype == "int64"
 
 
 # ---------------------------------------------------------------------------
