@@ -1743,11 +1743,41 @@ per-reading event index below.
 
 **What the stage saves** (names settled in the build):
 
-- **The detection state**, one file per instrument, `detection/<instrument>.nc`,
-  on the stream's own cells: at every reading and sweep point the clean level
-  and spread of its record, the statistic *z*, and the index of the event it
-  belongs to; the declared or reported random sigma beside them for
-  comparison.
+- **The plume state** (built 2026-09-30, `tsara.plumes.state`), one Dataset
+  per instrument, `tsara_stage = "plumes"`, on the baseline state's own
+  `time` and `time_bnds` with the baseline's two sweep dimensions and two of
+  its own, `enter_multiple` and `exit_multiple`. Per variable *x* that finds
+  its own events: `record_x` (time), the record of each reading, −1 for
+  none; `clean_level_x`, `clean_spread_x` and `n_clean_readings_x` (time,
+  window, quantile), the description of the reading's record at each point
+  and how many readings lay below its level, level and spread blank where
+  that count is under `min_clean_readings`; `z_x` (time, window, quantile);
+  `event_x` (time, window, quantile, entry, exit), the event each reading
+  belongs to, numbered from 0 per sweep point in time order, −1 for none;
+  `n_events_x` and `chance_events_x` (window, quantile, entry, exit), the
+  events found and the events the closed form expects from chance on as many
+  readings with a finite *z*, its assumption named in
+  `tsara_chance_assumption`; and `sigma_rand_x` when the reading has one,
+  for comparison and nothing else. A variable with a trigger holds
+  `event_x` and `n_events_x` only, each naming the trigger in
+  `tsara_plumes_trigger`, its events keeping the trigger's numbers so the
+  two stay linked; a reading of it belongs to an event when its cell
+  midpoint lies in the event's interval, and where cells wide enough to
+  touch two events make two intervals overlap, to the later. The settings
+  the state was found under ride on the dataset as `tsara_plumes_record_gap`,
+  `tsara_plumes_max_record_length`, `tsara_plumes_min_clean_readings`,
+  `tsara_plumes_clean_level_estimator` and `tsara_plumes_max_internal_gap`.
+  A sweep point at which every record of a variable is blank is named in one
+  warning per stream, variables sharing a pattern named together. Through
+  the whole chain (the example campaign generated, its 2 s Picarro's
+  methane rolled at 2, 10 and 60 min with q = 0.05, entry 3, exit 1,
+  nothing bridged) the package reproduces the scoping measurement exactly:
+  the clean spread is 1.01, 1.02 and 1.45 times the true sigma, and 31, 33
+  and 42 % of readings lie in events. Its cost (rule: one variable, 200,000
+  readings at 1 s in 10 records, the baseline's 3 × 3 sweep, entry 3, 4, 5 ×
+  exit 1, 1.5, 2, so 81 sweep points): 1.9 s, beside 104 s for the baseline
+  state it reads, and 121 MB in memory, 65 MB of it the event index, whose
+  size on disk is measured with its persistence.
 - **The catalog**, one long Parquet table keyed by `event_id`: one row per
   event, variable and sweep point, the sweep coordinates as columns, the
   columns that mean the same as the generator's answer key spelled as it

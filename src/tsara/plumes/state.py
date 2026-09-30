@@ -1,0 +1,586 @@
+"""The plume state: records, clean air, the statistic and events, per stream.
+
+For every gas variable of a baseline state (``docs/METHODS.md`` §6.2) this
+stage finds the variable's records (:mod:`tsara.plumes.records`), describes
+its plume-free air in each at every sweep point (:mod:`tsara.plumes.clean`),
+forms the statistic z = (Δ − clean level) / clean spread at every reading,
+and finds the events at every combination of the baseline's window and
+quantile with the plumes stage's entry and exit multiples
+(:mod:`tsara.plumes.hysteresis`). Everything lands on the stream's own
+cells, beside the readings, as the baseline state does (§6.8): one Dataset
+per instrument, ``tsara_stage = "plumes"``.
+
+A variable named in ``plumes.triggers`` finds no events of its own: at each
+sweep point it takes the trigger's event intervals, a reading of it
+belonging to an event when its cell midpoint lies in that event's interval
+(§6.8). Its events keep the trigger's numbers, so the two stay linked.
+
+What the state holds per variable ``x`` found on its own:
+
+- ``record_x`` (time): the record of each reading, -1 for none;
+- ``clean_level_x``, ``clean_spread_x``, ``n_clean_readings_x``
+  (time, window, quantile): the description of the reading's record at each
+  point, and how many readings lay below its level; level and spread blank
+  where the record held fewer than ``min_clean_readings``;
+- ``z_x`` (time, window, quantile): the statistic;
+- ``event_x`` (time, window, quantile, entry, exit): the event each reading
+  belongs to at each point, numbered from 0 per point, -1 for none;
+- ``n_events_x`` and ``chance_events_x`` (window, quantile, entry, exit):
+  the events found, and the events chance alone would make on as many
+  independent Gaussian readings (an upper bound once dips are bridged);
+- ``sigma_rand_x`` when the reading declares or reports one, beside the
+  spread for comparison and nothing else: the spread is not a measurement
+  uncertainty (§2.3).
+
+A variable with a trigger holds ``event_x`` and ``n_events_x``, and names
+its trigger.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING
+
+import numpy as np
+import pandas as pd
+import xarray as xr
+
+from tsara._version import __version__
+from tsara.core.bundle import pin_time_encoding
+from tsara.core.naming import (
+    BASELINE_STAGE,
+    ENHANCEMENT_PREFIX,
+    QUANTILE_DIM,
+    TIME_BOUNDS_VAR,
+    TIME_COORD,
+    WINDOW_DIM,
+    enhancement_name,
+    sigma_rand_name,
+)
+from tsara.core.support import stream_cells
+from tsara.plumes.clean import clean_air
+from tsara.plumes.hysteresis import expected_chance_rate, find_events
+from tsara.plumes.records import TsaraPlumeError, find_records
+
+if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Mapping, Sequence
+
+    import numpy.typing as npt
+
+    from tsara.config.analysis import PlumesConfig
+    from tsara.core.support import CellBounds
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "CHANCE_ASSUMPTION_ATTR",
+    "ENTER_DIM",
+    "EXIT_DIM",
+    "PLUMES_STAGE",
+    "TRIGGER_ATTR",
+    "plume_state",
+    "plume_states",
+]
+
+#: What a plume state's ``tsara_stage`` says.
+PLUMES_STAGE = "plumes"
+
+#: The plumes stage's own two sweep dimensions, beside the baseline's.
+ENTER_DIM = "enter_multiple"
+EXIT_DIM = "exit_multiple"
+
+#: On a variable that takes its events from another: which one.
+TRIGGER_ATTR = "tsara_plumes_trigger"
+
+#: On ``chance_events_x``: the assumption its closed form rests on.
+CHANCE_ASSUMPTION_ATTR = "tsara_chance_assumption"
+
+#: The settings a state was found under, as dataset attributes (§6.8).
+_SETTING_ATTRS = {
+    "record_gap": "tsara_plumes_record_gap",
+    "max_record_length": "tsara_plumes_max_record_length",
+    "min_clean_readings": "tsara_plumes_min_clean_readings",
+    "clean_level_estimator": "tsara_plumes_clean_level_estimator",
+    "max_internal_gap": "tsara_plumes_max_internal_gap",
+}
+
+_CHANCE_ASSUMPTION = (
+    "independent Gaussian readings, no dip bridged (METHODS 6.8): oversampled, "
+    "autocorrelated readings cross less often, and bridging only merges events, "
+    "so this is an upper bound once dips are bridged"
+)
+
+#: At most this many variables or patterns are named in one warning.
+_MAX_NAMED = 8
+
+
+def plume_state(
+    state: xr.Dataset,
+    *,
+    instrument: str,
+    plumes: PlumesConfig,
+    variables: Sequence[str] | None = None,
+    triggers: Mapping[str, xr.Dataset] | None = None,
+) -> xr.Dataset:
+    """Find one stream's plume events at every sweep point.
+
+    Parameters
+    ----------
+    state : xarray.Dataset
+        The instrument's baseline state.
+    instrument : str
+        The stream's name in the campaign, as ``plumes.triggers`` spells it.
+    plumes : PlumesConfig
+        Thresholds, records and triggers.
+    variables : sequence of str, optional
+        Which variables to find events for. ``None`` takes every variable
+        the baseline state holds an enhancement of.
+    triggers : mapping of str to xarray.Dataset, optional
+        For a variable whose trigger lies on another instrument, that
+        instrument's plume state, keyed by instrument name. A trigger on
+        this instrument is taken from this call's own results.
+
+    Returns
+    -------
+    xarray.Dataset
+        The plume state, on the baseline state's ``time`` and ``time_bnds``,
+        with the baseline's two sweep dimensions and ``enter_multiple`` and
+        ``exit_multiple``; per variable the columns the module docstring
+        lists.
+
+    Raises
+    ------
+    TsaraPlumeError
+        If ``state`` is not a baseline state, a named variable has no
+        enhancement, or a trigger's plume state is missing or was found on
+        another sweep.
+    """
+    if state.attrs.get("tsara_stage") != BASELINE_STAGE:
+        raise TsaraPlumeError(
+            f"plume_state reads a baseline state, and '{instrument}' has tsara_stage "
+            f"'{state.attrs.get('tsara_stage')}'. Build one with baseline_state first."
+        )
+    selection = _select(state, instrument, variables)
+    cells = stream_cells(state, instrument)
+    enter = np.asarray(plumes.enter_multiple, dtype=np.float64)
+    exit_ = np.asarray(plumes.exit_multiple, dtype=np.float64)
+    own = [v for v in selection if plumes.trigger_for(instrument, v) is None]
+    adopted = [v for v in selection if plumes.trigger_for(instrument, v) is not None]
+
+    data_vars: dict[str, tuple[tuple[str, ...], npt.NDArray[np.generic], dict[str, object]]] = {}
+    blank_everywhere: dict[str, list[tuple[str, int]]] = {}
+    for variable in own:
+        columns, blank = _own_events(state, variable, cells, plumes, enter, exit_)
+        data_vars.update(columns)
+        if blank:
+            blank_everywhere[variable] = blank
+    for variable in adopted:
+        trigger = str(plumes.trigger_for(instrument, variable))
+        membership, source_cells = _trigger_events(
+            trigger, instrument, cells, data_vars, triggers, state, plumes
+        )
+        data_vars.update(
+            _adopted_events(state, variable, cells, trigger, membership, source_cells, instrument)
+        )
+
+    coords: dict[str, object] = {
+        str(name): state.coords[name] for name in state.coords if name != TIME_BOUNDS_VAR
+    }
+    coords[ENTER_DIM] = ((ENTER_DIM,), enter, {"units": "1", "long_name": "entry multiple"})
+    coords[EXIT_DIM] = ((EXIT_DIM,), exit_, {"units": "1", "long_name": "exit multiple"})
+    dataset = xr.Dataset(
+        data_vars=data_vars,
+        coords=coords,
+        attrs={
+            **state.attrs,
+            "tsara_version": __version__,
+            "tsara_stage": PLUMES_STAGE,
+            "tsara_instrument": instrument,
+            **{attr: str(getattr(plumes, field)) for field, attr in _SETTING_ATTRS.items()},
+        },
+    )
+    dataset.coords[TIME_BOUNDS_VAR] = state[TIME_BOUNDS_VAR]
+    dataset[TIME_COORD].attrs.update(state[TIME_COORD].attrs)
+    if blank_everywhere:
+        _warn_blank_everywhere(instrument, blank_everywhere, plumes.min_clean_readings)
+    pin_time_encoding(dataset)
+    return dataset
+
+
+def plume_states(states: Mapping[str, xr.Dataset], plumes: PlumesConfig) -> dict[str, xr.Dataset]:
+    """Find the plume events of every baseline state of a campaign.
+
+    In two passes, because a trigger may lie on another instrument: first
+    every variable that finds its own events, on every instrument; then every
+    variable that takes them from a trigger, which is never itself triggered
+    (the configuration refuses a chain), so the first pass holds them all.
+
+    Parameters
+    ----------
+    states : mapping of str to xarray.Dataset
+        The campaign's baseline states, keyed by instrument.
+    plumes : PlumesConfig
+        Thresholds, records and triggers.
+
+    Returns
+    -------
+    dict of str to xarray.Dataset
+        One plume state per instrument that had a variable to find events for.
+    """
+    first: dict[str, xr.Dataset] = {}
+    later: dict[str, list[str]] = {}
+    for instrument, state in states.items():
+        names = _default_variables(state)
+        own = [v for v in names if plumes.trigger_for(instrument, v) is None]
+        later[instrument] = [v for v in names if v not in own]
+        if own:
+            first[instrument] = plume_state(
+                state, instrument=instrument, plumes=plumes, variables=own
+            )
+    result = dict(first)
+    for instrument, adopted in later.items():
+        if not adopted:
+            continue
+        taken = plume_state(
+            states[instrument],
+            instrument=instrument,
+            plumes=plumes,
+            variables=adopted,
+            triggers=first,
+        )
+        result[instrument] = (
+            first[instrument].assign(taken.data_vars) if instrument in first else taken
+        )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Selecting the variables
+# ---------------------------------------------------------------------------
+
+
+def _select(state: xr.Dataset, instrument: str, variables: Sequence[str] | None) -> list[str]:
+    """Return the variables to find events for, refusing one with no enhancement."""
+    if variables is None:
+        return _default_variables(state)
+    missing = [v for v in variables if enhancement_name(v) not in state.data_vars]
+    if missing:
+        raise TsaraPlumeError(
+            f"The baseline state of '{instrument}' holds no enhancement of {missing}; "
+            f"it holds enhancements of {_default_variables(state)}."
+        )
+    return list(variables)
+
+
+def _default_variables(state: xr.Dataset) -> list[str]:
+    """Return every variable the baseline state holds an enhancement of, in order."""
+    return [
+        str(name)[len(ENHANCEMENT_PREFIX) :]
+        for name in state.data_vars
+        if str(name).startswith(ENHANCEMENT_PREFIX)
+    ]
+
+
+# ---------------------------------------------------------------------------
+# A variable that finds its own events
+# ---------------------------------------------------------------------------
+
+_Column = tuple[tuple[str, ...], "npt.NDArray[np.generic]", dict[str, object]]
+
+
+def _own_events(
+    state: xr.Dataset,
+    variable: str,
+    cells: CellBounds,
+    plumes: PlumesConfig,
+    enter: npt.NDArray[np.float64],
+    exit_: npt.NDArray[np.float64],
+) -> tuple[dict[str, _Column], list[tuple[str, int]]]:
+    """Return one variable's columns, and the sweep points blank at every record.
+
+    Each blank point comes with the most readings any record held below its
+    level there, which is what the count rule was short of.
+    """
+    reading = state[variable]
+    x = np.asarray(reading.values, dtype=np.float64)
+    enhancement = np.asarray(
+        state[enhancement_name(variable)].transpose(TIME_COORD, WINDOW_DIM, QUANTILE_DIM).values,
+        dtype=np.float64,
+    )
+    records = find_records(
+        cells,
+        np.isfinite(x),
+        gap_ns=_ns(plumes.record_gap),
+        max_length_ns=_ns(plumes.max_record_length),
+    )
+    declared = reading.attrs.get("quantization")
+    air = clean_air(
+        enhancement,
+        x,
+        records,
+        estimator=plumes.clean_level_estimator,
+        min_clean_readings=plumes.min_clean_readings,
+        quantization=None if declared is None else float(declared),
+    )
+
+    # The record's description, at each of its readings; blank off record.
+    on_record = records.index >= 0
+    at = np.where(on_record, records.index, 0)
+    level = np.where(on_record[:, None, None], air.level[at], np.nan)
+    spread = np.where(on_record[:, None, None], air.spread[at], np.nan)
+    n_clean = np.where(on_record[:, None, None], air.n_below[at], 0).astype(np.int32)
+    z = (enhancement - level) / spread
+
+    windows, quantiles = enhancement.shape[1:]
+    sweep = (windows, quantiles, enter.size, exit_.size)
+    event = np.full((x.size, *sweep), -1, dtype=np.int32)
+    n_events = np.zeros(sweep, dtype=np.int64)
+    chance = np.zeros(sweep, dtype=np.float64)
+    gap_ns = _ns(plumes.max_internal_gap)
+    for w, q in np.ndindex(windows, quantiles):
+        scored = int(np.count_nonzero(np.isfinite(z[:, w, q])))
+        for e, x_ in np.ndindex(enter.size, exit_.size):
+            found = find_events(
+                z[:, w, q],
+                cells,
+                records,
+                enter=float(enter[e]),
+                exit_=float(exit_[x_]),
+                max_internal_gap_ns=gap_ns,
+            )
+            event[:, w, q, e, x_] = found.membership
+            n_events[w, q, e, x_] = found.n
+            chance[w, q, e, x_] = scored * expected_chance_rate(float(enter[e]), float(exit_[x_]))
+
+    units = str(reading.attrs.get("units", ""))
+    swept = (TIME_COORD, WINDOW_DIM, QUANTILE_DIM)
+    points = (WINDOW_DIM, QUANTILE_DIM, ENTER_DIM, EXIT_DIM)
+    columns: dict[str, _Column] = {
+        f"record_{variable}": (
+            (TIME_COORD,),
+            records.index.astype(np.int32),
+            {"long_name": f"record of each {variable} reading; -1 for none"},
+        ),
+        f"clean_level_{variable}": (
+            swept,
+            level,
+            {"units": units, "long_name": f"clean level of {variable}'s enhancement"},
+        ),
+        f"clean_spread_{variable}": (
+            swept,
+            spread,
+            {
+                "units": units,
+                "long_name": (
+                    f"clean spread of {variable}'s enhancement: 1.4826 x the median distance "
+                    "below the clean level; not a measurement uncertainty"
+                ),
+            },
+        ),
+        f"n_clean_readings_{variable}": (
+            swept,
+            n_clean,
+            {"long_name": "readings of the record below its clean level"},
+        ),
+        f"z_{variable}": (
+            swept,
+            z,
+            {
+                "units": "1",
+                "long_name": f"(enhancement - clean level) / clean spread of {variable}",
+            },
+        ),
+        f"event_{variable}": (
+            (*swept, ENTER_DIM, EXIT_DIM),
+            event,
+            {
+                "long_name": (
+                    f"event of each {variable} reading, numbered per sweep point; -1 for none"
+                )
+            },
+        ),
+        f"n_events_{variable}": (points, n_events, {"long_name": f"events of {variable} found"}),
+        f"chance_events_{variable}": (
+            points,
+            chance,
+            {
+                "long_name": f"events chance alone would make on as many readings of {variable}",
+                CHANCE_ASSUMPTION_ATTR: _CHANCE_ASSUMPTION,
+            },
+        ),
+    }
+    sigma = sigma_rand_name(variable)
+    if sigma in state.data_vars:
+        columns[sigma] = ((TIME_COORD,), state[sigma].values, dict(state[sigma].attrs))
+    blank = [
+        (
+            f"{state[WINDOW_DIM].values[w]:g} s, q {state[QUANTILE_DIM].values[q]:g}",
+            int(air.n_below[:, w, q].max(initial=0)),
+        )
+        for w, q in np.ndindex(windows, quantiles)
+        if air.blank[:, w, q].all()
+    ]
+    return columns, blank
+
+
+def _ns(spec: str) -> int:
+    """Return a configured duration, already validated positive, in nanoseconds."""
+    return int(pd.Timedelta(spec).value)
+
+
+def _warn_blank_everywhere(
+    instrument: str, blank: Mapping[str, list[tuple[str, int]]], min_clean_readings: int
+) -> None:
+    """Warn once per stream about sweep points at which every record is blank.
+
+    Variables blank at the same points are named together, at most
+    :data:`_MAX_NAMED` of them, as the baseline stage's warning does, and the
+    count quoted per point is the largest over the variables named.
+    """
+    patterns: dict[tuple[str, ...], list[str]] = {}
+    held: dict[str, int] = {}
+    for variable, where in blank.items():
+        patterns.setdefault(tuple(point for point, _ in where), []).append(variable)
+        for point, count in where:
+            held[point] = max(held.get(point, 0), count)
+    groups = []
+    for pattern, variables in list(patterns.items())[:_MAX_NAMED]:
+        named = ", ".join(variables[:_MAX_NAMED])
+        if len(variables) > _MAX_NAMED:
+            named += f" and {len(variables) - _MAX_NAMED} more"
+        points = "; ".join(f"{point} (at most {held[point]})" for point in pattern)
+        groups.append(f"{named}: {points}")
+    if len(patterns) > _MAX_NAMED:
+        groups.append(f"and {len(patterns) - _MAX_NAMED} more pattern(s)")
+    logger.warning(
+        "Plume state of '%s': sweep points at which every record is blank, so no event is "
+        "found -- %s. A record needs %d readings below its clean level (METHODS 6.8); a "
+        "sparse variable can take its events from a dense one named in plumes.triggers.",
+        instrument,
+        " | ".join(groups),
+        min_clean_readings,
+    )
+
+
+# ---------------------------------------------------------------------------
+# A variable that takes its events from a trigger
+# ---------------------------------------------------------------------------
+
+
+def _trigger_events(
+    trigger: str,
+    instrument: str,
+    cells: CellBounds,
+    found: Mapping[str, _Column],
+    triggers: Mapping[str, xr.Dataset] | None,
+    state: xr.Dataset,
+    plumes: PlumesConfig,
+) -> tuple[npt.NDArray[np.integer], CellBounds]:
+    """Return a trigger's event membership, shaped (time, *sweep), and its cells.
+
+    From this call's own results when the trigger is a variable of this
+    instrument found here; otherwise from the plume state handed over for
+    its instrument, which must have been found on this same sweep.
+    """
+    trigger_instrument, _, trigger_variable = trigger.partition(".")
+    name = f"event_{trigger_variable}"
+    if trigger_instrument == instrument and name in found:
+        return found[name][1].astype(np.int64), cells
+    source = None if triggers is None else triggers.get(trigger_instrument)
+    if source is None or name not in source:
+        raise TsaraPlumeError(
+            f"'{instrument}' takes events from '{trigger}', whose plume state was not "
+            "handed over; find its events first and pass its state in triggers=."
+        )
+    for dim, wanted in (
+        (WINDOW_DIM, state[WINDOW_DIM].values),
+        (QUANTILE_DIM, state[QUANTILE_DIM].values),
+        (ENTER_DIM, np.asarray(plumes.enter_multiple, dtype=np.float64)),
+        (EXIT_DIM, np.asarray(plumes.exit_multiple, dtype=np.float64)),
+    ):
+        if not np.array_equal(source[dim].values, wanted):
+            raise TsaraPlumeError(
+                f"The plume state of '{trigger_instrument}' was found on another sweep "
+                f"({dim} {source[dim].values.tolist()}, here {list(wanted)}); a trigger's "
+                "events can only be taken at the same sweep points."
+            )
+    membership = source[name].transpose(TIME_COORD, WINDOW_DIM, QUANTILE_DIM, ENTER_DIM, EXIT_DIM)
+    return membership.values.astype(np.int64), stream_cells(source, trigger_instrument)
+
+
+def _adopted_events(
+    state: xr.Dataset,
+    variable: str,
+    cells: CellBounds,
+    trigger: str,
+    membership: npt.NDArray[np.integer],
+    source_cells: CellBounds,
+    instrument: str,
+) -> dict[str, _Column]:
+    """Return a triggered variable's columns: the trigger's events, on its own readings."""
+    finite = np.isfinite(np.asarray(state[variable].values, dtype=np.float64))
+    midpoints = cells.midpoint_ns
+    sweep = membership.shape[1:]
+    event = np.full((midpoints.size, *sweep), -1, dtype=np.int32)
+    n_events = np.zeros(sweep, dtype=np.int64)
+    for point in np.ndindex(*sweep):
+        starts, stops, numbers = _intervals(membership[(slice(None), *point)], source_cells)
+        taken = _containing(midpoints, starts, stops, numbers)
+        taken[~finite] = -1
+        event[(slice(None), *point)] = taken
+        n_events[point] = np.unique(taken[taken >= 0]).size
+    attrs: dict[str, object] = {
+        "long_name": (
+            f"event of each {variable} reading, taken from {trigger} and numbered as there; "
+            "-1 for none"
+        ),
+        TRIGGER_ATTR: trigger,
+    }
+    points = (WINDOW_DIM, QUANTILE_DIM, ENTER_DIM, EXIT_DIM)
+    logger.info("'%s.%s' takes its events from '%s'.", instrument, variable, trigger)
+    return {
+        f"event_{variable}": ((TIME_COORD, *points), event, attrs),
+        f"n_events_{variable}": (
+            points,
+            n_events,
+            {
+                "long_name": f"events of {trigger} holding a {variable} reading",
+                TRIGGER_ATTR: trigger,
+            },
+        ),
+    }
+
+
+def _intervals(
+    membership: npt.NDArray[np.integer], cells: CellBounds
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.int64], npt.NDArray[np.int64]]:
+    """Return each event's interval, first cell start to last cell stop, and its number."""
+    rows = np.flatnonzero(membership >= 0)
+    numbers, first = np.unique(membership[rows], return_index=True)
+    last = rows.size - 1 - np.unique(membership[rows][::-1], return_index=True)[1]
+    return cells.start_ns[rows[first]], cells.stop_ns[rows[last]], numbers.astype(np.int64)
+
+
+def _containing(
+    midpoints: npt.NDArray[np.int64],
+    starts: npt.NDArray[np.int64],
+    stops: npt.NDArray[np.int64],
+    numbers: npt.NDArray[np.int64],
+) -> npt.NDArray[np.int32]:
+    """Return, per midpoint, the number of the interval holding it, -1 for none.
+
+    Events at one sweep point are in time order, so the candidate is the last
+    interval starting at or before the midpoint. Two intervals overlap only
+    where cells at least as wide as the gap between two events touch both,
+    and there a midpoint goes to the later one.
+    """
+    candidate = np.searchsorted(starts, midpoints, side="right") - 1
+    safe = np.clip(candidate, 0, None)
+    inside = (
+        (candidate >= 0) & (midpoints < stops[safe])
+        if starts.size
+        else np.zeros(midpoints.size, dtype=bool)
+    )
+    out = np.full(midpoints.size, -1, dtype=np.int32)
+    out[inside] = numbers[safe[inside]]
+    return out

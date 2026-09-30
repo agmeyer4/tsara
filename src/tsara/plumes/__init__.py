@@ -24,6 +24,10 @@ Shape of the subpackage
     the entry multiple, never across a dropout, a record boundary or a blank
     reading, with short dips bridged; what each event records; and the
     closed-form rate at which chance alone makes events.
+``state``
+    The product: every gas variable of a baseline state described, scored
+    and searched at every sweep point, on the stream's own cells; a variable
+    named in ``plumes.triggers`` takes its trigger's events instead.
 """
 
 from __future__ import annotations
@@ -43,15 +47,29 @@ from tsara.plumes.clean import (
 )
 from tsara.plumes.hysteresis import Events, expected_chance_rate, find_events
 from tsara.plumes.records import DROPOUT_SPACING_FACTOR, Records, TsaraPlumeError, find_records
+from tsara.plumes.state import (
+    CHANCE_ASSUMPTION_ATTR,
+    ENTER_DIM,
+    EXIT_DIM,
+    PLUMES_STAGE,
+    TRIGGER_ATTR,
+    plume_state,
+    plume_states,
+)
 
 __all__ = [
+    "CHANCE_ASSUMPTION_ATTR",
     "CleanAir",
     "CleanDescription",
     "CleanLevelEstimator",
     "DROPOUT_SPACING_FACTOR",
+    "ENTER_DIM",
+    "EXIT_DIM",
     "Events",
     "MAD_TO_SIGMA",
+    "PLUMES_STAGE",
     "Records",
+    "TRIGGER_ATTR",
     "TsaraPlumeError",
     "available_clean_level_estimators",
     "clean_air",
@@ -61,6 +79,8 @@ __all__ = [
     "find_records",
     "get_clean_level_estimator",
     "half_sample_mode",
+    "plume_state",
+    "plume_states",
     "quantization_step",
     "register_clean_level_estimator",
 ]
