@@ -922,17 +922,31 @@ that window's baseline. Worked case: a 30-minute landfill plume with a
 
 | window | the baseline follows | events found on Δ |
 |---|---|---|
-| 2 min | the landfill air | the blip |
+| 2 min | the landfill air, a little behind it on its slopes | the blip, and the landfill's two flanks (below) |
 | 2 h | the air under the landfill | the landfill, and the blip inside it |
 | 6 h | slower structure, such as valley build-up | the same, plus anything slower |
 
 The selection is not sharp: a plume close to the window's length is partly
-absorbed. That is why the window is a sweep dimension rather than a setting to
-get right: the sweep reports how an answer moves with scale instead of choosing
-one. Nesting is read directly off the results: an event found at a short
-window whose interval lies inside an event found at a longer one is its child,
-which is the parent–child link of the catalog (§6.8). This document therefore
-says "the baseline at window *w*", never "the baseline".
+absorbed. Nor does a plume much longer than the window vanish at it. A low
+quantile of a window lying on a slope sits below the slope's middle, by (½ −
+*q*)·*w*·slope for a straight, noiseless slope, so the flanks of a broad plume
+stand out at a short window and its top, where the slope is zero, does not.
+Measured (rule: notebook 06's landfill alone, 12 h at 1 s, seed 5, 0.7 ppb of
+white noise on a flat 1900 ppb, seven Gaussian plumes of σ 8 min peaking at
+36–71 ppb; *q* = 0.05, entry 3, exit 1, dips under 5 s bridged; a flank
+reading is one whose true plume exceeds 5 ppb and changes faster than 0.02
+ppb/s, a top reading one whose true plume exceeds 20 ppb and changes slower
+than 0.005 ppb/s): at 2 min 83 % of flank readings and none of the top
+readings lie in events; at 5 min 100 % and 98 %; at 10 min all of both. On the
+flanks the offset is a median 0.59 of (½ − *q*)·*w*·slope at 2 min and 0.78 at
+5 and 10 min. So at 2 min this landfill is its two flanks, split at its top,
+and the tree (§6.8) links each to the landfill's event at a longer window
+(notebook 06 §5). That is why the window is a sweep dimension rather than a
+setting to get right: the sweep reports how an answer moves with scale instead
+of choosing one. Nesting is read directly off the results: an event found at a
+short window whose interval lies inside an event found at a longer one is its
+child, which is the parent–child link of the catalog (§6.8). This document
+therefore says "the baseline at window *w*", never "the baseline".
 
 **Open, for Phases 6–7: which window's ratio belongs to which event.** At the
 2-hour window the blip's enhancement includes the landfill air beneath it, so a
@@ -1498,18 +1512,23 @@ per hour by chance):
 |---|---|---|---|---|
 | flat | 15–26 /h | 6–9 /h | 5–11 /h | 0.98–1.04 |
 | random walk 30 ppb/day | 50–124 | 24–94 | 3–16 | 1.1–2.8 |
-| random walk 100 ppb/day | 13–117 | 12–102 | 0.9–18 | 1.9–8.9 |
-| daily cycle 25 ppb + random walk 30 ppb/day | 49–122 | 25–93 | 2–14 | 1.1–3.1 |
+| random walk 100 ppb/day | 13–117 | 12–102 | 0.9–18 | 1.8–8.9 |
+| daily cycle 25 ppb + random walk 30 ppb/day | 49–122 | 25–93 | 2–14 | 1.1–3.0 |
 
 A and B call wander plumes; C's spread grows with the wander, and its false
 alarms stay near the chance rate. (A reads 7–9 % low on flat air by
-construction, a quietest-5 % estimate being the low tail of a noisy one.) The
-price is sensitivity at long windows
-where the air wanders. Recall on weak plumes (rule: the same analyzer, one
-source of Gaussian plumes, σ 20 s, 6 per hour, peaks lognormal with median
-5 ppb, about 7σ, and σ_log 0.8; 12 h, seeds 1–3, 196 events; q = 0.05, entry
-3, exit 1; a plume is found when a detected interval holds its true peak
-time; a false event overlaps no true plume's support):
+construction, a quietest-5 % estimate being the low tail of a noisy one.)
+Every column C of this table and of the two below is re-run through the
+package by `tests/plumes/test_methods_tables.py` (opt-in, `TSARA_SLOW=1`,
+about 12 minutes), which requires each printed number to reproduce; its first
+run corrected two (2026-09-30): 1.9 and 3.1 had been rounded twice, from the
+scoping's printed 1.85 and 3.05, and are 1.849 and 3.049. The price is
+sensitivity at long windows where the air wanders. Recall on weak plumes
+(rule: the same analyzer, one source of Gaussian plumes, σ 20 s, 6 per hour,
+peaks lognormal with median 5 ppb, about 7σ, and σ_log 0.8; 12 h, seeds 1–3,
+196 events; q = 0.05, entry 3, exit 1; a plume is found when a detected
+interval holds its true peak time; a false event overlaps no true plume's
+support):
 
 | | peak 3–5σ | 5–10σ | 10–30σ | false events |
 |---|---|---|---|---|
@@ -1570,19 +1589,32 @@ whose true enhancement is under 0.1σ; error of the level in true spreads at
 The midpoint of the shortest half (Rousseeuw 1984's location estimator; the
 "shorth" of Andrews et al. 1972 is the mean of that half) collapses once
 plumes are most of a record: on the dense record its spread reaches 9 and 19
-times the truth at 10 and 60 min, and it puts 44–48 % of readings in events where the true-noise
-detector puts 82 %; the half-sample mode puts 56–77 %. The shortest half is
-also the steadiest on clean records (seed-to-seed spread of the false-alarm
-rate on the flat no-plume records above, at 2 / 10 / 60 min: ±1.5 / ±1.8 /
-±1.8 per hour, against ±12.3 / ±4.6 / ±3.8 for the half-sample mode and the
-true detector's ±0.7), and it was chosen for that on 2026-09-29 and withdrawn
-the same day, when the drive and the dense record were measured. The
-half-sample mode's jitter is its known cost. Every estimator under-calls a
-plume-dense record somewhat, reading the level and spread high; the error is
-conservative. The estimator is registered by name, so a better one replaces it
-without a redesign; the candidate is a Gaussian fitted to the lower side of
-the enhancement's histogram peak, which is plume-free whatever the plume
-fraction (not measured; CLAUDE.md open flags).
+times the truth at 10 and 60 min, and it puts 44–48 % of readings in events
+where the true-noise detector puts 82 %; the half-sample mode puts 56–77 %.
+The shortest half is also the steadiest on clean records (seed-to-seed spread
+of the false-alarm rate on the flat no-plume records above, at 2 / 10 / 60
+min: ±1.5 / ±1.8 / ±1.8 per hour, against ±12.3 / ±4.6 / ±3.8 for the
+half-sample mode and the true detector's ±0.7), and it was chosen for that on
+2026-09-29 and withdrawn the same day, when the drive and the dense record
+were measured. The half-sample mode's jitter is its known cost. On average
+every estimator under-calls a plume-dense record, reading the level and spread
+high, which is conservative; record by record the half-sample mode errs both
+ways (corrected 2026-09-30, when notebook 06 §3 drew a record that read low).
+Rule: notebook 06's landfill recipe (1 s, 0.7 ppb, landfill 0.6 plumes an hour
+of Gaussian σ 8 min, median 60 ppb, and 10 gas blips an hour, EMG 6 s / 12 s,
+median 120 ppb), 3 h and 6 h records, seeds 1–20 each, *q* = 0.05 at 2, 10 and
+60 min, entry 3, exit 1, dips under 5 s bridged, one record each; truth as in
+the table above; 120 (record, window) cases, 23–87 % of readings in plumes.
+The level reads low in 38 of 120 (the median error per window and length is
+0.04 to 0.22 true spreads high), and the share of plume-free readings at or
+above entry is more than twice the Gaussian tail's 0.135 % in 14 of 120, at
+most 9.1 times (the median case 0.04–0.78 times). A record that reads low
+finds chance events in clean air at several times the rate the chance column
+expects, and a count well above that column is the sign. The estimator is
+registered by name, so a better one replaces it without a redesign; the
+candidate is a Gaussian fitted to the lower side of the enhancement's
+histogram peak, which is plume-free whatever the plume fraction (not measured;
+CLAUDE.md open flags).
 
 **The half-sample mode as built** (`tsara.plumes.clean`, 2026-09-30). Sorted,
 the values are narrowed to the shortest interval holding ⌈*n*/2⌉ of them, then
