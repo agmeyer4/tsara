@@ -36,6 +36,8 @@ attributes and this document, because each was once used for several:
 | **provenance** | where a number or a fact came from: `declared`, `reported`, `inferred`, `assumed`, `empirical` … (`uncertainty_provenance`, `tsara_support_label_provenance`) | |
 | **field** | the physical quantity a variable measures (§1.6) | |
 | **baseline at window w** | the low quantile of a variable over a window of length w around a reading; always stated with its window (§6.1) | "the baseline" or "the true background": what is baseline at one window is signal at another |
+| **clean level**, **clean spread** | detection's description of plume-free air at one sweep point over one record: the most common enhancement, and 1.4826 × the median distance below it (§6.8). Detection's thresholds are multiples of the clean spread | a measurement uncertainty or the instrument's noise: the clean spread includes the background's wobble at the window's scale. Not `scale` or `offset`, which are a unit conversion's |
+| **record** | a stretch of one stream over which detection computes its clean level and spread: split where consecutive readings are more than a set gap apart, and cut into pieces no longer than a set length (§6.8) | a file, a drive or a campaign |
 | **rolling** | the operation: a statistic over a window centred on each reading, moved along the record (`rolling_quantile`; Phase 7's fits over windows) | a stage or a product. The stage that computes baselines and enhancements is `baseline` (`tsara.baseline`); its product is the **baseline state**, saved under `baseline/` in a bundle. Both were named `rolling` until Phase 5 merged; no bundle under the old name exists outside that branch, so none is migrated |
 | **borrowed** | the share of a joined value resting on air outside its own cell (`borrowed_<name>`, `tsara_borrowed_share`, §11.2.4) | an uncertainty; it is a magnitude, and no threshold on it separates a blend from jitter |
 | **averaged / straddled / narrowed / copied** | what a join did to the readings behind a column (`tsara_support_transform`, §11.2.4): wholly inside their cells; lying across a boundary; wider than a cell they fill; at least twice as wide, which is refused unless asked for by name | |
@@ -63,7 +65,7 @@ The pipeline defers any change of clock to the last possible moment:
 |---|---|---|
 | QA/QC, unit conversion | native | unchanged; both are pointwise |
 | Baseline, enhancement Δ — the continuous baseline state | native (time-based windows), per stream (§6.2) | windows are durations, so cells of any width fit; each reading is weighted by the share of its cell inside the window (§6.3) |
-| Plume detection | native → events are time **intervals** | an event's bounds are the union of the cells above threshold; the smallest resolvable event is one cell |
+| Plume detection | native → events are time **intervals** | an event runs from its first reading's cell start to its last reading's cell stop, with the share its cells cover recorded; the smallest event is one reading (§6.8) |
 | Ratio regression | **pairing clock** (§1.3), per event/window | the **wider-supported** stream's cells, with its partner averaged onto them by overlap |
 | Receptor-model (PMF) export | a **cell set** chosen for it (§1.4) | one join onto those cells |
 
@@ -320,7 +322,7 @@ Each component of each variable may be specified as:
 |---|---|---|
 | `declared`, constant/relative | $\sigma_i = \sqrt{a^2 + (r\,x_i)^2}$ | Picarro CH₄: a = 0.5 ppb noise floor |
 | `reported` | per-point column read from the data file | EM27 retrievals: an error column that changes every 8 s |
-| *(fallback)* `empirical` | robust first-difference estimator `diff_mad` (§2.5) | any variable with no declared budget |
+| *(no budget)* | nothing is estimated; the component is labelled `unknown` (§2.4) | any variable with no declared budget |
 
 An optional **decorrelation timescale** τ on the random component covers the
 in-between world (errors correlated over minutes but not hours); see §3.3.
@@ -339,20 +341,29 @@ case of a spec-sheet precision stated at one second being applied to a
 one-minute product; §10.8 sets out what ingestion records about it and why the
 arithmetic that reconciles the two belongs to the stage that consumes a sigma
 rather than to the one that reads it. Omitting a component means "not
-modeled here": an omitted `systematic` is zero; an omitted `random` falls back
-to the empirical estimator (§2.5) at runtime. A `ReportedUncertainty.column`
+modeled here": an omitted `systematic` is zero; an omitted `random` is
+`unknown`, and nothing estimated stands in for it (§2.3; until 2026-09-29 it
+fell back to the estimator of §2.5). A `ReportedUncertainty.column`
 is scaled by the parent variable's `convert.scale` at ingestion (a spread has
 no origin, so `convert.offset` never applies to it) — that scaling is Phase-3
 ingestion logic, not part of this schema.
 
 ### 2.3 No silent assumptions
 
-If no budget is declared, TSARA does not invent one: it falls back to the
-empirical `diff_mad` estimate (§2.5) and **labels** the result. There is no
+If no budget is declared, TSARA does not invent one: the component is
+labelled `unknown` (§2.4) and nothing estimated stands in for it. There is no
 code path in which an uncertainty of unstated origin enters a confidence
-interval. The direction of dependency is fixed: plume detection *consumes*
-this uncertainty system (§6); it does not maintain a private, parallel
-definition of noise.
+interval.
+
+**Revised 2026-09-29 (Phase-6 scoping).** This section used to say that plume
+detection consumes this uncertainty system, with the estimator of §2.5 as the
+fallback, and keeps no private definition of noise. It no longer consumes it.
+Detection's thresholds are multiples of its own **clean spread** (§6.8), which
+describes plume-free air at a window's scale rather than the instrument, and is
+never labelled or used as a measurement uncertainty. A declared or reported
+random sigma is recorded beside it for comparison and does not set it: measured
+on the NOy-LIF's reported column, it would have set the threshold at 90–100 %
+of a drive's readings (§6.8).
 
 ### 2.4 Provenance
 
@@ -372,14 +383,35 @@ honest, and they are not interchangeable:
 |---|---|
 | `declared` | computed at ingestion from `absolute`/`relative` |
 | `reported` | read at ingestion from the instrument's per-point sigma column |
-| `empirical` | deferred to the stage holding the analysis config, which owns the estimator name and window (§2.5) |
+| `empirical` | estimated from the data by the stage that computes the figure; since 2026-09-29 that is only the baseline's order-statistic sigma (§6.7) |
 | `zero` | a budget was given and *deliberately* omitted this component ("an omitted `systematic` is zero", §2.2) |
-| `unknown` | no budget at all. The random component falls back to `empirical`; the systematic component cannot, since `diff_mad` is structurally blind to it (§2.5) |
+| `unknown` | no budget at all, for either component; nothing estimated stands in (§2.3) |
+
+**Found at the Phase-6 scoping (2026-09-29), to be corrected in the Phase-6
+build:** ingestion still labels an undeclared random component `empirical`,
+the old promise that a later stage would estimate it (§2.5), and the baseline
+state copies that label onto the enhancement (§6.7). No stage estimates it
+since the noise scale left the baseline state, so the label is false: on the
+2024-07-18 drive the Picarro's methane reading and its enhancement both say
+`uncertainty_provenance_random = empirical`, and no random sigma exists in
+either product. The label becomes `unknown`.
 
 Collapsing `zero` into `unknown` would let an undeclared calibration become a
 silent claim of perfect calibration, which is exactly what §2.3 forbids.
 
-### 2.5 The empirical noise estimator (`diff_mad`)
+### 2.5 The first-difference noise estimator (`diff_mad`)
+
+**Status (2026-09-29): rejected as detection's scale; kept as a definition.**
+This estimator was the empirical rung of detection's noise ladder, built as a
+rolling estimate in Phase 5 (commit `59bd6ef`), moved to detection, and
+rejected there at the Phase-6 scoping in favour of the clean spread of §6.8:
+on a real drive it follows the air (the table below), and on generated air
+whose background wanders it calls the wander plumes at 5 to 25 times the
+chance rate (§6.8). It is not restored, and TSARA has no rolling noise
+estimate. The definition below stays because the synthetic generator's
+profiling uses it (`diff_mad_sigma`, §8.4), and because it is meaning B of
+§6.8, measured and rejected. What follows was written when it was the design
+and is kept as its record.
 
 When noise must be estimated from the data itself, the default estimator is
 the robust first-difference ("derivative noise") estimator over a rolling
@@ -428,7 +460,8 @@ signal, which on plume-dense records measures the plumes.
 
 **Built in Phase 5, withdrawn to detection (Phase 6) on 2026-09-29.** The
 design below was built in the baseline state (code and tests at commit
-`59bd6ef`) and is recorded here as the design Phase 6 restores. Three
+`59bd6ef`) and was to be restored in Phase 6; it was rejected instead (see
+the status note above). Three
 reasons moved it: its two settings are detection's (`DetectionConfig.
 noise_estimator`, `DetectionConfig.noise_window`), so the baseline stage was
 reading another stage's configuration, which Phases 3 and 3.5 had both
@@ -485,9 +518,10 @@ traffic. The floor never acted on this drive (every record is written in
 steps far finer than its noise). Declaring each analyzer's precision in the
 manifest puts a declared figure above the estimate on the ladder; what
 detection should mean by noise on a moving platform, the instrument's
-precision or the local variability, is Phase 6's first question (§6.8). The
-table is re-measured by Phase 6's real-data notebook, where the estimator
-returns; notebook 05b re-measures only the one noise figure §6.5 uses.
+precision or the local variability, was Phase 6's first question, answered
+by neither (§6.8). The table is re-measured by Phase 6's real-data notebook
+as the record of this rejected meaning; notebook 05b re-measures only the one
+noise figure §6.5 uses.
 
 Measured against the generator (rule: the example campaign's 2 s Picarro
 with its sigma columns removed, `diff_mad` over 10 min, the ratio of the
@@ -501,8 +535,10 @@ window's median absolute difference lands near the 70th percentile of the
 noise differences, and a quiet reading's window still holds plumes. That is
 the estimator's cost on such a record, and it is a bias in the safe
 direction for detection (thresholds 30 % higher where plumes are dense),
-but it is a bias; the remedy is Phase 6's to build, re-estimating the noise
-outside the plumes it has detected, since only then is the quiet air known.
+but it is a bias. The remedy planned for it, a loop that re-estimates the
+noise outside the plumes detected, was not needed: the clean spread of §6.8
+reads 1.01 and 1.02 times the true sigma on this same record at 2 and 10 min
+in one pass, and the loop was rejected (§6.8).
 On flat air with 0.7 ppb white noise both estimators recover 0.7 within
 5 %. Under a Gaussian plume at the centre of a 10 min
 window (1 s readings, seed 4), `diff_mad` reads 0.80 for 300 ppb at 240 s
@@ -852,8 +888,9 @@ not a sole objective. **[estimator details — Phase 7]**
 Baselines were scoped on 2026-09-24 and built in Phase 5 (2026-09-28):
 §6.1–6.7 say what was decided and, marked *built*, what the package now does
 (`tsara.baseline`). The numbers quoted were measured on the permitted 2024
-archive or on generated data under the rules stated beside them. Detection,
-smoothing and clustering remain stubs (§6.8).
+archive or on generated data under the rules stated beside them. Detection
+was scoped on 2026-09-29 and is decided, to be built in Phase 6 (§6.8);
+smoothing and clustering remain stubs (§6.9).
 
 ### 6.1 What a baseline is for **[decided 2026-09-24 — Phase 5]**
 
@@ -937,7 +974,10 @@ one long plume (notebook 05 §2: four blips within three minutes lift the
 Neither is a Phase-5 decision, since the baseline state holds the baseline at
 every window and both read it. A candidate division, not decided: masked
 children for the event catalog, bands for the continuous state and receptor
-rows.
+rows. **Settled at the Phase-6 scoping (2026-09-29): detection does not depend
+on it.** Both readings need the same two things, the tree of events across
+windows and, at every reading, the event it belongs to, and detection records
+both (§6.8); the rule for a parent's ratio is Phase 7's, where the fit is.
 
 ### 6.2 The continuous baseline state lives beside the readings **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
 
@@ -948,7 +988,8 @@ rate, with the sweep (`baseline_window`, `baseline_quantile`) as extra
 dimensions, and are saved beside the stream they came from. They are not a
 grid product (§1.4). The noise scale detection quotes its thresholds in was
 decided here on 2026-09-24 as a third per-reading quantity, built in Phase 5,
-and moved to detection on 2026-09-29 (§2.5 gives the three reasons). Size for
+and moved to detection on 2026-09-29 (§2.5 gives the three reasons), where
+detection's own clean spread replaced it (§6.8). Size for
 one species at 3 windows × 3 quantiles × (baseline, Δ, one sigma) in float64,
 over the ten 2024 drive days:
 
@@ -1231,8 +1272,12 @@ calibration assumption itself held on that drive on average: the PTR's
 readings averaged over each fill against the fill have a median difference
 of +0.000 ppb (ratio 1.01) over the 32 fills, the disagreement sitting in
 plumes (least-squares slope of canister on PTR 0.73, plausibly timing across
-sharp plumes; not measured). The offset is §6.8's quantile-offset correction
-applied with the donor's σ; how that σ reaches the adopter is Phase 6's.
+sharp plumes; not measured). **This offset does not reach detection**
+(decided 2026-09-29): detection measures its clean level on the adopter's own
+enhancement (§6.8), so an inherited offset is part of what it measures, and a
+canister too sparse for a clean level of its own takes its events from a
+dense instrument. It stays in the adopted enhancement's values, which is a
+question for receptor rows, not for detection.
 
 ### 6.6 What a baseline records **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
 
@@ -1358,11 +1403,21 @@ enhancement says so** (decided 2026-09-29): `enhancement_<x>` carries
 `uncertainty_provenance_random` and `uncertainty_provenance_systematic` for
 each component without a column, holding the reading's own provenance for
 it, `unknown` when the reading states none and `zero` when its budget omits
-it (§2.4). Nothing estimated stands in: the empirical noise scale that could
-(§2.5) is detection's, and on a drive it measures the air as much as the
-instrument. On the 2024-07-18 drive this is the Picarro's and the PTR-MS's
-case (neither declares a random sigma), and the NOy-LIF's reported sigma is
-the only one carried through.
+it (§2.4). Nothing estimated stands in: the one per-reading estimator TSARA
+built (§2.5) measures the air as much as the instrument on a drive, and was
+rejected for detection too (§6.8). (Ingestion still writes `empirical` for an
+undeclared random component, which the enhancement copies; that label is
+false and becomes `unknown` in the Phase-6 build, §2.4.) On the 2024-07-18
+drive no analyzer has a random sigma. The Picarro and the PTR-MS declare
+none, and the NOy-LIF's `NOy_LIF_1SigmaAccuracy`, which notebook 05b maps as
+`random`, is by the file's own header "the combined calibration uncertainties
+(±6%, ±9%, ±10%) and zero uncertainties (3 ppt, 20 ppt, 100 ppt) for NO, NO2,
+and NOy": a systematic figure. Measured on that drive's 19,498 NOy readings,
+it runs at 10–15 % of the reading from the lowest tenth of NOy to the highest,
+and exceeds the reading-to-reading scatter (§2.5's estimate over 10 min) at
+79 % of readings. 05b's mapping is corrected in the Phase-6 build. The
+NOy-LIF trio are the only per-point uncertainty columns in the 2024 ICARTT
+archive, so no file there reports a precision.
 Its systematic component depends on where the baseline came from. For a
 `rolling_quantile` baseline of the same instrument, an error common to
 reading and baseline is either an offset, which cancels exactly in the
@@ -1380,41 +1435,254 @@ clipped** at zero: noise makes Δ negative in clean air and on plume edges,
 and clipping would shift the noise distribution's mean and bias every
 Phase-7 regression that follows.
 
-### 6.8 Detection, smoothing, clustering **[stubs]**
+### 6.8 Detection **[decided 2026-09-29 — Phase 6]**
 
-- **Plume detection** **[partial stub — Phase 6]**: two-threshold hysteresis
-  segmentation of the enhancement Δ (config: `DetectionConfig.enter_sigma`
-  (sweep dim) / `exit_sigma`, both in noise-σ units, plus `min_duration` and
-  `max_internal_gap` for internal-gap bridging). Decided 2026-07-09: the noise
-  scale σ comes from the measurement-uncertainty system in provenance order —
-  declared or reported $\sigma^{\mathrm{rand}}$ when available, else the
-  empirical estimator named by `DetectionConfig.noise_estimator` (default
-  `diff_mad`, §2.5); detection has no private definition of noise, and the §2.5 quantization
-  floor applies to whichever estimate is used. Phase 5 built that ladder in
-  the baseline state, measured its cost on a plume-dense record (`diff_mad`
-  reads 1.30 times the true sigma when a third of the readings sit inside
-  plumes, §2.5), and on 2026-09-29 it moved here, because its remedy is a
-  loop with detection: estimate, detect, re-estimate the noise outside the
-  events found, detect again. Phase 6 restores it from the Phase-5 build
-  (§2.5), with the weighted rolling quantile moved into `core` so that this
-  stage and the baseline stage share one engine, and answers first what
-  detection means by noise on a moving platform: measured, on a real drive
-  the estimate follows the air (§2.5). Also decided:
-  **quantile-offset correction** — because the baseline
-  is a low quantile q, even pure noise has a positive median enhancement of
-  $-z_q\,\sigma$ (≈ 1.64σ at q = 0.05, Gaussian), so thresholds are applied
-  to the offset-corrected enhancement; otherwise the effective threshold
-  silently depends on the swept quantile and false-positive rates differ
-  across sweep points. For an adopted (`from_field`) baseline σ here is the
-  **donor's**, not the adopter's: the offset came with the donor's readings
-  (§6.5, measured). Carrying the donor's noise scale onto the adopter's cells
-  in the same join is the leading candidate for supplying it; left to the
-  Phase-6 scoping on 2026-09-29. Exact segmentation details specified in Phase 6.
-  Nested events (an event at a short baseline window inside an event at a
-  longer one) are recorded with parent–child links in the catalog —
-  detection-level bookkeeping only; no area mathematics (§7). How windows
-  see scales, and the open question of which window's ratio belongs to which
-  event, are in §6.1.
+Every stage before this one turns numbers into numbers. Detection turns them
+into a decision, "from here to here there is a plume in methane", and three
+things follow. Nothing in a real record says whether a decision is right, so
+the generated answer key (§8) is the only arbiter. A decision jumps with its
+settings: nudge a threshold and one event splits in two, merges with another
+or vanishes, so "the same event" at two sweep points is a relation that has
+to be computed. And the product is a table of intervals rather than a column.
+Everything here was measured at the Phase-6 scoping, on generated data under
+the rules stated and on the 2024-07-18 drive; the scripts were scoping tools,
+and notebooks 06 and 06b re-measure the numbers that matter.
+
+**Where it runs.** Per variable, on its own cells, at every point of the
+baseline sweep and of detection's own thresholds. Events are time intervals,
+so no common clock is needed (§1.1). An event seen by several variables is
+the union or intersection of their intervals, formed by a separate small
+operation, not by the detector.
+
+**What the thresholds are multiples of: the clean spread.** At window *w*,
+the enhancement of plume-free air is the instrument's noise, plus the
+background's wobble on time scales shorter than *w*, less the offset of a
+low-quantile baseline. Three meanings of "noise" were measured:
+
+- **A, the instrument's precision** (a declared figure; estimated for the
+  test as the quietest 5 % of B over the record), with the baseline's offset
+  modelled as −*z_q*·σ, the correction decided on 2026-07-09;
+- **B, the local variability**: the estimator of §2.5 over 10 min at every
+  reading, the same offset model;
+- **C, the enhancement's own spread in plume-free air.** Plumes only add, so
+  the readings below the enhancement's most common value are plume-free air.
+  Per variable, per sweep point and per record: the **clean level** *m* is the
+  most common enhancement, the **clean spread** *s* = 1.4826 ·
+  median(*m* − Δ | Δ < *m*), and the detection statistic is
+  *z* = (Δ − *m*)/*s*.
+
+**C is the design.** On generated air with no plumes (rule: one 1 s analyzer,
+methane at 1900 ppb with 0.7 ppb of white noise, no sources, 12 h, seeds 1–6;
+baselines at 2, 10 and 60 min × q 0.01, 0.05, 0.10; entry 3, exit 1; every
+event is false; each cell is the range over the nine sweep points of the mean
+over seeds; the detector that knows the true noise and background finds 5.1
+per hour by chance):
+
+| background | A | B | C | C's spread ÷ true noise |
+|---|---|---|---|---|
+| flat | 15–26 /h | 6–9 /h | 5–11 /h | 0.98–1.04 |
+| random walk 30 ppb/day | 50–124 | 24–94 | 3–16 | 1.1–2.8 |
+| random walk 100 ppb/day | 13–117 | 12–102 | 0.9–18 | 1.9–8.9 |
+| daily cycle 25 ppb + random walk 30 ppb/day | 49–122 | 25–93 | 2–14 | 1.1–3.1 |
+
+A and B call wander plumes; C's spread grows with the wander, and its false
+alarms stay near the chance rate. (A reads 7–9 % low on flat air by
+construction, a quietest-5 % estimate being the low tail of a noisy one.) The
+price is sensitivity at long windows
+where the air wanders. Recall on weak plumes (rule: the same analyzer, one
+source of Gaussian plumes, σ 20 s, 6 per hour, peaks lognormal with median
+5 ppb, about 7σ, and σ_log 0.8; 12 h, seeds 1–3, 196 events; q = 0.05, entry
+3, exit 1; a plume is found when a detected interval holds its true peak
+time; a false event overlaps no true plume's support):
+
+| | peak 3–5σ | 5–10σ | 10–30σ | false events |
+|---|---|---|---|---|
+| detector knowing the true noise | 100 % | 100 % | 100 % | 4 /h |
+| flat air, C at 2 / 10 / 60 min | 95 / 100 / 100 % | 100 % | 100 % | 3.3 / 4.9 / 5.0 /h |
+| random walk 30 ppb/day, C at 2 / 10 / 60 min | 93 / 84 / 26 % | 100 / 100 / 48 % | 100 / 100 / 98 % | 7.5 / 9.1 / 0.9 /h |
+| random walk 30 ppb/day, A or B at any window | 98–100 % | 100 % | 100 % | 22–87 /h |
+
+A 5σ plume does not stand out from an hour of wander, so the 60 min window
+does not report it and the 2 and 10 min windows do: each window does the job
+§6.1 gives it, and across the sweep the plume is in the catalog. Accepted.
+On the example campaign's plume-dense 2 s Picarro, where §2.5's estimator
+reads 1.30 times the true sigma, the clean spread reads 1.01 and 1.02 at 2
+and 10 min in one pass (1.45 at 60 min, that campaign's wander).
+
+On the 07-18 drive (q = 0.05, 10 min, entry 3, exit 1, one record per
+analyzer, finite readings), the share of readings inside an event:
+
+| | CH₄ | CO₂ | NOy | benzene (PTR) |
+|---|---|---|---|---|
+| B | 68 % | 46 % | 59 % | 40 % |
+| C | 59 % | 70 % | 77 % | 40 % |
+
+Most of a drive sits above a 5th-percentile baseline by more than its clean
+spread, which is what urban air is.
+
+**The clean spread is not a measurement uncertainty** and is never labelled
+or used as one (§2.3). This revises the 2026-07-09 decision that detection
+keeps no private definition of noise. A declared or reported random sigma is
+recorded beside it for comparison and has no role in the threshold, not even
+as a floor: on the 07-18 drive the NOy-LIF's reported column (a calibration
+figure, §6.7) sits above the clean spread at 100, 100 and 90 % of readings at
+2, 10 and 60 min, and as a floor would have cut NOy's share of readings in
+events from 75 to 54 % at 2 min, setting the threshold rather than bounding
+it. Only the quantization floor, *s* ≥ δ/√12 with δ as in §2.5, applies.
+
+**The clean level is measured, not modelled.** The 2026-07-09 correction
+modelled plume-free air as sitting −*z_q*·σ above the baseline, one value at
+every window. Measured on 07-18 methane, the most common enhancement is 0.8,
+2.4 and 3.1 ppb at 2, 10 and 60 min: it grows with the window because a
+longer window's low quantile reaches further down into the air's wobble.
+
+**Which estimator of the clean level: the half-sample mode** (Bickel and
+Frühwirth 2006: the shortest interval holding half the readings, then the
+shortest holding half of those, down to three). Robustness and steadiness
+trade against each other, and the archive is plume-dense (§8), so robustness
+decides. Rule: generated records at three plume densities (1 s, 0.7 ppb, 12 h,
+seeds 1–3, q = 0.05); truth is the median and 1.4826 × MAD of Δ over readings
+whose true enhancement is under 0.1σ; error of the level in true spreads at
+2 / 10 / 60 min, mean over seeds:
+
+| record (readings above 3σ) | half-sample mode | midpoint of the shortest half | shortest tenth |
+|---|---|---|---|
+| sparse (17 %) | +0.02 / +0.14 / +0.16 | +0.03 / +0.03 / +0.06 | +0.08 / +0.13 / +0.12 |
+| landfill case (47 %) | +0.21 / +0.13 / +0.14 | +0.22 / +0.42 / +0.58 | +0.08 / +0.20 / +0.06 |
+| dense (79 %) | +0.29 / +0.33 / +0.20 | **+1.2 / +7.3 / +14.5** | +0.15 / +0.24 / +0.16 |
+
+The midpoint of the shortest half (Rousseeuw 1984's location estimator; the
+"shorth" of Andrews et al. 1972 is the mean of that half) collapses once
+plumes are most of a record: on the dense record its spread reaches 9 and 19
+times the truth at 10 and 60 min, and it puts 44–48 % of readings in events where the true-noise
+detector puts 82 %; the half-sample mode puts 56–77 %. The shortest half is
+also the steadiest on clean records (seed-to-seed spread of the false-alarm
+rate on the flat no-plume records above, at 2 / 10 / 60 min: ±1.5 / ±1.8 /
+±1.8 per hour, against ±12.3 / ±4.6 / ±3.8 for the half-sample mode and the
+true detector's ±0.7), and it was chosen for that on 2026-09-29 and withdrawn
+the same day, when the drive and the dense record were measured. The
+half-sample mode's jitter is its known cost. Every estimator under-calls a
+plume-dense record somewhat, reading the level and spread high; the error is
+conservative. The estimator is registered by name, so a better one replaces it
+without a redesign; the candidate is a Gaussian fitted to the lower side of
+the enhancement's histogram peak, which is plume-free whatever the plume
+fraction (not measured; CLAUDE.md open flags).
+
+**Records.** The clean level and spread are computed per **record**: a
+stream is split where consecutive finite readings are more than a gap apart
+(default 2 h), and each piece is cut into equal parts no longer than a
+maximum length (default 6 h, about one drive). Both are configurable and
+found without declaration; declared segments can come later. The cap exists
+because the gap rule does not split a record that logs continuously
+(rule: TSARA ingestion, finite readings of one variable, gap = time between
+consecutive cell midpoints):
+
+| stream | readings, span | records at gaps > 2 h | durations (min / median / max) |
+|---|---|---|---|
+| 2024 drive Picarro CH₄, ten drives | 87,272 over 29.5 d | 10 (the same at any gap from 10 min to 6 h) | 3.9 / 5.5 / 7.2 h |
+| 2024 ground Picarro CH₄, 60 s means | 45,987 over 34.9 d | 11 | 16.7 h / 41.8 h / 11.7 d |
+| 2026 WYO van Picarro CH₄ | 331,588 over 9.3 d | 3 | 5.9 h / 6.9 h / 7.2 d |
+
+The ground site runs 11.7 days without a two-hour gap, and the van's analyzer
+logs parked and driving alike for 7.2 days; a clean spread over either would
+mix days of different air.
+
+**A minimum count: 100 readings below the clean level.** Fewer, and that
+record's level and spread are blank with the reason recorded, and the
+variable defines no events there. Rule: draws of N(0, 1) with 30 % of them
+carrying an exponential excess of mean 5, 4000 repetitions per count, seed 11;
+for the half-sample mode, the 10th–90th percentiles of the spread over its
+truth and of the chance that one plume-free reading crosses the entry
+threshold *m* + 3*s*, as a multiple of the nominal 0.00135:
+
+| readings below the level | 30 | 100 | 300 | 1000 |
+|---|---|---|---|---|
+| spread ÷ truth | 0.62–1.49 | 0.74–1.36 | 0.81–1.27 | 0.86–1.20 |
+| chance crossing × nominal | 0.00–58 | 0.00–21 | 0.01–11 | 0.03–6 |
+
+So 100 is the floor for having a scale at all, not a guarantee of the
+false-alarm rate; the half-sample mode's jitter persists at every count. A
+drive has thousands of readings below its level; a canister's day has about
+16, so a canister takes its events from a dense instrument measuring the same
+field (the union operation above).
+
+**Thresholds, both swept.** `enter_multiple` and `exit_multiple` (the old
+names said "sigma", which in TSARA means a measurement uncertainty) are both
+sweep dimensions, beside the baseline's window and quantile. A configuration
+in which any entry is at or below any exit is refused at validation. The
+example sweep is entry 3, 4, 5 × exit 1, 1.5, 2. Entry 2 is left out because
+chance decides it: the detector knowing the true noise, on 1 s white noise,
+finds 79 events an hour at entry 2 (one every 45 s), 5.1 at entry 3 and 0.1 at
+entry 4. The chance rate has a closed form for independent Gaussian readings.
+With *p_x* and *p_e* the upper-tail probabilities of the exit and entry
+multiples, a reading starts a run above exit with probability
+(1 − *p_x*) *p_x*, the run is geometric, and the rate of events per reading is
+
+$$r = (1 - p_x)\left[p_x - \frac{(1 - p_x)(p_x - p_e)}{1 - p_x + p_e}\right]$$
+
+which gives 79.7, 4.85 and 0.11 an hour at 1 s for entries 2, 3 and 4 (exit
+1, 1.5 or 2 changes it by under 0.4 %), against the measured 79.0 ± 2.4,
+5.1 ± 0.7 and 0.1 ± 0.1. It scales with the reading rate: entry 2 is about
+800 an hour on a 10 Hz analyzer and 1.3 on 60 s means. **The catalog records
+this expected chance rate per stream and sweep point**, labelled with its
+assumption (independent Gaussian readings; oversampled, autocorrelated
+readings cross less often). The exit multiple changes nothing on flat air;
+where the air wanders a higher exit breaks excursions into more events (no
+plumes, random walk 30 ppb/day, 60 min, entry 3: 3.1 false events an hour at
+exit 1 and 16.4 at exit 2) and lowers weak plumes' recall. That spread is methodological, which is why exit is
+swept. Matching events across thresholds and quantiles is Phase 7's first job.
+
+**The detector.** Offline two-threshold hysteresis: an event is a run of
+readings with *z* ≥ exit that holds at least one with *z* ≥ entry. A run
+never crosses a dropout (two consecutive finite readings more than 1.5 times
+the record's median spacing apart, the rule of §2.5; it lives in the
+detection stage until a second stage needs it). `max_internal_gap` bridges a
+dip below exit shorter than it, never a dropout: missing data is not
+turbulent air. An event runs from its first reading's cell start to its last
+reading's cell stop, and records the share its cells cover (under half on the
+07-18 Picarro, whose 1 s cells arrive every 2–3 s), its reading count and its
+largest *z*. **There is no minimum duration** (`min_duration` deleted). On
+07-18 under C at 10 min, 2.6–15.5 % of events are one reading and 6.7–30.1 %
+two or fewer, and at 3σ roughly 11 chance crossings per 8,448 readings are
+expected; width cannot tell one from a narrow real plume, which is §9.5's
+argument again. Deleting them would be deletion, not a safeguard; Phase 7's
+`min_points` decides what can be fitted.
+
+**Rejected: the loop.** Estimate, detect, mask the events, re-estimate,
+repeat, the remedy planned for §2.5's 1.30×. The clean spread does not have
+that bias, and measured, the loop's false-alarm rates stayed within the
+seed-to-seed spread of one pass on every no-plume and weak-plume record; on
+the landfill case at 10 min it moved the spread from
+1.10 to 0.97 of the truth and the false events from 0.4 to 3.9 an hour.
+
+**The parent–child tree.** Along `baseline_window`, at fixed quantile and
+thresholds: an event links to the event at the **nearest longer window** whose
+interval holds its peak, skipping a window at which nothing holds it (a blip
+found at 2 min and not at 10 min links to the landfill found at 60 min). The
+link carries both durations. It records containment, not origin: scale is not
+source (§6.1). No area mathematics (§7). The rule for a parent's ratio is
+Phase 7's, and both candidate readings of §6.1 need exactly this tree and the
+per-reading event index below.
+
+**What the stage saves** (names settled in the build):
+
+- **The detection state**, one file per instrument, `detection/<instrument>.nc`,
+  on the stream's own cells: at every reading and sweep point the clean level
+  and spread of its record, the statistic *z*, and the index of the event it
+  belongs to; the declared or reported random sigma beside them for
+  comparison.
+- **The catalog**, one long Parquet table keyed by `event_id`: one row per
+  event, variable and sweep point, the sweep coordinates as columns, the
+  columns that mean the same as the generator's answer key spelled as it
+  spells them (`GROUND_TRUTH_COLUMNS`, §8.1) so that scoring is a join; per
+  event its record, bounds, peak time, largest Δ and *z*, reading count,
+  covered share, parent link and durations, and the stream's expected chance
+  rate; positions when the stream carries them, the GPS join onto events
+  being Phase 8's. Later stages add tables keyed by `event_id` rather than
+  editing this one; that key is the room §7 keeps for integration.
+
+### 6.9 Smoothing, clustering **[stubs]**
+
 - **Smoothing** **[stub — Phase 8]**: zero-phase Butterworth per stream at its
   native nominal rate, segment-wise around gaps (filtfilt requires uniform
   sampling; each instrument is nominally uniform between gaps), or along a
@@ -5060,3 +5328,13 @@ should be in phase with is the user's choice, not TSARA's.
 - Yamartino, R. J. (1984). A comparison of several "single-pass" estimators
   of the standard deviation of wind direction. *Journal of Climate and
   Applied Meteorology*, 23, 1362–1366.
+- Bickel, D. R., & Frühwirth, R. (2006). On a fast, robust estimator of the
+  mode: comparisons to other robust estimators with applications.
+  *Computational Statistics & Data Analysis*, 50(12), 3500–3530. (The
+  half-sample mode, detection's clean level, §6.8.)
+- Rousseeuw, P. J. (1984). Least median of squares regression. *Journal of
+  the American Statistical Association*, 79(388), 871–880. (The midpoint of
+  the shortest half, measured and rejected, §6.8.)
+- Andrews, D. F., Bickel, P. J., Hampel, F. R., Huber, P. J., Rogers, W. H., &
+  Tukey, J. W. (1972). *Robust Estimates of Location: Survey and Advances.*
+  Princeton University Press. (The shorth, §6.8.)
