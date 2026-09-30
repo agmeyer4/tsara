@@ -31,6 +31,7 @@ if TYPE_CHECKING:  # pragma: no cover
 __all__ = [
     "ALTITUDE_COORD",
     "BASELINE_PREFIX",
+    "BASELINE_STAGE",
     "BINNED_ATTR",
     "BORROWED_ATTR",
     "BORROWED_PREFIX",
@@ -48,6 +49,7 @@ __all__ = [
     "LONGITUDE_COORD",
     "N_READINGS_PREFIX",
     "N_READINGS_WINDOW_PREFIX",
+    "QUANTILE_DIM",
     "RAW_TIME_START_COLUMN",
     "RAW_TIME_STOP_COLUMN",
     "READINGS_ATTR",
@@ -69,6 +71,7 @@ __all__ = [
     "TIME_SHIFT_ATTR",
     "TRANSFORM_ATTR",
     "WIDTH_RATIO_ATTR",
+    "WINDOW_DIM",
     "baseline_name",
     "borrowed_name",
     "coverage_name",
@@ -322,6 +325,14 @@ BASELINE_PREFIX = "baseline_"
 ENHANCEMENT_PREFIX = "enhancement_"
 N_READINGS_WINDOW_PREFIX = "n_readings_window_"
 COVERAGE_WINDOW_PREFIX = "coverage_window_"
+
+#: A baseline state's two sweep dimensions, and what its ``tsara_stage`` says
+#: (§6.2, §6.6). Here rather than in the baseline stage because a second stage
+#: reads them: the plumes stage finds events on a baseline state at every
+#: sweep point, and the stages never import each other.
+WINDOW_DIM = "baseline_window"
+QUANTILE_DIM = "baseline_quantile"
+BASELINE_STAGE = "baseline"
 
 
 def n_readings_name(variable: str) -> str:

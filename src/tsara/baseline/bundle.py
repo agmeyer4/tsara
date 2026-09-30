@@ -34,7 +34,6 @@ from typing import TYPE_CHECKING
 import xarray as xr
 import yaml
 
-from tsara.baseline.state import BASELINE_STAGE
 from tsara.config.analysis import AnalysisConfig
 from tsara.config.loader import read_yaml
 from tsara.core.bundle import (
@@ -43,6 +42,7 @@ from tsara.core.bundle import (
     TsaraBundleError,
     pin_time_encoding,
 )
+from tsara.core.naming import BASELINE_STAGE
 from tsara.core.support import check_bounds_intact
 
 if TYPE_CHECKING:  # pragma: no cover

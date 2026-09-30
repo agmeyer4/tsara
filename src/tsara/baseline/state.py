@@ -37,8 +37,6 @@ import xarray as xr
 
 from tsara._version import __version__
 from tsara.baseline.methods import (
-    QUANTILE_DIM,
-    WINDOW_DIM,
     BaselineRequest,
     BaselineResult,
     get_baseline_method,
@@ -47,9 +45,12 @@ from tsara.baseline.quantile import MAX_BLOCK_ELEMENTS
 from tsara.baseline.windows import TsaraBaselineError, duration_ns
 from tsara.core.bundle import pin_time_encoding
 from tsara.core.naming import (
+    BASELINE_STAGE,
     CELL_METHODS_ATTR,
+    QUANTILE_DIM,
     TIME_BOUNDS_VAR,
     TIME_COORD,
+    WINDOW_DIM,
     baseline_name,
     coverage_window_name,
     enhancement_name,
@@ -74,7 +75,6 @@ __all__ = [
     "BASELINE_MEMBERSHIP_ATTR",
     "BASELINE_METHOD_ATTR",
     "BASELINE_MIN_READINGS_ATTR",
-    "BASELINE_STAGE",
     "BASELINE_TOO_WIDE_ATTR",
     "BASELINE_WINDOWS_ATTR",
     "SIGMA_ASSUMPTION_ATTR",
@@ -83,9 +83,6 @@ __all__ = [
     "baseline_states",
 ]
 
-
-#: What a baseline state's ``tsara_stage`` says.
-BASELINE_STAGE = "baseline"
 
 #: Attrs the baseline column carries instead of a ``cell_methods`` (§6.6):
 #: the method that made it, the membership rule, the windows as configured,

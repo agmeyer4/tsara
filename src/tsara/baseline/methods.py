@@ -48,7 +48,9 @@ from tsara.config.analysis import BaselineMethod, ConstantMethod, FromFieldMetho
 from tsara.core.naming import (
     BASELINE_PREFIX,
     JOIN_RECORD_ATTRS,
+    QUANTILE_DIM,
     TIME_COORD,
+    WINDOW_DIM,
     sigma_rand_name,
     sigma_sys_name,
 )
@@ -69,8 +71,6 @@ __all__ = [
     "BaselineMethodFunction",
     "BaselineRequest",
     "BaselineResult",
-    "QUANTILE_DIM",
-    "WINDOW_DIM",
     "available_baseline_methods",
     "baseline_by_constant",
     "baseline_by_rolling_quantile",
@@ -79,10 +79,6 @@ __all__ = [
     "register_baseline_method",
 ]
 
-
-#: The two sweep dimensions of the baseline state (``docs/METHODS.md`` §6.2).
-WINDOW_DIM = "baseline_window"
-QUANTILE_DIM = "baseline_quantile"
 
 #: Attrs a method writes on the baseline it made: which instrument a
 #: ``from_field`` baseline was adopted from, and what a ``constant`` is.
