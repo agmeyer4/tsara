@@ -41,6 +41,7 @@ from tsara.core.bundle import (
     BUNDLE_BASELINE_DIR,
     TsaraBundleError,
     pin_time_encoding,
+    relabel_promised_estimates,
 )
 from tsara.core.naming import BASELINE_STAGE
 from tsara.core.support import check_bounds_intact
@@ -221,6 +222,15 @@ def load_state(path: str | Path) -> BaselineStates:
             raise TsaraBundleError(
                 f"'{file}' was written by the '{stage}' stage, not '{BASELINE_STAGE}'. "
                 "Refusing rather than misreading it as a baseline state."
+            )
+        # The reading and its enhancement copy the stream's labels, so a state
+        # rolled before Phase 6 carries its false `empirical`; the rule is
+        # exact without a format version (see `relabel_promised_estimates`).
+        if relabel_promised_estimates(state):
+            logger.info(
+                "Relabelled an unstated random component 'unknown' (written "
+                "'empirical', which promised an estimate nothing makes) in %s.",
+                file,
             )
         states[file.stem] = state
     analysis: AnalysisConfig | None = None

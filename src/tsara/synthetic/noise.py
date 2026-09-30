@@ -55,8 +55,8 @@ class NoiseRealization:
     reported_sigma : numpy.ndarray or None
         What the instrument publishes, i.e. ``sigma * report_bias``. None
         when the component has no ``report_as`` column, meaning the error is
-        real but undeclared and downstream code must fall back to empirical
-        estimation.
+        real but undeclared: whatever reads it back has no sigma for it, and
+        says so (``unknown``, METHODS §2.3).
     """
 
     error: npt.NDArray[np.float64]

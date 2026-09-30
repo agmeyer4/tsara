@@ -21,7 +21,12 @@ from typing import TYPE_CHECKING
 
 import xarray as xr
 
-from tsara.core.bundle import BUNDLE_GRID_FILE, TsaraBundleError, pin_time_encoding
+from tsara.core.bundle import (
+    BUNDLE_GRID_FILE,
+    TsaraBundleError,
+    pin_time_encoding,
+    relabel_promised_estimates,
+)
 from tsara.core.support import check_bounds_intact
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -152,6 +157,15 @@ def load_grid(path: str | Path) -> xr.Dataset:
         raise TsaraBundleError(
             f"'{target}' was written by the '{stage}' stage, not '{GRID_STAGE}'. "
             "Refusing rather than misreading it as a grid."
+        )
+    # A grid copies its columns' attributes from the streams, so one built
+    # before Phase 6 carries their false `empirical`; the rule is exact
+    # without a format version (see `relabel_promised_estimates`).
+    if relabel_promised_estimates(grid):
+        logger.info(
+            "Relabelled an unstated random component 'unknown' (written 'empirical', "
+            "which promised an estimate nothing makes) in %s.",
+            target,
         )
     logger.info("Loaded grid from %s (%d cells).", target, grid.sizes.get("time", 0))
     return grid

@@ -17,13 +17,16 @@ floor plus a percent-of-reading term) and ``reported`` (a per-point sigma
 column the instrument wrote) — and computes those pointwise, in canonical
 units.
 
-It does **not** compute the empirical fallback. The empirical estimator is a
-*rolling* statistic whose name and window come from the analysis config
-(``DetectionConfig.noise_estimator``, METHODS §2.5), which ingestion has no
-business reading. What ingestion does instead is *label* the variable
-``empirical``, so the obligation is recorded and cannot be forgotten. This
-is the shape of METHODS §2.3's promise: there is no code path in which an
-uncertainty of unstated origin enters a confidence interval.
+It does **not** estimate anything. A component the manifest does not state
+is labelled ``unknown``, and nothing estimated stands in for it: METHODS
+§2.3's promise that no uncertainty of unstated origin enters a confidence
+interval. Before Phase 6 an unstated *random* component was labelled
+``empirical`` instead, a promise that a later stage would estimate it from
+the data. The one per-reading estimator TSARA built measured the air as much
+as the instrument on a moving platform and was rejected (METHODS §2.5,
+§6.8), so the promise was withdrawn and the label with it; bundles written
+under it are relabelled on load
+(:func:`tsara.core.bundle.relabel_promised_estimates`).
 
 For the same reason it does **not** move a declared sigma onto the stream's
 cells. A manifest may say its figures were quoted at one second while the
@@ -38,25 +41,26 @@ how many of those intervals fit in a cell — for the stage that needs a sigma
 at a particular support to resolve in one hop, from the declaration to the
 support it actually wants.
 
-The five provenance values, and why "zero" is not "unknown"
------------------------------------------------------------
+The four provenance values written here, and why "zero" is not "unknown"
+-------------------------------------------------------------------------
 ``declared``
     Computed here from ``absolute``/``relative``.
 ``reported``
     Read here from the instrument's own per-point sigma column.
-``empirical``
-    Deferred to the stage holding the analysis config.
 ``zero``
-    The manifest supplied a budget and deliberately omitted this component.
-    METHODS §2.2: "an omitted ``systematic`` is zero". That is a *statement*
-    — the author considered systematic error and declared it negligible.
+    The manifest supplied a budget and deliberately omitted the systematic
+    component. METHODS §2.2: "an omitted ``systematic`` is zero". That is a
+    *statement* — the author considered systematic error and declared it
+    negligible.
 ``unknown``
-    No budget at all. The random component then falls back to the empirical
-    estimator, but the systematic component cannot: ``diff_mad`` differences
-    the signal, which cancels anything slowly varying, so it is structurally
-    blind to systematic error (METHODS §2.5, "honest scope"). An undeclared
-    systematic component is genuinely unknown, and saying so is different
-    from claiming it is zero.
+    No statement: no budget at all, or a budget that omits the *random*
+    component, which METHODS §2.2 does not read as zero. Nothing estimated
+    stands in for it (§2.3). An undeclared component is genuinely unknown,
+    and saying so is different from claiming it is zero.
+
+A fifth value, ``empirical``, belongs to a figure a later stage estimates
+from the data (today only the baseline's own sampling sigma, METHODS §6.7).
+Ingestion estimates nothing, so it never writes it.
 
 Keeping ``zero`` and ``unknown`` apart is the whole point of §2.3. Collapsing
 them would let an undeclared calibration silently become a claim of perfect
@@ -87,8 +91,10 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["ResolvedUncertainty", "UncertaintyProvenance", "resolve_uncertainty"]
 
-#: Provenance of one uncertainty component. See the module docstring.
-UncertaintyProvenance = Literal["declared", "reported", "empirical", "zero", "unknown"]
+#: Provenance of one uncertainty component as ingestion resolves it. See the
+#: module docstring; ``empirical`` is not among them, since ingestion
+#: estimates nothing.
+UncertaintyProvenance = Literal["declared", "reported", "zero", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -99,8 +105,8 @@ class ResolvedUncertainty:
     ----------
     random : numpy.ndarray or None
         Per-point 1-sigma random component in canonical units, or ``None``
-        when the component was not computed here (``empirical``, ``zero``,
-        ``unknown``). ``None`` is not "no uncertainty" — read
+        when the manifest states no figure for it (``zero``, ``unknown``).
+        ``None`` is not "no uncertainty" — read
         :attr:`random_provenance` to learn what it means.
     systematic : numpy.ndarray or None
         Per-point 1-sigma systematic component, same convention.
@@ -150,12 +156,9 @@ class ResolvedUncertainty:
         budgets report ``mixed``, and the per-component labels remain
         available for anyone who needs the detail.
 
-        The wholly-undeclared case reports ``empirical`` rather than
-        ``mixed``: its systematic component is unknown precisely *because*
-        the fallback is empirical, so one word describes it honestly.
+        A variable with no budget at all is ``unknown`` in both components,
+        and so ``unknown`` as a species.
         """
-        if self.random_provenance == "empirical" and self.systematic_provenance == "unknown":
-            return "empirical"
         if self.random_provenance == self.systematic_provenance:
             return self.random_provenance
         return "mixed"
@@ -206,12 +209,12 @@ def resolve_uncertainty(
         If a ``reported`` component names a column absent from the file.
     """
     if spec is None:
-        # No budget at all: random falls back to the empirical estimator
-        # later, systematic is genuinely unknown.
+        # No budget at all: neither component is stated, and nothing
+        # estimated stands in for either (METHODS §2.3).
         return ResolvedUncertainty(
             random=None,
             systematic=None,
-            random_provenance="empirical",
+            random_provenance="unknown",
             systematic_provenance="unknown",
         )
 
@@ -222,7 +225,9 @@ def resolve_uncertainty(
         conversion=conversion,
         variable=variable,
         path=path,
-        absent_provenance="empirical",
+        # An omitted random component is not a claim that it is zero: unlike
+        # the systematic one below, METHODS §2.2 reads its absence as unknown.
+        absent_provenance="unknown",
     )
     systematic, systematic_provenance = _resolve_component(
         spec.systematic,

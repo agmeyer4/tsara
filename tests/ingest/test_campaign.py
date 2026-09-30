@@ -47,7 +47,7 @@ from tsara.ingest.streams import build_stream
 
 # Spelled out rather than imported from conftest, as in tests/config/test_loader.py:
 # `from tests.conftest import ...` resolves only when pytest runs from the repo root.
-RespellBundle = Callable[[Path], int]
+RewriteBundle = Callable[[Path, int], int]
 
 
 def _write_csv(path: Path, rows: list[tuple[str, float]]) -> None:
@@ -305,7 +305,7 @@ def test_round_trip_preserves_provenance_attrs(tmp_path: Path) -> None:
     reloaded = load_streams(tmp_path / "bundle")
 
     assert reloaded["picarro"].attrs["tsara_stage"] == "ingest"
-    assert reloaded["picarro"]["ch4"].attrs["uncertainty_provenance"] == "empirical"
+    assert reloaded["picarro"]["ch4"].attrs["uncertainty_provenance"] == "unknown"
 
 
 def test_bundle_layout(tmp_path: Path) -> None:
@@ -838,22 +838,47 @@ def test_a_version_1_ingest_bundle_is_still_migrated(
 
 
 def test_a_format_2_ingest_bundle_is_respelled_on_load(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, respell_as_format_2: RespellBundle
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, rewrite_as_format: RewriteBundle
 ) -> None:
-    """Format 3 only renamed attributes, so an older bundle reads back identical.
+    """Formats 3 and 4 changed only labels, so an older bundle reads back identical.
 
     Compared with `identical` against a reload of the same bundle before it
-    was respelled, which checks every attribute of the dataset and of each
-    variable, not only the renamed ones.
+    was rewritten, which checks every attribute of the dataset and of each
+    variable, not only the renamed and relabelled ones.
     """
     bundle = tmp_path / "bundle"
     save_streams(ingest_campaign(_manifest(_archive(tmp_path))), bundle)
     expected = load_streams(bundle)
-    assert respell_as_format_2(bundle) > 0
+    assert rewrite_as_format(bundle, 2) > 0
 
     with caplog.at_level(logging.INFO, logger="tsara.ingest.bundle"):
         reloaded = load_streams(bundle)
     assert "current vocabulary" in caplog.text
+    assert "promised an estimate nothing makes" in caplog.text
+    for name in expected.streams:
+        assert reloaded[name].identical(expected[name]), name
+
+
+def test_a_format_3_ingest_bundle_is_relabelled_on_load(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, rewrite_as_format: RewriteBundle
+) -> None:
+    """A format-3 stream's unkept `empirical` comes back `unknown`, and nothing else moves.
+
+    The Picarro's methane declares no budget, so format 3 labelled its random
+    component and the species `empirical`, promising an estimate that no
+    stage makes (METHODS §2.4). The names were already current, so only the
+    relabelling runs.
+    """
+    bundle = tmp_path / "bundle"
+    save_streams(ingest_campaign(_manifest(_archive(tmp_path))), bundle)
+    expected = load_streams(bundle)
+    assert expected["picarro"]["ch4"].attrs["uncertainty_provenance_random"] == "unknown"
+    assert rewrite_as_format(bundle, 3) > 0
+
+    with caplog.at_level(logging.INFO, logger="tsara.ingest.bundle"):
+        reloaded = load_streams(bundle)
+    assert "promised an estimate nothing makes" in caplog.text
+    assert "current vocabulary" not in caplog.text
     for name in expected.streams:
         assert reloaded[name].identical(expected[name]), name
 

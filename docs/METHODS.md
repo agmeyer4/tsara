@@ -387,14 +387,17 @@ honest, and they are not interchangeable:
 | `zero` | a budget was given and *deliberately* omitted this component ("an omitted `systematic` is zero", §2.2) |
 | `unknown` | no budget at all, for either component; nothing estimated stands in (§2.3) |
 
-**Found at the Phase-6 scoping (2026-09-29), to be corrected in the Phase-6
-build:** ingestion still labels an undeclared random component `empirical`,
-the old promise that a later stage would estimate it (§2.5), and the baseline
-state copies that label onto the enhancement (§6.7). No stage estimates it
-since the noise scale left the baseline state, so the label is false: on the
-2024-07-18 drive the Picarro's methane reading and its enhancement both say
-`uncertainty_provenance_random = empirical`, and no random sigma exists in
-either product. The label becomes `unknown`.
+**Found at the Phase-6 scoping (2026-09-29), corrected in the Phase-6 build
+(2026-09-30):** ingestion labelled an undeclared random component `empirical`,
+the old promise that a later stage would estimate it (§2.5), and every product
+that copies a stream variable's attributes carried the label along: the
+baseline state's reading and enhancement (§6.7), and a joined product's
+columns. No stage estimates it since the noise scale left the baseline state,
+so the label was false: on the 2024-07-18 drive the Picarro's methane reading
+and its enhancement both said `uncertainty_provenance_random = empirical`, and
+no random sigma existed in either product. Ingestion now writes `unknown`,
+both for a variable with no budget and for a budget that omits the random
+component (§2.2). Products written before are relabelled on load (§10.2).
 
 Collapsing `zero` into `unknown` would let an undeclared calibration become a
 silent claim of perfect calibration, which is exactly what §2.3 forbids.
@@ -1405,9 +1408,9 @@ each component without a column, holding the reading's own provenance for
 it, `unknown` when the reading states none and `zero` when its budget omits
 it (§2.4). Nothing estimated stands in: the one per-reading estimator TSARA
 built (§2.5) measures the air as much as the instrument on a drive, and was
-rejected for detection too (§6.8). (Ingestion still writes `empirical` for an
-undeclared random component, which the enhancement copies; that label is
-false and becomes `unknown` in the Phase-6 build, §2.4.) On the 2024-07-18
+rejected for detection too (§6.8). (Until the Phase-6 build ingestion wrote
+`empirical` for an undeclared random component, which the enhancement copied;
+it now writes `unknown`, and older states are relabelled on load, §2.4.) On the 2024-07-18
 drive no analyzer has a random sigma. The Picarro and the PTR-MS declare
 none, and the NOy-LIF's `NOy_LIF_1SigmaAccuracy`, which notebook 05b maps as
 `random`, is by the file's own header "the combined calibration uncertainties
@@ -3157,6 +3160,23 @@ TSARA version writes both:
 Nothing is inferred, so nothing moves on the provenance ladder. The grid
 product's `n_source_<name>` columns became `n_readings_<name>` before any grid
 was released, so no migration exists for them.
+
+**Format version 4 changed one attribute value and nothing else** (2026-09-30).
+A random component nobody stated was labelled `empirical`, promising an
+estimate that no stage makes, and is now `unknown` (§2.4). An older stream is
+relabelled on load by `tsara.core.bundle.relabel_promised_estimates`: on every
+variable with no random sigma beside it, `uncertainty_provenance_random =
+empirical` becomes `unknown`, and a species-level `empirical` with it (ingestion
+wrote that only for a variable with no budget at all). The rule is exact
+without a version, because `empirical` means a figure was estimated, so a
+variable labelled so with no sigma is the unkept promise and nothing else; a
+sigma companion carries no per-component label, so the baseline's
+order-statistic sigma keeps its true `empirical` (§6.7). The stream loader
+applies it to bundles older than format 4, after the respelling above. The
+grid (`load_grid`) and the baseline state (`load_state`), which copy their
+columns' labels from the streams and carry no format version of their own,
+apply it to every file. The synthetic loader does not need it: the generator
+has never written an uncertainty provenance label.
 
 ### 10.3 `point` versus `mean` is a claim about arithmetic
 

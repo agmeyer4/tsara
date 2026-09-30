@@ -178,8 +178,8 @@ def baseline_state(
         dimensions; per variable ``x`` the reading and its sigmas copied,
         ``baseline_x``, ``enhancement_x``, their sigma companions, and for a
         rolling quantile ``n_readings_window_x`` and ``coverage_window_x``.
-        The noise scale detection quotes thresholds in is not here: it is
-        detection's, since its fix is a loop with detection (§6.8).
+        Nothing here is a noise scale: plume detection's thresholds are
+        multiples of the plumes stage's own clean spread (§6.8).
 
     Raises
     ------

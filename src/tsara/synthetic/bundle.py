@@ -281,6 +281,9 @@ def load_bundle(
     # current names only.
     predates_vocabulary = int(found_version) < BUNDLE_VERSION_WITH_READINGS_AND_PROVENANCE
     respelled: list[str] = []
+    # No relabelling of an unkept `empirical` here, unlike the ingest loader:
+    # the generator has never written an uncertainty provenance label, so no
+    # synthetic bundle carries one (see `relabel_promised_estimates`).
 
     streams: dict[str, xr.Dataset] = {}
     migrated: list[str] = []

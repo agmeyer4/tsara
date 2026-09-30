@@ -136,6 +136,35 @@ def test_the_round_trip_is_exact_and_brings_the_config_back(
     assert sorted(load_state(target).states) == ["aeris", "van"]
 
 
+def test_a_state_rolled_before_phase_6_loses_its_unkept_empirical(
+    tmp_path: Path, analysis: AnalysisConfig, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The reading and its enhancement copy the stream's labels; Woodruff's stays true.
+
+    The stream is shaped as ingestion wrote a variable with no budget before
+    Phase 6: no random sigma, and `empirical` promising an estimate no stage
+    makes. The baseline's own sampling sigma is `empirical` and was estimated
+    (METHODS §6.7), so it must come back unchanged.
+    """
+    stream = make_stream(cells(0.0, 1.0, 600), 1900 + np.zeros(600)).drop_vars(["sigma_rand_ch4"])
+    stream["ch4"].attrs.update(
+        uncertainty_provenance="mixed",
+        uncertainty_provenance_random="empirical",
+        uncertainty_provenance_systematic="declared",
+    )
+    state = baseline_state(stream, instrument="van", baseline=analysis.baseline)
+    assert state["enhancement_ch4"].attrs["uncertainty_provenance_random"] == "empirical"
+    save_state({"van": state}, tmp_path / "bundle", analysis=analysis)
+
+    with caplog.at_level(logging.INFO, logger="tsara.baseline.bundle"):
+        back = load_state(tmp_path / "bundle").states["van"]
+    assert "promised an estimate nothing makes" in caplog.text
+    assert back["ch4"].attrs["uncertainty_provenance_random"] == "unknown"
+    assert back["ch4"].attrs["uncertainty_provenance"] == "mixed"
+    assert back["enhancement_ch4"].attrs["uncertainty_provenance_random"] == "unknown"
+    assert back["sigma_rand_baseline_ch4"].attrs["uncertainty_provenance"] == "empirical"
+
+
 def test_the_per_sweep_point_records_survive_as_arrays(
     tmp_path: Path, states: dict[str, xr.Dataset]
 ) -> None:

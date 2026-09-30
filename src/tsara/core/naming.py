@@ -9,9 +9,9 @@ agree — exactly — on what a species' random-error variable is called.
 
 Before this module the agreement was two f-strings in two packages that
 happened to match. That is the kind of coupling that survives review and
-then breaks silently: rename one and nothing fails until detection quietly
-finds no sigma and falls back to an empirical noise estimate, which is a
-*plausible* answer rather than an error.
+then breaks silently: rename one and nothing fails, because a later stage
+quietly finds no sigma and carries on without one, which is a *plausible*
+answer rather than an error.
 
 The composition that has to keep working
 ----------------------------------------

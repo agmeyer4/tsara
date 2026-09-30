@@ -316,10 +316,11 @@ def test_provenance_labels_match_what_was_declared(tmp_path: Path) -> None:
     c2h6 = ingested["analyzer"]["c2h6"].attrs
     assert c2h6["uncertainty_provenance_systematic"] == "zero"
 
-    # wind_dir declares no budget at all: random falls back to the empirical
-    # estimator and systematic is genuinely unknown.
+    # wind_dir declares no budget at all: neither component is stated, and
+    # nothing estimated stands in for either.
     wind = ingested["met"]["wind_dir"].attrs
-    assert wind["uncertainty_provenance"] == "empirical"
+    assert wind["uncertainty_provenance"] == "unknown"
+    assert wind["uncertainty_provenance_random"] == "unknown"
     assert wind["uncertainty_provenance_systematic"] == "unknown"
     assert sigma_rand_name("wind_dir") not in ingested["met"].data_vars
 

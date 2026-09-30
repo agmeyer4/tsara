@@ -267,16 +267,16 @@ class UncertaintySpec(_StrictModel):
     column) — a real instrument might declare a constant systematic
     calibration uncertainty while reporting a per-point random column, or
     any other combination. Omitting a component means "not modeled here":
-    an omitted ``systematic`` is treated as zero; an omitted ``random``
-    falls back to the empirical ``diff_mad`` estimator (METHODS.md §2.5) at
-    runtime, with the `uncertainty_provenance` label recorded either way.
+    an omitted ``systematic`` is treated as zero; an omitted ``random`` is
+    unknown, and nothing estimated stands in for it (METHODS.md §2.2, §2.3),
+    with the `uncertainty_provenance` label recorded either way.
     """
 
     random: ComponentUncertainty | None = Field(
         default=None,
         description=(
-            "Random (uncorrelated) component. None = fall back to the "
-            "empirical noise estimator at runtime (METHODS.md §2.3)."
+            "Random (uncorrelated) component. None = unknown: labelled so, and "
+            "nothing estimated stands in for it (METHODS.md §2.3)."
         ),
     )
     systematic: ComponentUncertainty | None = Field(

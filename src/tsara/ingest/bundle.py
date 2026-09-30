@@ -44,9 +44,11 @@ from tsara.core.bundle import (
     BUNDLE_STREAMS_DIR,
     BUNDLE_VERSION_WITH_CELLS,
     BUNDLE_VERSION_WITH_READINGS_AND_PROVENANCE,
+    BUNDLE_VERSION_WITHOUT_PROMISED_ESTIMATES,
     SUPPORTED_BUNDLE_VERSIONS,
     TsaraBundleError,
     pin_time_encoding,
+    relabel_promised_estimates,
     rename_retired_attrs,
 )
 from tsara.core.support import check_bounds_intact, ensure_time_bounds
@@ -195,6 +197,13 @@ def load_streams(path: str | Path) -> StreamCollection:
         int(descriptor["bundle_format_version"]) < BUNDLE_VERSION_WITH_READINGS_AND_PROVENANCE
     )
     respelled: list[str] = []
+    # Older bundles label an unstated random component `empirical`, promising
+    # an estimate no stage makes; see `relabel_promised_estimates`. After the
+    # respelling, since it reads the current attribute names.
+    predates_honest_labels = (
+        int(descriptor["bundle_format_version"]) < BUNDLE_VERSION_WITHOUT_PROMISED_ESTIMATES
+    )
+    relabelled: list[str] = []
 
     streams: dict[str, xr.Dataset] = {}
     migrated: list[str] = []
@@ -211,6 +220,8 @@ def load_streams(path: str | Path) -> StreamCollection:
             streams[name] = stream.load()
         if predates_vocabulary and rename_retired_attrs(streams[name]):
             respelled.append(name)
+        if predates_honest_labels and relabel_promised_estimates(streams[name]):
+            relabelled.append(name)
         if predates_cells and ensure_time_bounds(streams[name]):
             migrated.append(name)
 
@@ -221,6 +232,15 @@ def load_streams(path: str | Path) -> StreamCollection:
             len(respelled),
             int(descriptor["bundle_format_version"]),
             ", ".join(respelled),
+        )
+    if relabelled:
+        logger.info(
+            "Relabelled an unstated random component 'unknown' (written 'empirical' "
+            "by a format-%d bundle, which promised an estimate nothing makes) in %d "
+            "stream(s): %s.",
+            int(descriptor["bundle_format_version"]),
+            len(relabelled),
+            ", ".join(relabelled),
         )
     if migrated:
         logger.info(
