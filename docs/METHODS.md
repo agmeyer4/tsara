@@ -1420,13 +1420,14 @@ rejected for detection too (§6.8). (Until the Phase-6 build ingestion wrote
 `empirical` for an undeclared random component, which the enhancement copied;
 it now writes `unknown`, and older states are relabelled on load, §2.4.) On the 2024-07-18
 drive no analyzer has a random sigma. The Picarro and the PTR-MS declare
-none, and the NOy-LIF's `NOy_LIF_1SigmaAccuracy`, which notebook 05b maps as
-`random`, is by the file's own header "the combined calibration uncertainties
+none, and the NOy-LIF's `NOy_LIF_1SigmaAccuracy`, which notebook 05b mapped as
+`random` until the Phase-6 build, is by the file's own header "the combined calibration uncertainties
 (±6%, ±9%, ±10%) and zero uncertainties (3 ppt, 20 ppt, 100 ppt) for NO, NO2,
 and NOy": a systematic figure. Measured on that drive's 19,498 NOy readings,
 it runs at 10–15 % of the reading from the lowest tenth of NOy to the highest,
 and exceeds the reading-to-reading scatter (§2.5's estimate over 10 min) at
-79 % of readings. 05b's mapping is corrected in the Phase-6 build. The
+79 % of readings. 05b now maps it as `systematic` (2026-09-30; its ledger
+unchanged, since nothing there used NOy's sigma). The
 NOy-LIF trio are the only per-point uncertainty columns in the 2024 ICARTT
 archive, so no file there reports a precision.
 Its systematic component depends on where the baseline came from. For a
