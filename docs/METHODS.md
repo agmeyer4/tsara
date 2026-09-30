@@ -1682,7 +1682,16 @@ which gives 79.7, 4.85 and 0.11 an hour at 1 s for entries 2, 3 and 4 (exit
 800 an hour on a 10 Hz analyzer and 1.3 on 60 s means. **The catalog records
 this expected chance rate per stream and sweep point**, labelled with its
 assumption (independent Gaussian readings; oversampled, autocorrelated
-readings cross less often). The exit multiple changes nothing on flat air;
+readings cross less often; dips not bridged). Measured through the package's
+own detector (`tsara.plumes.hysteresis`; rule: independent N(0, 1) readings on
+contiguous 1 s cells, 200 h in one record, seed 12, exit 1, nothing bridged):
+78.86, 4.62 and 0.10 events an hour at entries 2, 3 and 4 against 79.74, 4.85
+and 0.11, which is −1.4, −1.5 and −0.4 Poisson standard errors; over seeds
+100–109 the mean deviation at entries 2 and 3 is −0.24 and −0.43 standard
+errors (standard error of that mean 0.32), so no bias shows at this
+resolution. Bridging only merges events, so with dips bridged the closed form
+is an upper bound, and a loose one where chance crossings crowd: bridged at
+5 s, the same noise gives 67.88, 4.57 and 0.10 an hour. The exit multiple changes nothing on flat air;
 where the air wanders a higher exit breaks excursions into more events (no
 plumes, random walk 30 ppb/day, 60 min, entry 3: 3.1 false events an hour at
 exit 1 and 16.4 at exit 2) and lowers weak plumes' recall. That spread is methodological, which is why exit is
@@ -1691,13 +1700,25 @@ swept. Matching events across thresholds and quantiles is Phase 7's first job.
 **The detector.** Offline two-threshold hysteresis: an event is a run of
 readings with *z* ≥ exit that holds at least one with *z* ≥ entry. A run
 never crosses a dropout (two consecutive finite readings more than 1.5 times
-the record's median spacing apart, the rule of §2.5; it lives in the
-detection stage until a second stage needs it). `max_internal_gap` bridges a
-dip below exit shorter than it, never a dropout: missing data is not
-turbulent air. An event runs from its first reading's cell start to its last
-reading's cell stop, and records the share its cells cover (under half on the
-07-18 Picarro, whose 1 s cells arrive every 2–3 s), its reading count and its
-largest *z*. **There is no minimum duration** (`min_duration` deleted). On
+the record's median spacing apart, the rule of §2.5; it lives in the plumes
+stage, as `DROPOUT_SPACING_FACTOR`, until a second stage needs it), a record
+boundary, or a reading whose enhancement is blank, since a blank baseline
+says nothing about the air. `max_internal_gap` bridges a dip below exit
+shorter than it, never a dropout: missing data is not turbulent air. The dip
+is the time from the cell stop of the last reading above exit to the cell
+start of the next (zero where those cells overlap), bridged only when
+strictly shorter, and the readings in a bridged dip belong to the event. An event runs from its first reading's cell
+start to its last reading's cell stop, and records the share of that interval
+its cells cover (their union, clipped to it, so that jittered cells
+overlapping by a few milliseconds are counted once; under half on the 07-18
+Picarro, whose 1 s cells arrive every 2–3 s), its count of finite readings,
+its peak (the reading with the largest *z*, the earliest on a tie; within a
+record also the largest enhancement) and that *z*. A row whose reading is
+not finite belongs to no event even inside one's interval, since it has
+nothing to belong with. The detector is checked against a reference written
+one reading at a time from this paragraph, on random records with jittered
+spacing, dropouts, blank readings, overlapping cells and three bridging
+gaps. **There is no minimum duration** (`min_duration` deleted). On
 07-18 under C at 10 min, 2.6–15.5 % of events are one reading and 6.7–30.1 %
 two or fewer, and at 3σ roughly 11 chance crossings per 8,448 readings are
 expected; width cannot tell one from a narrow real plume, which is §9.5's

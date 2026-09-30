@@ -19,6 +19,11 @@ Shape of the subpackage
     The clean level and spread per record and sweep point, with the
     clean-level estimators registered by name (the half-sample mode), the
     quantization floor and the count below which a record is blank.
+``hysteresis``
+    The detector: runs of the statistic z above the exit multiple that reach
+    the entry multiple, never across a dropout, a record boundary or a blank
+    reading, with short dips bridged; what each event records; and the
+    closed-form rate at which chance alone makes events.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ from tsara.plumes.clean import (
     quantization_step,
     register_clean_level_estimator,
 )
+from tsara.plumes.hysteresis import Events, expected_chance_rate, find_events
 from tsara.plumes.records import DROPOUT_SPACING_FACTOR, Records, TsaraPlumeError, find_records
 
 __all__ = [
@@ -43,12 +49,15 @@ __all__ = [
     "CleanDescription",
     "CleanLevelEstimator",
     "DROPOUT_SPACING_FACTOR",
+    "Events",
     "MAD_TO_SIGMA",
     "Records",
     "TsaraPlumeError",
     "available_clean_level_estimators",
     "clean_air",
     "describe_clean_air",
+    "expected_chance_rate",
+    "find_events",
     "find_records",
     "get_clean_level_estimator",
     "half_sample_mode",
