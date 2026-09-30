@@ -449,15 +449,17 @@ def _frame(
 
 
 def _position(plume: xr.Dataset, name: str, rows: npt.NDArray[np.int64]) -> npt.NDArray[np.float64]:
-    """Return a position at each row: a track's value there, a site's everywhere, or NaN."""
+    """Return a position at each row: a track's value there, a site's everywhere, or NaN.
+
+    A stream carries a position as a site's scalar or a track along time and
+    in no other shape, so those are the two read here.
+    """
     if name not in plume.coords:
         return np.full(rows.size, np.nan)
     coordinate = plume.coords[name]
     if coordinate.ndim == 0:
         return np.full(rows.size, float(coordinate.values))
-    if coordinate.dims == (TIME_COORD,):
-        return np.asarray(coordinate.values, dtype=np.float64)[rows]
-    return np.full(rows.size, np.nan)
+    return np.asarray(coordinate.transpose(TIME_COORD).values, dtype=np.float64)[rows]
 
 
 # ---------------------------------------------------------------------------

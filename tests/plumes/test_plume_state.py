@@ -270,6 +270,24 @@ def test_a_variable_blank_at_every_record_is_named_in_one_warning(
     assert "A record needs 100 readings below its clean level" in warnings[0].getMessage()
 
 
+def test_the_warning_names_eight_and_counts_the_rest(caplog: pytest.LogCaptureFixture) -> None:
+    """Asked of the formatter directly, as the baseline stage's warning is: nine
+    variables sharing one pattern, and nine patterns, are rare enough in a stream
+    that building one would test the fixture more than the rule. A canister's 56
+    VOCs sharing one blank pattern is the case the first half is for."""
+    from tsara.plumes.state import _warn_blank_everywhere
+
+    shared = {f"voc{k}": [("120 s, q 0.05", 3)] for k in range(9)}
+    distinct = {f"v{k}": [(f"{k + 1} s, q 0.05", 3)] for k in range(9)}
+    with caplog.at_level(logging.WARNING, logger="tsara.plumes.state"):
+        _warn_blank_everywhere("iwas", shared, 100)
+        _warn_blank_everywhere("lab", distinct, 100)
+    first, second = (r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+    assert "voc7 and 1 more: 120 s, q 0.05 (at most 3)" in first
+    assert "voc8" not in first
+    assert "and 1 more pattern(s)" in second and "v8:" not in second
+
+
 # ---------------------------------------------------------------------------
 # Refusals
 # ---------------------------------------------------------------------------
