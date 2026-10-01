@@ -2,7 +2,7 @@
 # TSARA analysis config example
 # ----------------------------------------------------------------------------
 # Describes the SCIENCE applied to ingested data. List-valued fields
-# (baseline windows/quantiles, detection enter_sigma, smoothing cutoffs)
+# (baseline windows/quantiles, events enter/exit multiples, smoothing cutoffs)
 # are PARAMETER SWEEP dimensions: every combination is evaluated, and the
 # spread of results across the hypercube becomes the methodological
 # uncertainty. Single-element lists = fixed methodology, zero sweep.
@@ -77,17 +77,45 @@ baseline:
     # Spelled out for the default, which needs no entry at all.
     voc_pfp.benzene: {method: rolling_quantile}
 
-# --- Plume detection ---------------------------------------------------------
-detection:
-  enter_sigma: [3.0, 5.0]  # sweep: sensitivity of event detection, in noise-sigma units
-  exit_sigma: 1.0          # hysteresis: exit threshold must be below entry
-  # Registered empirical-fallback estimator (METHODS.md §2.5), used only for
-  # species with no declared/reported random uncertainty -- declared/reported
-  # sigma always takes precedence when a species has one (§2.3/§6).
-  noise_estimator: diff_mad
-  noise_window: 10min
-  min_duration: 3s        # discard blips shorter than this
-  max_internal_gap: 5s    # bridge sub-threshold dips shorter than this
+# --- Events ----------------------------------------------------------------
+# Per variable and sweep point, plume-free air is described by its clean level
+# (the most common enhancement) and clean spread (1.4826 x the median distance
+# below it); thresholds are multiples of that spread above that level
+# (METHODS.md §6.8). The clean spread is NOT a measurement uncertainty: it
+# includes the background's wobble at the window's scale.
+events:
+  # Both swept; every entry must exceed every exit. On 1 s white noise, entry
+  # 2 finds about 79 chance events an hour, 3 about 5 and 4 about 0.1.
+  enter_multiple: [3.0, 4.0, 5.0]
+  exit_multiple: [1.0, 1.5, 2.0]
+  max_internal_gap: 5s    # bridge dips below exit shorter than this
+  # A dropout (a hole in the readings) shorter than this is bridged as a dip
+  # is, so one missing row does not split a plume; nothing is filled in.
+  max_bridged_dropout: 5s
+  # Level and spread are computed per record: split at gaps longer than
+  # record_gap, and cut into equal parts no longer than max_record_length.
+  record_gap: 2h
+  max_record_length: 6h
+  # On a mobile platform whose gas file carries its speed, as the NOAA ARC
+  # suite's does, records also split where the platform stays parked for at
+  # least record_gap, so a long stop at base and the drive after it are
+  # described apart, while shorter stops stay with the drive. Shown commented:
+  # the multiformat example is stationary.
+  # platform_state:
+  #   arc: {variable: speed, moving_above: 5.0}
+  # Fewer readings than this below its level, and a record is blank with the
+  # reason and defines no events of its own.
+  min_clean_readings: 100
+  clean_level_estimator: half_sample_mode
+  # A canister holds a few dozen fills a drive (32 on the 2024-07-18 drive,
+  # 261 over ten drive days), far below min_clean_readings, so its variables
+  # take their events from a dense analyzer instead. Keyed by
+  # instrument (every gas it declares) or instrument.variable (which wins);
+  # the trigger may measure any field. Names as in
+  # manifest_multiformat_example.yaml, checked when the two are combined.
+  triggers:
+    voc_pfp: picarro.ch4
+    voc_pfp.benzene: aeris.ch4_aeris
 
 # --- Optional: low-pass smoothing to align disjoint plumes -------------------
 smoothing:

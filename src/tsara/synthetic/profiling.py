@@ -203,10 +203,11 @@ def diff_mad_sigma(values: npt.NDArray[np.float64]) -> float:
     to plumes: a broad enhancement has point-to-point differences of noise
     size no matter how tall it is.
 
-    This is a small standalone helper, *not* the production Phase 6 estimator
-    — that one is windowed, registered by name, and carries the quantization
-    floor. This one exists so profiling can characterize noise using the same
-    mathematics the pipeline will later apply.
+    This is a small standalone helper for profiling. The pipeline has no
+    rolling noise estimate: a windowed ``diff_mad`` was built, then rejected
+    as the scale plume detection's thresholds are quoted in, in favour of
+    the clean spread (METHODS.md §2.5, §6.8). The definition stays because
+    profiling uses it and METHODS records it.
 
     Parameters
     ----------

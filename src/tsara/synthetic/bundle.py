@@ -16,9 +16,9 @@ Why each format
 * **netCDF4** for streams — the atmospheric-community interchange standard,
   self-describing, and what ``xarray`` round-trips losslessly including
   attrs and coordinates.
-* **Parquet** for the catalog — columnar, typed, and the format CLAUDE.md
-  fixes for the Phase 6 ``PlumeCatalog``. Using it here means ground truth
-  and detections will be directly comparable on disk with no conversion.
+* **Parquet** for the catalog — columnar, typed, and the format the event
+  catalog is saved in too (``events/catalog.parquet``), so ground truth and
+  detections are directly comparable on disk with no conversion.
 * **YAML** for the config — human-readable and diffable, the same format
   every other TSARA config uses.
 
@@ -281,6 +281,9 @@ def load_bundle(
     # current names only.
     predates_vocabulary = int(found_version) < BUNDLE_VERSION_WITH_READINGS_AND_PROVENANCE
     respelled: list[str] = []
+    # No relabelling of an unkept `empirical` here, unlike the ingest loader:
+    # the generator has never written an uncertainty provenance label, so no
+    # synthetic bundle carries one (see `relabel_promised_estimates`).
 
     streams: dict[str, xr.Dataset] = {}
     migrated: list[str] = []

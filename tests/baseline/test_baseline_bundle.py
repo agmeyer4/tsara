@@ -12,6 +12,7 @@ import xarray as xr
 from tsara.align import bin_streams_onto_cells
 from tsara.baseline import baseline_state, load_state, save_state
 from tsara.config.analysis import AnalysisConfig, BaselineConfig
+from tsara.config.loader import read_yaml
 from tsara.core.bundle import (
     BUNDLE_ANALYSIS_CONFIG,
     BUNDLE_BASELINE_DIR,
@@ -119,7 +120,7 @@ def assert_identical(a: xr.Dataset, b: xr.Dataset) -> None:
 def test_the_round_trip_is_exact_and_brings_the_config_back(
     tmp_path: Path, states: dict[str, xr.Dataset], analysis: AnalysisConfig
 ) -> None:
-    target = save_state(states, tmp_path / "bundle", analysis=analysis)
+    target = save_state(states, tmp_path / "bundle", baseline=analysis.baseline)
     assert target == tmp_path / "bundle" / BUNDLE_BASELINE_DIR
     assert sorted(p.name for p in target.iterdir()) == [
         "aeris.nc",
@@ -131,9 +132,38 @@ def test_the_round_trip_is_exact_and_brings_the_config_back(
     for name, state in states.items():
         assert_identical(state, back.states[name])
         assert "time_bnds" in back.states[name].coords
-    assert back.analysis == analysis
+    assert back.baseline == analysis.baseline
     # The baseline directory itself is also a valid path to load from.
     assert sorted(load_state(target).states) == ["aeris", "van"]
+
+
+def test_a_state_rolled_before_phase_6_loses_its_unkept_empirical(
+    tmp_path: Path, analysis: AnalysisConfig, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The reading and its enhancement copy the stream's labels; Woodruff's stays true.
+
+    The stream is shaped as ingestion wrote a variable with no budget before
+    Phase 6: no random sigma, and `empirical` promising an estimate no stage
+    makes. The baseline's own sampling sigma is `empirical` and was estimated
+    (METHODS §6.7), so it must come back unchanged.
+    """
+    stream = make_stream(cells(0.0, 1.0, 600), 1900 + np.zeros(600)).drop_vars(["sigma_rand_ch4"])
+    stream["ch4"].attrs.update(
+        uncertainty_provenance="mixed",
+        uncertainty_provenance_random="empirical",
+        uncertainty_provenance_systematic="declared",
+    )
+    state = baseline_state(stream, instrument="van", baseline=analysis.baseline)
+    assert state["enhancement_ch4"].attrs["uncertainty_provenance_random"] == "empirical"
+    save_state({"van": state}, tmp_path / "bundle", baseline=analysis.baseline)
+
+    with caplog.at_level(logging.INFO, logger="tsara.baseline.bundle"):
+        back = load_state(tmp_path / "bundle").states["van"]
+    assert "promised an estimate nothing makes" in caplog.text
+    assert back["ch4"].attrs["uncertainty_provenance_random"] == "unknown"
+    assert back["ch4"].attrs["uncertainty_provenance"] == "mixed"
+    assert back["enhancement_ch4"].attrs["uncertainty_provenance_random"] == "unknown"
+    assert back["sigma_rand_baseline_ch4"].attrs["uncertainty_provenance"] == "empirical"
 
 
 def test_the_per_sweep_point_records_survive_as_arrays(
@@ -184,8 +214,8 @@ def test_saving_without_a_config_writes_none_and_says_so(
     with caplog.at_level(logging.INFO, logger="tsara.baseline.bundle"):
         target = save_state(states, tmp_path)
     assert not (target / BUNDLE_ANALYSIS_CONFIG).exists()
-    assert "without an analysis configuration" in caplog.text
-    assert load_state(tmp_path).analysis is None
+    assert "without their baseline configuration" in caplog.text
+    assert load_state(tmp_path).baseline is None
 
 
 def test_a_stale_state_file_is_removed_on_save(
@@ -240,7 +270,7 @@ def test_a_corrupt_config_beside_the_states_is_refused_by_name(
 ) -> None:
     """Valid in every respect but a key written twice, which only the one YAML door
     refuses; a plain load would keep the last value and say nothing (config.loader)."""
-    target = save_state(states, tmp_path, analysis=analysis)
+    target = save_state(states, tmp_path, baseline=analysis.baseline)
     (target / BUNDLE_ANALYSIS_CONFIG).write_text(
         "baseline:\n"
         "  windows: [2min, 10min]\n"
@@ -250,22 +280,62 @@ def test_a_corrupt_config_beside_the_states_is_refused_by_name(
         "  reference_species: ch4\n"
     )
     with pytest.raises(
-        TsaraBundleError, match="(?s)Could not read the analysis configuration.*duplicate key"
+        TsaraBundleError, match="(?s)Could not read the baseline configuration.*duplicate key"
     ):
         load_state(tmp_path)
 
 
-def test_the_baseline_config_alone_is_enough_to_roll_and_the_saved_config_is_the_whole(
+def test_only_the_baseline_section_is_saved_beside_the_states(
+    tmp_path: Path, states: dict[str, xr.Dataset], analysis: AnalysisConfig
+) -> None:
+    """The states were rolled from a BaselineConfig, and that is what is saved.
+
+    The whole AnalysisConfig was saved until Phase 6, when deleting the
+    detection settings made every such file unreadable (the next test): a
+    stage records the section it read, so another stage's schema can change.
+    """
+    target = save_state(states, tmp_path, baseline=analysis.baseline)
+    written = read_yaml(target / BUNDLE_ANALYSIS_CONFIG)
+    assert list(written) == ["baseline"]
+    assert BaselineConfig.model_validate(written["baseline"]) == analysis.baseline
+
+
+def test_a_phase_5_bundle_with_the_whole_configuration_still_loads(
+    tmp_path: Path, states: dict[str, xr.Dataset], analysis: AnalysisConfig
+) -> None:
+    """Phase 5 wrote every section, the retired ``detection`` one included.
+
+    Validated whole, that file is now refused, since ``detection`` became
+    ``events`` with other fields and unknown keys are refused; read by its
+    baseline section alone, it loads as it was written.
+    """
+    target = save_state(states, tmp_path)
+    (target / BUNDLE_ANALYSIS_CONFIG).write_text(
+        "output_grid: null\n"
+        "baseline:\n"
+        "  windows: [2min, 10min]\n"
+        "  quantiles: [0.01, 0.05]\n"
+        "  min_readings: null\n"
+        "  methods: {}\n"
+        "detection:\n"
+        "  enter_sigma: [3.0]\n"
+        "  exit_sigma: 1.0\n"
+        "  noise_estimator: diff_mad\n"
+        "  noise_window: 10min\n"
+        "  min_duration: 3s\n"
+        "  max_internal_gap: 5s\n"
+        "regression:\n"
+        "  reference_species: ch4\n"
+    )
+    with pytest.raises(Exception, match="(?s)detection.*Extra inputs"):
+        AnalysisConfig.model_validate(read_yaml(target / BUNDLE_ANALYSIS_CONFIG))
+    assert load_state(tmp_path).baseline == analysis.baseline
+
+
+def test_a_configuration_without_a_baseline_section_is_refused(
     tmp_path: Path, states: dict[str, xr.Dataset]
 ) -> None:
-    """The states were rolled from a BaselineConfig; what is saved beside them is the whole
-    AnalysisConfig, since that is the record of the run."""
-    whole = AnalysisConfig.model_validate(
-        {
-            "baseline": {"windows": ["2min", "10min"], "quantiles": [0.01, 0.05]},
-            "regression": {"reference_species": "ch4"},
-        }
-    )
-    save_state(states, tmp_path, analysis=whole)
-    assert isinstance(load_state(tmp_path).analysis, AnalysisConfig)
-    assert isinstance(whole.baseline, BaselineConfig)
+    target = save_state(states, tmp_path)
+    (target / BUNDLE_ANALYSIS_CONFIG).write_text("regression:\n  reference_species: ch4\n")
+    with pytest.raises(TsaraBundleError, match="no 'baseline' section"):
+        load_state(tmp_path)

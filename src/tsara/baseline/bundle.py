@@ -2,12 +2,16 @@
 
 Each instrument's state is one netCDF file, ``baseline/<instrument>.nc``,
 inside a bundle directory beside whatever else that bundle holds; the
-analysis configuration that produced them is written beside the files as
-``baseline/analysis.yaml``, as the resolved manifest is written beside the
-streams. ``bundle.json`` is not touched, for the grid's reason: that
-descriptor records which stage created the bundle and what streams it
-wrote, and the baseline state is a later stage's product arriving in the
-same directory (:mod:`tsara.core.bundle`).
+baseline section of the analysis configuration that produced them is written
+beside the files as ``baseline/analysis.yaml``, as the resolved manifest is
+written beside the streams. Only that section: it is all this stage read,
+and a copy of the whole would stop loading the first time another stage's
+settings changed, as the events stage's did in Phase 6 (METHODS.md §6.6).
+
+``bundle.json`` is not touched, for the grid's reason: that descriptor
+records which stage created the bundle and what streams it wrote, and the
+baseline state is a later stage's product arriving in the same directory
+(:mod:`tsara.core.bundle`).
 
 Why this ships now rather than with the Phase-9 pipeline: every stage
 product gains persistence in the phase that introduces it (CLAUDE.md §5).
@@ -34,15 +38,16 @@ from typing import TYPE_CHECKING
 import xarray as xr
 import yaml
 
-from tsara.baseline.state import BASELINE_STAGE
-from tsara.config.analysis import AnalysisConfig
+from tsara.config.analysis import BaselineConfig
 from tsara.config.loader import read_yaml
 from tsara.core.bundle import (
     BUNDLE_ANALYSIS_CONFIG,
     BUNDLE_BASELINE_DIR,
     TsaraBundleError,
     pin_time_encoding,
+    relabel_promised_estimates,
 )
+from tsara.core.naming import BASELINE_STAGE
 from tsara.core.support import check_bounds_intact
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -61,20 +66,20 @@ class BaselineStates:
     ----------
     states : dict of str to xarray.Dataset
         One baseline state per instrument, keyed by instrument name.
-    analysis : AnalysisConfig or None
-        The analysis configuration written beside them, or ``None`` when the
+    baseline : BaselineConfig or None
+        The baseline configuration written beside them, or ``None`` when the
         states were saved without one.
     """
 
     states: dict[str, xr.Dataset]
-    analysis: AnalysisConfig | None
+    baseline: BaselineConfig | None
 
 
 def save_state(
     states: Mapping[str, xr.Dataset],
     path: str | Path,
     *,
-    analysis: AnalysisConfig | None = None,
+    baseline: BaselineConfig | None = None,
     compression: int | None = None,
 ) -> Path:
     """Write baseline states into a bundle directory.
@@ -88,11 +93,12 @@ def save_state(
         Bundle directory. Created if absent. State files for instruments not
         in ``states`` are removed, so the directory never contradicts the
         run that wrote it; anything that is not a ``.nc`` file is left alone.
-    analysis : AnalysisConfig, optional
+    baseline : BaselineConfig, optional
         The configuration the states were computed under, written beside
-        them. Omitted, nothing is written and a note is logged: a state
-        without its configuration cannot say which sweep it is, beyond what
-        its own attributes record.
+        them under a ``baseline`` key, so that the file reads as a section
+        of an analysis configuration. Omitted, nothing is written and a note
+        is logged: a state without its configuration cannot say which sweep
+        it is, beyond what its own attributes record.
     compression : int, optional
         zlib level, 1 (fastest) to 9 (smallest), applied to every array in
         each file, the time axis and bounds included; ``None`` (the default)
@@ -153,14 +159,14 @@ def save_state(
         )
         state.to_netcdf(target / f"{instrument}.nc", engine="netcdf4", encoding=encoding)
     _remove_orphan_states(target, set(states))
-    if analysis is not None:
-        payload = analysis.model_dump(mode="json", exclude_none=False)
+    if baseline is not None:
+        payload = {"baseline": baseline.model_dump(mode="json", exclude_none=False)}
         (target / BUNDLE_ANALYSIS_CONFIG).write_text(
             yaml.safe_dump(payload, sort_keys=False), encoding="utf-8"
         )
     else:
         logger.info(
-            "Baseline states written to %s without an analysis configuration beside them.",
+            "Baseline states written to %s without their baseline configuration beside them.",
             target,
         )
     logger.info("Wrote %d baseline state(s) to %s.", len(states), target)
@@ -191,15 +197,17 @@ def load_state(path: str | Path) -> BaselineStates:
     Returns
     -------
     BaselineStates
-        The states, keyed by instrument, and the analysis configuration
-        beside them if one was written.
+        The states, keyed by instrument, and the baseline configuration
+        beside them if one was written. Only the ``baseline`` section of the
+        file is read, so a bundle saved before Phase 6 with the whole
+        analysis configuration beside it loads too.
 
     Raises
     ------
     TsaraBundleError
         If the directory is missing or holds no state file, a file holds a
         product from a different stage, or the configuration beside them
-        does not validate.
+        has no ``baseline`` section or does not validate.
     """
     candidate = Path(path)
     target = candidate if candidate.name == BUNDLE_BASELINE_DIR else candidate / BUNDLE_BASELINE_DIR
@@ -222,17 +230,32 @@ def load_state(path: str | Path) -> BaselineStates:
                 f"'{file}' was written by the '{stage}' stage, not '{BASELINE_STAGE}'. "
                 "Refusing rather than misreading it as a baseline state."
             )
+        # The reading and its enhancement copy the stream's labels, so a state
+        # rolled before Phase 6 carries its false `empirical`; the rule is
+        # exact without a format version (see `relabel_promised_estimates`).
+        if relabel_promised_estimates(state):
+            logger.info(
+                "Relabelled an unstated random component 'unknown' (written "
+                "'empirical', which promised an estimate nothing makes) in %s.",
+                file,
+            )
         states[file.stem] = state
-    analysis: AnalysisConfig | None = None
+    baseline: BaselineConfig | None = None
     config_file = target / BUNDLE_ANALYSIS_CONFIG
     if config_file.is_file():
         try:
             # The same door every configuration comes through, so a
             # hand-edited copy with a key written twice is refused here too.
-            analysis = AnalysisConfig.model_validate(read_yaml(config_file))
+            # Only this stage's section is validated: a Phase-5 bundle holds
+            # the whole analysis configuration, whose detection settings no
+            # longer exist, and they were never this stage's to read.
+            section = read_yaml(config_file).get("baseline")
+            if section is None:
+                raise TsaraBundleError("it has no 'baseline' section")
+            baseline = BaselineConfig.model_validate(section)
         except Exception as exc:
             raise TsaraBundleError(
-                f"Could not read the analysis configuration in '{config_file}': {exc}"
+                f"Could not read the baseline configuration in '{config_file}': {exc}"
             ) from exc
     logger.info("Loaded %d baseline state(s) from %s.", len(states), target)
-    return BaselineStates(states=states, analysis=analysis)
+    return BaselineStates(states=states, baseline=baseline)

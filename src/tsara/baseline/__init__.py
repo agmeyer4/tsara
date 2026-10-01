@@ -3,10 +3,11 @@
 For every reading of every instrument and every point of the sweep, this
 stage computes the baseline, the enhancement and their uncertainties, and
 keeps them on the reading's own cell beside the reading (``docs/METHODS.md``
-§6.2). The noise scale detection quotes its thresholds in is detection's,
-not this stage's: its remedy is a loop with detection (§6.8). Nothing here changes a
-stream's support: a window is an interval the statistic looks at, and the
-value it yields belongs to the cell the window is centred on.
+§6.2). Nothing here is a noise scale: plume detection's thresholds are
+multiples of the events stage's own clean spread, measured on the
+enhancements this stage writes (§6.8). Nothing here changes a stream's
+support: a window is an interval the statistic looks at, and the value it
+yields belongs to the cell the window is centred on.
 
 Shape of the subpackage
 -----------------------

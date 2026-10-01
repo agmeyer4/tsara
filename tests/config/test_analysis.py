@@ -13,7 +13,7 @@ from tsara.config.analysis import (
     AnalysisConfig,
     BaselineConfig,
     ConstantMethod,
-    DetectionConfig,
+    EventsConfig,
     FromFieldMethod,
     OutputGridConfig,
     RollingQuantileMethod,
@@ -33,8 +33,13 @@ def test_minimal_analysis_parses(analysis_dict: dict[str, Any]) -> None:
     assert config.baseline.methods == {}
     # Optional stages exist with safe defaults instead of being None.
     assert config.alignment.max_interp_gap == "10s"
-    assert config.detection.exit_sigma == 1.0
-    assert config.detection.noise_estimator == "diff_mad"
+    assert config.events.enter_multiple == (3.0,)
+    assert config.events.exit_multiple == (1.0,)
+    assert config.events.record_gap == "2h"
+    assert config.events.max_record_length == "6h"
+    assert config.events.min_clean_readings == 100
+    assert config.events.clean_level_estimator == "half_sample_mode"
+    assert config.events.triggers == {}
     assert config.smoothing.enabled is False
     assert config.clustering.enabled is False
     assert config.regression.methods == ("ols", "york")
@@ -43,11 +48,12 @@ def test_minimal_analysis_parses(analysis_dict: dict[str, Any]) -> None:
 def test_sweep_lists_accepted(analysis_dict: dict[str, Any]) -> None:
     full = copy.deepcopy(analysis_dict)
     full["baseline"]["quantiles"] = [0.01, 0.05, 0.10]
-    full["detection"] = {"enter_sigma": [3.0, 5.0], "exit_sigma": 1.0}
+    full["events"] = {"enter_multiple": [3.0, 4.0, 5.0], "exit_multiple": [1.0, 1.5, 2.0]}
     full["smoothing"] = {"enabled": True, "cutoff_periods": ["30s", "60s"]}
     config = AnalysisConfig.model_validate(full)
     assert len(config.baseline.quantiles) == 3
-    assert len(config.detection.enter_sigma) == 2
+    assert len(config.events.enter_multiple) == 3
+    assert len(config.events.exit_multiple) == 3
     assert len(config.smoothing.cutoff_periods) == 2
 
 
@@ -175,30 +181,136 @@ def test_a_coarse_grid_no_longer_constrains_the_shortest_window(
 
 
 # ---------------------------------------------------------------------------
-# Detection validation
+# Events validation
 # ---------------------------------------------------------------------------
 
 
-def test_enter_must_exceed_exit() -> None:
-    """Inverted hysteresis makes event boundaries ill-defined."""
-    with pytest.raises(ValidationError, match="exceed"):
-        DetectionConfig(enter_sigma=(2.0,), exit_sigma=3.0)
+@pytest.mark.parametrize(
+    ("enter", "exit_"),
+    [
+        ((2.0,), (3.0,)),  # inverted
+        ((3.0,), (3.0,)),  # equal: an event would start where it ends
+        ((3.0, 4.0), (1.0, 3.5)),  # one pairing of the sweep inverts
+    ],
+)
+def test_every_entry_must_exceed_every_exit(
+    enter: tuple[float, ...], exit_: tuple[float, ...]
+) -> None:
+    """Both are swept, so every pairing runs; one inverted pairing is enough to refuse."""
+    with pytest.raises(ValidationError, match="must exceed every exit_multiple"):
+        EventsConfig(enter_multiple=enter, exit_multiple=exit_)
 
 
-def test_any_enter_below_exit_rejected() -> None:
-    with pytest.raises(ValidationError, match="exceed"):
-        DetectionConfig(enter_sigma=(5.0, 0.5), exit_sigma=1.0)
+def test_short_holes_are_bridged_by_default_and_no_platform_state_is_read() -> None:
+    config = EventsConfig()
+    assert config.max_bridged_dropout == "5s"
+    assert config.platform_state == {}
 
 
-def test_unknown_noise_estimator_rejected() -> None:
+@pytest.mark.parametrize("value", ["abc", "0s", "-5s"])
+def test_the_bridge_for_holes_is_a_positive_duration(value: str) -> None:
+    with pytest.raises(ValidationError, match="max_bridged_dropout"):
+        EventsConfig(max_bridged_dropout=value)
+
+
+def test_a_platform_state_names_a_variable_and_a_speed() -> None:
+    config = EventsConfig.model_validate(
+        {"platform_state": {"arc": {"variable": "speed", "moving_above": 5.0}}}
+    )
+    assert config.platform_state["arc"].variable == "speed"
+    assert config.platform_state["arc"].moving_above == 5.0
+
+
+@pytest.mark.parametrize(
+    ("platform_state", "message"),
+    [
+        ({"arc van": {"variable": "speed", "moving_above": 5.0}}, "keyed by instrument"),
+        ({"arc": {"variable": "ground speed", "moving_above": 5.0}}, "names a variable"),
+        ({"arc": {"variable": "speed", "moving_above": -1.0}}, "greater than or equal"),
+        ({"arc": {"variable": "speed", "moving_above": float("nan")}}, "finite number"),
+        ({"arc": {"variable": "speed"}}, "moving_above"),
+    ],
+)
+def test_a_platform_state_spelled_wrong_is_refused(
+    platform_state: dict[str, dict[str, object]], message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        EventsConfig.model_validate({"platform_state": platform_state})
+
+
+def test_the_example_sweep_is_accepted() -> None:
+    config = EventsConfig(enter_multiple=(3.0, 4.0, 5.0), exit_multiple=(1.0, 1.5, 2.0))
+    assert config.enter_multiple == (3.0, 4.0, 5.0)
+
+
+@pytest.mark.parametrize(
+    "multiples",
+    [(0.0, 3.0), (-1.0, 3.0), (float("nan"),), (float("inf"),)],
+)
+def test_a_multiple_must_be_positive_and_finite(multiples: tuple[float, ...]) -> None:
+    with pytest.raises(ValidationError, match="positive multiples"):
+        EventsConfig(enter_multiple=multiples, exit_multiple=(0.5,))
+
+
+@pytest.mark.parametrize("field", ["enter_multiple", "exit_multiple"])
+@pytest.mark.parametrize("values", [(3.0, 3.0), (5.0, 4.0)])
+def test_a_sweep_list_must_be_strictly_increasing(field: str, values: tuple[float, float]) -> None:
+    """Enforced rather than sorted: each list is a sweep coordinate."""
+    other: dict[str, object] = {"enter_multiple": (10.0,), "exit_multiple": (0.5,)}
+    other[field] = values
+    with pytest.raises(ValidationError, match="strictly increasing"):
+        EventsConfig.model_validate(other)
+
+
+@pytest.mark.parametrize("field", ["max_internal_gap", "record_gap", "max_record_length"])
+def test_durations_are_validated(field: str) -> None:
+    with pytest.raises(ValidationError, match=f"EventsConfig.{field}"):
+        EventsConfig.model_validate({field: "soon"})
+
+
+def test_the_retired_detection_fields_are_refused() -> None:
+    """Deleted at the Phase-6 scoping (METHODS §6.8): a noise estimator and window
+    (the clean spread replaced them) and a minimum duration (width cannot tell a
+    chance crossing from a narrow plume)."""
+    for retired in ("noise_estimator", "noise_window", "min_duration", "enter_sigma"):
+        with pytest.raises(ValidationError, match="Extra inputs"):
+            EventsConfig.model_validate({retired: "x"})
+
+
+def test_only_the_registered_clean_level_estimator_is_accepted() -> None:
     with pytest.raises(ValidationError):
-        DetectionConfig(noise_estimator="qn")  # type: ignore[arg-type]  # not a registered name
+        EventsConfig(clean_level_estimator="shortest_half")  # type: ignore[arg-type]
 
 
-def test_mad_noise_estimator_rejected() -> None:
-    """'mad' was measured and rejected (METHODS §2.5): never better than diff_mad."""
+def test_a_min_clean_readings_below_one_is_refused() -> None:
     with pytest.raises(ValidationError):
-        DetectionConfig(noise_estimator="mad")  # type: ignore[arg-type]  # rejected 2026-09-29
+        EventsConfig(min_clean_readings=0)
+
+
+@pytest.mark.parametrize(
+    "triggers",
+    [
+        {"iwas.benzene.extra": "ptr.benzene"},
+        {"iwas-2": "ptr.benzene"},
+        {"iwas.": "ptr.benzene"},
+    ],
+)
+def test_a_trigger_key_is_an_instrument_or_a_variable(triggers: dict[str, str]) -> None:
+    with pytest.raises(ValidationError, match="keys are '<instrument>'"):
+        EventsConfig(triggers=triggers)
+
+
+@pytest.mark.parametrize("trigger", ["ptr", "ptr.", ".benzene", "ptr.benzene-x"])
+def test_a_trigger_names_one_variable(trigger: str) -> None:
+    with pytest.raises(ValidationError, match="names its trigger as"):
+        EventsConfig(triggers={"iwas": trigger})
+
+
+def test_a_variable_key_wins_over_its_instrument_key() -> None:
+    config = EventsConfig(triggers={"iwas": "picarro.ch4", "iwas.benzene": "ptr.benzene"})
+    assert config.trigger_for("iwas", "benzene") == "ptr.benzene"
+    assert config.trigger_for("iwas", "toluene") == "picarro.ch4"
+    assert config.trigger_for("ptr", "benzene") is None
 
 
 # ---------------------------------------------------------------------------
