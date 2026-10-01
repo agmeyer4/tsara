@@ -1,4 +1,4 @@
-"""Tests for the detector (tsara.plumes.hysteresis)."""
+"""Tests for the detector (tsara.events.hysteresis)."""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ import pytest
 
 from tsara.core.support import CellBounds
 from tsara.core.timebase import SECOND_NS as SECOND
-from tsara.plumes import (
+from tsara.events import (
     Events,
     Records,
-    TsaraPlumeError,
+    TsaraEventError,
     describe_events,
     expected_chance_rate,
     find_events,
@@ -309,15 +309,15 @@ def test_a_taken_event_keeps_its_number_its_interval_and_a_peak_where_a_score_is
 
 def test_describing_what_does_not_fit_is_refused() -> None:
     cells = cells_at([0.0, 1.0, 2.0])
-    with pytest.raises(TsaraPlumeError, match="do not match"):
+    with pytest.raises(TsaraEventError, match="do not match"):
         describe_events(np.array([0, 0]), np.zeros(3), cells)
-    with pytest.raises(TsaraPlumeError, match="do not match"):
+    with pytest.raises(TsaraEventError, match="do not match"):
         describe_events(np.array([0, 0, -1]), np.zeros(2), cells)
     one = (np.array([0]), np.array([0]), np.array([SECOND]))
-    with pytest.raises(TsaraPlumeError, match="no interval of its own"):
+    with pytest.raises(TsaraEventError, match="no interval of its own"):
         describe_events(np.array([0, 1, -1]), np.zeros(3), cells, intervals=one)
     none = (np.empty(0, dtype=np.int64),) * 3
-    with pytest.raises(TsaraPlumeError, match="no interval of its own"):
+    with pytest.raises(TsaraEventError, match="no interval of its own"):
         describe_events(np.array([0, -1, -1]), np.zeros(3), cells, intervals=none)
 
 
@@ -370,11 +370,11 @@ def test_white_noise_crosses_as_often_as_the_closed_form_says() -> None:
 def test_what_cannot_be_detected_is_refused() -> None:
     cells = cells_at([0.0, 1.0, 2.0])
     records = find_records(cells, np.ones(3, dtype=bool), gap_ns=HOUR, max_length_ns=HOUR)
-    with pytest.raises(TsaraPlumeError, match="does not match"):
+    with pytest.raises(TsaraEventError, match="does not match"):
         find_events(np.zeros(2), cells, records, enter=3.0, exit_=1.0, max_internal_gap_ns=0)
-    with pytest.raises(TsaraPlumeError, match="must exceed"):
+    with pytest.raises(TsaraEventError, match="must exceed"):
         find_events(np.zeros(3), cells, records, enter=1.0, exit_=1.0, max_internal_gap_ns=0)
-    with pytest.raises(TsaraPlumeError, match="negative"):
+    with pytest.raises(TsaraEventError, match="negative"):
         find_events(np.zeros(3), cells, records, enter=3.0, exit_=1.0, max_internal_gap_ns=-1)
 
 

@@ -1,4 +1,4 @@
-"""Tests for records and dropouts (tsara.plumes.records)."""
+"""Tests for records and dropouts (tsara.events.records)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pytest
 
 from tsara.core.support import CellBounds
 from tsara.core.timebase import SECOND_NS as SECOND
-from tsara.plumes import DROPOUT_SPACING_FACTOR, TsaraPlumeError, find_records
+from tsara.events import DROPOUT_SPACING_FACTOR, TsaraEventError, find_records
 
 HOUR = 3600 * SECOND
 
@@ -236,11 +236,11 @@ def test_a_record_of_one_reading_has_no_spacing() -> None:
 
 def test_what_cannot_be_split_is_refused() -> None:
     cells = cells_at([0.0, 1.0, 2.0])
-    with pytest.raises(TsaraPlumeError, match="one per reading"):
+    with pytest.raises(TsaraEventError, match="one per reading"):
         find_records(cells, all_finite(2), gap_ns=HOUR, max_length_ns=HOUR)
-    with pytest.raises(TsaraPlumeError, match="positive gap"):
+    with pytest.raises(TsaraEventError, match="positive gap"):
         find_records(cells, all_finite(3), gap_ns=0, max_length_ns=HOUR)
-    with pytest.raises(TsaraPlumeError, match="positive gap"):
+    with pytest.raises(TsaraEventError, match="positive gap"):
         find_records(cells, all_finite(3), gap_ns=HOUR, max_length_ns=-1)
-    with pytest.raises(TsaraPlumeError, match="not in time order"):
+    with pytest.raises(TsaraEventError, match="not in time order"):
         find_records(cells_at([0.0, 2.0, 1.0]), all_finite(3), gap_ns=HOUR, max_length_ns=HOUR)

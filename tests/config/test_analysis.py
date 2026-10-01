@@ -13,9 +13,9 @@ from tsara.config.analysis import (
     AnalysisConfig,
     BaselineConfig,
     ConstantMethod,
+    EventsConfig,
     FromFieldMethod,
     OutputGridConfig,
-    PlumesConfig,
     RollingQuantileMethod,
 )
 
@@ -33,13 +33,13 @@ def test_minimal_analysis_parses(analysis_dict: dict[str, Any]) -> None:
     assert config.baseline.methods == {}
     # Optional stages exist with safe defaults instead of being None.
     assert config.alignment.max_interp_gap == "10s"
-    assert config.plumes.enter_multiple == (3.0,)
-    assert config.plumes.exit_multiple == (1.0,)
-    assert config.plumes.record_gap == "2h"
-    assert config.plumes.max_record_length == "6h"
-    assert config.plumes.min_clean_readings == 100
-    assert config.plumes.clean_level_estimator == "half_sample_mode"
-    assert config.plumes.triggers == {}
+    assert config.events.enter_multiple == (3.0,)
+    assert config.events.exit_multiple == (1.0,)
+    assert config.events.record_gap == "2h"
+    assert config.events.max_record_length == "6h"
+    assert config.events.min_clean_readings == 100
+    assert config.events.clean_level_estimator == "half_sample_mode"
+    assert config.events.triggers == {}
     assert config.smoothing.enabled is False
     assert config.clustering.enabled is False
     assert config.regression.methods == ("ols", "york")
@@ -48,12 +48,12 @@ def test_minimal_analysis_parses(analysis_dict: dict[str, Any]) -> None:
 def test_sweep_lists_accepted(analysis_dict: dict[str, Any]) -> None:
     full = copy.deepcopy(analysis_dict)
     full["baseline"]["quantiles"] = [0.01, 0.05, 0.10]
-    full["plumes"] = {"enter_multiple": [3.0, 4.0, 5.0], "exit_multiple": [1.0, 1.5, 2.0]}
+    full["events"] = {"enter_multiple": [3.0, 4.0, 5.0], "exit_multiple": [1.0, 1.5, 2.0]}
     full["smoothing"] = {"enabled": True, "cutoff_periods": ["30s", "60s"]}
     config = AnalysisConfig.model_validate(full)
     assert len(config.baseline.quantiles) == 3
-    assert len(config.plumes.enter_multiple) == 3
-    assert len(config.plumes.exit_multiple) == 3
+    assert len(config.events.enter_multiple) == 3
+    assert len(config.events.exit_multiple) == 3
     assert len(config.smoothing.cutoff_periods) == 2
 
 
@@ -198,11 +198,11 @@ def test_every_entry_must_exceed_every_exit(
 ) -> None:
     """Both are swept, so every pairing runs; one inverted pairing is enough to refuse."""
     with pytest.raises(ValidationError, match="must exceed every exit_multiple"):
-        PlumesConfig(enter_multiple=enter, exit_multiple=exit_)
+        EventsConfig(enter_multiple=enter, exit_multiple=exit_)
 
 
 def test_the_example_sweep_is_accepted() -> None:
-    config = PlumesConfig(enter_multiple=(3.0, 4.0, 5.0), exit_multiple=(1.0, 1.5, 2.0))
+    config = EventsConfig(enter_multiple=(3.0, 4.0, 5.0), exit_multiple=(1.0, 1.5, 2.0))
     assert config.enter_multiple == (3.0, 4.0, 5.0)
 
 
@@ -212,7 +212,7 @@ def test_the_example_sweep_is_accepted() -> None:
 )
 def test_a_multiple_must_be_positive_and_finite(multiples: tuple[float, ...]) -> None:
     with pytest.raises(ValidationError, match="positive multiples"):
-        PlumesConfig(enter_multiple=multiples, exit_multiple=(0.5,))
+        EventsConfig(enter_multiple=multiples, exit_multiple=(0.5,))
 
 
 @pytest.mark.parametrize("field", ["enter_multiple", "exit_multiple"])
@@ -222,13 +222,13 @@ def test_a_sweep_list_must_be_strictly_increasing(field: str, values: tuple[floa
     other: dict[str, object] = {"enter_multiple": (10.0,), "exit_multiple": (0.5,)}
     other[field] = values
     with pytest.raises(ValidationError, match="strictly increasing"):
-        PlumesConfig.model_validate(other)
+        EventsConfig.model_validate(other)
 
 
 @pytest.mark.parametrize("field", ["max_internal_gap", "record_gap", "max_record_length"])
 def test_durations_are_validated(field: str) -> None:
-    with pytest.raises(ValidationError, match=f"PlumesConfig.{field}"):
-        PlumesConfig.model_validate({field: "soon"})
+    with pytest.raises(ValidationError, match=f"EventsConfig.{field}"):
+        EventsConfig.model_validate({field: "soon"})
 
 
 def test_the_retired_detection_fields_are_refused() -> None:
@@ -237,17 +237,17 @@ def test_the_retired_detection_fields_are_refused() -> None:
     chance crossing from a narrow plume)."""
     for retired in ("noise_estimator", "noise_window", "min_duration", "enter_sigma"):
         with pytest.raises(ValidationError, match="Extra inputs"):
-            PlumesConfig.model_validate({retired: "x"})
+            EventsConfig.model_validate({retired: "x"})
 
 
 def test_only_the_registered_clean_level_estimator_is_accepted() -> None:
     with pytest.raises(ValidationError):
-        PlumesConfig(clean_level_estimator="shortest_half")  # type: ignore[arg-type]
+        EventsConfig(clean_level_estimator="shortest_half")  # type: ignore[arg-type]
 
 
 def test_a_min_clean_readings_below_one_is_refused() -> None:
     with pytest.raises(ValidationError):
-        PlumesConfig(min_clean_readings=0)
+        EventsConfig(min_clean_readings=0)
 
 
 @pytest.mark.parametrize(
@@ -260,17 +260,17 @@ def test_a_min_clean_readings_below_one_is_refused() -> None:
 )
 def test_a_trigger_key_is_an_instrument_or_a_variable(triggers: dict[str, str]) -> None:
     with pytest.raises(ValidationError, match="keys are '<instrument>'"):
-        PlumesConfig(triggers=triggers)
+        EventsConfig(triggers=triggers)
 
 
 @pytest.mark.parametrize("trigger", ["ptr", "ptr.", ".benzene", "ptr.benzene-x"])
 def test_a_trigger_names_one_variable(trigger: str) -> None:
     with pytest.raises(ValidationError, match="names its trigger as"):
-        PlumesConfig(triggers={"iwas": trigger})
+        EventsConfig(triggers={"iwas": trigger})
 
 
 def test_a_variable_key_wins_over_its_instrument_key() -> None:
-    config = PlumesConfig(triggers={"iwas": "picarro.ch4", "iwas.benzene": "ptr.benzene"})
+    config = EventsConfig(triggers={"iwas": "picarro.ch4", "iwas.benzene": "ptr.benzene"})
     assert config.trigger_for("iwas", "benzene") == "ptr.benzene"
     assert config.trigger_for("iwas", "toluene") == "picarro.ch4"
     assert config.trigger_for("ptr", "benzene") is None

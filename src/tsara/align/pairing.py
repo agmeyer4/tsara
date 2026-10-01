@@ -221,7 +221,7 @@ def pair_species(
         streams and must be unambiguous; a tuple names the instrument.
     interval : tuple of pandas.Timestamp, optional
         Restrict pairing to cells overlapping this window, such as an
-        event's interval from the plume catalog. ``None`` pairs the whole
+        event's interval from the event catalog. ``None`` pairs the whole
         record.
     target : CellBounds or str, optional
         Cells to pair on instead of the wider-supported member's own: explicit

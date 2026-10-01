@@ -1,4 +1,4 @@
-"""Records: the stretches of a stream the plumes stage describes one at a time.
+"""Records: the stretches of a stream the events stage describes one at a time.
 
 The clean level and spread (``docs/METHODS.md`` §6.8) describe plume-free
 air over a stretch of time, and the stretch matters: a ground site that runs
@@ -19,7 +19,7 @@ drive's analyzer reports every 2 or 3 s on 1 s cells, so a rule on width
 would call every step a dropout.
 
 This module is the vocabulary of the subpackage and holds its error class;
-:mod:`tsara.plumes.clean` describes the air in each record.
+:mod:`tsara.events.clean` describes the air in each record.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
     from tsara.core.support import CellBounds
 
-__all__ = ["DROPOUT_SPACING_FACTOR", "Records", "TsaraPlumeError", "find_records"]
+__all__ = ["DROPOUT_SPACING_FACTOR", "Records", "TsaraEventError", "find_records"]
 
 #: A gap between consecutive finite readings longer than this many times the
 #: record's median spacing is a dropout (§2.5, §6.8). 1.5 keeps every jittered
@@ -46,8 +46,8 @@ __all__ = ["DROPOUT_SPACING_FACTOR", "Records", "TsaraPlumeError", "find_records
 DROPOUT_SPACING_FACTOR = 1.5
 
 
-class TsaraPlumeError(TsaraError):
-    """Raised when plume events cannot be found as asked.
+class TsaraEventError(TsaraError):
+    """Raised when events cannot be found as asked.
 
     Its own type because the failures are about records, thresholds and
     what the baseline state handed over, rather than about reading, joining
@@ -113,9 +113,9 @@ def find_records(
     finite : numpy.ndarray of bool
         Which readings of the variable are finite.
     gap_ns : int
-        ``PlumesConfig.record_gap``, in nanoseconds.
+        ``EventsConfig.record_gap``, in nanoseconds.
     max_length_ns : int
-        ``PlumesConfig.max_record_length``, in nanoseconds.
+        ``EventsConfig.max_record_length``, in nanoseconds.
 
     Returns
     -------
@@ -125,18 +125,18 @@ def find_records(
 
     Raises
     ------
-    TsaraPlumeError
+    TsaraEventError
         If ``finite`` does not match the cells, a length is not positive, or
         the finite readings are not in time order.
     """
     mask = np.asarray(finite, dtype=bool)
     if mask.shape != cells.start_ns.shape:
-        raise TsaraPlumeError(
+        raise TsaraEventError(
             f"{mask.size} finite flags for {cells.start_ns.size} cells; there must be one per "
             "reading."
         )
     if gap_ns <= 0 or max_length_ns <= 0:
-        raise TsaraPlumeError(
+        raise TsaraEventError(
             f"A record needs a positive gap and maximum length; got {gap_ns} ns and "
             f"{max_length_ns} ns."
         )
@@ -149,7 +149,7 @@ def find_records(
     midpoints = cells.midpoint_ns[kept]
     spacing = np.diff(midpoints)
     if np.any(spacing < 0):
-        raise TsaraPlumeError(
+        raise TsaraEventError(
             "The finite readings are not in time order; a stream's cells must be sorted "
             "by their midpoints."
         )

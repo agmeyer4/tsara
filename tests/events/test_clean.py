@@ -1,4 +1,4 @@
-"""Tests for the clean level and spread (tsara.plumes.clean)."""
+"""Tests for the clean level and spread (tsara.events.clean)."""
 
 from __future__ import annotations
 
@@ -12,9 +12,9 @@ from scipy.stats import norm
 
 from tsara.core.support import CellBounds
 from tsara.core.timebase import SECOND_NS as SECOND
-from tsara.plumes import (
+from tsara.events import (
     MAD_TO_SIGMA,
-    TsaraPlumeError,
+    TsaraEventError,
     available_clean_level_estimators,
     clean_air,
     describe_clean_air,
@@ -306,7 +306,7 @@ def test_a_blank_record_reports_no_floor_action() -> None:
 def test_what_does_not_fit_or_names_no_estimator_is_refused() -> None:
     cells = two_records(10)[0]
     records = find_records(cells, np.ones(20, dtype=bool), gap_ns=2 * HOUR, max_length_ns=HOUR)
-    with pytest.raises(TsaraPlumeError, match="do not match"):
+    with pytest.raises(TsaraEventError, match="do not match"):
         clean_air(
             np.zeros((19, 1)),
             np.zeros(20),
@@ -314,7 +314,7 @@ def test_what_does_not_fit_or_names_no_estimator_is_refused() -> None:
             estimator="half_sample_mode",
             min_clean_readings=1,
         )
-    with pytest.raises(TsaraPlumeError, match="do not match"):
+    with pytest.raises(TsaraEventError, match="do not match"):
         clean_air(
             np.zeros((20, 1)),
             np.zeros(19),
@@ -322,14 +322,14 @@ def test_what_does_not_fit_or_names_no_estimator_is_refused() -> None:
             estimator="half_sample_mode",
             min_clean_readings=1,
         )
-    with pytest.raises(TsaraPlumeError, match="No clean-level estimator registered as 'shorth'"):
+    with pytest.raises(TsaraEventError, match="No clean-level estimator registered as 'shorth'"):
         clean_air(
             np.zeros((20, 1)), np.zeros(20), records, estimator="shorth", min_clean_readings=1
         )
     # Refused before any work, so a variable with nothing to describe cannot
     # carry a misspelt estimator through unnoticed.
     none = find_records(cells, np.zeros(20, dtype=bool), gap_ns=2 * HOUR, max_length_ns=HOUR)
-    with pytest.raises(TsaraPlumeError, match="'shorth'"):
+    with pytest.raises(TsaraEventError, match="'shorth'"):
         clean_air(np.zeros((20, 1)), np.zeros(20), none, estimator="shorth", min_clean_readings=1)
 
 
@@ -350,7 +350,7 @@ def test_a_name_is_registered_once_unless_replaced_on_purpose(
         register_clean_level_estimator("half_sample_mode")(half_sample_mode)
     with pytest.raises(ValueError, match="non-empty"):
         register_clean_level_estimator("  ")
-    with caplog.at_level(logging.WARNING, logger="tsara.plumes.clean"):
+    with caplog.at_level(logging.WARNING, logger="tsara.events.clean"):
         register_clean_level_estimator("half_sample_mode", replace=True)(half_sample_mode)
     assert "Replacing clean-level estimator 'half_sample_mode'" in caplog.text
     assert get_clean_level_estimator("half_sample_mode") is half_sample_mode

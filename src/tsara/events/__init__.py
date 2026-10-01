@@ -1,13 +1,14 @@
-"""Plume events: intervals where an enhancement stands above plume-free air.
+"""Events: intervals where an enhancement stands above plume-free air.
 
 For every gas variable, at every point of the baseline sweep, this stage
 describes plume-free air by its clean level and clean spread and marks an
 event where the enhancement rises a set multiple of the spread above the
-level (``docs/METHODS.md`` §6.8). It reads the baseline state as a Dataset
-and never imports the baseline stage. Neither the level nor the spread is a
-measurement uncertainty: the spread holds the background's wobble at the
-window's scale, and a declared or reported sigma plays no part in any
-threshold (§2.3).
+level (``docs/METHODS.md`` §6.8). An event is what one sweep point sees, not
+a verdict: whether it is a plume is judged across the sweep, later. It reads
+the baseline state as a Dataset and never imports the baseline stage. Neither
+the level nor the spread is a measurement uncertainty: the spread holds the
+background's wobble at the window's scale, and a declared or reported sigma
+plays no part in any threshold (§2.3).
 
 Shape of the subpackage
 -----------------------
@@ -27,21 +28,21 @@ Shape of the subpackage
 ``state``
     The product: every gas variable of a baseline state described, scored
     and searched at every sweep point, on the stream's own cells; a variable
-    named in ``plumes.triggers`` takes its trigger's events instead.
+    named in ``events.triggers`` takes its trigger's events instead.
 ``catalog``
     The events as rows: one long table keyed by ``event_id``, spelled like
     the generator's answer key where the meaning is the same, with the
     parent-child tree along the baseline's window.
 ``bundle``
-    Saving and reloading the plume states, the catalog and the plumes
+    Saving and reloading the event states, the catalog and the events
     configuration, in a directory beside the baseline states.
 """
 
 from __future__ import annotations
 
-from tsara.plumes.bundle import PlumeStates, load_plumes, save_plumes
-from tsara.plumes.catalog import CATALOG_COLUMNS, link_parents, plume_catalog
-from tsara.plumes.clean import (
+from tsara.events.bundle import EventStates, load_events, save_events
+from tsara.events.catalog import CATALOG_COLUMNS, event_catalog, link_parents
+from tsara.events.clean import (
     MAD_TO_SIGMA,
     CleanAir,
     CleanDescription,
@@ -54,16 +55,16 @@ from tsara.plumes.clean import (
     quantization_step,
     register_clean_level_estimator,
 )
-from tsara.plumes.hysteresis import Events, describe_events, expected_chance_rate, find_events
-from tsara.plumes.records import DROPOUT_SPACING_FACTOR, Records, TsaraPlumeError, find_records
-from tsara.plumes.state import (
+from tsara.events.hysteresis import Events, describe_events, expected_chance_rate, find_events
+from tsara.events.records import DROPOUT_SPACING_FACTOR, Records, TsaraEventError, find_records
+from tsara.events.state import (
     CHANCE_ASSUMPTION_ATTR,
     ENTER_DIM,
+    EVENTS_STAGE,
     EXIT_DIM,
-    PLUMES_STAGE,
     TRIGGER_ATTR,
-    plume_state,
-    plume_states,
+    event_state,
+    event_states,
 )
 
 __all__ = [
@@ -74,29 +75,29 @@ __all__ = [
     "CleanLevelEstimator",
     "DROPOUT_SPACING_FACTOR",
     "ENTER_DIM",
+    "EVENTS_STAGE",
     "EXIT_DIM",
+    "EventStates",
     "Events",
     "MAD_TO_SIGMA",
-    "PLUMES_STAGE",
-    "PlumeStates",
     "Records",
     "TRIGGER_ATTR",
-    "TsaraPlumeError",
+    "TsaraEventError",
     "available_clean_level_estimators",
     "clean_air",
     "describe_clean_air",
     "describe_events",
+    "event_catalog",
+    "event_state",
+    "event_states",
     "expected_chance_rate",
     "find_events",
     "find_records",
     "get_clean_level_estimator",
     "half_sample_mode",
     "link_parents",
-    "load_plumes",
-    "plume_catalog",
-    "plume_state",
-    "plume_states",
+    "load_events",
     "quantization_step",
     "register_clean_level_estimator",
-    "save_plumes",
+    "save_events",
 ]

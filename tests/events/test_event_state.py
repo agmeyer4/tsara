@@ -1,4 +1,4 @@
-"""Tests for the plume state (tsara.plumes.state)."""
+"""Tests for the event state (tsara.events.state)."""
 
 from __future__ import annotations
 
@@ -11,20 +11,20 @@ import pytest
 import xarray as xr
 
 from tsara.baseline import baseline_state
-from tsara.config.analysis import BaselineConfig, PlumesConfig
+from tsara.config.analysis import BaselineConfig, EventsConfig
 from tsara.core.support import CellBounds, stream_cells
 from tsara.core.timebase import SECOND_NS as SECOND
-from tsara.plumes import (
+from tsara.events import (
     CHANCE_ASSUMPTION_ATTR,
-    PLUMES_STAGE,
+    EVENTS_STAGE,
     TRIGGER_ATTR,
-    TsaraPlumeError,
+    TsaraEventError,
     clean_air,
+    event_state,
+    event_states,
     expected_chance_rate,
     find_events,
     find_records,
-    plume_state,
-    plume_states,
 )
 from tsara.synthetic import SyntheticDataset
 from tsara.synthetic.noise import quantization_floor
@@ -32,7 +32,7 @@ from tsara.synthetic.noise import quantization_floor
 HOUR = 3600 * SECOND
 ExampleChain: TypeAlias = tuple[SyntheticDataset, xr.Dataset, xr.Dataset]
 BASELINE = BaselineConfig(windows=("2min", "10min"), quantiles=(0.05, 0.1))
-PLUMES = PlumesConfig(enter_multiple=(3.0, 4.0), exit_multiple=(1.0,))
+EVENTS = EventsConfig(enter_multiple=(3.0, 4.0), exit_multiple=(1.0,))
 
 
 def make_stream(
@@ -76,10 +76,10 @@ def plumy(n: int, seed: int, *, every_s: float = 1.0) -> npt.NDArray[np.float64]
     """Methane at 1900 ppb with 0.7 ppb of noise and a 40 ppb plume every ten minutes."""
     rng = np.random.default_rng(seed)
     t = np.arange(n) * every_s
-    plumes = np.zeros(n)
+    events = np.zeros(n)
     for centre in np.arange(300, t[-1], 600):
-        plumes += 40 * np.exp(-0.5 * ((t - centre) / 15) ** 2)
-    values: npt.NDArray[np.float64] = 1900 + rng.normal(0, 0.7, n) + plumes
+        events += 40 * np.exp(-0.5 * ((t - centre) / 15) ** 2)
+    values: npt.NDArray[np.float64] = 1900 + rng.normal(0, 0.7, n) + events
     return values
 
 
@@ -99,11 +99,11 @@ def test_the_state_lives_on_the_readings_cells_with_two_more_sweep_dimensions(
     dense: tuple[xr.Dataset, xr.Dataset],
 ) -> None:
     _, state = dense
-    found = plume_state(state, instrument="van", plumes=PLUMES)
-    assert found.attrs["tsara_stage"] == PLUMES_STAGE
+    found = event_state(state, instrument="van", events=EVENTS)
+    assert found.attrs["tsara_stage"] == EVENTS_STAGE
     assert found.attrs["tsara_instrument"] == "van"
-    assert found.attrs["tsara_plumes_record_gap"] == "2h"
-    assert found.attrs["tsara_plumes_min_clean_readings"] == "100"
+    assert found.attrs["tsara_events_record_gap"] == "2h"
+    assert found.attrs["tsara_events_min_clean_readings"] == "100"
     assert np.array_equal(found["time_bnds"].values, state["time_bnds"].values)
     assert found["enter_multiple"].values.tolist() == [3.0, 4.0]
     assert found["exit_multiple"].values.tolist() == [1.0]
@@ -131,7 +131,7 @@ def test_the_state_is_the_three_steps_called_by_hand(
     """Records, clean air, z and events at every sweep point, as stages 2 and 3
     compute them: the state only wires them, and must not transpose or shift."""
     _, state = dense
-    found = plume_state(state, instrument="van", plumes=PLUMES)
+    found = event_state(state, instrument="van", events=EVENTS)
     cells = stream_cells(state, "van")
     x = state["ch4"].values
     records = find_records(cells, np.isfinite(x), gap_ns=2 * HOUR, max_length_ns=6 * HOUR)
@@ -144,7 +144,7 @@ def test_the_state_is_the_three_steps_called_by_hand(
     assert np.array_equal(found["z_ch4"].values, z, equal_nan=True)
     assert np.array_equal(found["record_ch4"].values, records.index)
     for w, q, e in np.ndindex(2, 2, 2):
-        enter = PLUMES.enter_multiple[e]
+        enter = EVENTS.enter_multiple[e]
         events = find_events(
             z[:, w, q], cells, records, enter=enter, exit_=1.0, max_internal_gap_ns=5 * SECOND
         )
@@ -161,7 +161,7 @@ def test_every_plume_is_found_and_the_quiet_air_mostly_is_not(
     """Twelve 40 ppb plumes (57 sigma) in two hours: each peak lies in an event at
     every sweep point, and at entry 4 events are few beyond the plumes."""
     _, state = dense
-    found = plume_state(state, instrument="van", plumes=PLUMES)
+    found = event_state(state, instrument="van", events=EVENTS)
     peaks = np.arange(300, 7200, 600)
     event = found["event_ch4"].values
     assert np.all(event[peaks] >= 0)
@@ -175,7 +175,7 @@ def test_a_stream_of_two_records_is_described_record_by_record() -> None:
     t = np.r_[np.arange(7200.0), 5 * 3600 + np.arange(7200.0)]
     ch4 = 1900 + np.r_[rng.normal(0, 0.5, 7200), rng.normal(0, 1.5, 7200)]
     state = baseline_state(make_stream(t, {"ch4": ch4}), instrument="van", baseline=BASELINE)
-    found = plume_state(state, instrument="van", plumes=PLUMES)
+    found = event_state(state, instrument="van", events=EVENTS)
     assert set(np.unique(found["record_ch4"].values)) == {0, 1}
     spread = found["clean_spread_ch4"].values[:, 1, 0]
     assert 0.4 < spread[0] < 0.6 < 1.2 < spread[-1] < 1.8
@@ -190,7 +190,7 @@ def test_a_reading_in_no_record_has_no_description_no_z_and_no_chance() -> None:
     state = baseline_state(
         make_stream(np.arange(3600.0), {"ch4": ch4}), instrument="van", baseline=BASELINE
     )
-    found = plume_state(state, instrument="van", plumes=PLUMES)
+    found = event_state(state, instrument="van", events=EVENTS)
     off = np.isnan(ch4)
     assert (found["record_ch4"].values[off] == -1).all()
     assert np.isnan(found["clean_level_ch4"].values[off]).all()
@@ -211,8 +211,8 @@ def test_the_configured_gap_bridges_a_dip_and_a_tiny_one_does_not() -> None:
     state = baseline_state(
         make_stream(np.arange(3600.0), {"ch4": ch4}), instrument="van", baseline=BASELINE
     )
-    bridged = plume_state(state, instrument="van", plumes=PLUMES)["event_ch4"].values
-    apart = plume_state(state, instrument="van", plumes=PlumesConfig(max_internal_gap="1ns"))[
+    bridged = event_state(state, instrument="van", events=EVENTS)["event_ch4"].values
+    apart = event_state(state, instrument="van", events=EventsConfig(max_internal_gap="1ns"))[
         "event_ch4"
     ].values
     assert bridged[2001, 0, 0, 0, 0] == bridged[2000, 0, 0, 0, 0] >= 0
@@ -225,7 +225,7 @@ def test_a_declared_quantization_floors_the_spread() -> None:
     stream = make_stream(np.arange(3600.0), {"ch4": plumy(3600, 13)})
     stream["ch4"].attrs["quantization"] = 5.0
     state = baseline_state(stream, instrument="van", baseline=BASELINE)
-    spread = plume_state(state, instrument="van", plumes=PLUMES)["clean_spread_ch4"].values
+    spread = event_state(state, instrument="van", events=EVENTS)["clean_spread_ch4"].values
     assert np.all(spread == quantization_floor(5.0))
 
 
@@ -242,8 +242,8 @@ def test_a_short_record_is_blank_and_finds_nothing_while_its_neighbour_does(
     state = baseline_state(
         make_stream(t, {"ch4": plumy(3720, 5)}), instrument="van", baseline=BASELINE
     )
-    with caplog.at_level(logging.WARNING, logger="tsara.plumes.state"):
-        found = plume_state(state, instrument="van", plumes=PLUMES)
+    with caplog.at_level(logging.WARNING, logger="tsara.events.state"):
+        found = event_state(state, instrument="van", events=EVENTS)
     short = found["record_ch4"].values == 1
     assert np.isnan(found["clean_level_ch4"].values[short]).all()
     assert np.isnan(found["z_ch4"].values[short]).all()
@@ -260,8 +260,8 @@ def test_a_variable_blank_at_every_record_is_named_in_one_warning(
     t = np.arange(150.0)
     stream = make_stream(t, {"ch4": plumy(150, 6), "co2": plumy(150, 7)})
     state = baseline_state(stream, instrument="van", baseline=BASELINE)
-    with caplog.at_level(logging.WARNING, logger="tsara.plumes.state"):
-        found = plume_state(state, instrument="van", plumes=PLUMES)
+    with caplog.at_level(logging.WARNING, logger="tsara.events.state"):
+        found = event_state(state, instrument="van", events=EVENTS)
     assert (found["event_ch4"].values == -1).all()
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
@@ -275,11 +275,11 @@ def test_the_warning_names_eight_and_counts_the_rest(caplog: pytest.LogCaptureFi
     variables sharing one pattern, and nine patterns, are rare enough in a stream
     that building one would test the fixture more than the rule. A canister's 56
     VOCs sharing one blank pattern is the case the first half is for."""
-    from tsara.plumes.state import _warn_blank_everywhere
+    from tsara.events.state import _warn_blank_everywhere
 
     shared = {f"voc{k}": [("120 s, q 0.05", 3)] for k in range(9)}
     distinct = {f"v{k}": [(f"{k + 1} s, q 0.05", 3)] for k in range(9)}
-    with caplog.at_level(logging.WARNING, logger="tsara.plumes.state"):
+    with caplog.at_level(logging.WARNING, logger="tsara.events.state"):
         _warn_blank_everywhere("iwas", shared, 100)
         _warn_blank_everywhere("lab", distinct, 100)
     first, second = (r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
@@ -297,10 +297,10 @@ def test_what_is_not_a_baseline_state_or_holds_no_enhancement_is_refused(
     dense: tuple[xr.Dataset, xr.Dataset],
 ) -> None:
     stream, state = dense
-    with pytest.raises(TsaraPlumeError, match="reads a baseline state"):
-        plume_state(stream, instrument="van", plumes=PLUMES)
-    with pytest.raises(TsaraPlumeError, match="no enhancement of \\['co2'\\]"):
-        plume_state(state, instrument="van", plumes=PLUMES, variables=["co2"])
+    with pytest.raises(TsaraEventError, match="reads a baseline state"):
+        event_state(stream, instrument="van", events=EVENTS)
+    with pytest.raises(TsaraEventError, match="no enhancement of \\['co2'\\]"):
+        event_state(state, instrument="van", events=EVENTS, variables=["co2"])
 
 
 # ---------------------------------------------------------------------------
@@ -319,10 +319,10 @@ def test_a_sparse_variable_takes_the_events_of_a_sibling_on_its_own_instrument(
     benzene[::60] = 0.2
     both = stream.assign(benzene=("time", benzene, {"units": "ppb", "role": "gas"}))
     state = baseline_state(both, instrument="van", baseline=BASELINE)
-    plumes = PlumesConfig(
+    events = EventsConfig(
         enter_multiple=(3.0, 4.0), exit_multiple=(1.0,), triggers={"van.benzene": "van.ch4"}
     )
-    found = plume_state(state, instrument="van", plumes=plumes)
+    found = event_state(state, instrument="van", events=events)
     assert "z_benzene" not in found and "record_benzene" not in found
     assert found["event_benzene"].attrs[TRIGGER_ATTR] == "van.ch4"
     ch4, taken = found["event_ch4"].values, found["event_benzene"].values
@@ -343,7 +343,7 @@ def test_a_sparse_variable_takes_the_events_of_a_sibling_on_its_own_instrument(
 
 
 def test_a_canister_takes_its_events_from_an_analyzer_on_another_instrument() -> None:
-    """A canister filling for 15 s every 5 min beside a 1 s analyzer: plume_states
+    """A canister filling for 15 s every 5 min beside a 1 s analyzer: event_states
     finds the analyzer's events first, then hands them to the canister. Fills at
     the plumes' centres (300 + 600 k s) lie in the analyzer's events and take their
     numbers; fills midway between plumes (600 k s, 20 plume widths away) lie in
@@ -355,11 +355,11 @@ def test_a_canister_takes_its_events_from_an_analyzer_on_another_instrument() ->
         "van": baseline_state(van, instrument="van", baseline=BASELINE),
         "iwas": baseline_state(canister, instrument="iwas", baseline=BASELINE),
     }
-    plumes = PlumesConfig(triggers={"iwas": "van.ch4"})
-    found = plume_states(states, plumes)
+    events = EventsConfig(triggers={"iwas": "van.ch4"})
+    found = event_states(states, events)
     assert sorted(found) == ["iwas", "van"]
     assert found["iwas"]["event_benzene"].attrs[TRIGGER_ATTR] == "van.ch4"
-    assert found["van"].identical(plume_state(states["van"], instrument="van", plumes=plumes))
+    assert found["van"].identical(event_state(states["van"], instrument="van", events=events))
     taken = found["iwas"]["event_benzene"].values[:, 0, 0, 0, 0]
     van_events = found["van"]["event_ch4"].values[:, 0, 0, 0, 0]
     in_plume = (fills - 300) % 600 == 0
@@ -381,7 +381,7 @@ def test_an_instrument_with_both_kinds_of_variable_keeps_both() -> None:
         "van": baseline_state(van, instrument="van", baseline=BASELINE),
         "lab": baseline_state(lab, instrument="lab", baseline=BASELINE),
     }
-    found = plume_states(states, PlumesConfig(triggers={"lab.c2h6": "van.ch4"}))
+    found = event_states(states, EventsConfig(triggers={"lab.c2h6": "van.ch4"}))
     assert "z_co2" in found["lab"] and "z_c2h6" not in found["lab"]
     assert found["lab"]["event_c2h6"].attrs[TRIGGER_ATTR] == "van.ch4"
 
@@ -401,8 +401,8 @@ def test_a_triggered_reading_belongs_from_an_events_start_up_to_its_stop() -> No
         "lab": baseline_state(lab, instrument="lab", baseline=BASELINE),
     }
     # Nothing bridged, so that noise crossings near the edges stay apart.
-    plumes = PlumesConfig(max_internal_gap="1ns", triggers={"lab": "van.ch4"})
-    found = plume_states(states, plumes)
+    events = EventsConfig(max_internal_gap="1ns", triggers={"lab": "van.ch4"})
+    found = event_states(states, events)
     k = found["van"]["event_ch4"].values[1000, 0, 0, 0, 0]
     assert (found["van"]["event_ch4"].values[999:1004, 0, 0, 0, 0] == [-1, k, k, k, -1]).all()
     taken = found["lab"]["event_c2h6"].values[:, 0, 0, 0, 0]
@@ -417,12 +417,12 @@ def test_a_trigger_state_missing_or_found_on_another_sweep_is_refused(
     _, state = dense
     other = make_stream(np.arange(7200.0), {"co2": plumy(7200, 9)})
     lab = baseline_state(other, instrument="lab", baseline=BASELINE)
-    plumes = PlumesConfig(triggers={"lab": "van.ch4"})
-    with pytest.raises(TsaraPlumeError, match="was not handed over"):
-        plume_state(lab, instrument="lab", plumes=plumes)
-    elsewhere = plume_state(state, instrument="van", plumes=PlumesConfig(enter_multiple=(5.0,)))
-    with pytest.raises(TsaraPlumeError, match="found on another sweep"):
-        plume_state(lab, instrument="lab", plumes=plumes, triggers={"van": elsewhere})
+    events = EventsConfig(triggers={"lab": "van.ch4"})
+    with pytest.raises(TsaraEventError, match="was not handed over"):
+        event_state(lab, instrument="lab", events=events)
+    elsewhere = event_state(state, instrument="van", events=EventsConfig(enter_multiple=(5.0,)))
+    with pytest.raises(TsaraEventError, match="found on another sweep"):
+        event_state(lab, instrument="lab", events=events, triggers={"van": elsewhere})
 
 
 # ---------------------------------------------------------------------------
@@ -436,9 +436,9 @@ def test_the_example_campaign_reproduces_the_scoping_measurement(
     """METHODS §6.8: through the whole chain (the fixture states the rule) the clean
     spread is 1.01, 1.02 and 1.45 times the true sigma of 0.6 ppb, and 31, 33 and
     42 % of readings lie in events."""
-    _, _, plume = example_chain
-    spread = plume["clean_spread_ch4"].values[:, :, 0]
-    event = plume["event_ch4"].values[:, :, 0, 0, 0]
+    _, _, found = example_chain
+    spread = found["clean_spread_ch4"].values[:, :, 0]
+    event = found["event_ch4"].values[:, :, 0, 0, 0]
     assert [round(float(np.nanmedian(spread[:, w])) / 0.6, 2) for w in range(3)] == [
         1.01,
         1.02,

@@ -328,7 +328,7 @@ COVERAGE_WINDOW_PREFIX = "coverage_window_"
 
 #: A baseline state's two sweep dimensions, and what its ``tsara_stage`` says
 #: (§6.2, §6.6). Here rather than in the baseline stage because a second stage
-#: reads them: the plumes stage finds events on a baseline state at every
+#: reads them: the events stage finds events on a baseline state at every
 #: sweep point, and the stages never import each other.
 WINDOW_DIM = "baseline_window"
 QUANTILE_DIM = "baseline_quantile"

@@ -179,7 +179,7 @@ def baseline_state(
         ``baseline_x``, ``enhancement_x``, their sigma companions, and for a
         rolling quantile ``n_readings_window_x`` and ``coverage_window_x``.
         Nothing here is a noise scale: plume detection's thresholds are
-        multiples of the plumes stage's own clean spread (§6.8).
+        multiples of the events stage's own clean spread (§6.8).
 
     Raises
     ------

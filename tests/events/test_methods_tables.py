@@ -16,7 +16,7 @@ each generated record is one record (the scoping described 12 h at once).
 
 About twelve minutes, so opt-in:
 
-    TSARA_SLOW=1 pytest tests/plumes/test_methods_tables.py
+    TSARA_SLOW=1 pytest tests/events/test_methods_tables.py
 """
 
 from __future__ import annotations
@@ -31,11 +31,11 @@ import pytest
 import xarray as xr
 
 from tsara.baseline import baseline_state
-from tsara.config.analysis import BaselineConfig, PlumesConfig
+from tsara.config.analysis import BaselineConfig, EventsConfig
 from tsara.config.synthetic import SyntheticConfig
 from tsara.core.support import stream_cells
 from tsara.core.timebase import SECOND_NS as SECOND
-from tsara.plumes import find_events, find_records, plume_catalog, plume_state
+from tsara.events import event_catalog, event_state, find_events, find_records
 from tsara.synthetic import SyntheticDataset, generate
 
 pytestmark = pytest.mark.skipif(
@@ -49,9 +49,9 @@ WINDOWS = ("2min", "10min", "60min")
 HOUR = 3600 * SECOND
 
 
-def as_scoped(**more: Any) -> PlumesConfig:
+def as_scoped(**more: Any) -> EventsConfig:
     """Events as the scoping found them: nothing bridged, the whole 12 h one record."""
-    return PlumesConfig.model_validate(
+    return EventsConfig.model_validate(
         {"max_internal_gap": "1ns", "max_record_length": "13h", **more}
     )
 
@@ -183,13 +183,13 @@ def test_the_no_plume_table() -> None:
         "rw100": ((0.9, 18, 1), (1.8, 8.9, 1)),
         "diurnal+rw30": ((2, 14, 0), (1.1, 3.0, 1)),
     }
-    plumes = as_scoped(exit_multiple=(1.0, 2.0))
+    events = as_scoped(exit_multiple=(1.0, 2.0))
     oracle = []
     for name, ((low, high, dp), (r_low, r_high, r_dp)) in table.items():
         rates, ratios, exits = [], [], []
         for seed in range(1, 7):
             campaign, state = _rolled("none", name, seed, (0.01, 0.05, 0.10))
-            found = plume_state(state, instrument="a", plumes=plumes)
+            found = event_state(state, instrument="a", events=events)
             rates.append(found["n_events_ch4"].values[:, :, 0, 0] / HOURS)
             ratios.append(found["clean_spread_ch4"].values[0] / SIGMA)
             exits.append(found["n_events_ch4"].values[2, 1, 0, :] / HOURS)
@@ -239,15 +239,15 @@ def test_the_weak_plume_recall_table() -> None:
         "rw30": ([(93, 84, 26), (100, 100, 48), (100, 100, 98)], (7.5, 9.1, 0.9)),
     }
     bins = [(3, 5), (5, 10), (10, 30)]
-    plumes = as_scoped()
+    events = as_scoped()
     for name, (recall, false_rate) in table.items():
         found: dict[float, list[np.ndarray]] = {}
         false: dict[float, list[float]] = {}
         sizes, oracle_found = [], []
         for seed in (1, 2, 3):
             campaign, state = _rolled("weak", name, seed, (0.05,))
-            catalog = plume_catalog(
-                {"a": plume_state(state, instrument="a", plumes=plumes)}, {"a": state}
+            catalog = event_catalog(
+                {"a": event_state(state, instrument="a", events=events)}, {"a": state}
             )
             truth = campaign.ground_truth.to_frame()
             truth = truth[truth["sampled_peak_amplitude"].notna()]
@@ -290,12 +290,12 @@ def test_the_plume_density_table() -> None:
         "landfill": (0.21, 0.13, 0.14),
         "dense": (0.29, 0.33, 0.20),
     }
-    plumes = as_scoped()
+    events = as_scoped()
     for name, expected in table.items():
         errors, shares, oracle = [], [], []
         for seed in (1, 2, 3):
             campaign, state = _rolled("density", name, seed, (0.05,))
-            found = plume_state(state, instrument="a", plumes=plumes)
+            found = event_state(state, instrument="a", events=events)
             enhancement = campaign.streams["a"]["truth_enhancement_ch4"].values
             clean = enhancement < 0.1 * SIGMA
             per_window = []

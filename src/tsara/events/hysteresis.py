@@ -1,12 +1,12 @@
 """The detector: two-threshold runs of the statistic z, and what each event records.
 
-With the clean level *m* and spread *s* of a record (:mod:`tsara.plumes.clean`),
+With the clean level *m* and spread *s* of a record (:mod:`tsara.events.clean`),
 each reading's statistic is z = (Δ − m) / s, and an **event** is a run of
 readings with z ≥ exit that holds at least one with z ≥ entry
 (``docs/METHODS.md`` §6.8): offline hysteresis, so that a plume hovering near
 one threshold is not chopped into fragments. Four rules shape the runs.
 
-- **A run never crosses a dropout** (:mod:`tsara.plumes.records`), a record
+- **A run never crosses a dropout** (:mod:`tsara.events.records`), a record
   boundary, or a reading whose enhancement is blank: missing data is not
   turbulent air, and a blank baseline says nothing about the air either.
 - **A dip below exit shorter than** ``max_internal_gap`` **is bridged**, so
@@ -25,7 +25,7 @@ one threshold is not chopped into fragments. Four rules shape the runs.
 
 The rate at which chance alone makes events has a closed form for
 independent Gaussian readings (:func:`expected_chance_rate`), which the
-plume state records beside the events so that a sweep point's count can be
+event state records beside the events so that a sweep point's count can be
 read against it.
 """
 
@@ -38,13 +38,13 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-from tsara.plumes.records import TsaraPlumeError
+from tsara.events.records import TsaraEventError
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt
 
     from tsara.core.support import CellBounds
-    from tsara.plumes.records import Records
+    from tsara.events.records import Records
 
 __all__ = ["Events", "describe_events", "expected_chance_rate", "find_events"]
 
@@ -124,7 +124,7 @@ def find_events(
         The stream's cells, one per reading, in time order.
     records : Records
         The variable's records and dropouts
-        (:func:`~tsara.plumes.records.find_records`).
+        (:func:`~tsara.events.records.find_records`).
     enter, exit_ : float
         The entry and exit multiples; entry must exceed exit.
     max_internal_gap_ns : int
@@ -138,20 +138,20 @@ def find_events(
 
     Raises
     ------
-    TsaraPlumeError
+    TsaraEventError
         If the arrays do not match, entry does not exceed exit, or the gap
         is negative.
     """
     values = np.asarray(z, dtype=np.float64)
     if values.shape != records.index.shape or values.shape != cells.start_ns.shape:
-        raise TsaraPlumeError(
+        raise TsaraEventError(
             f"z of shape {values.shape} does not match {records.index.size} readings and "
             f"{cells.start_ns.size} cells."
         )
     if not enter > exit_:
-        raise TsaraPlumeError(f"The entry multiple ({enter}) must exceed the exit ({exit_}).")
+        raise TsaraEventError(f"The entry multiple ({enter}) must exceed the exit ({exit_}).")
     if max_internal_gap_ns < 0:
-        raise TsaraPlumeError(f"max_internal_gap cannot be negative; got {max_internal_gap_ns} ns.")
+        raise TsaraEventError(f"max_internal_gap cannot be negative; got {max_internal_gap_ns} ns.")
 
     # Work along the finite readings only: a reading that is not finite is a
     # hole in time, and whether the hole breaks a run is the dropout rule's
@@ -215,7 +215,7 @@ def describe_events(
     """Describe the events a membership array holds.
 
     The last step of :func:`find_events`, and on its own the way to describe
-    events found elsewhere: from a saved plume state's ``event_x``, or a
+    events found elsewhere: from a saved event state's ``event_x``, or a
     variable's share of its trigger's events.
 
     Parameters
@@ -240,13 +240,13 @@ def describe_events(
 
     Raises
     ------
-    TsaraPlumeError
+    TsaraEventError
         If the arrays do not match the cells, or an event has no interval.
     """
     member_of = np.asarray(membership, dtype=np.int64)
     values = np.asarray(score, dtype=np.float64)
     if member_of.shape != cells.start_ns.shape or values.shape != member_of.shape:
-        raise TsaraPlumeError(
+        raise TsaraEventError(
             f"A membership of shape {member_of.shape} and a score of shape {values.shape} "
             f"do not match {cells.start_ns.size} cells."
         )
@@ -271,7 +271,7 @@ def describe_events(
         if np.any(where >= known.size) or np.any(
             known[np.minimum(where, known.size - 1)] != number
         ):
-            raise TsaraPlumeError("An event taken from a trigger has no interval of its own.")
+            raise TsaraEventError("An event taken from a trigger has no interval of its own.")
         start_ns, stop_ns = starts[where], stops[where]
     covered = _covered(cells.start_ns[rows], cells.stop_ns[rows], group, start_ns, stop_ns)
     return Events(

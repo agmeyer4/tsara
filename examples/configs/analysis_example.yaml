@@ -2,7 +2,7 @@
 # TSARA analysis config example
 # ----------------------------------------------------------------------------
 # Describes the SCIENCE applied to ingested data. List-valued fields
-# (baseline windows/quantiles, plumes enter/exit multiples, smoothing cutoffs)
+# (baseline windows/quantiles, events enter/exit multiples, smoothing cutoffs)
 # are PARAMETER SWEEP dimensions: every combination is evaluated, and the
 # spread of results across the hypercube becomes the methodological
 # uncertainty. Single-element lists = fixed methodology, zero sweep.
@@ -77,13 +77,13 @@ baseline:
     # Spelled out for the default, which needs no entry at all.
     voc_pfp.benzene: {method: rolling_quantile}
 
-# --- Plume events ----------------------------------------------------------
+# --- Events ----------------------------------------------------------------
 # Per variable and sweep point, plume-free air is described by its clean level
 # (the most common enhancement) and clean spread (1.4826 x the median distance
 # below it); thresholds are multiples of that spread above that level
 # (METHODS.md §6.8). The clean spread is NOT a measurement uncertainty: it
 # includes the background's wobble at the window's scale.
-plumes:
+events:
   # Both swept; every entry must exceed every exit. On 1 s white noise, entry
   # 2 finds about 79 chance events an hour, 3 about 5 and 4 about 0.1.
   enter_multiple: [3.0, 4.0, 5.0]

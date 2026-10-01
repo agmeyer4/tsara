@@ -1,16 +1,16 @@
-"""The plume state: records, clean air, the statistic and events, per stream.
+"""The event state: records, clean air, the statistic and events, per stream.
 
 For every gas variable of a baseline state (``docs/METHODS.md`` §6.2) this
-stage finds the variable's records (:mod:`tsara.plumes.records`), describes
-its plume-free air in each at every sweep point (:mod:`tsara.plumes.clean`),
+stage finds the variable's records (:mod:`tsara.events.records`), describes
+its plume-free air in each at every sweep point (:mod:`tsara.events.clean`),
 forms the statistic z = (Δ − clean level) / clean spread at every reading,
 and finds the events at every combination of the baseline's window and
-quantile with the plumes stage's entry and exit multiples
-(:mod:`tsara.plumes.hysteresis`). Everything lands on the stream's own
+quantile with the events stage's entry and exit multiples
+(:mod:`tsara.events.hysteresis`). Everything lands on the stream's own
 cells, beside the readings, as the baseline state does (§6.8): one Dataset
-per instrument, ``tsara_stage = "plumes"``.
+per instrument, ``tsara_stage = "events"``.
 
-A variable named in ``plumes.triggers`` finds no events of its own: at each
+A variable named in ``events.triggers`` finds no events of its own: at each
 sweep point it takes the trigger's event intervals, a reading of it
 belonging to an event when its cell midpoint lies in that event's interval
 (§6.8). Its events keep the trigger's numbers, so the two stay linked.
@@ -58,16 +58,16 @@ from tsara.core.naming import (
     sigma_rand_name,
 )
 from tsara.core.support import stream_cells
-from tsara.plumes.clean import clean_air
-from tsara.plumes.hysteresis import expected_chance_rate, find_events
-from tsara.plumes.records import TsaraPlumeError, find_records
+from tsara.events.clean import clean_air
+from tsara.events.hysteresis import expected_chance_rate, find_events
+from tsara.events.records import TsaraEventError, find_records
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Mapping, Sequence
 
     import numpy.typing as npt
 
-    from tsara.config.analysis import PlumesConfig
+    from tsara.config.analysis import EventsConfig
     from tsara.core.support import CellBounds
 
 logger = logging.getLogger(__name__)
@@ -75,33 +75,33 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "CHANCE_ASSUMPTION_ATTR",
     "ENTER_DIM",
+    "EVENTS_STAGE",
     "EXIT_DIM",
-    "PLUMES_STAGE",
     "TRIGGER_ATTR",
-    "plume_state",
-    "plume_states",
+    "event_state",
+    "event_states",
 ]
 
-#: What a plume state's ``tsara_stage`` says.
-PLUMES_STAGE = "plumes"
+#: What an event state's ``tsara_stage`` says.
+EVENTS_STAGE = "events"
 
-#: The plumes stage's own two sweep dimensions, beside the baseline's.
+#: The events stage's own two sweep dimensions, beside the baseline's.
 ENTER_DIM = "enter_multiple"
 EXIT_DIM = "exit_multiple"
 
 #: On a variable that takes its events from another: which one.
-TRIGGER_ATTR = "tsara_plumes_trigger"
+TRIGGER_ATTR = "tsara_events_trigger"
 
 #: On ``chance_events_x``: the assumption its closed form rests on.
 CHANCE_ASSUMPTION_ATTR = "tsara_chance_assumption"
 
 #: The settings a state was found under, as dataset attributes (§6.8).
 _SETTING_ATTRS = {
-    "record_gap": "tsara_plumes_record_gap",
-    "max_record_length": "tsara_plumes_max_record_length",
-    "min_clean_readings": "tsara_plumes_min_clean_readings",
-    "clean_level_estimator": "tsara_plumes_clean_level_estimator",
-    "max_internal_gap": "tsara_plumes_max_internal_gap",
+    "record_gap": "tsara_events_record_gap",
+    "max_record_length": "tsara_events_max_record_length",
+    "min_clean_readings": "tsara_events_min_clean_readings",
+    "clean_level_estimator": "tsara_events_clean_level_estimator",
+    "max_internal_gap": "tsara_events_max_internal_gap",
 }
 
 _CHANCE_ASSUMPTION = (
@@ -114,70 +114,70 @@ _CHANCE_ASSUMPTION = (
 _MAX_NAMED = 8
 
 
-def plume_state(
+def event_state(
     state: xr.Dataset,
     *,
     instrument: str,
-    plumes: PlumesConfig,
+    events: EventsConfig,
     variables: Sequence[str] | None = None,
     triggers: Mapping[str, xr.Dataset] | None = None,
 ) -> xr.Dataset:
-    """Find one stream's plume events at every sweep point.
+    """Find one stream's events at every sweep point.
 
     Parameters
     ----------
     state : xarray.Dataset
         The instrument's baseline state.
     instrument : str
-        The stream's name in the campaign, as ``plumes.triggers`` spells it.
-    plumes : PlumesConfig
+        The stream's name in the campaign, as ``events.triggers`` spells it.
+    events : EventsConfig
         Thresholds, records and triggers.
     variables : sequence of str, optional
         Which variables to find events for. ``None`` takes every variable
         the baseline state holds an enhancement of.
     triggers : mapping of str to xarray.Dataset, optional
         For a variable whose trigger lies on another instrument, that
-        instrument's plume state, keyed by instrument name. A trigger on
+        instrument's event state, keyed by instrument name. A trigger on
         this instrument is taken from this call's own results.
 
     Returns
     -------
     xarray.Dataset
-        The plume state, on the baseline state's ``time`` and ``time_bnds``,
+        The event state, on the baseline state's ``time`` and ``time_bnds``,
         with the baseline's two sweep dimensions and ``enter_multiple`` and
         ``exit_multiple``; per variable the columns the module docstring
         lists.
 
     Raises
     ------
-    TsaraPlumeError
+    TsaraEventError
         If ``state`` is not a baseline state, a named variable has no
-        enhancement, or a trigger's plume state is missing or was found on
+        enhancement, or a trigger's event state is missing or was found on
         another sweep.
     """
     if state.attrs.get("tsara_stage") != BASELINE_STAGE:
-        raise TsaraPlumeError(
-            f"plume_state reads a baseline state, and '{instrument}' has tsara_stage "
+        raise TsaraEventError(
+            f"event_state reads a baseline state, and '{instrument}' has tsara_stage "
             f"'{state.attrs.get('tsara_stage')}'. Build one with baseline_state first."
         )
     selection = _select(state, instrument, variables)
     cells = stream_cells(state, instrument)
-    enter = np.asarray(plumes.enter_multiple, dtype=np.float64)
-    exit_ = np.asarray(plumes.exit_multiple, dtype=np.float64)
-    own = [v for v in selection if plumes.trigger_for(instrument, v) is None]
-    adopted = [v for v in selection if plumes.trigger_for(instrument, v) is not None]
+    enter = np.asarray(events.enter_multiple, dtype=np.float64)
+    exit_ = np.asarray(events.exit_multiple, dtype=np.float64)
+    own = [v for v in selection if events.trigger_for(instrument, v) is None]
+    adopted = [v for v in selection if events.trigger_for(instrument, v) is not None]
 
     data_vars: dict[str, tuple[tuple[str, ...], npt.NDArray[np.generic], dict[str, object]]] = {}
     blank_everywhere: dict[str, list[tuple[str, int]]] = {}
     for variable in own:
-        columns, blank = _own_events(state, variable, cells, plumes, enter, exit_)
+        columns, blank = _own_events(state, variable, cells, events, enter, exit_)
         data_vars.update(columns)
         if blank:
             blank_everywhere[variable] = blank
     for variable in adopted:
-        trigger = str(plumes.trigger_for(instrument, variable))
+        trigger = str(events.trigger_for(instrument, variable))
         membership, source_cells = _trigger_events(
-            trigger, instrument, cells, data_vars, triggers, state, plumes
+            trigger, instrument, cells, data_vars, triggers, state, events
         )
         data_vars.update(
             _adopted_events(state, variable, cells, trigger, membership, source_cells, instrument)
@@ -194,21 +194,21 @@ def plume_state(
         attrs={
             **state.attrs,
             "tsara_version": __version__,
-            "tsara_stage": PLUMES_STAGE,
+            "tsara_stage": EVENTS_STAGE,
             "tsara_instrument": instrument,
-            **{attr: str(getattr(plumes, field)) for field, attr in _SETTING_ATTRS.items()},
+            **{attr: str(getattr(events, field)) for field, attr in _SETTING_ATTRS.items()},
         },
     )
     dataset.coords[TIME_BOUNDS_VAR] = state[TIME_BOUNDS_VAR]
     dataset[TIME_COORD].attrs.update(state[TIME_COORD].attrs)
     if blank_everywhere:
-        _warn_blank_everywhere(instrument, blank_everywhere, plumes.min_clean_readings)
+        _warn_blank_everywhere(instrument, blank_everywhere, events.min_clean_readings)
     pin_time_encoding(dataset)
     return dataset
 
 
-def plume_states(states: Mapping[str, xr.Dataset], plumes: PlumesConfig) -> dict[str, xr.Dataset]:
-    """Find the plume events of every baseline state of a campaign.
+def event_states(states: Mapping[str, xr.Dataset], events: EventsConfig) -> dict[str, xr.Dataset]:
+    """Find the events of every baseline state of a campaign.
 
     In two passes, because a trigger may lie on another instrument: first
     every variable that finds its own events, on every instrument; then every
@@ -219,32 +219,32 @@ def plume_states(states: Mapping[str, xr.Dataset], plumes: PlumesConfig) -> dict
     ----------
     states : mapping of str to xarray.Dataset
         The campaign's baseline states, keyed by instrument.
-    plumes : PlumesConfig
+    events : EventsConfig
         Thresholds, records and triggers.
 
     Returns
     -------
     dict of str to xarray.Dataset
-        One plume state per instrument that had a variable to find events for.
+        One event state per instrument that had a variable to find events for.
     """
     first: dict[str, xr.Dataset] = {}
     later: dict[str, list[str]] = {}
     for instrument, state in states.items():
         names = _default_variables(state)
-        own = [v for v in names if plumes.trigger_for(instrument, v) is None]
+        own = [v for v in names if events.trigger_for(instrument, v) is None]
         later[instrument] = [v for v in names if v not in own]
         if own:
-            first[instrument] = plume_state(
-                state, instrument=instrument, plumes=plumes, variables=own
+            first[instrument] = event_state(
+                state, instrument=instrument, events=events, variables=own
             )
     result = dict(first)
     for instrument, adopted in later.items():
         if not adopted:
             continue
-        taken = plume_state(
+        taken = event_state(
             states[instrument],
             instrument=instrument,
-            plumes=plumes,
+            events=events,
             variables=adopted,
             triggers=first,
         )
@@ -265,7 +265,7 @@ def _select(state: xr.Dataset, instrument: str, variables: Sequence[str] | None)
         return _default_variables(state)
     missing = [v for v in variables if enhancement_name(v) not in state.data_vars]
     if missing:
-        raise TsaraPlumeError(
+        raise TsaraEventError(
             f"The baseline state of '{instrument}' holds no enhancement of {missing}; "
             f"it holds enhancements of {_default_variables(state)}."
         )
@@ -292,7 +292,7 @@ def _own_events(
     state: xr.Dataset,
     variable: str,
     cells: CellBounds,
-    plumes: PlumesConfig,
+    events: EventsConfig,
     enter: npt.NDArray[np.float64],
     exit_: npt.NDArray[np.float64],
 ) -> tuple[dict[str, _Column], list[tuple[str, int]]]:
@@ -310,16 +310,16 @@ def _own_events(
     records = find_records(
         cells,
         np.isfinite(x),
-        gap_ns=_ns(plumes.record_gap),
-        max_length_ns=_ns(plumes.max_record_length),
+        gap_ns=_ns(events.record_gap),
+        max_length_ns=_ns(events.max_record_length),
     )
     declared = reading.attrs.get("quantization")
     air = clean_air(
         enhancement,
         x,
         records,
-        estimator=plumes.clean_level_estimator,
-        min_clean_readings=plumes.min_clean_readings,
+        estimator=events.clean_level_estimator,
+        min_clean_readings=events.min_clean_readings,
         quantization=None if declared is None else float(declared),
     )
 
@@ -336,7 +336,7 @@ def _own_events(
     event = np.full((x.size, *sweep), -1, dtype=np.int32)
     n_events = np.zeros(sweep, dtype=np.int64)
     chance = np.zeros(sweep, dtype=np.float64)
-    gap_ns = _ns(plumes.max_internal_gap)
+    gap_ns = _ns(events.max_internal_gap)
     for w, q in np.ndindex(windows, quantiles):
         scored = int(np.count_nonzero(np.isfinite(z[:, w, q])))
         for e, x_ in np.ndindex(enter.size, exit_.size):
@@ -453,9 +453,9 @@ def _warn_blank_everywhere(
     if len(patterns) > _MAX_NAMED:
         groups.append(f"and {len(patterns) - _MAX_NAMED} more pattern(s)")
     logger.warning(
-        "Plume state of '%s': sweep points at which every record is blank, so no event is "
+        "Event state of '%s': sweep points at which every record is blank, so no event is "
         "found -- %s. A record needs %d readings below its clean level (METHODS 6.8); a "
-        "sparse variable can take its events from a dense one named in plumes.triggers.",
+        "sparse variable can take its events from a dense one named in events.triggers.",
         instrument,
         " | ".join(groups),
         min_clean_readings,
@@ -474,12 +474,12 @@ def _trigger_events(
     found: Mapping[str, _Column],
     triggers: Mapping[str, xr.Dataset] | None,
     state: xr.Dataset,
-    plumes: PlumesConfig,
+    events: EventsConfig,
 ) -> tuple[npt.NDArray[np.integer], CellBounds]:
     """Return a trigger's event membership, shaped (time, *sweep), and its cells.
 
     From this call's own results when the trigger is a variable of this
-    instrument found here; otherwise from the plume state handed over for
+    instrument found here; otherwise from the event state handed over for
     its instrument, which must have been found on this same sweep.
     """
     trigger_instrument, _, trigger_variable = trigger.partition(".")
@@ -488,19 +488,19 @@ def _trigger_events(
         return found[name][1].astype(np.int64), cells
     source = None if triggers is None else triggers.get(trigger_instrument)
     if source is None or name not in source:
-        raise TsaraPlumeError(
-            f"'{instrument}' takes events from '{trigger}', whose plume state was not "
+        raise TsaraEventError(
+            f"'{instrument}' takes events from '{trigger}', whose event state was not "
             "handed over; find its events first and pass its state in triggers=."
         )
     for dim, wanted in (
         (WINDOW_DIM, state[WINDOW_DIM].values),
         (QUANTILE_DIM, state[QUANTILE_DIM].values),
-        (ENTER_DIM, np.asarray(plumes.enter_multiple, dtype=np.float64)),
-        (EXIT_DIM, np.asarray(plumes.exit_multiple, dtype=np.float64)),
+        (ENTER_DIM, np.asarray(events.enter_multiple, dtype=np.float64)),
+        (EXIT_DIM, np.asarray(events.exit_multiple, dtype=np.float64)),
     ):
         if not np.array_equal(source[dim].values, wanted):
-            raise TsaraPlumeError(
-                f"The plume state of '{trigger_instrument}' was found on another sweep "
+            raise TsaraEventError(
+                f"The event state of '{trigger_instrument}' was found on another sweep "
                 f"({dim} {source[dim].values.tolist()}, here {list(wanted)}); a trigger's "
                 "events can only be taken at the same sweep points."
             )

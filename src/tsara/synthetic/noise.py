@@ -391,7 +391,7 @@ def quantization_floor(resolution: float) -> float:
 
     The standard deviation of uniform rounding error on a step of width
     ``delta`` is ``delta / sqrt(12)`` (METHODS.md §2.5). Exposed here so that
-    the plumes stage's tests of its floor compare against the same constant
+    the events stage's tests of its floor compare against the same constant
     the generator used, rather than a re-derived literal.
 
     Parameters

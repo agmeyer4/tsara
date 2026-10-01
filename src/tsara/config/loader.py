@@ -164,8 +164,8 @@ class TsaraConfig(_StrictModel):
         return self
 
     @model_validator(mode="after")
-    def _plume_triggers_name_declared_gases(self) -> TsaraConfig:
-        """Check every ``plumes.triggers`` entry against the manifest.
+    def _event_triggers_name_declared_gases(self) -> TsaraConfig:
+        """Check every ``events.triggers`` entry against the manifest.
 
         The analysis schema validates the *spelling* of a key and a trigger;
         here both must exist. Both sides must be ``role: gas`` variables,
@@ -176,49 +176,49 @@ class TsaraConfig(_StrictModel):
         make the record of where a variable's events came from name the wrong
         variable, the reason ``from_field`` refuses one (METHODS.md §6.8).
         """
-        plumes = self.analysis.plumes
+        events = self.analysis.events
         instruments = self.manifest.instruments
 
         def gases_of(key: str, instrument_name: str) -> list[str]:
             instrument = instruments.get(instrument_name)
             if instrument is None:
                 raise ValueError(
-                    f"plumes.triggers names '{key}', but manifest '{self.manifest.name}' "
+                    f"events.triggers names '{key}', but manifest '{self.manifest.name}' "
                     f"declares no instrument '{instrument_name}'; instruments: "
                     f"{sorted(instruments)}."
                 )
             return [name for name, spec in instrument.variables.items() if spec.role == "gas"]
 
-        for key, trigger in plumes.triggers.items():
+        for key, trigger in events.triggers.items():
             instrument_name, _, variable_name = key.partition(".")
             gases = gases_of(key, instrument_name)
             if variable_name and variable_name not in gases:
                 raise ValueError(
-                    f"plumes.triggers names '{key}', but instrument '{instrument_name}' "
+                    f"events.triggers names '{key}', but instrument '{instrument_name}' "
                     f"declares no gas variable '{variable_name}'; its gases: "
                     f"{sorted(gases)}."
                 )
             if not gases:
                 raise ValueError(
-                    f"plumes.triggers names instrument '{key}', which declares no gas "
+                    f"events.triggers names instrument '{key}', which declares no gas "
                     "variable, so the entry would apply to nothing."
                 )
             trigger_instrument, _, trigger_variable = trigger.partition(".")
             if trigger_variable not in gases_of(trigger, trigger_instrument):
                 raise ValueError(
-                    f"plumes.triggers['{key}'] names '{trigger}', which is not a gas "
+                    f"events.triggers['{key}'] names '{trigger}', which is not a gas "
                     f"variable of instrument '{trigger_instrument}'."
                 )
             covered = [variable_name] if variable_name else gases
             if trigger_instrument == instrument_name and trigger_variable in covered:
                 raise ValueError(
-                    f"plumes.triggers['{key}'] makes '{trigger}' its own trigger; name the "
+                    f"events.triggers['{key}'] makes '{trigger}' its own trigger; name the "
                     "variables that take its events one by one instead."
                 )
-            upstream = plumes.trigger_for(trigger_instrument, trigger_variable)
+            upstream = events.trigger_for(trigger_instrument, trigger_variable)
             if upstream is not None:
                 raise ValueError(
-                    f"plumes.triggers['{key}'] names '{trigger}', which itself takes its "
+                    f"events.triggers['{key}'] names '{trigger}', which itself takes its "
                     f"events from '{upstream}'; a chain is refused so that the record of "
                     "where a variable's events came from names the variable that found them."
                 )

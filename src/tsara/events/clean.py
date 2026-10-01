@@ -1,4 +1,4 @@
-"""The clean level and spread: the plumes stage's description of plume-free air.
+"""The clean level and spread: the events stage's description of plume-free air.
 
 Plumes only add, so an enhancement's plume-free readings are the ones below
 its most common value (``docs/METHODS.md`` §6.8). Per variable, per record
@@ -40,12 +40,12 @@ from typing import TYPE_CHECKING, TypeVar
 
 import numpy as np
 
-from tsara.plumes.records import TsaraPlumeError
+from tsara.events.records import TsaraEventError
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt
 
-    from tsara.plumes.records import Records
+    from tsara.events.records import Records
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ MAD_TO_SIGMA = 1.4826
 #: A clean-level estimator: finite enhancements in, their most common value out.
 CleanLevelEstimator = Callable[["npt.NDArray[np.float64]"], float]
 
-#: Registered estimators keyed by ``PlumesConfig.clean_level_estimator``.
+#: Registered estimators keyed by ``EventsConfig.clean_level_estimator``.
 #: Module-private: mutation goes through :func:`register_clean_level_estimator`.
 _ESTIMATORS: dict[str, CleanLevelEstimator] = {}
 
@@ -161,7 +161,7 @@ def clean_air(
     readings : numpy.ndarray of float64
         The variable's readings, shaped ``(reading,)``, for δ.
     records : Records
-        The variable's records (:func:`~tsara.plumes.records.find_records`).
+        The variable's records (:func:`~tsara.events.records.find_records`).
     estimator : str
         The registered clean-level estimator.
     min_clean_readings : int
@@ -178,14 +178,14 @@ def clean_air(
 
     Raises
     ------
-    TsaraPlumeError
+    TsaraEventError
         If the arrays do not match the records, or the estimator is not
         registered.
     """
     values = np.asarray(enhancement, dtype=np.float64)
     x = np.asarray(readings, dtype=np.float64)
     if values.ndim < 1 or values.shape[0] != records.index.size or x.shape != records.index.shape:
-        raise TsaraPlumeError(
+        raise TsaraEventError(
             f"Enhancement of shape {values.shape} and readings of shape {x.shape} do not match "
             f"{records.index.size} readings."
         )
@@ -306,7 +306,7 @@ def register_clean_level_estimator(name: str, *, replace: bool = False) -> Calla
     Parameters
     ----------
     name : str
-        The ``PlumesConfig.clean_level_estimator`` value.
+        The ``EventsConfig.clean_level_estimator`` value.
     replace : bool, optional
         Replace an estimator already registered under ``name``.
 
@@ -354,7 +354,7 @@ def get_clean_level_estimator(name: str) -> CleanLevelEstimator:
     Parameters
     ----------
     name : str
-        The ``PlumesConfig.clean_level_estimator`` value.
+        The ``EventsConfig.clean_level_estimator`` value.
 
     Returns
     -------
@@ -363,13 +363,13 @@ def get_clean_level_estimator(name: str) -> CleanLevelEstimator:
 
     Raises
     ------
-    TsaraPlumeError
+    TsaraEventError
         If nothing is registered under ``name``; the message lists what is.
     """
     try:
         return _ESTIMATORS[name]
     except KeyError:
-        raise TsaraPlumeError(
+        raise TsaraEventError(
             f"No clean-level estimator registered as '{name}'. Available: "
             f"{list(available_clean_level_estimators())}."
         ) from None

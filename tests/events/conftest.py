@@ -8,12 +8,12 @@ import pytest
 import xarray as xr
 
 from tsara.baseline import baseline_state
-from tsara.config.analysis import BaselineConfig, PlumesConfig
+from tsara.config.analysis import BaselineConfig, EventsConfig
 from tsara.config.loader import load_synthetic
-from tsara.plumes import plume_state
+from tsara.events import event_state
 from tsara.synthetic import SyntheticDataset, generate
 
-#: The example campaign, its Picarro's baseline state and its plume state. Test
+#: The example campaign, its Picarro's baseline state and its event state. Test
 #: files spell this alias again rather than importing it, as they do the other
 #: fixture types.
 ExampleChain: TypeAlias = tuple[SyntheticDataset, xr.Dataset, xr.Dataset]
@@ -37,5 +37,5 @@ def example_chain() -> ExampleChain:
         baseline=BaselineConfig(windows=("2min", "10min", "60min"), quantiles=(0.05,)),
         variables=["ch4"],
     )
-    plume = plume_state(state, instrument="picarro", plumes=PlumesConfig(max_internal_gap="1ns"))
-    return campaign, state, plume
+    found = event_state(state, instrument="picarro", events=EventsConfig(max_internal_gap="1ns"))
+    return campaign, state, found

@@ -6,7 +6,7 @@ baseline section of the analysis configuration that produced them is written
 beside the files as ``baseline/analysis.yaml``, as the resolved manifest is
 written beside the streams. Only that section: it is all this stage read,
 and a copy of the whole would stop loading the first time another stage's
-settings changed, as the plumes stage's did in Phase 6 (METHODS.md §6.6).
+settings changed, as the events stage's did in Phase 6 (METHODS.md §6.6).
 
 ``bundle.json`` is not touched, for the grid's reason: that descriptor
 records which stage created the bundle and what streams it wrote, and the

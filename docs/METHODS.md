@@ -36,10 +36,10 @@ attributes and this document, because each was once used for several:
 | **provenance** | where a number or a fact came from: `declared`, `reported`, `inferred`, `assumed`, `empirical` … (`uncertainty_provenance`, `tsara_support_label_provenance`) | |
 | **field** | the physical quantity a variable measures (§1.6) | |
 | **baseline at window w** | the low quantile of a variable over a window of length w around a reading; always stated with its window (§6.1) | "the baseline" or "the true background": what is baseline at one window is signal at another |
-| **clean level**, **clean spread** | the plumes stage's description of plume-free air at one sweep point over one record: the most common enhancement, and 1.4826 × the median distance below it (§6.8). Detection's thresholds are multiples of the clean spread | a measurement uncertainty or the instrument's noise: the clean spread includes the background's wobble at the window's scale. Not `scale` or `offset`, which are a unit conversion's |
-| **plume** | an enhancement in the air from an emission: what the generator injects and the plumes stage (`tsara.plumes`) looks for | an interval the stage reported, which is an *event* |
-| **event** | an interval the plumes stage reported on one variable at one sweep point (`event_id`): one plume, part of one, several merged, or a chance crossing, which is why the expected chance rate is recorded (§6.8) | a plume, or a source |
-| **record** | a stretch of one stream over which the plumes stage computes its clean level and spread: split where consecutive readings are more than a set gap apart, and cut into pieces no longer than a set length (§6.8) | a file, a drive or a campaign |
+| **clean level**, **clean spread** | the events stage's description of plume-free air at one sweep point over one record: the most common enhancement, and 1.4826 × the median distance below it (§6.8). The events stage's thresholds are multiples of the clean spread | a measurement uncertainty or the instrument's noise: the clean spread includes the background's wobble at the window's scale. Not `scale` or `offset`, which are a unit conversion's |
+| **plume** | an enhancement in the air from an emission: what the generator injects and the events stage (`tsara.events`) looks for. No stage yet reports one: whether events are a plume is judged across the sweep (Phase 7) | an interval the stage reported, which is an *event* |
+| **event** | an interval the events stage reported on one variable at one sweep point (`event_id`): what one sweep point sees, not a verdict: one plume, part of one, several merged, or a chance crossing, which is why the expected chance rate is recorded (§6.8) | a plume, or a source. The stage that reports events is `events` (`tsara.events`), named for its product as `baseline` is; its product is the **event state** and the **event catalog**, saved under `events/` in a bundle. It was named `plumes` until the Phase-6 walkthrough; no bundle under the old name exists outside that branch, so none is migrated |
+| **record** | a stretch of one stream over which the events stage computes its clean level and spread: split where consecutive readings are more than a set gap apart, and cut into pieces no longer than a set length (§6.8) | a file, a drive or a campaign |
 | **rolling** | the operation: a statistic over a window centred on each reading, moved along the record (`rolling_quantile`; Phase 7's fits over windows) | a stage or a product. The stage that computes baselines and enhancements is `baseline` (`tsara.baseline`); its product is the **baseline state**, saved under `baseline/` in a bundle. Both were named `rolling` until Phase 5 merged; no bundle under the old name exists outside that branch, so none is migrated |
 | **borrowed** | the share of a joined value resting on air outside its own cell (`borrowed_<name>`, `tsara_borrowed_share`, §11.2.4) | an uncertainty; it is a magnitude, and no threshold on it separates a blend from jitter |
 | **averaged / straddled / narrowed / copied** | what a join did to the readings behind a column (`tsara_support_transform`, §11.2.4): wholly inside their cells; lying across a boundary; wider than a cell they fill; at least twice as wide, which is refused unless asked for by name | |
@@ -1360,7 +1360,7 @@ that produced them as `baseline/analysis.yaml`, as the resolved manifest is
 written beside the streams; `bundle.json` is not touched, for the grid's
 reason (§11.7). **Only that section** (decided 2026-09-30): Phase 5 wrote the
 whole analysis configuration, and the Phase-6 schema, which renamed
-`detection` to `plumes` and deleted its noise fields, would have refused every
+`detection` to `events` and deleted its noise fields, would have refused every
 such file, since unknown keys are refused. A stage records the section it
 read, so that another stage's settings can change; `load_state` reads only
 the `baseline` section, which also loads every bundle Phase 5 wrote. State
@@ -1461,25 +1461,29 @@ clipped** at zero: noise makes Δ negative in clean air and on plume edges,
 and clipping would shift the noise distribution's mean and bias every
 Phase-7 regression that follows.
 
-### 6.8 Plumes **[decided 2026-09-29, built 2026-09-30 — Phase 6]**
+### 6.8 Events **[decided 2026-09-29, built 2026-09-30 — Phase 6]**
 
-Every stage before this one turns numbers into numbers. Detection turns them
-into a decision, "from here to here there is a plume in methane", and three
-things follow. Nothing in a real record says whether a decision is right, so
+Every stage before this one turns numbers into numbers. This one turns them
+into a decision, "from here to here, at this sweep point, methane stands
+out", and three things follow. Nothing in a real record says whether a decision is right, so
 the generated answer key (§8) is the only arbiter. A decision jumps with its
 settings: nudge a threshold and one event splits in two, merges with another
 or vanishes, so "the same event" at two sweep points is a relation that has
-to be computed. And the product is a table of intervals rather than a column.
+to be computed. And the product is a table of intervals rather than a column. A decision is
+what one sweep point sees, not a verdict that a plume is there: that is
+judged across the sweep, in Phase 7.
 Everything here was measured at the Phase-6 scoping, on generated data under
 the rules stated and on the 2024-07-18 drive; the scripts were scoping tools,
 and notebooks 06 and 06b re-measure the numbers that matter.
 
 **Where it runs.** Per variable, on its own cells, at every point of the
 baseline sweep and of detection's own thresholds. Events are time intervals,
-so no common clock is needed (§1.1). The stage is `tsara.plumes` and its
-settings are `analysis.plumes` (named 2026-09-30: "detection" alone could be
-read as source detection, and in TSARA it already names the limit of
-detection, §9.2.1). An event seen by several variables is the union or
+so no common clock is needed (§1.1). The stage is `tsara.events` and its
+settings are `analysis.events`. It was named `plumes` on 2026-09-30
+("detection" alone could be read as source detection, and in TSARA it already
+names the limit of detection, §9.2.1) and renamed `events` in the Phase-6
+walkthrough, for its product: an event per sweep point, of which a plume is a
+judgement made later. An event seen by several variables is the union or
 intersection of their intervals, formed by a separate small operation, not
 by the detector; it is built in Phase 7, where fitting a pair over its
 events is its first caller (decided 2026-09-30).
@@ -1519,7 +1523,7 @@ A and B call wander plumes; C's spread grows with the wander, and its false
 alarms stay near the chance rate. (A reads 7–9 % low on flat air by
 construction, a quietest-5 % estimate being the low tail of a noisy one.)
 Every column C of this table and of the two below is re-run through the
-package by `tests/plumes/test_methods_tables.py` (opt-in, `TSARA_SLOW=1`,
+package by `tests/events/test_methods_tables.py` (opt-in, `TSARA_SLOW=1`,
 about 12 minutes), which requires each printed number to reproduce; its first
 run corrected two (2026-09-30): 1.9 and 3.1 had been rounded twice, from the
 scoping's printed 1.85 and 3.05, and are 1.849 and 3.049. The price is
@@ -1618,7 +1622,7 @@ candidate is a Gaussian fitted to the lower side of the enhancement's
 histogram peak, which is plume-free whatever the plume fraction (not measured;
 CLAUDE.md open flags).
 
-**The half-sample mode as built** (`tsara.plumes.clean`, 2026-09-30). Sorted,
+**The half-sample mode as built** (`tsara.events.clean`, 2026-09-30). Sorted,
 the values are narrowed to the shortest interval holding ⌈*n*/2⌉ of them, then
 to the shortest holding half of those, until three or fewer remain; of three,
 the mode is the mean of the closer pair, or the middle value when the two gaps
@@ -1673,7 +1677,7 @@ generator seeded 11, run through the counts 10, 15, 20, 30, 50, 100, 300 and
 1000 in that order; for the half-sample mode, the 10th–90th percentiles of
 the spread over its truth (1) and of the chance that one plume-free reading
 crosses the entry threshold *m* + 3*s*, as a multiple of the nominal 0.00135.
-The package reproduces every number exactly (`tests/plumes/test_clean.py`).
+The package reproduces every number exactly (`tests/events/test_clean.py`).
 The rule was first written without the draw count and the order of the
 counts, and could not have been re-run from this document:
 
@@ -1687,7 +1691,7 @@ false-alarm rate; the half-sample mode's jitter persists at every count. A
 drive has thousands of readings below its level; a canister's has a few tens
 at most (with a constant zero baseline: 7 of its 32 fills on the 07-18 drive,
 15 of 30 on 07-30; notebook 06b), so a canister takes its events from a dense
-instrument named as its **trigger** (`plumes.triggers`, keyed by instrument or
+instrument named as its **trigger** (`events.triggers`, keyed by instrument or
 by variable, the variable's key winning). A trigger may measure any field
 (decided 2026-09-30, revising "the same field"): the 2024 canister's VOCs
 mostly have no dense instrument of their own, and a trigger states when the
@@ -1719,7 +1723,7 @@ which gives 79.7, 4.85 and 0.11 an hour at 1 s for entries 2, 3 and 4 (exit
 this expected chance rate per stream and sweep point**, labelled with its
 assumption (independent Gaussian readings; oversampled, autocorrelated
 readings cross less often; dips not bridged). Measured through the package's
-own detector (`tsara.plumes.hysteresis`; rule: independent N(0, 1) readings on
+own detector (`tsara.events.hysteresis`; rule: independent N(0, 1) readings on
 contiguous 1 s cells, 200 h in one record, seed 12, exit 1, nothing bridged):
 78.86, 4.62 and 0.10 events an hour at entries 2, 3 and 4 against 79.74, 4.85
 and 0.11, which is −1.4, −1.5 and −0.4 Poisson standard errors; over seeds
@@ -1736,7 +1740,7 @@ swept. Matching events across thresholds and quantiles is Phase 7's first job.
 **The detector.** Offline two-threshold hysteresis: an event is a run of
 readings with *z* ≥ exit that holds at least one with *z* ≥ entry. A run
 never crosses a dropout (two consecutive finite readings more than 1.5 times
-the record's median spacing apart, the rule of §2.5; it lives in the plumes
+the record's median spacing apart, the rule of §2.5; it lives in the events
 stage, as `DROPOUT_SPACING_FACTOR`, until a second stage needs it), a record
 boundary, or a reading whose enhancement is blank, since a blank baseline
 says nothing about the air. `max_internal_gap` bridges a dip below exit
@@ -1783,8 +1787,8 @@ does an event at the longest window. On the example chain, 95 % of events at
 
 **What the stage saves** (names settled in the build):
 
-- **The plume state** (built 2026-09-30, `tsara.plumes.state`), one Dataset
-  per instrument, `tsara_stage = "plumes"`, on the baseline state's own
+- **The event state** (built 2026-09-30, `tsara.events.state`), one Dataset
+  per instrument, `tsara_stage = "events"`, on the baseline state's own
   `time` and `time_bnds` with the baseline's two sweep dimensions and two of
   its own, `enter_multiple` and `exit_multiple`. Per variable *x* that finds
   its own events: `record_x` (time), the record of each reading, −1 for
@@ -1800,13 +1804,13 @@ does an event at the longest window. On the example chain, 95 % of events at
   `tsara_chance_assumption`; and `sigma_rand_x` when the reading has one,
   for comparison and nothing else. A variable with a trigger holds
   `event_x` and `n_events_x` only, each naming the trigger in
-  `tsara_plumes_trigger`, its events keeping the trigger's numbers so the
+  `tsara_events_trigger`, its events keeping the trigger's numbers so the
   two stay linked; a reading of it belongs to an event when its cell
   midpoint lies in the event's interval, and where cells wide enough to
   touch two events make two intervals overlap, to the later. The settings
-  the state was found under ride on the dataset as `tsara_plumes_record_gap`,
-  `tsara_plumes_max_record_length`, `tsara_plumes_min_clean_readings`,
-  `tsara_plumes_clean_level_estimator` and `tsara_plumes_max_internal_gap`.
+  the state was found under ride on the dataset as `tsara_events_record_gap`,
+  `tsara_events_max_record_length`, `tsara_events_min_clean_readings`,
+  `tsara_events_clean_level_estimator` and `tsara_events_max_internal_gap`.
   A sweep point at which every record of a variable is blank is named in one
   warning per stream, variables sharing a pattern named together. Through
   the whole chain (the example campaign generated, its 2 s Picarro's
@@ -1818,7 +1822,7 @@ does an event at the longest window. On the example chain, 95 % of events at
   exit 1, 1.5, 2, so 81 sweep points): 1.9 s, beside 104 s for the baseline
   state it reads, and 121 MB in memory, 65 MB of it the event index, whose
   size on disk is measured with its persistence.
-- **The catalog** (built 2026-09-30, `tsara.plumes.catalog`), one long table
+- **The catalog** (built 2026-09-30, `tsara.events.catalog`), one long table
   keyed by `event_id`: one row per event, variable and sweep point, the sweep
   coordinates as columns (`baseline_window`, `baseline_quantile`,
   `enter_multiple`, `exit_multiple`), and the ten columns that mean what a
@@ -1838,7 +1842,7 @@ does an event at the longest window. On the example chain, 95 % of events at
   and configuration gives the same keys. A triggered variable's rows hold
   the trigger's interval, their own reading count, covered share and largest
   enhancement, no *z*, record or clean air, and name the trigger and the
-  trigger's `event_id`. Rows are rebuilt from the plume state's `event_x` by
+  trigger's `event_id`. Rows are rebuilt from the event state's `event_x` by
   the detector's own describing step (`describe_events`, the last step of
   `find_events`), so a saved state and its catalog cannot disagree. Scored as
   a join (rule: the example chain above; a true event is found when a
@@ -1849,15 +1853,15 @@ does an event at the longest window. On the example chain, 95 % of events at
   `event_id` rather than editing this one; that key is the room §7 keeps for
   integration.
 
-**Persistence** (built 2026-09-30, `tsara.plumes.bundle`). `save_plumes`
-writes one netCDF file per instrument, `plumes/<instrument>.nc`, the catalog
-as `plumes/catalog.parquet`, and the plumes section of the analysis
-configuration as `plumes/analysis.yaml`, beside the baseline states and for
+**Persistence** (built 2026-09-30, `tsara.events.bundle`). `save_events`
+writes one netCDF file per instrument, `events/<instrument>.nc`, the catalog
+as `events/catalog.parquet`, and the events section of the analysis
+configuration as `events/analysis.yaml`, beside the baseline states and for
 the reasons they are saved as they are (§6.6): only the section the stage
 read, `bundle.json` untouched, the bundle format version unchanged since the
 directory is additive, and files a narrower run did not write removed, a
 catalog included, so that the directory is the record of what ran.
-`load_plumes` brings every state back exactly, refuses a file another stage
+`load_events` brings every state back exactly, refuses a file another stage
 wrote, and refuses a table without the catalog's columns. The catalog
 declares a type for every column, so it survives Parquet exactly: left to
 inference, a column holding only missing text is pandas' `object` and comes
@@ -1900,7 +1904,7 @@ v1:
   parent–child event links (§6) precisely so this can be added later.
 - **Alternative plume detectors** beyond threshold + hysteresis: changepoint
   segmentation (e.g., PELT), matched filtering against plume templates, HMM
-  background/plume state models. Statistically interesting but heavier, more
+  background/event state models. Statistically interesting but heavier, more
   opaque, and less sweep-friendly than hysteresis; since the detector is a
   registered algorithm name, these can be added without touching the
   pipeline.
@@ -1967,7 +1971,7 @@ field it measures in its `field` attribute (§1.6). Everything prefixed
 `truth_` is the answer key and is excluded from the pipeline-visible view
 (`SyntheticDataset.observable`).
 
-The catalog is deliberately schema-compatible with the plume catalog of
+The catalog is deliberately schema-compatible with the event catalog of
 Phase 6 (§6.8): the ten columns the two share are spelled and typed alike, so
 scoring detection is a join rather than a translation layer. It records both `true_amplitude` (the continuous peak the
 source produced) and `sampled_peak_amplitude` (the largest value the
@@ -2336,7 +2340,7 @@ The components differ in **how they are drawn**, which is the entire point:
 adversarial case: once more than half a window shares one value every
 median-based estimator collapses to exactly zero, making every point a
 detection. `quantization_floor(δ) = δ/√12` exposes the §2.5 guard constant so
-the plumes stage's tests of its floor (§6.8) compare against the same number
+the events stage's tests of its floor (§6.8) compare against the same number
 the generator used.
 
 ### 8.6 Clocks, gaps, and platforms

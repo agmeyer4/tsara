@@ -1033,7 +1033,7 @@ class NestedSpec(_StrictModel):
     inherits the parent's chemistry instead, describing finer temporal
     structure within one source rather than a second source.
 
-    The plume catalog links an event to the event holding its peak at a
+    The event catalog links an event to the event holding its peak at a
     longer window, which records containment rather than this origin
     (METHODS.md §6.8); the area mathematics that would separate their
     masses is deferred (§7).

@@ -306,7 +306,7 @@ def test_a_phase_5_bundle_with_the_whole_configuration_still_loads(
     """Phase 5 wrote every section, the retired ``detection`` one included.
 
     Validated whole, that file is now refused, since ``detection`` became
-    ``plumes`` with other fields and unknown keys are refused; read by its
+    ``events`` with other fields and unknown keys are refused; read by its
     baseline section alone, it loads as it was written.
     """
     target = save_state(states, tmp_path)

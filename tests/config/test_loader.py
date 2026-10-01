@@ -63,7 +63,7 @@ def test_example_configs_are_valid() -> None:
 def test_the_example_analysis_combines_with_the_manifest_it_names() -> None:
     """The example analysis names instruments of the multiformat example manifest.
 
-    Its `baseline.methods` and `plumes.triggers` say they are checked against
+    Its `baseline.methods` and `events.triggers` say they are checked against
     that manifest when the two are combined; this is the check, so that an
     example cannot drift into naming variables nothing declares.
     """
@@ -75,7 +75,7 @@ def test_the_example_analysis_combines_with_the_manifest_it_names() -> None:
         analysis=load_analysis(examples / "analysis_example.yaml"),
     )
     assert config.analysis.baseline.methods
-    assert config.analysis.plumes.triggers
+    assert config.analysis.events.triggers
 
 
 def test_stationary_example_config_is_valid() -> None:
@@ -523,11 +523,11 @@ def test_triggers_between_declared_gases_are_accepted(
     """An instrument key, and a variable key naming a sibling on its own instrument."""
     manifest = _with_a_second_methane_analyzer(stationary_manifest_dict)
     analysis = copy.deepcopy(analysis_dict)
-    analysis["plumes"] = {"triggers": {"aeris": "picarro.ch4", "picarro.co2": "picarro.ch4"}}
-    plumes = _combined(write_yaml, manifest, analysis).analysis.plumes
-    assert plumes.trigger_for("aeris", "ch4_aeris") == "picarro.ch4"
-    assert plumes.trigger_for("picarro", "co2") == "picarro.ch4"
-    assert plumes.trigger_for("picarro", "ch4") is None
+    analysis["events"] = {"triggers": {"aeris": "picarro.ch4", "picarro.co2": "picarro.ch4"}}
+    events = _combined(write_yaml, manifest, analysis).analysis.events
+    assert events.trigger_for("aeris", "ch4_aeris") == "picarro.ch4"
+    assert events.trigger_for("picarro", "co2") == "picarro.ch4"
+    assert events.trigger_for("picarro", "ch4") is None
 
 
 @pytest.mark.parametrize(
@@ -559,6 +559,6 @@ def test_a_trigger_naming_what_cannot_take_or_give_events_is_refused(
     }
     manifest["instruments"]["sonic"] = sonic
     analysis = copy.deepcopy(analysis_dict)
-    analysis["plumes"] = {"triggers": triggers}
+    analysis["events"] = {"triggers": triggers}
     with pytest.raises(TsaraConfigError, match=message):
         _combined(write_yaml, manifest, analysis)

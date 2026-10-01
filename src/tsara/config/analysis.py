@@ -2,7 +2,7 @@
 
 Where the manifest (:mod:`tsara.config.manifest`) describes the raw data,
 this module describes the science: the baseline parameter sweep and the
-method each variable's baseline is built with, how plume events are found
+method each variable's baseline is built with, how events are found
 (thresholds, records, triggers), smoothing, source-complex clustering,
 regression/UQ settings, and an optional uniform output grid for the run that
 wants to export a rectangular table.
@@ -291,7 +291,7 @@ class BaselineConfig(_StrictModel):
 
     ``windows`` and ``quantiles`` are sweep dimensions: every (window,
     quantile) pair is evaluated. Windows double as the *multi-scale
-    hierarchy* of the plume catalog's parent-child tree (METHODS.md §6.8) --
+    hierarchy* of the event catalog's parent-child tree (METHODS.md §6.8) --
     a sharp blip is an enhancement over the shortest window's baseline, a
     broad plume over the longest. ``min_readings`` is the validity rule, a
     count tied to the quantile (§6.4). ``methods`` chooses, per variable, how
@@ -438,20 +438,20 @@ class BaselineConfig(_StrictModel):
 
 
 # ---------------------------------------------------------------------------
-# Plumes
+# Events
 # ---------------------------------------------------------------------------
 
 
-#: Clean-level estimators (METHODS.md §6.8), registered by name in the plumes
+#: Clean-level estimators (METHODS.md §6.8), registered by name in the events
 #: stage. One today: the half-sample mode, chosen over the midpoint of the
 #: shortest half, which collapses once plumes are most of a record.
 CleanLevelEstimator = Literal["half_sample_mode"]
 
 
-class PlumesConfig(_StrictModel):
-    """Finding plume events on the enhancements: thresholds, records, triggers.
+class EventsConfig(_StrictModel):
+    """Finding events on the enhancements: thresholds, records, triggers.
 
-    Per variable, at every point of the baseline sweep, the plumes stage
+    Per variable, at every point of the baseline sweep, the events stage
     describes plume-free air by its **clean level** (the most common
     enhancement) and its **clean spread** (1.4826 times the median distance
     below that level), and marks an event wherever the statistic
@@ -563,7 +563,7 @@ class PlumesConfig(_StrictModel):
     @field_validator("max_internal_gap", "record_gap", "max_record_length")
     @classmethod
     def _valid_durations(cls, value: str, info: ValidationInfo) -> str:
-        _validate_duration(value, field=f"PlumesConfig.{info.field_name}")
+        _validate_duration(value, field=f"EventsConfig.{info.field_name}")
         return value
 
     @field_validator("enter_multiple", "exit_multiple")
@@ -579,12 +579,12 @@ class PlumesConfig(_StrictModel):
         """
         if any(not math.isfinite(m) or m <= 0 for m in value):
             raise ValueError(
-                f"PlumesConfig.{info.field_name} must be positive multiples of the clean "
+                f"EventsConfig.{info.field_name} must be positive multiples of the clean "
                 f"spread; got {list(value)}."
             )
         if any(b <= a for a, b in zip(value, value[1:])):
             raise ValueError(
-                f"PlumesConfig.{info.field_name} must be strictly increasing; got {list(value)}."
+                f"EventsConfig.{info.field_name} must be strictly increasing; got {list(value)}."
             )
         return value
 
@@ -603,19 +603,19 @@ class PlumesConfig(_StrictModel):
             parts = key.split(".")
             if len(parts) > 2 or not all(part.isidentifier() for part in parts):
                 raise ValueError(
-                    "PlumesConfig.triggers keys are '<instrument>' or "
+                    "EventsConfig.triggers keys are '<instrument>' or "
                     f"'<instrument>.<variable>', e.g. 'iwas' or 'iwas.benzene'; got {key!r}."
                 )
             instrument, dot, variable = trigger.partition(".")
             if not dot or not instrument.isidentifier() or not variable.isidentifier():
                 raise ValueError(
-                    f"PlumesConfig.triggers['{key}'] names its trigger as "
+                    f"EventsConfig.triggers['{key}'] names its trigger as "
                     f"'<instrument>.<variable>', e.g. 'ptr.benzene'; got {trigger!r}."
                 )
         return value
 
     @model_validator(mode="after")
-    def _every_entry_above_every_exit(self) -> PlumesConfig:
+    def _every_entry_above_every_exit(self) -> EventsConfig:
         """Refuse a configuration in which any entry is at or below any exit.
 
         Both are swept, so every pairing is run; at entry <= exit the
@@ -623,7 +623,7 @@ class PlumesConfig(_StrictModel):
         """
         if min(self.enter_multiple) <= max(self.exit_multiple):
             raise ValueError(
-                f"Every PlumesConfig.enter_multiple must exceed every exit_multiple, since "
+                f"Every EventsConfig.enter_multiple must exceed every exit_multiple, since "
                 f"both are swept; got enter {list(self.enter_multiple)} and exit "
                 f"{list(self.exit_multiple)}."
             )
@@ -807,9 +807,9 @@ class AnalysisConfig(_StrictModel):
     baseline: BaselineConfig = Field(
         description="Baseline settings: the sweep, the count rule and the method per variable."
     )
-    plumes: PlumesConfig = Field(
-        default_factory=PlumesConfig,
-        description="Plume events: thresholds, records and triggers (METHODS.md §6.8).",
+    events: EventsConfig = Field(
+        default_factory=EventsConfig,
+        description="Events: thresholds, records and triggers (METHODS.md §6.8).",
     )
     smoothing: SmoothingConfig = Field(
         default_factory=SmoothingConfig, description="Optional low-pass alignment stage."

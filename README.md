@@ -3,7 +3,7 @@
 TSARA turns raw, multi-rate trace gas timeseries — from fixed sites and from
 vehicles — into **enhancement ratios with defensible uncertainties**. It reads a
 campaign's archive as described by a YAML manifest, keeps every instrument on its
-own clock, computes rolling baselines, detects plume events, and fits ratios
+own clock, computes rolling baselines, finds events, and fits ratios
 between species with the measurement error in *both* axes carried through to the
 answer. The output is both a catalog of discrete plume events and a continuous
 record (a baseline and an enhancement at every reading, and ratios over rolling
@@ -30,7 +30,7 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 4.5 | One atmosphere, realized once and sampled by every instrument; a variable's `field` | ✅ done |
 | 4.6 | How support may be changed at all: one per-pair rule, a record on every column of what the join did, the borrowed share | ✅ done |
 | 5 | The baseline state: a baseline and an enhancement at every reading, per stream on its own cells, a window × quantile sweep, three baseline methods, uncertainties for both | ✅ done |
-| 6 | Plume events: plume-free air described per record, two-threshold events at every sweep point, triggers for sparse instruments, a catalog spelled like the answer key, the parent–child tree | ✅ done |
+| 6 | Events: plume-free air described per record, two-threshold events at every sweep point, triggers for sparse instruments, a catalog spelled like the answer key, the parent–child tree | ✅ done |
 | 7 | Regression (OLS / York / ODR), combined UQ, stability cube | planned |
 | 8 | Smoothing + spatiotemporal source complexes | planned |
 | 9 | `Pipeline` class + `tsara` CLI | planned |
@@ -42,7 +42,7 @@ they describe, put any set of those variables onto a common support with
 their uncertainty propagated through the same weights, and roll every stream
 into its continuous state: a baseline and an enhancement, with their
 uncertainties, for each reading at every point of a window × quantile sweep, on
-the stream's own cells, saved beside it; and find plume events in every
+the stream's own cells, saved beside it; and find events in every
 enhancement at every point of that sweep and of the event thresholds, as a state
 beside the readings and one catalog whose shared columns are spelled like the
 answer key's**. A manufactured campaign holds one atmosphere that
@@ -108,15 +108,15 @@ print(dict(picarro.sizes))
 print(sorted(v for v in picarro.data_vars if v.endswith("ch4")))
 save_state(states, "demo_bundle", baseline=analysis.baseline)
 
-# 6. Find plume events in every enhancement, at every point of the baseline
+# 6. Find events in every enhancement, at every point of the baseline
 #    sweep and of the entry x exit thresholds; list them as one table whose
 #    shared columns are spelled like the answer key's; checkpoint both.
-from tsara.plumes import plume_catalog, plume_states, save_plumes
+from tsara.events import event_catalog, event_states, save_events
 
-plumes = plume_states(states, analysis.plumes)
-catalog = plume_catalog(plumes, states)
+found = event_states(states, analysis.events)
+catalog = event_catalog(found, states)
 print(len(catalog), "events, e.g.", catalog["event_id"].iloc[0])
-save_plumes(plumes, "demo_bundle", catalog=catalog, plumes=analysis.plumes)
+save_events(found, "demo_bundle", catalog=catalog, events=analysis.events)
 ```
 
 ```
@@ -194,7 +194,7 @@ silently keeping the last value. Fuller, commented examples ship in
 | `manifest_mobile_example.yaml` | vehicle, GPS instrument, systematic uncertainty, reported per-point error |
 | `manifest_multiformat_example.yaml` | one campaign mixing CSV, ICARTT and Parquet, several directory layouts |
 | `synthetic_example.yaml`, `synthetic_bootstrap.yaml` | generating data: an atmosphere (fields, backgrounds, sources) and the instruments measuring it, with backgrounds parametric or bootstrapped from a real record's residuals |
-| `analysis_example.yaml` | the analysis side: baseline sweeps, plume events, regression, clustering |
+| `analysis_example.yaml` | the analysis side: baseline sweeps, events, regression, clustering |
 
 ## The ideas the API is shaped around
 
@@ -258,8 +258,8 @@ delivered on. (`METHODS.md` §10)
 introduces, so a long run can be inspected in a notebook, resumed after a crash,
 and audited later. A bundle is a plain directory: `bundle.json`, the resolved
 `manifest.yaml`, one netCDF per stream under `streams/`, one baseline state per
-instrument under `baseline/`, and one plume state per instrument with the event
-catalog under `plumes/`; each stage writes beside its products only the section
+instrument under `baseline/`, and one event state per instrument with the event
+catalog under `events/`; each stage writes beside its products only the section
 of the analysis configuration it read.
 
 **A baseline is stated with its window.** There is no single true baseline: a
@@ -277,7 +277,7 @@ never clipped at zero, and their uncertainty follows from the reading's: where
 the reading declares none, the enhancement says `unknown` rather than borrowing
 an estimate. (`METHODS.md` §6)
 
-**A plume is found against plume-free air, as measured.** Plumes only add, so an
+**An event is found against plume-free air, as measured.** Plumes only add, so an
 enhancement's readings below its most common value are plume-free air. For each
 variable, record (a stretch between long gaps, at most six hours) and sweep
 point, TSARA measures that most common value, the *clean level*, and 1.4826
@@ -291,7 +291,8 @@ too sparse for a level of its own takes its events from a dense analyzer named
 as its trigger. Events are rows of one catalog keyed by `event_id`, and each
 links to the event holding its peak at the nearest longer window: containment,
 not origin. On a manufactured campaign, scoring the catalog is a join against
-the answer key. (`METHODS.md` §6.8)
+the answer key. An event is what one sweep point sees, not a verdict: whether
+it is a plume is judged across the sweep, in Phase 7. (`METHODS.md` §6.8)
 
 ## Repository layout
 
@@ -309,7 +310,7 @@ src/tsara/
                auxiliary fields, output grid
   baseline/    Windows as cells, the weighted rolling quantile, the baseline
                methods, the baseline state, its bundle
-  plumes/      Records, the clean level and spread, the detector, the plume
+  events/      Records, the clean level and spread, the detector, the event
                state, the catalog and its tree, their bundle
   synthetic/   Ground-truth data generation, profiling, raw-file export
                The five stages import core and config and never each other:
@@ -362,8 +363,8 @@ without being run, and none needs any real data:
   joined like a stream. Same interactive shape as 04: parameters cells, ✔
   checks, "Try it" notes whose every prediction is run as a parameter
   override before the notebook is committed, a scoreboard.
-- [`06_plumes_walkthrough.ipynb`](examples/notebooks/06_plumes_walkthrough.ipynb)
-  — plume events: plume-free air measured (the clean level and spread against
+- [`06_events_walkthrough.ipynb`](examples/notebooks/06_events_walkthrough.ipynb)
+  — events: plume-free air measured (the clean level and spread against
   truly plume-free readings), records and dropouts, the two-threshold detector
   against a loop written from its definition, the chance rate against its
   closed form, what the window decides and the tree that links the scales, the
@@ -388,7 +389,7 @@ committed **without** outputs:
   canister's windows, its adopted baseline and the offset that comes with it;
   its ledger re-measures the archive numbers `docs/METHODS.md` §6 and §2.5
   quote. Same gate as 04b.
-- [`06b_plumes_real_data.ipynb`](examples/notebooks/06b_plumes_real_data.ipynb)
+- [`06b_events_real_data.ipynb`](examples/notebooks/06b_events_real_data.ipynb)
   — notebook 06's stage on the archive: a day of the NOAA ARC's Aeris methane
   and ethane (with the QA/QC its file calls for), a second analyzer of the same
   methane and a column of held copies, records on logs that run for days, and
@@ -406,7 +407,7 @@ TSARA_ARCHIVE=/path/to/Data TSARA_NOTEBOOKS=1 pytest tests/test_notebooks.py
                             # opt-in: executes notebooks 04b, 05b and 06b (against
                             # the archive) and 04, 05 and 06, and requires every
                             # check and ledger row to hold
-TSARA_SLOW=1 pytest tests/plumes/test_methods_tables.py
+TSARA_SLOW=1 pytest tests/events/test_methods_tables.py
                             # opt-in: re-runs METHODS §6.8's generated-data tables
                             # (about 12 minutes)
 ```

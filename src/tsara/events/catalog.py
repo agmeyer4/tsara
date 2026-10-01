@@ -1,6 +1,6 @@
-"""The plume catalog: one row per event, variable and sweep point, and the tree.
+"""The event catalog: one row per event, variable and sweep point, and the tree.
 
-The plume state holds events as a number at every reading; the catalog holds
+The event state holds events as a number at every reading; the catalog holds
 them as rows (``docs/METHODS.md`` §6.8): one long table keyed by
 ``event_id``, the sweep coordinates as columns, and every column that means
 what a column of the generator's answer key means spelled as the answer key
@@ -42,9 +42,9 @@ from tsara.core.naming import (
 )
 from tsara.core.support import stream_cells
 from tsara.core.timebase import NS_PER_S
-from tsara.plumes.hysteresis import describe_events
-from tsara.plumes.records import TsaraPlumeError
-from tsara.plumes.state import ENTER_DIM, EXIT_DIM, PLUMES_STAGE, TRIGGER_ATTR
+from tsara.events.hysteresis import describe_events
+from tsara.events.records import TsaraEventError
+from tsara.events.state import ENTER_DIM, EVENTS_STAGE, EXIT_DIM, TRIGGER_ATTR
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Mapping
@@ -53,11 +53,15 @@ if TYPE_CHECKING:  # pragma: no cover
     import xarray as xr
 
     from tsara.core.support import CellBounds
-    from tsara.plumes.hysteresis import Events
+    from tsara.events.hysteresis import Events
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["CATALOG_COLUMNS", "link_parents", "plume_catalog"]
+__all__ = [
+    "CATALOG_COLUMNS",
+    "event_catalog",
+    "link_parents",
+]
 
 #: The catalog's columns, in order. The ten the answer key also has are
 #: spelled as it spells them.
@@ -144,15 +148,15 @@ _Intervals = dict[
 ]
 
 
-def plume_catalog(
-    plume_states: Mapping[str, xr.Dataset], baseline_states: Mapping[str, xr.Dataset]
+def event_catalog(
+    event_states: Mapping[str, xr.Dataset], baseline_states: Mapping[str, xr.Dataset]
 ) -> pd.DataFrame:
     """Return every event of a campaign as one long table, its tree linked.
 
     Parameters
     ----------
-    plume_states : mapping of str to xarray.Dataset
-        The campaign's plume states, keyed by instrument.
+    event_states : mapping of str to xarray.Dataset
+        The campaign's event states, keyed by instrument.
     baseline_states : mapping of str to xarray.Dataset
         The baseline states they were found on, for each event's largest
         enhancement and each variable's field.
@@ -166,26 +170,26 @@ def plume_catalog(
 
     Raises
     ------
-    TsaraPlumeError
-        If a product is not the one expected, an instrument's plume state has
+    TsaraEventError
+        If a product is not the one expected, an instrument's event state has
         no baseline state on the same readings, or a triggered variable's
         trigger is not in the catalog.
     """
     frames: list[pd.DataFrame] = []
     intervals: _Intervals = {}
     adopted: list[tuple[str, str]] = []
-    for instrument, plume in plume_states.items():
-        baseline = _checked_baseline(instrument, plume, baseline_states)
-        cells = stream_cells(plume, instrument)
-        for variable in _event_variables(plume):
-            if TRIGGER_ATTR in plume[f"event_{variable}"].attrs:
+    for instrument, state in event_states.items():
+        baseline = _checked_baseline(instrument, state, baseline_states)
+        cells = stream_cells(state, instrument)
+        for variable in _event_variables(state):
+            if TRIGGER_ATTR in state[f"event_{variable}"].attrs:
                 adopted.append((instrument, variable))
                 continue
-            frames.append(_own_rows(instrument, variable, plume, baseline, cells, intervals))
+            frames.append(_own_rows(instrument, variable, state, baseline, cells, intervals))
     for instrument, variable in adopted:
-        plume, baseline = plume_states[instrument], baseline_states[instrument]
-        cells = stream_cells(plume, instrument)
-        frames.append(_adopted_rows(instrument, variable, plume, baseline, cells, intervals))
+        state, baseline = event_states[instrument], baseline_states[instrument]
+        cells = stream_cells(state, instrument)
+        frames.append(_adopted_rows(instrument, variable, state, baseline, cells, intervals))
     # Typed on the way out, below, so an empty catalog needs only its columns.
     frames = [frame for frame in frames if len(frame)]
     catalog = (
@@ -237,29 +241,29 @@ def link_parents(catalog: pd.DataFrame) -> pd.DataFrame:
 
 
 def _checked_baseline(
-    instrument: str, plume: xr.Dataset, baseline_states: Mapping[str, xr.Dataset]
+    instrument: str, state: xr.Dataset, baseline_states: Mapping[str, xr.Dataset]
 ) -> xr.Dataset:
     """Return the instrument's baseline state, refusing a mismatched pair."""
-    if plume.attrs.get("tsara_stage") != PLUMES_STAGE:
-        raise TsaraPlumeError(
-            f"plume_catalog reads plume states, and '{instrument}' has tsara_stage "
-            f"'{plume.attrs.get('tsara_stage')}'."
+    if state.attrs.get("tsara_stage") != EVENTS_STAGE:
+        raise TsaraEventError(
+            f"event_catalog reads event states, and '{instrument}' has tsara_stage "
+            f"'{state.attrs.get('tsara_stage')}'."
         )
     baseline = baseline_states.get(instrument)
     if baseline is None or baseline.attrs.get("tsara_stage") != BASELINE_STAGE:
-        raise TsaraPlumeError(
-            f"The plume state of '{instrument}' needs the baseline state it was found on."
+        raise TsaraEventError(
+            f"The event state of '{instrument}' needs the baseline state it was found on."
         )
-    if not np.array_equal(baseline[TIME_COORD].values, plume[TIME_COORD].values):
-        raise TsaraPlumeError(
-            f"The baseline and plume states of '{instrument}' are not on the same readings."
+    if not np.array_equal(baseline[TIME_COORD].values, state[TIME_COORD].values):
+        raise TsaraEventError(
+            f"The baseline and event states of '{instrument}' are not on the same readings."
         )
     return baseline
 
 
-def _event_variables(plume: xr.Dataset) -> list[str]:
-    """Return every variable the plume state holds events of, in order."""
-    return [str(n)[len("event_") :] for n in plume.data_vars if str(n).startswith("event_")]
+def _event_variables(state: xr.Dataset) -> list[str]:
+    """Return every variable the event state holds events of, in order."""
+    return [str(n)[len("event_") :] for n in state.data_vars if str(n).startswith("event_")]
 
 
 # ---------------------------------------------------------------------------
@@ -270,25 +274,25 @@ def _event_variables(plume: xr.Dataset) -> list[str]:
 def _own_rows(
     instrument: str,
     variable: str,
-    plume: xr.Dataset,
+    state: xr.Dataset,
     baseline: xr.Dataset,
     cells: CellBounds,
     intervals: _Intervals,
 ) -> pd.DataFrame:
     """Return the rows of a variable that found its own events, and keep its intervals."""
-    event = _swept(plume[f"event_{variable}"], 5)
-    z = _swept(plume[f"z_{variable}"], 3)
+    event = _swept(state[f"event_{variable}"], 5)
+    z = _swept(state[f"z_{variable}"], 3)
     enhancement = _swept(baseline[enhancement_name(variable)], 3)
-    level = _swept(plume[f"clean_level_{variable}"], 3)
-    spread = _swept(plume[f"clean_spread_{variable}"], 3)
-    record = plume[f"record_{variable}"].values
-    counts = _swept(plume[f"n_events_{variable}"], 4)
-    chance = _swept(plume[f"chance_events_{variable}"], 4)
+    level = _swept(state[f"clean_level_{variable}"], 3)
+    spread = _swept(state[f"clean_spread_{variable}"], 3)
+    record = state[f"record_{variable}"].values
+    counts = _swept(state[f"n_events_{variable}"], 4)
+    chance = _swept(state[f"chance_events_{variable}"], 4)
     frames = []
     for point in np.ndindex(*event.shape[1:]):
         w, q, _, _ = point
         found = describe_events(event[(slice(None), *point)], z[:, w, q], cells)
-        ids = _ids(instrument, variable, plume, point, found.number)
+        ids = _ids(instrument, variable, state, point, found.number)
         intervals[(f"{instrument}.{variable}", *point)] = (
             found.number,
             found.start_ns,
@@ -299,7 +303,7 @@ def _own_rows(
             _frame(
                 instrument,
                 variable,
-                plume,
+                state,
                 baseline,
                 point,
                 found,
@@ -319,7 +323,7 @@ def _own_rows(
 def _adopted_rows(
     instrument: str,
     variable: str,
-    plume: xr.Dataset,
+    state: xr.Dataset,
     baseline: xr.Dataset,
     cells: CellBounds,
     intervals: _Intervals,
@@ -330,18 +334,18 @@ def _adopted_rows(
     interval: their count, the share of the interval their cells cover, and
     the largest enhancement among them; no z, no record, no clean air.
     """
-    trigger = str(plume[f"event_{variable}"].attrs[TRIGGER_ATTR])
-    event = _swept(plume[f"event_{variable}"], 5)
+    trigger = str(state[f"event_{variable}"].attrs[TRIGGER_ATTR])
+    event = _swept(state[f"event_{variable}"], 5)
     enhancement = _swept(baseline[enhancement_name(variable)], 3)
-    counts = _swept(plume[f"n_events_{variable}"], 4)
+    counts = _swept(state[f"n_events_{variable}"], 4)
     frames = []
     for point in np.ndindex(*event.shape[1:]):
         w, q, _, _ = point
         taken = intervals.get((trigger, *point))
         if taken is None:
-            raise TsaraPlumeError(
+            raise TsaraEventError(
                 f"'{instrument}.{variable}' takes its events from '{trigger}', which is not "
-                "in the catalog; pass its plume state too."
+                "in the catalog; pass its event state too."
             )
         numbers, starts, stops, trigger_ids = taken
         found = describe_events(
@@ -354,11 +358,11 @@ def _adopted_rows(
         frame = _frame(
             instrument,
             variable,
-            plume,
+            state,
             baseline,
             point,
             found,
-            _ids(instrument, variable, plume, point, found.number),
+            _ids(instrument, variable, state, point, found.number),
             record=np.full(found.n, -1),
             peak_z=np.full(found.n, np.nan),
             peak_enhancement=found.peak_score,
@@ -393,16 +397,16 @@ def _swept(variable: xr.DataArray, ndim: int) -> npt.NDArray[Any]:
 def _ids(
     instrument: str,
     variable: str,
-    plume: xr.Dataset,
+    state: xr.Dataset,
     point: tuple[int, ...],
     numbers: npt.NDArray[np.int64],
 ) -> list[str]:
     """Spell each event's key from its variable, sweep point and number."""
     w, q, e, x = point
     stem = (
-        f"{instrument}.{variable}/w{plume[WINDOW_DIM].values[w]:g}s"
-        f"/q{plume[QUANTILE_DIM].values[q]:g}/e{plume[ENTER_DIM].values[e]:g}"
-        f"/x{plume[EXIT_DIM].values[x]:g}"
+        f"{instrument}.{variable}/w{state[WINDOW_DIM].values[w]:g}s"
+        f"/q{state[QUANTILE_DIM].values[q]:g}/e{state[ENTER_DIM].values[e]:g}"
+        f"/x{state[EXIT_DIM].values[x]:g}"
     )
     return [f"{stem}/{k}" for k in numbers.tolist()]
 
@@ -410,7 +414,7 @@ def _ids(
 def _frame(
     instrument: str,
     variable: str,
-    plume: xr.Dataset,
+    state: xr.Dataset,
     baseline: xr.Dataset,
     point: tuple[int, ...],
     found: Events,
@@ -419,17 +423,17 @@ def _frame(
 ) -> pd.DataFrame:
     """Assemble one sweep point's rows."""
     w, q, e, x = point
-    times = plume[TIME_COORD].values
+    times = state[TIME_COORD].values
     frame = pd.DataFrame(
         {
             "event_id": ids,
             "instrument": instrument,
             "species": variable,
             "field": str(baseline[variable].attrs.get("field", variable)),
-            "baseline_window": float(plume[WINDOW_DIM].values[w]),
-            "baseline_quantile": float(plume[QUANTILE_DIM].values[q]),
-            "enter_multiple": float(plume[ENTER_DIM].values[e]),
-            "exit_multiple": float(plume[EXIT_DIM].values[x]),
+            "baseline_window": float(state[WINDOW_DIM].values[w]),
+            "baseline_quantile": float(state[QUANTILE_DIM].values[q]),
+            "enter_multiple": float(state[ENTER_DIM].values[e]),
+            "exit_multiple": float(state[EXIT_DIM].values[x]),
             "event_number": found.number,
             "start_time": pd.to_datetime(found.start_ns, unit="ns"),
             "peak_time": pd.to_datetime(times[found.peak]),
@@ -440,23 +444,23 @@ def _frame(
             **columns,
             "trigger": None,
             "trigger_event_id": None,
-            "latitude": _position(plume, LATITUDE_COORD, found.peak),
-            "longitude": _position(plume, LONGITUDE_COORD, found.peak),
+            "latitude": _position(state, LATITUDE_COORD, found.peak),
+            "longitude": _position(state, LONGITUDE_COORD, found.peak),
         },
         index=pd.RangeIndex(found.n),
     )
     return frame
 
 
-def _position(plume: xr.Dataset, name: str, rows: npt.NDArray[np.int64]) -> npt.NDArray[np.float64]:
+def _position(state: xr.Dataset, name: str, rows: npt.NDArray[np.int64]) -> npt.NDArray[np.float64]:
     """Return a position at each row: a track's value there, a site's everywhere, or NaN.
 
     A stream carries a position as a site's scalar or a track along time and
     in no other shape, so those are the two read here.
     """
-    if name not in plume.coords:
+    if name not in state.coords:
         return np.full(rows.size, np.nan)
-    coordinate = plume.coords[name]
+    coordinate = state.coords[name]
     if coordinate.ndim == 0:
         return np.full(rows.size, float(coordinate.values))
     return np.asarray(coordinate.transpose(TIME_COORD).values, dtype=np.float64)[rows]

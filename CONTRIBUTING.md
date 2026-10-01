@@ -47,15 +47,15 @@ TSARA_ARCHIVE=/path/to/Data pytest tests/test_notebooks.py
                                                     # executes notebooks 04b, 05b and 06b
                                                     # against the campaign archive and
                                                     # requires every ledger row to reproduce
-TSARA_SLOW=1 pytest tests/plumes/test_methods_tables.py
+TSARA_SLOW=1 pytest tests/events/test_methods_tables.py
                                                     # re-runs METHODS §6.8's generated-data
                                                     # tables through the package (about
                                                     # 12 minutes)
 ```
 
 Run the notebook gates before a pull request that touches alignment, the
-baseline stage, the plumes stage or the notebooks, and the tables gate before
-one that touches the plumes stage.
+baseline stage, the events stage or the notebooks, and the tables gate before
+one that touches the events stage.
 
 ## How the package is laid out
 
@@ -68,7 +68,7 @@ by `tests/test_architecture.py`; the rest is this section.
 ```
 core/        a leaf: imports nothing else from tsara
 config/      every schema plus the one YAML door: imports only core
-synthetic/  ingest/  align/  baseline/  plumes/
+synthetic/  ingest/  align/  baseline/  events/
              the stages: import core, config and themselves, and NEVER each
              other. They hand each other xarray Datasets whose vocabulary
              lives in core/naming.py. That is what lets a new stage be

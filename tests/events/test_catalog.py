@@ -1,4 +1,4 @@
-"""Tests for the plume catalog and its tree (tsara.plumes.catalog)."""
+"""Tests for the event catalog and its tree (tsara.events.catalog)."""
 
 from __future__ import annotations
 
@@ -11,18 +11,18 @@ import pytest
 import xarray as xr
 
 from tsara.baseline import baseline_state
-from tsara.config.analysis import BaselineConfig, PlumesConfig
+from tsara.config.analysis import BaselineConfig, EventsConfig
 from tsara.core.support import CellBounds, stream_cells
 from tsara.core.timebase import SECOND_NS as SECOND
-from tsara.plumes import (
+from tsara.events import (
     CATALOG_COLUMNS,
-    TsaraPlumeError,
+    TsaraEventError,
+    event_catalog,
+    event_state,
+    event_states,
     find_events,
     find_records,
     link_parents,
-    plume_catalog,
-    plume_state,
-    plume_states,
 )
 from tsara.synthetic import SyntheticDataset
 from tsara.synthetic.plumes import GROUND_TRUTH_COLUMNS
@@ -30,7 +30,7 @@ from tsara.synthetic.plumes import GROUND_TRUTH_COLUMNS
 HOUR = 3600 * SECOND
 ExampleChain: TypeAlias = tuple[SyntheticDataset, xr.Dataset, xr.Dataset]
 BASELINE = BaselineConfig(windows=("2min", "10min"), quantiles=(0.05,))
-PLUMES = PlumesConfig(enter_multiple=(3.0, 4.0), exit_multiple=(1.0,))
+EVENTS = EventsConfig(enter_multiple=(3.0, 4.0), exit_multiple=(1.0,))
 
 
 def make_stream(
@@ -67,20 +67,20 @@ def plumy(n: int, seed: int) -> npt.NDArray[np.float64]:
     """Methane at 1900 ppb with 0.7 ppb of noise and a 40 ppb plume every ten minutes."""
     rng = np.random.default_rng(seed)
     t = np.arange(float(n))
-    plumes = np.zeros(n)
+    events = np.zeros(n)
     for centre in np.arange(300, t[-1], 600):
-        plumes += 40 * np.exp(-0.5 * ((t - centre) / 15) ** 2)
-    values: npt.NDArray[np.float64] = 1900 + rng.normal(0, 0.7, n) + plumes
+        events += 40 * np.exp(-0.5 * ((t - centre) / 15) ** 2)
+    values: npt.NDArray[np.float64] = 1900 + rng.normal(0, 0.7, n) + events
     return values
 
 
 @pytest.fixture(scope="module")
 def van() -> tuple[xr.Dataset, xr.Dataset, pd.DataFrame]:
-    """Two hours of 1 s methane: its baseline state, plume state and catalog."""
+    """Two hours of 1 s methane: its baseline state, event state and catalog."""
     stream = make_stream(np.arange(7200.0), {"ch4": plumy(7200, 1)})
     baseline = baseline_state(stream, instrument="van", baseline=BASELINE)
-    plume = plume_state(baseline, instrument="van", plumes=PLUMES)
-    return baseline, plume, plume_catalog({"van": plume}, {"van": baseline})
+    state = event_state(baseline, instrument="van", events=EVENTS)
+    return baseline, state, event_catalog({"van": state}, {"van": baseline})
 
 
 # ---------------------------------------------------------------------------
@@ -116,14 +116,14 @@ def test_the_columns_are_the_catalogs_and_the_shared_ones_are_spelled_as_the_ans
 def test_one_row_per_event_and_sweep_point_each_with_a_readable_unique_key(
     van: tuple[xr.Dataset, xr.Dataset, pd.DataFrame],
 ) -> None:
-    _, plume, catalog = van
+    _, state, catalog = van
     assert catalog["event_id"].is_unique
     assert catalog["event_id"].iloc[0] == "van.ch4/w120s/q0.05/e3/x1/0"
     for w, e in np.ndindex(2, 2):
-        at = (catalog["baseline_window"] == plume["baseline_window"].values[w]) & (
-            catalog["enter_multiple"] == plume["enter_multiple"].values[e]
+        at = (catalog["baseline_window"] == state["baseline_window"].values[w]) & (
+            catalog["enter_multiple"] == state["enter_multiple"].values[e]
         )
-        assert at.sum() == plume["n_events_ch4"].values[w, 0, e, 0]
+        assert at.sum() == state["n_events_ch4"].values[w, 0, e, 0]
     assert (
         catalog["events_at_point"]
         == catalog.groupby(["baseline_window", "enter_multiple"])["event_id"].transform("size")
@@ -132,23 +132,23 @@ def test_one_row_per_event_and_sweep_point_each_with_a_readable_unique_key(
 
 def test_each_row_is_the_detectors_event(van: tuple[xr.Dataset, xr.Dataset, pd.DataFrame]) -> None:
     """Rows rebuilt from the saved membership agree with the detector run again."""
-    baseline, plume, catalog = van
-    cells = stream_cells(plume, "van")
+    baseline, state, catalog = van
+    cells = stream_cells(state, "van")
     x = baseline["ch4"].values
     records = find_records(cells, np.isfinite(x), gap_ns=2 * HOUR, max_length_ns=6 * HOUR)
     for w, e in np.ndindex(2, 2):
-        z = plume["z_ch4"].values[:, w, 0]
+        z = state["z_ch4"].values[:, w, 0]
         found = find_events(
             z,
             cells,
             records,
-            enter=PLUMES.enter_multiple[e],
+            enter=EVENTS.enter_multiple[e],
             exit_=1.0,
             max_internal_gap_ns=5 * SECOND,
         )
         rows = catalog[
-            (catalog["baseline_window"] == plume["baseline_window"].values[w])
-            & (catalog["enter_multiple"] == PLUMES.enter_multiple[e])
+            (catalog["baseline_window"] == state["baseline_window"].values[w])
+            & (catalog["enter_multiple"] == EVENTS.enter_multiple[e])
         ]
         assert rows["event_number"].tolist() == found.number.tolist()
         assert rows["start_time"].astype("int64").tolist() == found.start_ns.tolist()
@@ -156,15 +156,15 @@ def test_each_row_is_the_detectors_event(van: tuple[xr.Dataset, xr.Dataset, pd.D
         assert rows["n_readings"].tolist() == found.n_readings.tolist()
         assert rows["covered"].tolist() == found.covered.tolist()
         assert rows["peak_z"].tolist() == found.peak_score.tolist()
-        assert (rows["peak_time"].to_numpy() == plume["time"].values[found.peak]).all()
+        assert (rows["peak_time"].to_numpy() == state["time"].values[found.peak]).all()
         assert rows["peak_enhancement"].tolist() == (
             baseline["enhancement_ch4"].values[found.peak, w, 0].tolist()
         )
         assert rows["duration_s"].tolist() == ((found.stop_ns - found.start_ns) / 1e9).tolist()
         for column in ("clean_level", "clean_spread"):
-            at_peak = plume[f"{column}_ch4"].values[found.peak, w, 0]
+            at_peak = state[f"{column}_ch4"].values[found.peak, w, 0]
             assert rows[column].tolist() == at_peak.tolist(), column
-        assert rows["record"].tolist() == plume["record_ch4"].values[found.peak].tolist()
+        assert rows["record"].tolist() == state["record_ch4"].values[found.peak].tolist()
     assert catalog["trigger"].isna().all() and catalog["trigger_event_id"].isna().all()
 
 
@@ -287,8 +287,8 @@ def test_a_canister_row_is_the_triggers_interval_with_its_own_readings() -> None
         "van": baseline_state(stream, instrument="van", baseline=baseline_config),
         "iwas": baseline_state(canister, instrument="iwas", baseline=baseline_config),
     }
-    plumes = plume_states(baselines, PlumesConfig(triggers={"iwas": "van.ch4"}))
-    catalog = plume_catalog(plumes, baselines)
+    events = event_states(baselines, EventsConfig(triggers={"iwas": "van.ch4"}))
+    catalog = event_catalog(events, baselines)
     rows = catalog[catalog["instrument"] == "iwas"]
     assert len(rows) > 0
     assert (rows["trigger"] == "van.ch4").all()
@@ -325,9 +325,9 @@ def test_a_triggered_variable_whose_trigger_is_missing_is_refused() -> None:
         "van": baseline_state(stream, instrument="van", baseline=BASELINE),
         "iwas": baseline_state(canister, instrument="iwas", baseline=BASELINE),
     }
-    plumes = plume_states(baselines, PlumesConfig(triggers={"iwas": "van.ch4"}))
-    with pytest.raises(TsaraPlumeError, match="not in the catalog"):
-        plume_catalog({"iwas": plumes["iwas"]}, baselines)
+    events = event_states(baselines, EventsConfig(triggers={"iwas": "van.ch4"}))
+    with pytest.raises(TsaraEventError, match="not in the catalog"):
+        event_catalog({"iwas": events["iwas"]}, baselines)
 
 
 # ---------------------------------------------------------------------------
@@ -350,9 +350,9 @@ def test_a_track_gives_each_event_its_position_at_the_peak_and_a_site_its_own() 
         (site, lambda peak: (np.full(peak.size, 40.5), np.full(peak.size, -111.8))),
     ):
         baseline = baseline_state(stream, instrument="van", baseline=BASELINE)
-        plume = plume_state(baseline, instrument="van", plumes=PLUMES)
-        catalog = plume_catalog({"van": plume}, {"van": baseline})
-        peak = np.searchsorted(plume["time"].values, catalog["peak_time"].to_numpy())
+        state = event_state(baseline, instrument="van", events=EVENTS)
+        catalog = event_catalog({"van": state}, {"van": baseline})
+        peak = np.searchsorted(state["time"].values, catalog["peak_time"].to_numpy())
         want_lat, want_lon = check(peak)
         assert np.array_equal(catalog["latitude"].to_numpy(), want_lat)
         assert np.array_equal(catalog["longitude"].to_numpy(), want_lon)
@@ -371,21 +371,21 @@ def test_a_stream_without_positions_gives_none(
 
 
 def test_what_does_not_pair_up_is_refused(van: tuple[xr.Dataset, xr.Dataset, pd.DataFrame]) -> None:
-    baseline, plume, _ = van
-    with pytest.raises(TsaraPlumeError, match="reads plume states"):
-        plume_catalog({"van": baseline}, {"van": baseline})
-    with pytest.raises(TsaraPlumeError, match="needs the baseline state"):
-        plume_catalog({"van": plume}, {})
-    with pytest.raises(TsaraPlumeError, match="not on the same readings"):
-        plume_catalog({"van": plume}, {"van": baseline.isel(time=slice(1, None))})
+    baseline, state, _ = van
+    with pytest.raises(TsaraEventError, match="reads event states"):
+        event_catalog({"van": baseline}, {"van": baseline})
+    with pytest.raises(TsaraEventError, match="needs the baseline state"):
+        event_catalog({"van": state}, {})
+    with pytest.raises(TsaraEventError, match="not on the same readings"):
+        event_catalog({"van": state}, {"van": baseline.isel(time=slice(1, None))})
 
 
 def test_quiet_air_makes_an_empty_catalog_with_every_column() -> None:
     rng = np.random.default_rng(4)
     stream = make_stream(np.arange(3600.0), {"ch4": 1900 + rng.normal(0, 0.7, 3600)})
     baseline = baseline_state(stream, instrument="van", baseline=BASELINE)
-    plume = plume_state(baseline, instrument="van", plumes=PlumesConfig(enter_multiple=(9.0,)))
-    catalog = plume_catalog({"van": plume}, {"van": baseline})
+    state = event_state(baseline, instrument="van", events=EventsConfig(enter_multiple=(9.0,)))
+    catalog = event_catalog({"van": state}, {"van": baseline})
     assert len(catalog) == 0
     assert tuple(catalog.columns) == CATALOG_COLUMNS
     assert catalog["start_time"].dtype == "datetime64[ns]"
@@ -406,8 +406,8 @@ def test_the_example_campaign_scores_as_the_scoping_measured(
     true event's [start_time, end_time] is false. All 59 true events are found at
     every window, and the false events are 2.50, 4.00 and 7.67 an hour at 2, 10 and
     60 min over the record's 6 h."""
-    campaign, baseline, plume = example_chain
-    catalog = plume_catalog({"picarro": plume}, {"picarro": baseline})
+    campaign, baseline, state = example_chain
+    catalog = event_catalog({"picarro": state}, {"picarro": baseline})
     truth = campaign.ground_truth.to_frame()
     truth = truth[truth["sampled_peak_amplitude"].notna()]
     pairs = catalog.merge(truth, on=["instrument", "species"], suffixes=("", "_true"))

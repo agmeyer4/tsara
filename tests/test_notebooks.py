@@ -133,7 +133,7 @@ def clean_env() -> dict[str, str]:
 @requires_archive
 @pytest.mark.parametrize(
     "name",
-    ["04b_alignment_real_data", "05b_baseline_state_real_data", "06b_plumes_real_data"],
+    ["04b_alignment_real_data", "05b_baseline_state_real_data", "06b_events_real_data"],
 )
 def test_real_data_notebook_executes_and_its_ledger_agrees(tmp_path: Path, name: str) -> None:
     nb = execute(NOTEBOOKS / f"{name}.ipynb", tmp_path, env=clean_env())
@@ -159,7 +159,7 @@ def test_real_data_notebook_executes_and_its_ledger_agrees(tmp_path: Path, name:
 @requires_opt_in
 @pytest.mark.parametrize(
     "name",
-    ["04_alignment_walkthrough", "05_baseline_state_walkthrough", "06_plumes_walkthrough"],
+    ["04_alignment_walkthrough", "05_baseline_state_walkthrough", "06_events_walkthrough"],
 )
 def test_generated_data_notebook_executes_and_every_check_holds(tmp_path: Path, name: str) -> None:
     env = clean_env()
