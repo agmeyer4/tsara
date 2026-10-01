@@ -392,8 +392,9 @@ committed **without** outputs:
 - [`06b_events_real_data.ipynb`](examples/notebooks/06b_events_real_data.ipynb)
   — notebook 06's stage on the archive: a day of the NOAA ARC's Aeris methane
   and ethane (with the QA/QC its file calls for), a second analyzer of the same
-  methane and a column of held copies, records on logs that run for days, and
-  the 2024-07-18 drive's methane, benzene and canister; its ledger re-measures
+  methane and a column of held copies, records on logs that run for days and
+  where the car parks, and the 2024-07-18 drive's methane, benzene and canister
+  fill by fill; its ledger re-measures
   the archive numbers `docs/METHODS.md` §6.8 and §2.5 quote. Same gate as 04b;
   a few minutes.
 
