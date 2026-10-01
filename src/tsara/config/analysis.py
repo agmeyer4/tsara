@@ -448,6 +448,34 @@ class BaselineConfig(_StrictModel):
 CleanLevelEstimator = Literal["half_sample_mode"]
 
 
+class PlatformStateConfig(_StrictModel):
+    """Where an instrument's stream says whether the platform is moving.
+
+    A variable of the instrument's own stream, in its canonical units, and the
+    value above which the platform counts as moving. A stretch of one state
+    lasting at least ``EventsConfig.record_gap`` splits records as an outage
+    does (METHODS.md §6.8), so that a long stop at a base and the drive that
+    follows are described apart, while a stop between legs of a drive stays
+    with it.
+    """
+
+    variable: str = Field(description="A variable of the instrument's own stream, e.g. its speed.")
+    moving_above: float = Field(
+        ge=0,
+        allow_inf_nan=False,
+        description="The value above which the platform counts as moving, in the variable's units.",
+    )
+
+    @field_validator("variable")
+    @classmethod
+    def _an_identifier(cls, value: str) -> str:
+        if not value.isidentifier():
+            raise ValueError(
+                f"PlatformStateConfig.variable names a variable of the stream; got {value!r}."
+            )
+        return value
+
+
 class EventsConfig(_StrictModel):
     """Finding events on the enhancements: thresholds, records, triggers.
 
@@ -467,7 +495,9 @@ class EventsConfig(_StrictModel):
     sigma plays no part in any threshold (§2.3).
 
     Level and spread are computed per **record**: a stream split where
-    consecutive readings are more than ``record_gap`` apart and cut into
+    consecutive readings are more than ``record_gap`` apart (or, where
+    ``platform_state`` names a speed, where the platform is parked or moving
+    for that long) and cut into
     equal parts no longer than ``max_record_length``, so that days of
     different air are never described by one number. A record holding fewer
     than ``min_clean_readings`` readings below its level has no description
@@ -497,8 +527,16 @@ class EventsConfig(_StrictModel):
         default="5s",
         description=(
             "A dip below the exit threshold shorter than this is bridged, so that "
-            "noise does not split one plume in two. A dropout is never bridged: "
-            "missing data is not turbulent air."
+            "noise does not split one plume in two."
+        ),
+    )
+    max_bridged_dropout: str = Field(
+        default="5s",
+        description=(
+            "A dropout (a hole in the readings) shorter than this is bridged as a dip "
+            "is, so that a single missing row does not split one plume in two; a "
+            "longer one ends the event. Nothing is filled in: the hole holds no "
+            "reading, and the event's covered share records it (METHODS.md §6.8)."
         ),
     )
     record_gap: str = Field(
@@ -530,6 +568,15 @@ class EventsConfig(_StrictModel):
         default="half_sample_mode",
         description="The registered estimator of the clean level (METHODS.md §6.8).",
     )
+    platform_state: dict[str, PlatformStateConfig] = Field(
+        default_factory=dict,
+        description=(
+            "Per instrument, the variable of its stream that says whether the "
+            "platform is moving, and the value above which it is; a stretch of one "
+            "state lasting at least record_gap splits records as an outage does. "
+            "Checked against the manifest when the two configs are combined."
+        ),
+    )
     triggers: dict[str, str] = Field(
         default_factory=dict,
         description=(
@@ -560,7 +607,7 @@ class EventsConfig(_StrictModel):
         """
         return self.triggers.get(f"{instrument}.{variable}", self.triggers.get(instrument))
 
-    @field_validator("max_internal_gap", "record_gap", "max_record_length")
+    @field_validator("max_internal_gap", "max_bridged_dropout", "record_gap", "max_record_length")
     @classmethod
     def _valid_durations(cls, value: str, info: ValidationInfo) -> str:
         _validate_duration(value, field=f"EventsConfig.{info.field_name}")
@@ -586,6 +633,19 @@ class EventsConfig(_StrictModel):
             raise ValueError(
                 f"EventsConfig.{info.field_name} must be strictly increasing; got {list(value)}."
             )
+        return value
+
+    @field_validator("platform_state")
+    @classmethod
+    def _instruments_are_spelled_right(
+        cls, value: dict[str, PlatformStateConfig]
+    ) -> dict[str, PlatformStateConfig]:
+        """Require every key to be an instrument's name, an identifier."""
+        for key in value:
+            if not key.isidentifier():
+                raise ValueError(
+                    f"EventsConfig.platform_state is keyed by instrument; got {key!r}."
+                )
         return value
 
     @field_validator("triggers")

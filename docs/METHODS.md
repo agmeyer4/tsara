@@ -1651,7 +1651,20 @@ last part, and a part holding no reading is not a record. Records belong to a
 variable, found from which of its readings are finite, and are the same at
 every sweep point. A reading masked to NaN leaves the same hole as one absent
 from the file, so either is a dropout when the hole breaks the spacing rule.
-Both lengths are found without declaration; declared segments can come later.
+Both lengths are found without declaration. Where `events.platform_state`
+names a variable of the instrument's own stream (its speed) and the value
+above which it is moving, records also split at both ends of every stretch of
+one state that lasts at least `record_gap`, as an outage does: a stretch lasts
+from its first finite reading's midpoint to the next stretch's first, a reading
+with no speed takes the state before it, and the rule is recorded on the
+state as `tsara_events_platform_state` (e.g. `speed > 5`). Measured on three
+ARC days (speed above 5 km/h, a 5 min majority to look past red lights; the
+rule itself needs none), each day is one parked stretch of 15–20 h at its base
+and a drive session of 4–8.5 h with stops of 0–25 min, so the rule separates
+base from drive and keeps the stops with the drive, which is what drives look
+like. Inside one 6 h record that held both, the 2024-07-30 Aeris methane's
+clean spread at 60 min was 1.62 ppb over its parked readings and 6.60 over its
+moving ones, against 8.52 for the record.
 The cap exists
 because the gap rule does not split a record that logs continuously
 (rule: TSARA ingestion, finite readings of one variable, gap = time between
@@ -1730,24 +1743,42 @@ and 0.11, which is −1.4, −1.5 and −0.4 Poisson standard errors; over seeds
 100–109 the mean deviation at entries 2 and 3 is −0.24 and −0.43 standard
 errors (standard error of that mean 0.32), so no bias shows at this
 resolution. Bridging only merges events, so with dips bridged the closed form
-is an upper bound, and a loose one where chance crossings crowd: bridged at
-5 s, the same noise gives 67.88, 4.57 and 0.10 an hour. The exit multiple changes nothing on flat air;
+is an upper bound on noise described correctly, and a loose one where chance
+crossings crowd: bridged at 5 s, the same noise gives 67.88, 4.57 and 0.10 an
+hour. On a record whose clean level or spread is off, or where the air wanders
+at the window's own scale, chance crosses more often than it says, so the
+column is a reference, not a bound (`tsara_chance_assumption` says so). The exit multiple changes nothing on flat air;
 where the air wanders a higher exit breaks excursions into more events (no
 plumes, random walk 30 ppb/day, 60 min, entry 3: 3.1 false events an hour at
 exit 1 and 16.4 at exit 2) and lowers weak plumes' recall. That spread is methodological, which is why exit is
 swept. Matching events across thresholds and quantiles is Phase 7's first job.
 
 **The detector.** Offline two-threshold hysteresis: an event is a run of
-readings with *z* ≥ exit that holds at least one with *z* ≥ entry. A run
-never crosses a dropout (two consecutive finite readings more than 1.5 times
-the record's median spacing apart, the rule of §2.5; it lives in the events
-stage, as `DROPOUT_SPACING_FACTOR`, until a second stage needs it), a record
-boundary, or a reading whose enhancement is blank, since a blank baseline
-says nothing about the air. `max_internal_gap` bridges a dip below exit
-shorter than it, never a dropout: missing data is not turbulent air. The dip
-is the time from the cell stop of the last reading above exit to the cell
-start of the next (zero where those cells overlap), bridged only when
-strictly shorter, and the readings in a bridged dip belong to the event. An event runs from its first reading's cell
+readings with *z* ≥ exit that holds at least one with *z* ≥ entry. A run never
+crosses a record boundary or a reading whose enhancement is blank, since a
+blank baseline says nothing about the air. `max_internal_gap` bridges a dip
+below exit shorter than it. The dip is the time from the cell stop of the last
+reading above exit to the cell start of the next (zero where those cells
+overlap), bridged only when strictly shorter, and the readings in a bridged
+dip belong to the event. A dropout (two consecutive finite readings more than
+1.5 times the record's median spacing apart, the rule of §2.5; it lives in the
+events stage, as `DROPOUT_SPACING_FACTOR`, until a second stage needs it) is
+bridged the same way when its hole, from the cell stop of the reading before
+it to the cell start of the reading after, is shorter than
+`max_bridged_dropout` (default 5 s), and ends the run when it is not. Nothing
+is filled in: the hole holds no reading, and the event's covered share records
+it. The first rule, that a run never crossed a dropout, was withdrawn in the
+Phase-6 walkthrough by measurement: the ARC merge file misses single seconds
+of its Aeris 39 to 111 times an hour on every ARC day (95 % of the holes one
+missing row; rule: TSARA ingestion of the Aeris methane with its QA/QC,
+dropouts with a hole under 5 s, per hour of readings, per day), and ending an
+event at each split one plume into many: on 2024-07-30 (q = 0.05, entry 3,
+exit 1, dips bridged at 5 s) bridging holes under 5 s takes the Aeris methane
+from 1,285 / 1,044 / 783 events to 594 / 255 / 121 at 2 / 10 / 60 min and its
+one-reading events from 11 % to none at 10 min, which puts it beside the same
+air's G2401 at 242 under the same rule (§9.2.3), while the 2024-07-18 PTR
+benzene changes by 3–5 %, its NOy by 1 %, and the Wyoming van's 2026 Aeris and
+the ten 2024 drives' Picarro not at all. An event runs from its first reading's cell
 start to its last reading's cell stop, and records the share of that interval
 its cells cover (their union, clipped to it, so that jittered cells
 overlapping by a few milliseconds are counted once; under half on the 07-18
@@ -1810,7 +1841,9 @@ does an event at the longest window. On the example chain, 95 % of events at
   touch two events make two intervals overlap, to the later. The settings
   the state was found under ride on the dataset as `tsara_events_record_gap`,
   `tsara_events_max_record_length`, `tsara_events_min_clean_readings`,
-  `tsara_events_clean_level_estimator` and `tsara_events_max_internal_gap`.
+  `tsara_events_clean_level_estimator`, `tsara_events_max_internal_gap` and
+  `tsara_events_max_bridged_dropout`, and `tsara_events_platform_state` where
+  records split at the platform's state.
   A sweep point at which every record of a variable is blank is named in one
   warning per stream, variables sharing a pattern named together. Through
   the whole chain (the example campaign generated, its 2 s Picarro's

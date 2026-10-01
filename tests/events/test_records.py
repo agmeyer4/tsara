@@ -133,25 +133,52 @@ def test_a_year_long_piece_is_cut_without_overflow() -> None:
 
 
 def test_records_match_a_slow_reference_written_from_the_definition() -> None:
-    """The definition, one reading at a time, with part edges as exact fractions."""
+    """The definition, one reading at a time, with part edges as exact fractions,
+    half the trials with a platform state that changes at random."""
     rng = np.random.default_rng(3)
-    for _ in range(40):
+    for trial in range(60):
         steps = rng.choice([1, 2, 3, 900, 9000], size=300, p=[0.5, 0.3, 0.17, 0.02, 0.01])
         mids = np.cumsum(steps).astype(np.int64) * SECOND
         finite = rng.random(mids.size) > 0.1
         cells = CellBounds(start_ns=mids - SECOND // 2, stop_ns=mids + SECOND // 2)
         gap, cap = 3000 * SECOND, int(rng.integers(600, 20000)) * SECOND
-        found = find_records(cells, finite, gap_ns=gap, max_length_ns=cap)
-        assert found.index.tolist() == _slow_records(mids, finite, gap, cap)
+        state = None
+        if trial % 2:
+            # stretches of random length, so that some last the gap and some do not
+            state = np.repeat(np.arange(40) % 2, rng.integers(1, 30, size=40))[: mids.size]
+            state = np.pad(state, (0, mids.size - state.size), mode="edge")
+        found = find_records(cells, finite, gap_ns=gap, max_length_ns=cap, state=state)
+        assert found.index.tolist() == _slow_records(mids, finite, gap, cap, state)
 
 
 def _slow_records(
-    mids: npt.NDArray[np.int64], finite: npt.NDArray[np.bool_], gap: int, cap: int
+    mids: npt.NDArray[np.int64],
+    finite: npt.NDArray[np.bool_],
+    gap: int,
+    cap: int,
+    state: npt.NDArray[np.int64] | None = None,
 ) -> list[int]:
     kept = [i for i in range(mids.size) if finite[i]]
+    # Where the platform's state splits: both ends of every stretch of one state
+    # lasting at least the gap, a stretch lasting from its first reading to the
+    # next stretch's first, or to its own last reading at the end.
+    cuts: set[int] = set()
+    if state is not None:
+        stretches: list[list[int]] = []
+        for i in kept:
+            if stretches and state[i] == state[stretches[-1][0]]:
+                stretches[-1].append(i)
+            else:
+                stretches.append([i])
+        for k, stretch in enumerate(stretches):
+            end = stretches[k + 1][0] if k + 1 < len(stretches) else stretch[-1]
+            if int(mids[end]) - int(mids[stretch[0]]) >= gap:
+                cuts.add(stretch[0])
+                if k + 1 < len(stretches):
+                    cuts.add(stretches[k + 1][0])
     pieces: list[list[int]] = []
     for i in kept:
-        if pieces and int(mids[i]) - int(mids[pieces[-1][-1]]) <= gap:
+        if pieces and i not in cuts and int(mids[i]) - int(mids[pieces[-1][-1]]) <= gap:
             pieces[-1].append(i)
         else:
             pieces.append([i])
@@ -173,6 +200,79 @@ def _slow_records(
             out[i] = record + used[part]
         record += len(used)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Pieces, split where the platform's state lasts
+# ---------------------------------------------------------------------------
+
+
+def minutes(*stretches: tuple[int, int]) -> tuple[CellBounds, npt.NDArray[np.int64]]:
+    """One reading a minute through stretches of (state, minutes), in order."""
+    state = np.concatenate([np.full(n, s) for s, n in stretches])
+    return cells_at(np.arange(state.size) * 60.0), state
+
+
+def test_a_lasting_stop_splits_like_an_outage_and_short_stops_stay_with_the_drive() -> None:
+    """An ARC day in miniature: three hours parked at base, then a drive of
+    legs and short stops ending in a 100 min stop. Only the base stretch lasts
+    the 2 h gap, so it is one piece and the drive, stops and all, another."""
+    cells, state = minutes((0, 180), (1, 70), (0, 25), (1, 46), (0, 7), (1, 72), (0, 100))
+    records = find_records(
+        cells, all_finite(state.size), gap_ns=2 * HOUR, max_length_ns=24 * HOUR, state=state
+    )
+    assert records.index.tolist() == [0] * 180 + [1] * (state.size - 180)
+
+
+def test_a_lasting_stretch_inside_short_ones_splits_at_both_its_ends() -> None:
+    cells, state = minutes((1, 30), (0, 10), (1, 180), (0, 20), (1, 30))
+    records = find_records(
+        cells, all_finite(state.size), gap_ns=2 * HOUR, max_length_ns=24 * HOUR, state=state
+    )
+    assert records.index.tolist() == [0] * 40 + [1] * 180 + [2] * 50
+
+
+def test_a_stretch_lasts_until_the_next_one_starts() -> None:
+    """120 readings a minute apart span 119 minutes, but the stretch lasts until
+    the next begins at 120: exactly the gap, which is enough. One second less
+    is not."""
+    cells, state = minutes((0, 120), (1, 30))
+    lasting = find_records(
+        cells, all_finite(state.size), gap_ns=2 * HOUR, max_length_ns=24 * HOUR, state=state
+    )
+    assert lasting.n == 2
+    short = find_records(
+        cells,
+        all_finite(state.size),
+        gap_ns=2 * HOUR + SECOND,
+        max_length_ns=24 * HOUR,
+        state=state,
+    )
+    assert short.n == 1
+
+
+def test_the_last_stretch_lasts_to_its_own_last_reading() -> None:
+    cells, state = minutes((1, 60), (0, 121))
+    split = find_records(
+        cells, all_finite(state.size), gap_ns=2 * HOUR, max_length_ns=24 * HOUR, state=state
+    )
+    assert split.index.tolist() == [0] * 60 + [1] * 121
+    cells, state = minutes((1, 60), (0, 120))
+    kept = find_records(
+        cells, all_finite(state.size), gap_ns=2 * HOUR, max_length_ns=24 * HOUR, state=state
+    )
+    assert kept.n == 1
+
+
+def test_only_the_finite_readings_states_are_read() -> None:
+    """A reading that is not finite neither starts nor ends a stretch."""
+    cells, state = minutes((0, 130), (1, 30))
+    finite = all_finite(state.size)
+    finite[125:130] = False
+    state[125:130] = 7  # never read
+    records = find_records(cells, finite, gap_ns=2 * HOUR, max_length_ns=24 * HOUR, state=state)
+    assert records.n == 2
+    assert records.index[124] == 0 and records.index[130] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +338,8 @@ def test_what_cannot_be_split_is_refused() -> None:
     cells = cells_at([0.0, 1.0, 2.0])
     with pytest.raises(TsaraEventError, match="one per reading"):
         find_records(cells, all_finite(2), gap_ns=HOUR, max_length_ns=HOUR)
+    with pytest.raises(TsaraEventError, match="platform states for 3 cells"):
+        find_records(cells, all_finite(3), gap_ns=HOUR, max_length_ns=HOUR, state=np.zeros(2))
     with pytest.raises(TsaraEventError, match="positive gap"):
         find_records(cells, all_finite(3), gap_ns=0, max_length_ns=HOUR)
     with pytest.raises(TsaraEventError, match="positive gap"):

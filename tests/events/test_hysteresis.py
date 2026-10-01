@@ -38,6 +38,7 @@ def detect(
     width: float | npt.ArrayLike = 1.0,
     finite: npt.ArrayLike | None = None,
     gap_s: float = 0.0,
+    hole_s: float = 0.0,
     enter: float = 3.0,
     exit_: float = 1.0,
 ) -> tuple[Events, CellBounds]:
@@ -53,6 +54,7 @@ def detect(
         enter=enter,
         exit_=exit_,
         max_internal_gap_ns=int(gap_s * SECOND),
+        max_bridged_dropout_ns=int(hole_s * SECOND),
     )
     return events, cells
 
@@ -124,12 +126,44 @@ def test_bridging_can_join_two_events_into_one() -> None:
     assert detect(z, gap_s=5.0)[0].n == 1
 
 
-def test_a_run_never_crosses_a_dropout_even_where_a_bridge_would_reach() -> None:
-    """Readings every second but one missing: the 2 s step is a dropout."""
+def test_a_dropout_ends_a_run_unless_its_hole_is_shorter_than_the_bridge() -> None:
+    """Readings every second but one missing: the 2 s step is a dropout, and
+    its hole runs from 3.5 s (the cell stop before it) to 4.5 s (the cell start
+    after it). A 2 s bridge crosses it; a 1 s bridge, not strictly longer, and
+    no bridge do not, whatever the dip bridge would reach."""
     mids = [0.0, 1.0, 2.0, 3.0, 5.0, 6.0]
     z = [0.0, 3.5, 2.0, 2.0, 2.0, 3.5]
-    events, _ = detect(z, mids=mids, gap_s=10.0)
-    assert events.first.tolist() == [1, 4] and events.last.tolist() == [3, 5]
+    for hole_s in (0.0, 1.0):
+        events, _ = detect(z, mids=mids, gap_s=10.0, hole_s=hole_s)
+        assert events.first.tolist() == [1, 4] and events.last.tolist() == [3, 5]
+    events, _ = detect(z, mids=mids, gap_s=10.0, hole_s=2.0)
+    assert events.first.tolist() == [1] and events.last.tolist() == [5]
+    assert events.membership.tolist() == [-1, 0, 0, 0, 0, 0]
+    assert events.n_readings.tolist() == [5]
+    assert events.covered.tolist() == [5.0 / 6.0]  # the hole holds no reading
+
+
+def test_a_hole_between_overlapping_cells_is_zero_and_no_bridge_crosses_it() -> None:
+    """2.5 s cells a second apart, one row missing: the cells either side of the
+    hole overlap by half a second, so the hole is zero, not negative. A bridge
+    of nothing still lets that dropout end the run; any bridge at all crosses it."""
+    mids = [0.0, 1.0, 2.0, 4.0, 5.0, 6.0]
+    z = [0.0, 3.5, 2.0, 2.0, 3.5, 0.0]
+    events, _ = detect(z, mids=mids, width=2.5, gap_s=10.0, hole_s=0.0)
+    assert events.first.tolist() == [1, 3]
+    assert detect(z, mids=mids, width=2.5, gap_s=10.0, hole_s=0.001)[0].n == 1
+
+
+def test_a_bridged_hole_inside_a_dip_counts_toward_the_dip() -> None:
+    """Readings a second apart with one missing at 4 s, a dropout. The dip runs
+    from the first run's cell stop (1.5 s) to the second's cell start (4.5 s),
+    its two readings and the hole included: 3 s, so a 3.5 s dip bridge joins
+    the runs and a 3 s one does not; with the hole not bridged, nothing does."""
+    mids = [0.0, 1.0, 2.0, 3.0, 5.0, 6.0, 7.0]
+    z = [0.0, 3.5, 0.5, 0.5, 3.5, 0.0, 0.0]
+    assert detect(z, mids=mids, gap_s=3.5, hole_s=5.0)[0].n == 1
+    assert detect(z, mids=mids, gap_s=3.0, hole_s=5.0)[0].n == 2
+    assert detect(z, mids=mids, gap_s=10.0, hole_s=0.0)[0].n == 2
 
 
 def test_a_blank_reading_ends_a_run_and_is_never_bridged() -> None:
@@ -212,8 +246,17 @@ def test_the_detector_matches_a_slow_reference_one_reading_at_a_time() -> None:
         z[~finite] = NAN
         records = find_records(cells, finite, gap_ns=2 * HOUR, max_length_ns=6 * HOUR)
         gap = [0, 2 * SECOND, 5 * SECOND][trial % 3]
-        found = find_events(z, cells, records, enter=2.5, exit_=0.5, max_internal_gap_ns=gap)
-        expected = _slow_events(z, cells, records, 2.5, 0.5, gap)
+        hole = [0, 2 * SECOND, 5 * SECOND][(trial // 3) % 3]
+        found = find_events(
+            z,
+            cells,
+            records,
+            enter=2.5,
+            exit_=0.5,
+            max_internal_gap_ns=gap,
+            max_bridged_dropout_ns=hole,
+        )
+        expected = _slow_events(z, cells, records, 2.5, 0.5, gap, hole)
         assert list(zip(found.first, found.last, found.peak, strict=True)) == expected["spans"]
         assert found.membership.tolist() == expected["membership"]
 
@@ -225,6 +268,7 @@ def _slow_events(
     enter: float,
     exit_: float,
     gap: int,
+    hole: int,
 ) -> dict[str, list]:  # type: ignore[type-arg]
     spans: list[tuple[int, int, int]] = []
     membership = [-1] * z.size
@@ -245,7 +289,10 @@ def _slow_events(
         broken = (
             previous is None
             or records.index[i] != records.index[previous]
-            or bool(records.dropout_before[i])
+            or (
+                bool(records.dropout_before[i])
+                and max(cells.start_ns[i] - cells.stop_ns[previous], 0) >= hole
+            )
             or math.isnan(z[i])
             or math.isnan(z[previous])
         )
@@ -282,7 +329,9 @@ def test_describing_a_membership_gives_back_what_the_detector_found() -> None:
         cells = cells_at(mids, rng.choice([1.0, 1.024], size=n))
         z = np.convolve(rng.normal(size=n), np.ones(4) / 2, mode="same")
         records = find_records(cells, np.ones(n, dtype=bool), gap_ns=HOUR, max_length_ns=HOUR)
-        found = find_events(z, cells, records, enter=2.5, exit_=0.5, max_internal_gap_ns=0)
+        found = find_events(
+            z, cells, records, enter=2.5, exit_=0.5, max_internal_gap_ns=0, max_bridged_dropout_ns=0
+        )
         again = describe_events(found.membership, z, cells)
         for field in ("number", "first", "last", "peak", "start_ns", "stop_ns", "n_readings"):
             assert np.array_equal(getattr(again, field), getattr(found, field)), field
@@ -354,10 +403,24 @@ def test_white_noise_crosses_as_often_as_the_closed_form_says() -> None:
     records = find_records(cells, np.ones(n, dtype=bool), gap_ns=HOUR, max_length_ns=300 * HOUR)
     for enter in (2.0, 3.0):
         expected = n * expected_chance_rate(enter, 1.0)
-        plain = find_events(z, cells, records, enter=enter, exit_=1.0, max_internal_gap_ns=0)
+        plain = find_events(
+            z,
+            cells,
+            records,
+            enter=enter,
+            exit_=1.0,
+            max_internal_gap_ns=0,
+            max_bridged_dropout_ns=0,
+        )
         assert abs(plain.n - expected) < 5 * math.sqrt(expected), enter
         bridged = find_events(
-            z, cells, records, enter=enter, exit_=1.0, max_internal_gap_ns=5 * SECOND
+            z,
+            cells,
+            records,
+            enter=enter,
+            exit_=1.0,
+            max_internal_gap_ns=5 * SECOND,
+            max_bridged_dropout_ns=0,
         )
         assert bridged.n <= plain.n
 
@@ -371,11 +434,45 @@ def test_what_cannot_be_detected_is_refused() -> None:
     cells = cells_at([0.0, 1.0, 2.0])
     records = find_records(cells, np.ones(3, dtype=bool), gap_ns=HOUR, max_length_ns=HOUR)
     with pytest.raises(TsaraEventError, match="does not match"):
-        find_events(np.zeros(2), cells, records, enter=3.0, exit_=1.0, max_internal_gap_ns=0)
+        find_events(
+            np.zeros(2),
+            cells,
+            records,
+            enter=3.0,
+            exit_=1.0,
+            max_internal_gap_ns=0,
+            max_bridged_dropout_ns=0,
+        )
     with pytest.raises(TsaraEventError, match="must exceed"):
-        find_events(np.zeros(3), cells, records, enter=1.0, exit_=1.0, max_internal_gap_ns=0)
+        find_events(
+            np.zeros(3),
+            cells,
+            records,
+            enter=1.0,
+            exit_=1.0,
+            max_internal_gap_ns=0,
+            max_bridged_dropout_ns=0,
+        )
     with pytest.raises(TsaraEventError, match="negative"):
-        find_events(np.zeros(3), cells, records, enter=3.0, exit_=1.0, max_internal_gap_ns=-1)
+        find_events(
+            np.zeros(3),
+            cells,
+            records,
+            enter=3.0,
+            exit_=1.0,
+            max_internal_gap_ns=-1,
+            max_bridged_dropout_ns=0,
+        )
+    with pytest.raises(TsaraEventError, match="max_bridged_dropout cannot be negative"):
+        find_events(
+            np.zeros(3),
+            cells,
+            records,
+            enter=3.0,
+            exit_=1.0,
+            max_internal_gap_ns=0,
+            max_bridged_dropout_ns=-1,
+        )
 
 
 def test_a_variable_with_no_finite_reading_has_no_event() -> None:

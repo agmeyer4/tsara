@@ -10,6 +10,11 @@ quantile with the events stage's entry and exit multiples
 cells, beside the readings, as the baseline state does (§6.8): one Dataset
 per instrument, ``tsara_stage = "events"``.
 
+Where ``events.platform_state`` names a variable of the instrument's stream
+(its speed), the stream is handed over too, and records also split where the
+platform is parked or moving for at least ``record_gap`` (§6.8); a reading
+whose speed is missing takes the state of the reading before it.
+
 A variable named in ``events.triggers`` finds no events of its own: at each
 sweep point it takes the trigger's event intervals, a reading of it
 belonging to an event when its cell midpoint lies in that event's interval
@@ -27,7 +32,8 @@ What the state holds per variable ``x`` found on its own:
   belongs to at each point, numbered from 0 per point, -1 for none;
 - ``n_events_x`` and ``chance_events_x`` (window, quantile, entry, exit):
   the events found, and the events chance alone would make on as many
-  independent Gaussian readings (an upper bound once dips are bridged);
+  independent Gaussian readings: a reference, not a bound, since a record
+  whose clean air is described wrongly crosses more often (§6.8);
 - ``sigma_rand_x`` when the reading declares or reports one, beside the
   spread for comparison and nothing else: the spread is not a measurement
   uncertainty (§2.3).
@@ -77,6 +83,7 @@ __all__ = [
     "ENTER_DIM",
     "EVENTS_STAGE",
     "EXIT_DIM",
+    "PLATFORM_STATE_ATTR",
     "TRIGGER_ATTR",
     "event_state",
     "event_states",
@@ -95,6 +102,10 @@ TRIGGER_ATTR = "tsara_events_trigger"
 #: On ``chance_events_x``: the assumption its closed form rests on.
 CHANCE_ASSUMPTION_ATTR = "tsara_chance_assumption"
 
+#: On a state whose records split at the platform's state: the rule, as
+#: ``'<variable> > <value>'`` (moving).
+PLATFORM_STATE_ATTR = "tsara_events_platform_state"
+
 #: The settings a state was found under, as dataset attributes (§6.8).
 _SETTING_ATTRS = {
     "record_gap": "tsara_events_record_gap",
@@ -102,12 +113,15 @@ _SETTING_ATTRS = {
     "min_clean_readings": "tsara_events_min_clean_readings",
     "clean_level_estimator": "tsara_events_clean_level_estimator",
     "max_internal_gap": "tsara_events_max_internal_gap",
+    "max_bridged_dropout": "tsara_events_max_bridged_dropout",
 }
 
 _CHANCE_ASSUMPTION = (
-    "independent Gaussian readings, no dip bridged (METHODS 6.8): oversampled, "
-    "autocorrelated readings cross less often, and bridging only merges events, "
-    "so this is an upper bound once dips are bridged"
+    "independent Gaussian readings described correctly by the record's clean level "
+    "and spread, no dip bridged (METHODS 6.8): oversampled, autocorrelated readings "
+    "cross less often and bridging only merges events, while a misdescribed record "
+    "or air wandering at the window's scale crosses more often, so this is a "
+    "reference, not a bound"
 )
 
 #: At most this many variables or patterns are named in one warning.
@@ -121,6 +135,7 @@ def event_state(
     events: EventsConfig,
     variables: Sequence[str] | None = None,
     triggers: Mapping[str, xr.Dataset] | None = None,
+    stream: xr.Dataset | None = None,
 ) -> xr.Dataset:
     """Find one stream's events at every sweep point.
 
@@ -139,6 +154,10 @@ def event_state(
         For a variable whose trigger lies on another instrument, that
         instrument's event state, keyed by instrument name. A trigger on
         this instrument is taken from this call's own results.
+    stream : xarray.Dataset, optional
+        The instrument's stream, needed when ``events.platform_state`` names
+        this instrument: the state is read from its variable at the
+        baseline state's readings, which the stream must all hold.
 
     Returns
     -------
@@ -152,8 +171,9 @@ def event_state(
     ------
     TsaraEventError
         If ``state`` is not a baseline state, a named variable has no
-        enhancement, or a trigger's event state is missing or was found on
-        another sweep.
+        enhancement, a trigger's event state is missing or was found on
+        another sweep, or the platform's state cannot be read from
+        ``stream``.
     """
     if state.attrs.get("tsara_stage") != BASELINE_STAGE:
         raise TsaraEventError(
@@ -167,10 +187,12 @@ def event_state(
     own = [v for v in selection if events.trigger_for(instrument, v) is None]
     adopted = [v for v in selection if events.trigger_for(instrument, v) is not None]
 
+    platform = _platform_state(state, instrument, events, stream) if own else None
+
     data_vars: dict[str, tuple[tuple[str, ...], npt.NDArray[np.generic], dict[str, object]]] = {}
     blank_everywhere: dict[str, list[tuple[str, int]]] = {}
     for variable in own:
-        columns, blank = _own_events(state, variable, cells, events, enter, exit_)
+        columns, blank = _own_events(state, variable, cells, events, enter, exit_, platform)
         data_vars.update(columns)
         if blank:
             blank_everywhere[variable] = blank
@@ -199,6 +221,9 @@ def event_state(
             **{attr: str(getattr(events, field)) for field, attr in _SETTING_ATTRS.items()},
         },
     )
+    spec = events.platform_state.get(instrument)
+    if platform is not None and spec is not None:
+        dataset.attrs[PLATFORM_STATE_ATTR] = f"{spec.variable} > {spec.moving_above:g}"
     dataset.coords[TIME_BOUNDS_VAR] = state[TIME_BOUNDS_VAR]
     dataset[TIME_COORD].attrs.update(state[TIME_COORD].attrs)
     if blank_everywhere:
@@ -207,7 +232,12 @@ def event_state(
     return dataset
 
 
-def event_states(states: Mapping[str, xr.Dataset], events: EventsConfig) -> dict[str, xr.Dataset]:
+def event_states(
+    states: Mapping[str, xr.Dataset],
+    events: EventsConfig,
+    *,
+    streams: Mapping[str, xr.Dataset] | None = None,
+) -> dict[str, xr.Dataset]:
     """Find the events of every baseline state of a campaign.
 
     In two passes, because a trigger may lie on another instrument: first
@@ -221,6 +251,9 @@ def event_states(states: Mapping[str, xr.Dataset], events: EventsConfig) -> dict
         The campaign's baseline states, keyed by instrument.
     events : EventsConfig
         Thresholds, records and triggers.
+    streams : mapping of str to xarray.Dataset, optional
+        The campaign's streams, keyed by instrument; read only for an
+        instrument ``events.platform_state`` names.
 
     Returns
     -------
@@ -235,7 +268,11 @@ def event_states(states: Mapping[str, xr.Dataset], events: EventsConfig) -> dict
         later[instrument] = [v for v in names if v not in own]
         if own:
             first[instrument] = event_state(
-                state, instrument=instrument, events=events, variables=own
+                state,
+                instrument=instrument,
+                events=events,
+                variables=own,
+                stream=(streams or {}).get(instrument),
             )
     result = dict(first)
     for instrument, adopted in later.items():
@@ -295,6 +332,7 @@ def _own_events(
     events: EventsConfig,
     enter: npt.NDArray[np.float64],
     exit_: npt.NDArray[np.float64],
+    platform: npt.NDArray[np.int8] | None,
 ) -> tuple[dict[str, _Column], list[tuple[str, int]]]:
     """Return one variable's columns, and the sweep points blank at every record.
 
@@ -312,6 +350,7 @@ def _own_events(
         np.isfinite(x),
         gap_ns=_ns(events.record_gap),
         max_length_ns=_ns(events.max_record_length),
+        state=platform,
     )
     declared = reading.attrs.get("quantization")
     air = clean_air(
@@ -337,6 +376,7 @@ def _own_events(
     n_events = np.zeros(sweep, dtype=np.int64)
     chance = np.zeros(sweep, dtype=np.float64)
     gap_ns = _ns(events.max_internal_gap)
+    hole_ns = _ns(events.max_bridged_dropout)
     for w, q in np.ndindex(windows, quantiles):
         scored = int(np.count_nonzero(np.isfinite(z[:, w, q])))
         for e, x_ in np.ndindex(enter.size, exit_.size):
@@ -347,6 +387,7 @@ def _own_events(
                 enter=float(enter[e]),
                 exit_=float(exit_[x_]),
                 max_internal_gap_ns=gap_ns,
+                max_bridged_dropout_ns=hole_ns,
             )
             event[:, w, q, e, x_] = found.membership
             n_events[w, q, e, x_] = found.n
@@ -421,6 +462,46 @@ def _own_events(
         if air.blank[:, w, q].all()
     ]
     return columns, blank
+
+
+def _platform_state(
+    state: xr.Dataset, instrument: str, events: EventsConfig, stream: xr.Dataset | None
+) -> npt.NDArray[np.int8] | None:
+    """Return 1 where the platform is moving and 0 where not, per reading; None unasked.
+
+    Read from the instrument's own stream at the baseline state's readings,
+    which the stream must all hold (a baseline state built on a stream's
+    finite readings of one variable holds a subset). A missing value takes
+    the state before it, and the first ones the state after.
+    """
+    spec = events.platform_state.get(instrument)
+    if spec is None:
+        return None
+    if stream is None:
+        raise TsaraEventError(
+            f"events.platform_state reads '{instrument}.{spec.variable}', so the events of "
+            f"'{instrument}' need its stream: pass stream= (or streams= to event_states)."
+        )
+    if spec.variable not in stream.data_vars:
+        raise TsaraEventError(
+            f"events.platform_state reads '{spec.variable}', which the stream of "
+            f"'{instrument}' does not hold."
+        )
+    times = state[TIME_COORD].values
+    if not np.isin(times, stream[TIME_COORD].values).all():
+        raise TsaraEventError(
+            f"The stream handed over for '{instrument}' does not hold every reading of its "
+            "baseline state; pass the stream the baseline state was built on."
+        )
+    value = np.asarray(stream[spec.variable].sel({TIME_COORD: times}).values, dtype=np.float64)
+    moving = pd.Series(np.where(np.isfinite(value), value > spec.moving_above, np.nan))
+    filled = moving.ffill().bfill()
+    if filled.isna().all():
+        raise TsaraEventError(
+            f"events.platform_state reads '{instrument}.{spec.variable}', which has no finite "
+            "value at these readings."
+        )
+    return filled.to_numpy().astype(np.int8)
 
 
 def _ns(spec: str) -> int:

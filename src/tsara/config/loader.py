@@ -224,6 +224,29 @@ class TsaraConfig(_StrictModel):
                 )
         return self
 
+    @model_validator(mode="after")
+    def _platform_states_name_declared_variables(self) -> TsaraConfig:
+        """Check every ``events.platform_state`` entry against the manifest.
+
+        The instrument must exist and declare the variable, of any role: a
+        speed is ``role: aux``, and it is read from the instrument's own
+        stream, so it never needs a join.
+        """
+        instruments = self.manifest.instruments
+        for key, spec in self.analysis.events.platform_state.items():
+            instrument = instruments.get(key)
+            if instrument is None:
+                raise ValueError(
+                    f"events.platform_state names '{key}', but manifest '{self.manifest.name}' "
+                    f"declares no instrument '{key}'; instruments: {sorted(instruments)}."
+                )
+            if spec.variable not in instrument.variables:
+                raise ValueError(
+                    f"events.platform_state['{key}'] reads '{spec.variable}', which instrument "
+                    f"'{key}' does not declare; its variables: {sorted(instrument.variables)}."
+                )
+        return self
+
 
 # ---------------------------------------------------------------------------
 # YAML plumbing

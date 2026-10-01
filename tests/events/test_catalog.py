@@ -145,6 +145,7 @@ def test_each_row_is_the_detectors_event(van: tuple[xr.Dataset, xr.Dataset, pd.D
             enter=EVENTS.enter_multiple[e],
             exit_=1.0,
             max_internal_gap_ns=5 * SECOND,
+            max_bridged_dropout_ns=5 * SECOND,
         )
         rows = catalog[
             (catalog["baseline_window"] == state["baseline_window"].values[w])

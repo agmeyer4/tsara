@@ -163,7 +163,10 @@ def _true_noise_events(campaign: SyntheticDataset) -> Any:
     cells = stream_cells(full, "a")
     z = (full["ch4"].values - full["truth_background_ch4"].values) / SIGMA
     records = find_records(cells, np.isfinite(z), gap_ns=2 * HOUR, max_length_ns=13 * HOUR)
-    return find_events(z, cells, records, enter=3.0, exit_=1.0, max_internal_gap_ns=0), cells
+    found = find_events(
+        z, cells, records, enter=3.0, exit_=1.0, max_internal_gap_ns=0, max_bridged_dropout_ns=0
+    )
+    return found, cells
 
 
 # ---------------------------------------------------------------------------

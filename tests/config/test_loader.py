@@ -530,6 +530,35 @@ def test_triggers_between_declared_gases_are_accepted(
     assert events.trigger_for("picarro", "ch4") is None
 
 
+def test_a_platform_state_naming_a_declared_variable_is_accepted(
+    write_yaml: WriteYaml, stationary_manifest_dict: dict[str, Any], analysis_dict: dict[str, Any]
+) -> None:
+    analysis = copy.deepcopy(analysis_dict)
+    analysis["events"] = {"platform_state": {"picarro": {"variable": "co2", "moving_above": 1.0}}}
+    events = _combined(write_yaml, stationary_manifest_dict, analysis).analysis.events
+    assert events.platform_state["picarro"].variable == "co2"
+
+
+@pytest.mark.parametrize(
+    ("platform_state", "message"),
+    [
+        ({"lgr": {"variable": "speed", "moving_above": 5.0}}, "declares no instrument 'lgr'"),
+        ({"picarro": {"variable": "speed", "moving_above": 5.0}}, "does not declare"),
+    ],
+)
+def test_a_platform_state_naming_what_is_not_declared_is_refused(
+    write_yaml: WriteYaml,
+    stationary_manifest_dict: dict[str, Any],
+    analysis_dict: dict[str, Any],
+    platform_state: dict[str, dict[str, object]],
+    message: str,
+) -> None:
+    analysis = copy.deepcopy(analysis_dict)
+    analysis["events"] = {"platform_state": platform_state}
+    with pytest.raises(TsaraConfigError, match=message):
+        _combined(write_yaml, stationary_manifest_dict, analysis)
+
+
 @pytest.mark.parametrize(
     ("triggers", "message"),
     [

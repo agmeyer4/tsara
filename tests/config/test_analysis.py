@@ -181,7 +181,7 @@ def test_a_coarse_grid_no_longer_constrains_the_shortest_window(
 
 
 # ---------------------------------------------------------------------------
-# Plumes validation
+# Events validation
 # ---------------------------------------------------------------------------
 
 
@@ -199,6 +199,43 @@ def test_every_entry_must_exceed_every_exit(
     """Both are swept, so every pairing runs; one inverted pairing is enough to refuse."""
     with pytest.raises(ValidationError, match="must exceed every exit_multiple"):
         EventsConfig(enter_multiple=enter, exit_multiple=exit_)
+
+
+def test_short_holes_are_bridged_by_default_and_no_platform_state_is_read() -> None:
+    config = EventsConfig()
+    assert config.max_bridged_dropout == "5s"
+    assert config.platform_state == {}
+
+
+@pytest.mark.parametrize("value", ["abc", "0s", "-5s"])
+def test_the_bridge_for_holes_is_a_positive_duration(value: str) -> None:
+    with pytest.raises(ValidationError, match="max_bridged_dropout"):
+        EventsConfig(max_bridged_dropout=value)
+
+
+def test_a_platform_state_names_a_variable_and_a_speed() -> None:
+    config = EventsConfig.model_validate(
+        {"platform_state": {"arc": {"variable": "speed", "moving_above": 5.0}}}
+    )
+    assert config.platform_state["arc"].variable == "speed"
+    assert config.platform_state["arc"].moving_above == 5.0
+
+
+@pytest.mark.parametrize(
+    ("platform_state", "message"),
+    [
+        ({"arc van": {"variable": "speed", "moving_above": 5.0}}, "keyed by instrument"),
+        ({"arc": {"variable": "ground speed", "moving_above": 5.0}}, "names a variable"),
+        ({"arc": {"variable": "speed", "moving_above": -1.0}}, "greater than or equal"),
+        ({"arc": {"variable": "speed", "moving_above": float("nan")}}, "finite number"),
+        ({"arc": {"variable": "speed"}}, "moving_above"),
+    ],
+)
+def test_a_platform_state_spelled_wrong_is_refused(
+    platform_state: dict[str, dict[str, object]], message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        EventsConfig.model_validate({"platform_state": platform_state})
 
 
 def test_the_example_sweep_is_accepted() -> None:

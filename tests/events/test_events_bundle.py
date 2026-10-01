@@ -122,6 +122,20 @@ def test_the_round_trip_is_exact_for_states_catalog_and_config(
     assert sorted(load_events(target).states) == ["iwas", "van"]
 
 
+def test_a_platform_state_in_the_configuration_comes_back(
+    tmp_path: Path, run: tuple[dict[str, xr.Dataset], dict[str, xr.Dataset], pd.DataFrame]
+) -> None:
+    _, states, _ = run
+    config = EventsConfig.model_validate(
+        {
+            "max_bridged_dropout": "3s",
+            "platform_state": {"arc": {"variable": "speed", "moving_above": 5.0}},
+        }
+    )
+    save_events(states, tmp_path, events=config)
+    assert load_events(tmp_path).events == config
+
+
 def test_a_reloaded_state_catalogs_as_the_saved_one_did(
     tmp_path: Path, run: tuple[dict[str, xr.Dataset], dict[str, xr.Dataset], pd.DataFrame]
 ) -> None:

@@ -11,12 +11,13 @@ import pytest
 import xarray as xr
 
 from tsara.baseline import baseline_state
-from tsara.config.analysis import BaselineConfig, EventsConfig
+from tsara.config.analysis import BaselineConfig, EventsConfig, PlatformStateConfig
 from tsara.core.support import CellBounds, stream_cells
 from tsara.core.timebase import SECOND_NS as SECOND
 from tsara.events import (
     CHANCE_ASSUMPTION_ATTR,
     EVENTS_STAGE,
+    PLATFORM_STATE_ATTR,
     TRIGGER_ATTR,
     TsaraEventError,
     clean_air,
@@ -146,7 +147,13 @@ def test_the_state_is_the_three_steps_called_by_hand(
     for w, q, e in np.ndindex(2, 2, 2):
         enter = EVENTS.enter_multiple[e]
         events = find_events(
-            z[:, w, q], cells, records, enter=enter, exit_=1.0, max_internal_gap_ns=5 * SECOND
+            z[:, w, q],
+            cells,
+            records,
+            enter=enter,
+            exit_=1.0,
+            max_internal_gap_ns=5 * SECOND,
+            max_bridged_dropout_ns=5 * SECOND,
         )
         assert np.array_equal(found["event_ch4"].values[:, w, q, e, 0], events.membership)
         assert found["n_events_ch4"].values[w, q, e, 0] == events.n
@@ -286,6 +293,120 @@ def test_the_warning_names_eight_and_counts_the_rest(caplog: pytest.LogCaptureFi
     assert "voc7 and 1 more: 120 s, q 0.05 (at most 3)" in first
     assert "voc8" not in first
     assert "and 1 more pattern(s)" in second and "v8:" not in second
+
+
+def test_a_missing_row_inside_a_plume_is_bridged_and_a_long_hole_is_not() -> None:
+    """A 50 ppb plume of 40 s with one row missing in its middle, and another
+    with 20 rows missing: the configured 5 s bridge crosses the first hole, and
+    no bridge at all ("1ns") crosses neither."""
+    ch4 = plumy(3600, 13)
+    ch4[2000:2040] = 1950.0
+    ch4[2020] = np.nan
+    ch4[2800:2840] = 1950.0
+    ch4[2810:2830] = np.nan
+    state = baseline_state(
+        make_stream(np.arange(3600.0), {"ch4": ch4}), instrument="van", baseline=BASELINE
+    )
+    bridged = event_state(state, instrument="van", events=EVENTS)
+    event = bridged["event_ch4"].values[:, 0, 0, 0, 0]
+    assert event[2019] == event[2021] >= 0
+    assert event[2809] != event[2830] and min(event[2809], event[2830]) >= 0
+    assert bridged.attrs["tsara_events_max_bridged_dropout"] == "5s"
+    apart = event_state(state, instrument="van", events=EventsConfig(max_bridged_dropout="1ns"))[
+        "event_ch4"
+    ].values[:, 0, 0, 0, 0]
+    assert apart[2019] != apart[2021]
+
+
+def moving_stream(speed: npt.NDArray[np.float64]) -> xr.Dataset:
+    """Four hours of 1 s methane with the platform's speed beside it."""
+    stream = make_stream(np.arange(float(speed.size)), {"ch4": plumy(speed.size, 14)})
+    stream["speed"] = ("time", speed, {"units": "km h-1", "role": "aux"})
+    return stream
+
+
+PARKED_THEN_DRIVING = EventsConfig(
+    record_gap="1h",
+    max_record_length="24h",
+    platform_state={"van": PlatformStateConfig(variable="speed", moving_above=5.0)},
+)
+
+
+def test_records_split_where_the_platform_is_parked_or_moving_long_enough() -> None:
+    """Parked 90 min, then a drive of 40 min legs and 5 min stops: the drive is
+    one record, the base another, as the rule reads them off the stream at the
+    baseline state's readings. Parked reads exactly 5 km/h (GPS jitter), which
+    is not above the threshold; 70 minutes of the base have no speed, which
+    take the state before them rather than making a stretch of their own; the
+    first readings have none either and take the state after them."""
+    n = 4 * 3600
+    t = np.arange(n)
+    speed = np.where(t < 5400, 5.0, np.where((t - 5400) % 2700 < 2400, 40.0, 0.0))
+    speed[600:4800] = np.nan
+    speed[:3] = np.nan
+    stream = moving_stream(speed)
+    state = baseline_state(stream, instrument="van", baseline=BASELINE)
+    found = event_state(state, instrument="van", events=PARKED_THEN_DRIVING, stream=stream)
+    record = found["record_ch4"].values
+    assert (record[:5400] == 0).all() and (record[5400:] == 1).all()
+    assert found.attrs[PLATFORM_STATE_ATTR] == "speed > 5"
+    labels = np.where(t < 5400, 0, np.where((t - 5400) % 2700 < 2400, 1, 0))
+    cells = stream_cells(state, "van")
+    by_hand = find_records(
+        cells, np.ones(n, bool), gap_ns=HOUR, max_length_ns=24 * HOUR, state=labels
+    )
+    assert np.array_equal(record, by_hand.index)
+    alone = event_state(state, instrument="van", events=EVENTS)
+    assert PLATFORM_STATE_ATTR not in alone.attrs
+
+
+def test_the_state_is_read_at_the_baseline_states_own_readings() -> None:
+    """A baseline state built on the finite readings of one variable holds a
+    subset of the stream's readings; the speed is read at those."""
+    speed = np.where(np.arange(4 * 3600) < 5400, 0.0, 40.0)
+    stream = moving_stream(speed)
+    stream["ch4"][::7] = np.nan
+    kept = stream.isel(time=np.flatnonzero(np.isfinite(stream["ch4"].values)))
+    state = baseline_state(kept, instrument="van", baseline=BASELINE)
+    found = event_state(state, instrument="van", events=PARKED_THEN_DRIVING, stream=stream)
+    t = (kept["time"].values - stream["time"].values[0]) / np.timedelta64(1, "s")
+    assert np.array_equal(found["record_ch4"].values, (t >= 5400).astype(np.int32))
+
+
+def test_event_states_hands_each_instrument_its_stream() -> None:
+    speed = np.where(np.arange(4 * 3600) < 5400, 0.0, 40.0)
+    stream = moving_stream(speed)
+    states = {"van": baseline_state(stream, instrument="van", baseline=BASELINE)}
+    found = event_states(states, PARKED_THEN_DRIVING, streams={"van": stream})
+    assert found["van"]["record_ch4"].values.max() == 1
+    with pytest.raises(TsaraEventError, match="need its stream"):
+        event_states(states, PARKED_THEN_DRIVING)
+
+
+def test_a_platform_state_that_cannot_be_read_is_refused() -> None:
+    speed = np.where(np.arange(4 * 3600) < 5400, 0.0, 40.0)
+    stream = moving_stream(speed)
+    state = baseline_state(stream, instrument="van", baseline=BASELINE)
+    with pytest.raises(TsaraEventError, match="need its stream"):
+        event_state(state, instrument="van", events=PARKED_THEN_DRIVING)
+    with pytest.raises(TsaraEventError, match="does not hold"):
+        event_state(
+            state,
+            instrument="van",
+            events=PARKED_THEN_DRIVING,
+            stream=stream.drop_vars("speed"),
+        )
+    with pytest.raises(TsaraEventError, match="every reading of its baseline state"):
+        event_state(
+            state,
+            instrument="van",
+            events=PARKED_THEN_DRIVING,
+            stream=stream.isel(time=slice(1, None)),
+        )
+    blank = stream.copy()
+    blank["speed"] = blank["speed"] * np.nan
+    with pytest.raises(TsaraEventError, match="no finite value"):
+        event_state(state, instrument="van", events=PARKED_THEN_DRIVING, stream=blank)
 
 
 # ---------------------------------------------------------------------------

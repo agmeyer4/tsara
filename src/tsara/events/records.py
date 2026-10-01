@@ -5,15 +5,18 @@ air over a stretch of time, and the stretch matters: a ground site that runs
 for eleven days without a two-hour gap, or a van that logs parked and
 driving alike for a week, would otherwise be described by one number mixing
 air that was never the same. So a variable's finite readings are split where
-consecutive ones are more than a gap apart, and each piece is cut into equal
-parts no longer than a maximum length. Each part is a **record**. Records
-belong to a variable, are found from which of its readings are finite, and
+consecutive ones are more than a gap apart, and where the platform changes
+state (parked or moving) for at least as long as that gap, and each piece is
+cut into equal parts no longer than a maximum length. Each part is a
+**record**. Records belong to a variable, are found from which of its
+readings are finite and, where given, from the platform's state at each, and
 are the same at every sweep point.
 
 A record also fixes what the detector calls a **dropout**: two consecutive
 finite readings farther apart than :data:`DROPOUT_SPACING_FACTOR` times the
-record's median spacing between consecutive finite readings. An event never
-runs across one (§6.8), because missing data is not turbulent air. The rule
+record's median spacing between consecutive finite readings. An event runs
+across a dropout only when the hole is shorter than the bridge allowed
+(``EventsConfig.max_bridged_dropout``, §6.8). The rule
 is on spacing, not on cell width, for the reason §2.5 measured: the 07-18
 drive's analyzer reports every 2 or 3 s on 1 s cells, so a rule on width
 would call every step a dropout.
@@ -96,11 +99,17 @@ def find_records(
     *,
     gap_ns: int,
     max_length_ns: int,
+    state: npt.NDArray[np.generic] | None = None,
 ) -> Records:
     """Split a variable's finite readings into records, and mark its dropouts.
 
     Consecutive finite readings more than ``gap_ns`` apart, midpoint to
-    midpoint, end one piece and start the next. A piece whose first and last
+    midpoint, end one piece and start the next. Where ``state`` is given, a
+    stretch of one state that lasts at least ``gap_ns`` also starts a piece
+    and ends one, as an outage would: a stretch lasts from its first finite
+    reading's midpoint to the next stretch's first, or to its own last
+    reading when none follows, so shorter stretches (a stop between legs of a
+    drive) stay with their neighbours. A piece whose first and last
     midpoints are more than ``max_length_ns`` apart is cut into the fewest
     equal parts no longer than that, each reading going to the part its
     midpoint falls in; a part that holds no reading is not a record, so
@@ -116,6 +125,10 @@ def find_records(
         ``EventsConfig.record_gap``, in nanoseconds.
     max_length_ns : int
         ``EventsConfig.max_record_length``, in nanoseconds.
+    state : numpy.ndarray, optional
+        Per reading, the platform's state (e.g. moving or not), compared for
+        equality; only the finite readings' values are read, and none may be
+        missing. ``None`` splits on gaps alone.
 
     Returns
     -------
@@ -126,14 +139,19 @@ def find_records(
     Raises
     ------
     TsaraEventError
-        If ``finite`` does not match the cells, a length is not positive, or
-        the finite readings are not in time order.
+        If ``finite`` or ``state`` does not match the cells, a length is not
+        positive, or the finite readings are not in time order.
     """
     mask = np.asarray(finite, dtype=bool)
     if mask.shape != cells.start_ns.shape:
         raise TsaraEventError(
             f"{mask.size} finite flags for {cells.start_ns.size} cells; there must be one per "
             "reading."
+        )
+    if state is not None and np.shape(state) != cells.start_ns.shape:
+        raise TsaraEventError(
+            f"{np.size(state)} platform states for {cells.start_ns.size} cells; there must be "
+            "one per reading."
         )
     if gap_ns <= 0 or max_length_ns <= 0:
         raise TsaraEventError(
@@ -155,8 +173,12 @@ def find_records(
         )
 
     # 1. Pieces: split wherever two consecutive finite readings are more
-    #    than the gap apart.
-    piece_starts = np.concatenate([[0], np.flatnonzero(spacing > gap_ns) + 1])
+    #    than the gap apart, and at both ends of every stretch of one state
+    #    that lasts at least the gap.
+    splits = set((np.flatnonzero(spacing > gap_ns) + 1).tolist())
+    if state is not None:
+        splits |= _state_splits(np.asarray(state)[kept], midpoints, gap_ns)
+    piece_starts = np.array([0, *sorted(splits)], dtype=np.int64)
     piece_stops = np.concatenate([piece_starts[1:], [kept.size]])
 
     # 2. Parts: cut each piece into the fewest equal parts no longer than the
@@ -183,6 +205,23 @@ def find_records(
         median_spacing[r] = float(np.median(steps))
         dropout_before[kept[a + 1 : b + 1]] = steps > DROPOUT_SPACING_FACTOR * median_spacing[r]
     return Records(index, start_ns, stop_ns, median_spacing, dropout_before)
+
+
+def _state_splits(
+    state: npt.NDArray[np.generic], midpoints: npt.NDArray[np.int64], gap_ns: int
+) -> set[int]:
+    """Return where the finite readings split for the platform's state.
+
+    ``state`` and ``midpoints`` are the finite readings'. A stretch is a run
+    of equal states; it lasts from its first midpoint to the next stretch's
+    first, or to its own last midpoint at the end. Each stretch lasting at
+    least ``gap_ns`` splits at its first reading and at the next stretch's.
+    """
+    starts = np.flatnonzero(np.concatenate([[True], state[1:] != state[:-1]]))
+    ends = np.concatenate([midpoints[starts[1:]], midpoints[-1:]])
+    lasting = ends - midpoints[starts] >= gap_ns
+    following = np.concatenate([starts[1:], [midpoints.size]])
+    return {int(i) for i in (*starts[lasting], *following[lasting]) if 0 < i < midpoints.size}
 
 
 def _parts(midpoints: npt.NDArray[np.int64], max_length_ns: int) -> npt.NDArray[np.int64]:

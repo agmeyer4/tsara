@@ -4,11 +4,19 @@ With the clean level *m* and spread *s* of a record (:mod:`tsara.events.clean`),
 each reading's statistic is z = (Δ − m) / s, and an **event** is a run of
 readings with z ≥ exit that holds at least one with z ≥ entry
 (``docs/METHODS.md`` §6.8): offline hysteresis, so that a plume hovering near
-one threshold is not chopped into fragments. Four rules shape the runs.
+one threshold is not chopped into fragments. Five rules shape the runs.
 
-- **A run never crosses a dropout** (:mod:`tsara.events.records`), a record
-  boundary, or a reading whose enhancement is blank: missing data is not
-  turbulent air, and a blank baseline says nothing about the air either.
+- **A run never crosses a record boundary or a reading whose enhancement is
+  blank**: a blank baseline says nothing about the air.
+- **A dropout shorter than** ``max_bridged_dropout`` **is bridged; a longer
+  one ends the run** (:mod:`tsara.events.records` says what a dropout is).
+  The hole is measured as a dip is, from the cell stop of the reading before
+  it to the cell start of the reading after it, and bridged only when
+  strictly shorter. Nothing is filled in: the hole holds no reading, and the
+  event's covered share records it. A single missing row inside a plume is
+  weaker evidence that the plume ended than a reading below exit, which is
+  bridged too; the ARC merge file misses single seconds of its Aeris tens of
+  times an hour, and ending an event at each split one plume into many.
 - **A dip below exit shorter than** ``max_internal_gap`` **is bridged**, so
   that noise does not split one plume in two. The dip is the time between
   the cell stop of the last reading above exit and the cell start of the
@@ -111,6 +119,7 @@ def find_events(
     enter: float,
     exit_: float,
     max_internal_gap_ns: int,
+    max_bridged_dropout_ns: int,
 ) -> Events:
     """Find the events of one variable at one sweep point.
 
@@ -130,6 +139,9 @@ def find_events(
     max_internal_gap_ns : int
         A dip below exit strictly shorter than this is bridged; 0 bridges
         nothing.
+    max_bridged_dropout_ns : int
+        A dropout whose hole is strictly shorter than this is bridged; 0
+        lets every dropout end a run.
 
     Returns
     -------
@@ -139,8 +151,8 @@ def find_events(
     Raises
     ------
     TsaraEventError
-        If the arrays do not match, entry does not exceed exit, or the gap
-        is negative.
+        If the arrays do not match, entry does not exceed exit, or a gap is
+        negative.
     """
     values = np.asarray(z, dtype=np.float64)
     if values.shape != records.index.shape or values.shape != cells.start_ns.shape:
@@ -152,22 +164,33 @@ def find_events(
         raise TsaraEventError(f"The entry multiple ({enter}) must exceed the exit ({exit_}).")
     if max_internal_gap_ns < 0:
         raise TsaraEventError(f"max_internal_gap cannot be negative; got {max_internal_gap_ns} ns.")
+    if max_bridged_dropout_ns < 0:
+        raise TsaraEventError(
+            f"max_bridged_dropout cannot be negative; got {max_bridged_dropout_ns} ns."
+        )
 
     # Work along the finite readings only: a reading that is not finite is a
-    # hole in time, and whether the hole breaks a run is the dropout rule's
-    # business, already written into `records.dropout_before`.
+    # hole in time. Whether a hole is a dropout is the record's business,
+    # already written into `records.dropout_before`; whether a dropout ends a
+    # run is the bridge's, below.
     rows = np.flatnonzero(records.index >= 0)
     zk = values[rows]
     valid = np.isfinite(zk)
 
     # 1. Segments: stretches no run may cross. A new one starts at a record
-    #    boundary, at a dropout and at a blank reading; the blank reading is
-    #    never above exit, so no run holds it, and whatever follows it lies in
-    #    a later segment than whatever came before.
+    #    boundary, at a blank reading and at a dropout whose hole is not
+    #    shorter than the bridge allowed; the blank reading is never above
+    #    exit, so no run holds it, and whatever follows it lies in a later
+    #    segment than whatever came before. The hole runs from the previous
+    #    finite reading's cell stop to this one's cell start, zero where the
+    #    cells overlap.
     record_of = records.index[rows]
+    starts, stops = cells.start_ns[rows], cells.stop_ns[rows]
+    hole = np.zeros(rows.size, dtype=np.int64)
+    hole[1:] = np.maximum(starts[1:] - stops[:-1], 0)
     breaks = np.ones(rows.size, dtype=bool)
     breaks[1:] = (record_of[1:] != record_of[:-1]) | ~valid[1:]
-    breaks |= records.dropout_before[rows]
+    breaks |= records.dropout_before[rows] & (hole >= max_bridged_dropout_ns)
     segment = np.cumsum(breaks)
 
     # 2. Runs: consecutive readings at or above exit within one segment.
@@ -182,7 +205,6 @@ def find_events(
     #    negative, so that a gap of zero bridges nothing. Whatever lies between
     #    them in one segment is finite and below exit, so it belongs to the
     #    event.
-    starts, stops = cells.start_ns[rows], cells.stop_ns[rows]
     dip = np.maximum(starts[run_first[1:]] - stops[run_last[:-1]], 0)
     joins = (segment[run_first[1:]] == segment[run_last[:-1]]) & (dip < max_internal_gap_ns)
     group_opens = np.r_[True, ~joins] if run_first.size else np.empty(0, dtype=bool)
