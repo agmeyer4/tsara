@@ -893,8 +893,9 @@ not a sole objective. **[estimator details — Phase 7]**
 Baselines were scoped on 2026-09-24 and built in Phase 5 (2026-09-28):
 §6.1–6.7 say what was decided and, marked *built*, what the package now does
 (`tsara.baseline`). The numbers quoted were measured on the permitted 2024
-archive or on generated data under the rules stated beside them. Detection
-was scoped on 2026-09-29 and is decided, to be built in Phase 6 (§6.8);
+archive or on generated data under the rules stated beside them. Events were
+scoped on 2026-09-29 and built in Phase 6 (2026-09-30, `tsara.events`; §6.8),
+and the Phase-6 walkthrough added measured findings to §6.1 and §6.8;
 smoothing and clustering remain stubs (§6.9).
 
 ### 6.1 What a baseline is for **[decided 2026-09-24 — Phase 5]**
@@ -997,6 +998,53 @@ rows. **Settled at the Phase-6 scoping (2026-09-29): detection does not depend
 on it.** Both readings need the same two things, the tree of events across
 windows and, at every reading, the event it belongs to, and detection records
 both (§6.8); the rule for a parent's ratio is Phase 7's, where the fit is.
+
+**Measured in the Phase-6 walkthrough (2026-09-30): with detected children,
+masking fails on a broad plume.** Masking needs the children found, and at a
+short window a broad plume's flanks are found too (above). Rule: notebook 06's
+landfill recipe at 6 h, seed 5 (stated in §6.8); *q* = 0.05 at 2, 10 and 60
+min, entry 3, exit 1, dips and holes under 5 s bridged; a blip reading is one
+inside a gas-line plume's interval in the answer key. The landfill's event at
+60 min, 11:53 to 12:48, holds 3,281 readings, 38 % of them in a blip. Events at
+2 min cover 72 % of its readings, and 58 % of what they cover is the landfill's
+own flanks, not blips, so masking the children would remove most of the
+parent. One 2 min event shows how: from 12:23:29 to 12:36:32 it is a blip (its
+first two minutes) joined by exit to the landfill's falling flank (from 12:27,
+no blip, median *z* 2.5 to 3.7 in each two minutes), where a 2 min 5th
+percentile lags a 4.4 ppb/min fall by about 0.45 × 2 min × 4.4 ppb/min =
+4.0 ppb, 4.6 clean spreads. The tree records containment and cannot tell a
+flank child from a blip child. The band does not depend on the children.
+
+**A baseline that follows a slope would leave the children blips only
+(scratch prototype, not built; recorded 2026-09-30 as roadmap item 6.5 in
+CLAUDE.md, a registered baseline method to design between Phases 6 and 7).**
+The flanks come from the lag (½ − *q*)·*w*·slope, so the prototype removes it:
+each window is detrended by the slope between the 5th percentiles of its two
+halves, and the 5th percentile is taken of what remains. Rule: the same
+record; both baselines computed by the same scratch code (unweighted, over the
+readings within *w*/2 of each reading), against which the package's clean
+description, *z* and detector run unchanged (one 6 h record, entry 3, exit 1,
+5 s bridging); a landfill reading lies outside every blip's interval and its
+true plume exceeds 1σ; a blip is found when the reading at its peak lies in an event (blips
+peaking at 5σ or more).
+
+| | 2 min, plain | 2 min, following | 10 min, plain | 10 min, following |
+|---|---|---|---|---|
+| landfill readings in an event | 73 % | 8 % | 93 % | 61 % |
+| blips found | 100 % | 100 % | 100 % | 100 % |
+| median length of an event holding a blip | 91 s | 70 s | 151 s | 151 s |
+| events holding landfill and no blip, in 6 h | 1 | 6 | 1 | 8 |
+| events with no plume, in 6 h | 0 | 4 | 7 | 42 |
+| chance events on the recipe with no plumes, per hour | 3.0 | 4.3 | 7.3 | 16.2 |
+
+It costs chance events, because a slope fitted to noise moves the baseline
+with the noise, and where blips sit close together (12:24 on this record) the
+crude half-window slope tilts and the baseline climbs into them. The two
+designs to measure: a steadier slope (a longer window or a higher quantile for
+it), or the short window detrended by the next longer window's baseline (the
+hierarchical baselines of CLAUDE.md §1). Either is a baseline method, so the
+events stage needs no change: it finds events on whatever baseline it is
+handed.
 
 ### 6.2 The continuous baseline state lives beside the readings **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
 
@@ -1457,9 +1505,10 @@ instruments' errors do not cancel (§6.5), so the terms add in quadrature,
 and the dense state carries `sigma_sys_baseline_<x>`, the reading sigma
 interpolated at the quantile position, for that purpose. For a `constant`
 nothing cancels and σ_sys(Δ) = σ_sys(*x*). Enhancements are **never
-clipped** at zero: noise makes Δ negative in clean air and on plume edges,
-and clipping would shift the noise distribution's mean and bias every
-Phase-7 regression that follows.
+clipped** at zero: clean air's Δ sits a little above zero (a low quantile
+lies below the air's middle; §6.8's clean level), and noise takes some
+clean-air readings and plume edges below it. Clipping would shift the noise
+distribution's mean and bias every Phase-7 regression that follows.
 
 ### 6.8 Events **[decided 2026-09-29, built 2026-09-30 — Phase 6]**
 
@@ -1548,6 +1597,30 @@ On the example campaign's plume-dense 2 s Picarro, where §2.5's estimator
 reads 1.30 times the true sigma, the clean spread reads 1.01 and 1.02 at 2
 and 10 min in one pass (1.45 at 60 min, that campaign's wander).
 
+**Wander at the window's own scale is a property of the window** (measured in
+the Phase-6 walkthrough, 2026-09-30; the table above has no cycle faster than
+a day). Rule: notebook 06's landfill recipe (stated below with the
+half-sample mode's error; seed 5, 6 h from 10:00) with the generator's
+`diurnal_amplitude` *A*, `diurnal_period` *P* and `diurnal_phase_hours` 19
+(its steepest change, 2π*A*/*P*, falls inside the record); *q* = 0.05 at 2, 10 and
+60 min, entry 3, exit 1; a plume-free reading's true plume is under 0.1σ. A
+daily cycle of ±40 ppb (steepest 10.5 ppb/h) leaves the 10 min description as
+it was (spread 0.95 times the noise), while at 60 min the level moves to
+4.3 ppb and the spread doubles, so entry sits at 8.5 ppb and no plume-free
+reading reaches it; at ±100 ppb, 10.6 ppb and 3.5 times. A 4 h cycle is
+different: at 60 min, ±15 and ±30 ppb put 45 and 74 % of plume-free readings
+above entry, merged with the plumes into 17 and 7 events, because air rising
+and falling over about the window stands above a low quantile and never below
+it, as a broad plume does, and a lower-side spread cannot see it. A 2 h cycle
+at 60 min instead widens the spread to 20 and 38 times the noise, lifting
+entry to 59 and 115 ppb, so that only the tallest blips are found. Decided by
+the owner: recorded as a property of the window, not flagged as a corrupted
+record. It shows from below: of the 4 h, ±15 ppb record's 60 min events, the
+two mostly plume-free ones (99 and 38 min long, 67–68 % plume-free) are 33 and
+36 % covered by 10 min events, where every 60 min event of two minutes or more
+on the record without the cycle is 73–100 % covered ("What the sweep says
+about an event", below).
+
 On the 07-18 drive (q = 0.05, 10 min, entry 3, exit 1, one record per
 analyzer, finite readings), the share of readings inside an event:
 
@@ -1616,11 +1689,26 @@ The level reads low in 38 of 120 (the median error per window and length is
 above entry is more than twice the Gaussian tail's 0.135 % in 14 of 120, at
 most 9.1 times (the median case 0.04–0.78 times). A record that reads low
 finds chance events in clean air at several times the rate the chance column
-expects, and a count well above that column is the sign. The estimator is
-registered by name, so a better one replaces it without a redesign; the
-candidate is a Gaussian fitted to the lower side of the enhancement's
-histogram peak, which is plume-free whatever the plume fraction (not measured;
-CLAUDE.md open flags).
+expects, and a count well above that column is the sign. The 9.1 times is
+notebook 06 §3's record (the recipe at 3 h, seed 5; the landfill fills its
+first half): at 2 min its level is 0.85 ppb and its spread 0.62, against the
+plume-free readings' median 1.10 and spread 0.71, so entry sits at 2.7 ppb
+instead of 3.2, and 41 of its 78 events hold no plume (no reading whose true
+plume reaches 1σ) where the chance column expects 14.6. The plumes are not
+pulling it: the half-sample mode of the record's plume-free readings alone
+(3,420 of them, in its second half) lands at 0.91, and its plume-filled first
+1.5 h, described alone, at 1.71. It is the estimator's own jitter on a third of
+a record of clean air, and a lower-side spread measured from a centre placed
+low comes out narrow. At 10 min the same record describes as 1.21 and 0.78
+(truth 1.06 and 0.71) and finds one false event. **Kept, decided in the
+Phase-6 walkthrough (2026-09-30):** the error is answered across the sweep, in
+Phase 7, since the false events it makes mostly do not recur at other windows
+and quantiles (below, "What the sweep says about an event"), and two
+descriptions of clean air in the baseline state measured worse (below,
+"Rejected"). The estimator is registered by name, so a better one replaces it
+without a redesign; a Gaussian fitted to the lower side of the enhancement's
+histogram peak, which is plume-free whatever the plume fraction, stays
+unmeasured.
 
 **The half-sample mode as built** (`tsara.events.clean`, 2026-09-30). Sorted,
 the values are narrowed to the shortest interval holding ⌈*n*/2⌉ of them, then
@@ -1803,6 +1891,30 @@ seed-to-seed spread of one pass on every no-plume and weak-plume record; on
 the landfill case at 10 min it moved the spread from
 1.10 to 0.97 of the truth and the false events from 0.4 to 3.9 an hour.
 
+**Rejected in the Phase-6 walkthrough (2026-09-30): a rolling clean
+description, and low quantiles of Δ.** Both were tried as answers to the
+misplaced description above, in scratch code feeding the package's detector
+(entry 3, exit 1, 5 s bridging) on notebook 06's landfill recipe, seed 5,
+scored on the answer key: recall over plumes peaking at 5σ or more, a plume
+found when the reading nearest its true peak lies in an event; false events
+as above. **A rolling description**, the half-sample mode and lower-side
+spread over a neighbourhood of 3 or 6 baseline windows around each
+half-window block (blank under 100 readings below the level), is worse on the
+6 h record: at 2 min recall falls from 100 % to 62 and 95 % and false events
+rise from none to 5.2 and 6.3 an hour, at 10 min from 0.7 to 4.7 and 4.5. It
+helps the 3 h record at 2 min (13.7 to 3.7 false events an hour, at a recall
+of 77 %) and a 4 h, ±15 ppb cycle at 60 min (plume-free readings above entry
+from 45 % to 19 and 3.5 %, the spread becoming 3.7 and 8.8 times the noise).
+Plumes dominate a short neighbourhood, and fewer readings make a noisier
+estimate. **Low quantiles of Δ**, a Gaussian lower side per record (*s* =
+(*Q*₀.₂₅ − *Q*₀.₀₅)/(*z*₀.₂₅ − *z*₀.₀₅), *m* = *Q*₀.₂₅ + 0.674 *s*), are
+conservative on the 6 h and 3 h records (no false events, recall 97–100 %)
+but read the level 0.5–1.2 true spreads high and the spread 1.24–1.49 times
+the truth, which lifts entry and gives up the weakest plumes, and on a record mostly plume (1.5
+landfills and 40 blips an hour, 6 h) the level reads 1.9, 6.2 and 11.6 true
+spreads high at 2, 10 and 60 min, the spread 1.9, 4.2 and 7.2 times the truth,
+where the half-sample mode stays within 0.13–0.41 and 1.17–1.19.
+
 **The parent–child tree.** Along `baseline_window`, at fixed quantile and
 thresholds: an event links to the event at the **nearest longer window** whose
 interval holds its peak, skipping a window at which nothing holds it (a blip
@@ -1815,6 +1927,66 @@ per-reading event index below. An interval holds a peak when start ≤ peak
 variable none of whose readings has an enhancement) has no parent, and nor
 does an event at the longest window. On the example chain, 95 % of events at
 2 min and 70 % at 10 min have a parent.
+
+**What the sweep says about an event** (measured in the Phase-6 walkthrough,
+2026-09-30, for Phase 7). An event is what one sweep point sees; whether it is
+a plume is judged across the sweep in Phase 7, and this stage adds nothing for
+that judgement (no agreement column, no orphan flag). What Phase 7 will work
+with was measured on the answer key, a false event being one none of whose
+readings carries a true plume of 1σ. False events are of four kinds, each told
+apart by a different signal:
+
+| kind | made by | told apart by |
+|---|---|---|
+| a chance crossing | noise above entry; the chance column counts them | a higher entry; a second gas |
+| a misplaced clean description | a record whose level or spread is off (above) | the sweep: few recur at other windows and quantiles |
+| wander at the window's own scale | air rising and falling over about the window (above) | the view down: shorter windows see little inside it |
+| a flank | a broad plume's slope against a short window (§6.1) | not false by the answer key, but not a plume of its own; a baseline that follows the slope (§6.1) |
+
+Recurrence (rule: notebook 06's landfill recipe above, seed 5; windows 2, 10
+and 60 min × *q* 0.01, 0.05 and 0.10, entry 3, exit 1, dips under 5 s
+bridged; an event is found at another sweep point when an event there
+overlaps it in time; the share found at four or more of the other eight):
+
+| events | found at ≥ 4 of the other 8 points |
+|---|---|
+| real, on the recipe at 3 h, at 6 h, and at 6 h with 1.5 landfills and 40 blips an hour | 95 / 98 / 100 % |
+| false, on the same three records (the third has none) | 38 / 56 % |
+| false at 2 min and *q* = 0.05 on the 3 h record, whose description is misplaced (41 events) | 15 % |
+| chance, on the recipe with no plumes (6 h, seeds 1–3; 943 events) | 65 % |
+
+Chance events recur because a noise spike is the same reading at every window
+and quantile; they do not recur across entry (3 % of them are events at entry
+4, none at 5). So agreement across windows and quantiles does not remove
+chance; height does, at the price of plumes standing between the two entries;
+and the chance column is the only number saying how many to expect. A second
+gas does too. Rule: one 1 s analyzer measuring methane at 1900 ppb with 0.7 ppb
+of noise and ethane at 2 ppb with 0.05 ppb, 12 h, seeds 1–3; 10 min, *q* =
+0.05, exit 1; with no plumes, 3.67 methane events an hour at entry 3, of which
+0.28 overlap an ethane event (13 times fewer; at entry 4, 0.03 and none). With
+plumes carrying both gases (10 an hour, Gaussian σ 20 s, methane lognormal
+median 8 ppb and σ_log 0.6, ethane 0.05 of methane), 76 % of methane events
+overlap an ethane event at entry 3, 97 % at entry 4. The three answers to
+chance, and what each gives up: a higher entry (swept already; at 1 s the
+closed form gives 4.85 an hour at entry 3 and 0.11 at 4) loses plumes between
+the two entries; coincidence across gases is physically grounded, since a
+ratio needs both gases anyway, but loses a source emitting only one (biogenic
+methane carries no ethane); width, through smoothing (Phase 8), loses plumes
+one or two readings wide, 27–29 % of clear events on 2 s drive data (§9.5).
+Coincidence is the union/intersection operation already assigned to Phase 7.
+
+Lineage. The owner's sketch for "the same event" across windows is the peak
+plus the tree: an event with no parent at the next longer window is an orphan.
+Rule: as above, *q* = 0.05 only. On the 3 h record, 85 % of false events at
+2 min have no parent at any longer window and 98 % none at 10 min, against 5 %
+and 11 % of real ones. On weak plumes in wandering air (the recall table's
+rule, random walk 30 ppb/day, 12 h, seed 1), 60 % of false and 6 % of real
+events at 2 min are orphans, but at 10 min 75 % of false and 60 % of real ones
+(85 % of the 27 real events peaking under 6 clean spreads), because the 60 min
+window cannot see weak plumes in wander (the recall table). So an orphan is
+evidence against an event only where the longer window could have seen it,
+its *z* at the child's peak reaching entry; and lineage cannot judge the
+longest window at all, which needs the view down (wander, above).
 
 **What the stage saves** (names settled in the build):
 
