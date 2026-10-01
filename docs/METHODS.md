@@ -942,7 +942,7 @@ readings lie in events; at 5 min 100 % and 98 %; at 10 min all of both. On the
 flanks the offset is a median 0.59 of (½ − *q*)·*w*·slope at 2 min and 0.78 at
 5 and 10 min. So at 2 min this landfill is its two flanks, split at its top,
 and the tree (§6.8) links each to the landfill's event at a longer window
-(notebook 06 §5). That is why the window is a sweep dimension rather than a
+(notebook 06 §4). That is why the window is a sweep dimension rather than a
 setting to get right: the sweep reports how an answer moves with scale instead
 of choosing one. Nesting is read directly off the results: an event found at a
 short window whose interval lies inside an event found at a longer one is its
@@ -1741,11 +1741,17 @@ every sweep point. A reading masked to NaN leaves the same hole as one absent
 from the file, so either is a dropout when the hole breaks the spacing rule.
 Both lengths are found without declaration. Where `events.platform_state`
 names a variable of the instrument's own stream (its speed) and the value
-above which it is moving, records also split at both ends of every stretch of
-one state that lasts at least `record_gap`, as an outage does: a stretch lasts
+above which it is moving, records also split at both ends of every parked
+stretch that lasts at least `record_gap`, as an outage does: a stretch lasts
 from its first finite reading's midpoint to the next stretch's first, a reading
 with no speed takes the state before it, and the rule is recorded on the
-state as `tsara_events_platform_state` (e.g. `speed > 5`). Measured on three
+state as `tsara_events_platform_state` (e.g. `speed > 5`). A moving stretch
+never splits, so a stop shorter than the gap stays with its drive however long
+the legs either side (decided 2026-10-01: the first rule, built in the
+walkthrough, split at both ends of any lasting stretch, moving or parked, and so
+cut a short stop out of the drive between two legs of two hours or more; on all
+18 ARC days with methane no moving stretch lasts two hours above 5 km/h, so the
+two rules give the same records there). Measured on three
 ARC days (speed above 5 km/h, a 5 min majority to look past red lights; the
 rule itself needs none), each day is one parked stretch of 15–20 h at its base
 and a drive session of 4–8.5 h with stops of 0–25 min, so the rule separates

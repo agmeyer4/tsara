@@ -5,12 +5,12 @@ air over a stretch of time, and the stretch matters: a ground site that runs
 for eleven days without a two-hour gap, or a van that logs parked and
 driving alike for a week, would otherwise be described by one number mixing
 air that was never the same. So a variable's finite readings are split where
-consecutive ones are more than a gap apart, and where the platform changes
-state (parked or moving) for at least as long as that gap, and each piece is
-cut into equal parts no longer than a maximum length. Each part is a
-**record**. Records belong to a variable, are found from which of its
-readings are finite and, where given, from the platform's state at each, and
-are the same at every sweep point.
+consecutive ones are more than a gap apart, and where the platform stays
+parked for at least as long as that gap, and each piece is cut into equal
+parts no longer than a maximum length. Each part is a **record**. Records
+belong to a variable, are found from which of its readings are finite and,
+where given, from whether the platform was parked at each, and are the same
+at every sweep point.
 
 A record also fixes what the detector calls a **dropout**: two consecutive
 finite readings farther apart than :data:`DROPOUT_SPACING_FACTOR` times the
@@ -99,17 +99,18 @@ def find_records(
     *,
     gap_ns: int,
     max_length_ns: int,
-    state: npt.NDArray[np.generic] | None = None,
+    parked: npt.NDArray[np.bool_] | None = None,
 ) -> Records:
     """Split a variable's finite readings into records, and mark its dropouts.
 
     Consecutive finite readings more than ``gap_ns`` apart, midpoint to
-    midpoint, end one piece and start the next. Where ``state`` is given, a
-    stretch of one state that lasts at least ``gap_ns`` also starts a piece
-    and ends one, as an outage would: a stretch lasts from its first finite
-    reading's midpoint to the next stretch's first, or to its own last
-    reading when none follows, so shorter stretches (a stop between legs of a
-    drive) stay with their neighbours. A piece whose first and last
+    midpoint, end one piece and start the next. Where ``parked`` is given, a
+    stretch of parked readings that lasts at least ``gap_ns`` also starts a
+    piece and ends one, as an outage would: a stretch lasts from its first
+    finite reading's midpoint to the first moving reading after it, or to its
+    own last reading when none follows. A moving stretch never splits, so a
+    stop shorter than the gap stays with the drive around it however long the
+    legs either side. A piece whose first and last
     midpoints are more than ``max_length_ns`` apart is cut into the fewest
     equal parts no longer than that, each reading going to the part its
     midpoint falls in; a part that holds no reading is not a record, so
@@ -125,10 +126,10 @@ def find_records(
         ``EventsConfig.record_gap``, in nanoseconds.
     max_length_ns : int
         ``EventsConfig.max_record_length``, in nanoseconds.
-    state : numpy.ndarray, optional
-        Per reading, the platform's state (e.g. moving or not), compared for
-        equality; only the finite readings' values are read, and none may be
-        missing. ``None`` splits on gaps alone.
+    parked : numpy.ndarray of bool, optional
+        Per reading, whether the platform was parked (not moving); only the
+        finite readings' values are read, and none may be missing. ``None``
+        splits on gaps alone.
 
     Returns
     -------
@@ -139,7 +140,7 @@ def find_records(
     Raises
     ------
     TsaraEventError
-        If ``finite`` or ``state`` does not match the cells, a length is not
+        If ``finite`` or ``parked`` does not match the cells, a length is not
         positive, or the finite readings are not in time order.
     """
     mask = np.asarray(finite, dtype=bool)
@@ -148,9 +149,9 @@ def find_records(
             f"{mask.size} finite flags for {cells.start_ns.size} cells; there must be one per "
             "reading."
         )
-    if state is not None and np.shape(state) != cells.start_ns.shape:
+    if parked is not None and np.shape(parked) != cells.start_ns.shape:
         raise TsaraEventError(
-            f"{np.size(state)} platform states for {cells.start_ns.size} cells; there must be "
+            f"{np.size(parked)} parked flags for {cells.start_ns.size} cells; there must be "
             "one per reading."
         )
     if gap_ns <= 0 or max_length_ns <= 0:
@@ -173,11 +174,11 @@ def find_records(
         )
 
     # 1. Pieces: split wherever two consecutive finite readings are more
-    #    than the gap apart, and at both ends of every stretch of one state
-    #    that lasts at least the gap.
+    #    than the gap apart, and at both ends of every parked stretch that
+    #    lasts at least the gap.
     splits = set((np.flatnonzero(spacing > gap_ns) + 1).tolist())
-    if state is not None:
-        splits |= _state_splits(np.asarray(state)[kept], midpoints, gap_ns)
+    if parked is not None:
+        splits |= _parked_splits(np.asarray(parked, dtype=bool)[kept], midpoints, gap_ns)
     piece_starts = np.array([0, *sorted(splits)], dtype=np.int64)
     piece_stops = np.concatenate([piece_starts[1:], [kept.size]])
 
@@ -207,19 +208,20 @@ def find_records(
     return Records(index, start_ns, stop_ns, median_spacing, dropout_before)
 
 
-def _state_splits(
-    state: npt.NDArray[np.generic], midpoints: npt.NDArray[np.int64], gap_ns: int
+def _parked_splits(
+    parked: npt.NDArray[np.bool_], midpoints: npt.NDArray[np.int64], gap_ns: int
 ) -> set[int]:
-    """Return where the finite readings split for the platform's state.
+    """Return where the finite readings split for the platform's stops.
 
-    ``state`` and ``midpoints`` are the finite readings'. A stretch is a run
-    of equal states; it lasts from its first midpoint to the next stretch's
-    first, or to its own last midpoint at the end. Each stretch lasting at
-    least ``gap_ns`` splits at its first reading and at the next stretch's.
+    ``parked`` and ``midpoints`` are the finite readings'. A stretch is a run
+    of readings all parked or all moving; it lasts from its first midpoint to
+    the next stretch's first, or to its own last midpoint at the end. Each
+    parked stretch lasting at least ``gap_ns`` splits at its first reading and
+    at the next stretch's; a moving stretch never splits.
     """
-    starts = np.flatnonzero(np.concatenate([[True], state[1:] != state[:-1]]))
+    starts = np.flatnonzero(np.concatenate([[True], parked[1:] != parked[:-1]]))
     ends = np.concatenate([midpoints[starts[1:]], midpoints[-1:]])
-    lasting = ends - midpoints[starts] >= gap_ns
+    lasting = parked[starts] & (ends - midpoints[starts] >= gap_ns)
     following = np.concatenate([starts[1:], [midpoints.size]])
     return {int(i) for i in (*starts[lasting], *following[lasting]) if 0 < i < midpoints.size}
 

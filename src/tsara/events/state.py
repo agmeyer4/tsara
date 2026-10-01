@@ -12,8 +12,9 @@ per instrument, ``tsara_stage = "events"``.
 
 Where ``events.platform_state`` names a variable of the instrument's stream
 (its speed), the stream is handed over too, and records also split where the
-platform is parked or moving for at least ``record_gap`` (§6.8); a reading
-whose speed is missing takes the state of the reading before it.
+platform stays parked for at least ``record_gap`` (§6.8); a moving stretch
+never splits, and a reading whose speed is missing takes the state of the
+reading before it.
 
 A variable named in ``events.triggers`` finds no events of its own: at each
 sweep point it takes the trigger's event intervals, a reading of it
@@ -187,12 +188,12 @@ def event_state(
     own = [v for v in selection if events.trigger_for(instrument, v) is None]
     adopted = [v for v in selection if events.trigger_for(instrument, v) is not None]
 
-    platform = _platform_state(state, instrument, events, stream) if own else None
+    parked = _parked(state, instrument, events, stream) if own else None
 
     data_vars: dict[str, tuple[tuple[str, ...], npt.NDArray[np.generic], dict[str, object]]] = {}
     blank_everywhere: dict[str, list[tuple[str, int]]] = {}
     for variable in own:
-        columns, blank = _own_events(state, variable, cells, events, enter, exit_, platform)
+        columns, blank = _own_events(state, variable, cells, events, enter, exit_, parked)
         data_vars.update(columns)
         if blank:
             blank_everywhere[variable] = blank
@@ -222,7 +223,7 @@ def event_state(
         },
     )
     spec = events.platform_state.get(instrument)
-    if platform is not None and spec is not None:
+    if parked is not None and spec is not None:
         dataset.attrs[PLATFORM_STATE_ATTR] = f"{spec.variable} > {spec.moving_above:g}"
     dataset.coords[TIME_BOUNDS_VAR] = state[TIME_BOUNDS_VAR]
     dataset[TIME_COORD].attrs.update(state[TIME_COORD].attrs)
@@ -332,7 +333,7 @@ def _own_events(
     events: EventsConfig,
     enter: npt.NDArray[np.float64],
     exit_: npt.NDArray[np.float64],
-    platform: npt.NDArray[np.int8] | None,
+    parked: npt.NDArray[np.bool_] | None,
 ) -> tuple[dict[str, _Column], list[tuple[str, int]]]:
     """Return one variable's columns, and the sweep points blank at every record.
 
@@ -350,7 +351,7 @@ def _own_events(
         np.isfinite(x),
         gap_ns=_ns(events.record_gap),
         max_length_ns=_ns(events.max_record_length),
-        state=platform,
+        parked=parked,
     )
     declared = reading.attrs.get("quantization")
     air = clean_air(
@@ -464,10 +465,12 @@ def _own_events(
     return columns, blank
 
 
-def _platform_state(
+def _parked(
     state: xr.Dataset, instrument: str, events: EventsConfig, stream: xr.Dataset | None
-) -> npt.NDArray[np.int8] | None:
-    """Return 1 where the platform is moving and 0 where not, per reading; None unasked.
+) -> npt.NDArray[np.bool_] | None:
+    """Return True where the platform is parked, per reading; None when not asked.
+
+    Parked means the speed is not above ``moving_above``.
 
     Read from the instrument's own stream at the baseline state's readings,
     which the stream must all hold (a baseline state built on a stream's
@@ -501,7 +504,7 @@ def _platform_state(
             f"events.platform_state reads '{instrument}.{spec.variable}', which has no finite "
             "value at these readings."
         )
-    return filled.to_numpy().astype(np.int8)
+    return np.asarray(filled.to_numpy() == 0, dtype=np.bool_)
 
 
 def _ns(spec: str) -> int:

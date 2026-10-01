@@ -332,7 +332,7 @@ PARKED_THEN_DRIVING = EventsConfig(
 )
 
 
-def test_records_split_where_the_platform_is_parked_or_moving_long_enough() -> None:
+def test_records_split_where_the_platform_stays_parked_long_enough() -> None:
     """Parked 90 min, then a drive of 40 min legs and 5 min stops: the drive is
     one record, the base another, as the rule reads them off the stream at the
     baseline state's readings. Parked reads exactly 5 km/h (GPS jitter), which
@@ -353,11 +353,23 @@ def test_records_split_where_the_platform_is_parked_or_moving_long_enough() -> N
     labels = np.where(t < 5400, 0, np.where((t - 5400) % 2700 < 2400, 1, 0))
     cells = stream_cells(state, "van")
     by_hand = find_records(
-        cells, np.ones(n, bool), gap_ns=HOUR, max_length_ns=24 * HOUR, state=labels
+        cells, np.ones(n, bool), gap_ns=HOUR, max_length_ns=24 * HOUR, parked=labels == 0
     )
     assert np.array_equal(record, by_hand.index)
     alone = event_state(state, instrument="van", events=EVENTS)
     assert PLATFORM_STATE_ATTR not in alone.attrs
+
+
+def test_a_long_leg_does_not_cut_a_short_stop_out_of_the_drive() -> None:
+    """Parked 90 min, then legs of 70 min (longer than the 1 h gap) with a
+    10 min stop between: the base is one record and the drive, stop and all,
+    the other, since only a parked stretch lasting the gap splits."""
+    t = np.arange(4 * 3600)
+    leg = (t >= 5400) & ((t < 9600) | (t >= 10200))
+    stream = moving_stream(np.where(leg, 40.0, 0.0))
+    state = baseline_state(stream, instrument="van", baseline=BASELINE)
+    found = event_state(state, instrument="van", events=PARKED_THEN_DRIVING, stream=stream)
+    assert np.array_equal(found["record_ch4"].values, (t >= 5400).astype(np.int32))
 
 
 def test_the_state_is_read_at_the_baseline_states_own_readings() -> None:

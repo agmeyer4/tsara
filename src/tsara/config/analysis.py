@@ -452,11 +452,11 @@ class PlatformStateConfig(_StrictModel):
     """Where an instrument's stream says whether the platform is moving.
 
     A variable of the instrument's own stream, in its canonical units, and the
-    value above which the platform counts as moving. A stretch of one state
-    lasting at least ``EventsConfig.record_gap`` splits records as an outage
-    does (METHODS.md §6.8), so that a long stop at a base and the drive that
-    follows are described apart, while a stop between legs of a drive stays
-    with it.
+    value above which the platform counts as moving. A parked stretch lasting
+    at least ``EventsConfig.record_gap`` splits records as an outage does
+    (METHODS.md §6.8), so that a long stop at a base and the drive that
+    follows are described apart; a moving stretch never splits, so a shorter
+    stop stays with its drive however long the legs either side.
     """
 
     variable: str = Field(description="A variable of the instrument's own stream, e.g. its speed.")
@@ -496,8 +496,8 @@ class EventsConfig(_StrictModel):
 
     Level and spread are computed per **record**: a stream split where
     consecutive readings are more than ``record_gap`` apart (or, where
-    ``platform_state`` names a speed, where the platform is parked or moving
-    for that long) and cut into
+    ``platform_state`` names a speed, where the platform stays parked for that
+    long) and cut into
     equal parts no longer than ``max_record_length``, so that days of
     different air are never described by one number. A record holding fewer
     than ``min_clean_readings`` readings below its level has no description
@@ -572,8 +572,8 @@ class EventsConfig(_StrictModel):
         default_factory=dict,
         description=(
             "Per instrument, the variable of its stream that says whether the "
-            "platform is moving, and the value above which it is; a stretch of one "
-            "state lasting at least record_gap splits records as an outage does. "
+            "platform is moving, and the value above which it is; a parked stretch "
+            "lasting at least record_gap splits records as an outage does. "
             "Checked against the manifest when the two configs are combined."
         ),
     )

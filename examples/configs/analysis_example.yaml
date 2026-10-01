@@ -97,9 +97,10 @@ events:
   record_gap: 2h
   max_record_length: 6h
   # On a mobile platform whose gas file carries its speed, as the NOAA ARC
-  # suite's does, records also split where the platform is parked or moving
-  # for at least record_gap, so a long stop at base and the drive after it are
-  # described apart. Shown commented: the multiformat example is stationary.
+  # suite's does, records also split where the platform stays parked for at
+  # least record_gap, so a long stop at base and the drive after it are
+  # described apart, while shorter stops stay with the drive. Shown commented:
+  # the multiformat example is stationary.
   # platform_state:
   #   arc: {variable: speed, moving_above: 5.0}
   # Fewer readings than this below its level, and a record is blank with the
