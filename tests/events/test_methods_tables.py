@@ -186,13 +186,13 @@ def test_the_no_plume_table() -> None:
         "rw100": ((0.9, 18, 1), (1.8, 8.9, 1)),
         "diurnal+rw30": ((2, 14, 0), (1.1, 3.0, 1)),
     }
-    events = as_scoped(exit_multiple=(1.0, 2.0))
+    config = as_scoped(exit_multiple=(1.0, 2.0))
     oracle = []
     for name, ((low, high, dp), (r_low, r_high, r_dp)) in table.items():
         rates, ratios, exits = [], [], []
         for seed in range(1, 7):
             campaign, state = _rolled("none", name, seed, (0.01, 0.05, 0.10))
-            found = event_state(state, instrument="a", events=events)
+            found = event_state(state, instrument="a", events=config)
             rates.append(found["n_events_ch4"].values[:, :, 0, 0] / HOURS)
             ratios.append(found["clean_spread_ch4"].values[0] / SIGMA)
             exits.append(found["n_events_ch4"].values[2, 1, 0, :] / HOURS)
@@ -242,7 +242,7 @@ def test_the_weak_plume_recall_table() -> None:
         "rw30": ([(93, 84, 26), (100, 100, 48), (100, 100, 98)], (7.5, 9.1, 0.9)),
     }
     bins = [(3, 5), (5, 10), (10, 30)]
-    events = as_scoped()
+    config = as_scoped()
     for name, (recall, false_rate) in table.items():
         found: dict[float, list[np.ndarray]] = {}
         false: dict[float, list[float]] = {}
@@ -250,7 +250,7 @@ def test_the_weak_plume_recall_table() -> None:
         for seed in (1, 2, 3):
             campaign, state = _rolled("weak", name, seed, (0.05,))
             catalog = event_catalog(
-                {"a": event_state(state, instrument="a", events=events)}, {"a": state}
+                {"a": event_state(state, instrument="a", events=config)}, {"a": state}
             )
             truth = campaign.ground_truth.to_frame()
             truth = truth[truth["sampled_peak_amplitude"].notna()]
@@ -293,12 +293,12 @@ def test_the_plume_density_table() -> None:
         "landfill": (0.21, 0.13, 0.14),
         "dense": (0.29, 0.33, 0.20),
     }
-    events = as_scoped()
+    config = as_scoped()
     for name, expected in table.items():
         errors, shares, oracle = [], [], []
         for seed in (1, 2, 3):
             campaign, state = _rolled("density", name, seed, (0.05,))
-            found = event_state(state, instrument="a", events=events)
+            found = event_state(state, instrument="a", events=config)
             enhancement = campaign.streams["a"]["truth_enhancement_ch4"].values
             clean = enhancement < 0.1 * SIGMA
             per_window = []

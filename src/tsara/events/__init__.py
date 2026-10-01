@@ -14,16 +14,18 @@ Shape of the subpackage
 -----------------------
 ``records``
     The stretches of a stream the air is described over, one at a time: a
-    variable's finite readings split at long gaps and cut to a maximum
-    length; where the dropouts are; the package's error class.
+    variable's finite readings split at long gaps and, where the platform's
+    speed is named, at long stops, and cut to a maximum length; where the
+    dropouts are; the package's error class.
 ``clean``
     The clean level and spread per record and sweep point, with the
     clean-level estimators registered by name (the half-sample mode), the
     quantization floor and the count below which a record is blank.
 ``hysteresis``
     The detector: runs of the statistic z above the exit multiple that reach
-    the entry multiple, never across a dropout, a record boundary or a blank
-    reading, with short dips bridged; what each event records; and the
+    the entry multiple, never across a record boundary, a blank reading or a
+    hole as long as the bridge, with short dips and holes bridged; what each
+    event records; and the
     closed-form rate at which chance alone makes events.
 ``state``
     The product: every gas variable of a baseline state described, scored

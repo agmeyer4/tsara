@@ -279,11 +279,12 @@ an estimate. (`METHODS.md` §6)
 
 **An event is found against plume-free air, as measured.** Plumes only add, so an
 enhancement's readings below its most common value are plume-free air. For each
-variable, record (a stretch between long gaps, at most six hours) and sweep
-point, TSARA measures that most common value, the *clean level*, and 1.4826
+variable, record (a stretch between long gaps or long stops of the platform,
+at most six hours) and sweep point, TSARA measures that most common value, the *clean level*, and 1.4826
 times the median distance below it, the *clean spread*; an event is a run of
 readings that climbs an entry multiple of the spread above the level and stays
-above an exit multiple, never across a dropout. The spread is not a measurement
+above an exit multiple, short dips and holes bridged, longer holes ending it.
+The spread is not a measurement
 uncertainty: it holds the background's wobble at the window's scale, which is
 why a long window reports only strong plumes and a short one weak ones too.
 Every sweep point records how many events chance alone would make. A canister

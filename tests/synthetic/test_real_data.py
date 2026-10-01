@@ -118,7 +118,9 @@ def test_real_profile_drives_a_bootstrap_background(real_series: pd.Series) -> N
         rng=np.random.default_rng(0),
         profiles={"real": profile},
     )
-    values = background.at(times.to_numpy().astype(np.int64) / 1e9)
+    # Ask for nanoseconds explicitly: pandas 3 gives date_range microseconds, and a
+    # bare astype(int64) would then hand back epoch seconds a thousand times too small.
+    values = background.at(times.to_numpy().astype("datetime64[ns]").astype(np.int64) / 1e9)
     assert values.shape == (5000,)
     assert np.all(np.isfinite(values))
 
