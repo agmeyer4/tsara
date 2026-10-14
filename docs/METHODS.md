@@ -965,9 +965,12 @@ median 60 ppb methane, no ethane) and a gas line (10 blips an hour,
 exponentially modified Gaussian 6 s / 12 s, median 120 ppb, ethane/methane
 exactly 0.050); the 5th percentile at 2 min, 20 min and 2 h; a blip's
 interval from 18 s before its peak to 54 s after, a landfill plume's ± 12 min
-around its peak; least-squares slope of Δethane on Δmethane. 270 blips, 40
+around its peak; least-squares slope of Δethane on Δmethane. 135 blips, 20
 of them inside a landfill plume (over 20 ppb of landfill at the blip); 7
-landfill plumes, each with 4 to 12 blips inside.
+landfill plumes, each with 2 to 6 blips inside. (Corrected 2026-10-14: first
+written as 270, 40 and 4 to 12, because the answer key holds one row per
+event and species and each blip was counted once for methane and once for
+ethane; every slope below is unchanged.)
 
 | quantity | 2 min | 20 min | 2 h | truth |
 |---|---|---|---|---|
