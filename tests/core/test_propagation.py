@@ -72,7 +72,7 @@ def test_independent_is_not_a_selectable_form() -> None:
 def test_lag1_correlation_is_the_exponential() -> None:
     assert lag1_correlation(1.0, 20.0) == pytest.approx(np.exp(-0.05))
     # One timescale of spacing leaves 1/e.
-    assert lag1_correlation(20.0, 20.0) == pytest.approx(1 / np.e)
+    assert lag1_correlation(20.0, 20.0) == pytest.approx(np.exp(-1.0))
 
 
 @pytest.mark.parametrize(("spacing", "tau"), [(0.0, 20.0), (-1.0, 20.0)])
