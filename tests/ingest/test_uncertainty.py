@@ -187,16 +187,16 @@ def test_non_numeric_reported_values_become_nan() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_no_budget_means_empirical_random_and_unknown_systematic() -> None:
-    """diff_mad differences the signal, so it is blind to systematic error."""
+def test_no_budget_means_both_components_unknown() -> None:
+    """Nothing is stated, and nothing estimated stands in (METHODS §2.3)."""
     values = _series([1900.0])
     resolved = _resolve(values, None, _frame(values))
 
     assert resolved.random is None
     assert resolved.systematic is None
-    assert resolved.random_provenance == "empirical"
+    assert resolved.random_provenance == "unknown"
     assert resolved.systematic_provenance == "unknown"
-    assert resolved.provenance == "empirical"
+    assert resolved.provenance == "unknown"
 
 
 def test_omitted_systematic_with_a_budget_is_zero_not_unknown() -> None:
@@ -209,14 +209,16 @@ def test_omitted_systematic_with_a_budget_is_zero_not_unknown() -> None:
     assert resolved.random_provenance == "declared"
 
 
-def test_omitted_random_with_a_budget_falls_back_to_empirical() -> None:
+def test_omitted_random_with_a_budget_is_unknown_not_zero() -> None:
+    """Unlike an omitted systematic, an omitted random is not a claim (METHODS §2.2)."""
     values = _series([1900.0])
     spec = _spec(systematic={"mode": "declared", "relative": 0.01})
     resolved = _resolve(values, spec, _frame(values))
 
     assert resolved.random is None
-    assert resolved.random_provenance == "empirical"
+    assert resolved.random_provenance == "unknown"
     assert resolved.systematic_provenance == "declared"
+    assert resolved.provenance == "mixed"
 
 
 def test_both_components_declared() -> None:

@@ -22,8 +22,8 @@ from tsara.baseline import (
     rolling_quantile,
     window_cells,
 )
-from tsara.baseline.state import BASELINE_STAGE
 from tsara.config.analysis import BaselineConfig
+from tsara.core.naming import BASELINE_STAGE
 from tsara.core.support import CellBounds, stream_cells
 from tsara.core.timebase import SECOND_NS as SECOND
 

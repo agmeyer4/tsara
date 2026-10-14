@@ -21,7 +21,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from tsara.core.exceptions import TsaraError
-from tsara.core.naming import TIME_BOUNDS_VAR, TIME_COORD
+from tsara.core.naming import TIME_BOUNDS_VAR, TIME_COORD, sigma_rand_name
 
 if TYPE_CHECKING:  # pragma: no cover
     import xarray as xr
@@ -29,11 +29,14 @@ if TYPE_CHECKING:  # pragma: no cover
 __all__ = [
     "BUNDLE_ANALYSIS_CONFIG",
     "BUNDLE_BASELINE_DIR",
+    "BUNDLE_CATALOG_FILE",
+    "BUNDLE_EVENTS_DIR",
     "BUNDLE_FORMAT_VERSION",
     "BUNDLE_GRID_FILE",
     "BUNDLE_MANIFEST",
     "BUNDLE_STAGE_KEY",
     "BUNDLE_STREAMS_DIR",
+    "BUNDLE_VERSION_WITHOUT_PROMISED_ESTIMATES",
     "BUNDLE_VERSION_WITH_CELLS",
     "BUNDLE_VERSION_WITH_READINGS_AND_PROVENANCE",
     "RETIRED_ATTR_NAMES",
@@ -41,6 +44,7 @@ __all__ = [
     "TIME_ENCODING",
     "TsaraBundleError",
     "pin_time_encoding",
+    "relabel_promised_estimates",
     "rename_retired_attrs",
 ]
 
@@ -74,6 +78,13 @@ BUNDLE_GRID_FILE = "grid.nc"
 BUNDLE_BASELINE_DIR = "baseline"
 BUNDLE_ANALYSIS_CONFIG = "analysis.yaml"
 
+#: Subdirectory holding one netCDF file per instrument's event state, the
+#: catalog of every event beside them, and the events section of the analysis
+#: configuration (``analysis.yaml``, as for the baseline state). A directory
+#: beside the others for the baseline state's reason.
+BUNDLE_EVENTS_DIR = "events"
+BUNDLE_CATALOG_FILE = "catalog.parquet"
+
 #: Bumped only when the layout changes incompatibly, so a future reader can
 #: refuse (or migrate) an old bundle rather than misinterpreting it.
 #:
@@ -84,7 +95,13 @@ BUNDLE_ANALYSIS_CONFIG = "analysis.yaml"
 #: had come to mean four things -- an emitter, a binning input, where a number
 #: came from, and a file -- and it now means only the first. See
 #: :data:`RETIRED_ATTR_NAMES`.
-BUNDLE_FORMAT_VERSION = 3
+#:
+#: Version 4 changed one attribute *value*, and nothing else: a random
+#: component nobody stated is labelled ``unknown``, where earlier versions
+#: wrote ``empirical``, a promise that a later stage would estimate it from
+#: the data. No stage keeps that promise (``docs/METHODS.md`` §2.4), so the
+#: label was false. See :func:`relabel_promised_estimates`.
+BUNDLE_FORMAT_VERSION = 4
 
 #: First format version whose streams record their own cells.
 #:
@@ -110,10 +127,13 @@ BUNDLE_VERSION_WITH_CELLS = 2
 #: not allowed to move. Refusing would strand any bundle written before the
 #: upgrade for no gain: the whole point of labelling provenance is that a weak
 #: reading can be admitted safely.
-SUPPORTED_BUNDLE_VERSIONS = (1, 2, 3)
+SUPPORTED_BUNDLE_VERSIONS = (1, 2, 3, 4)
 
 #: First format version whose attributes use the current vocabulary.
 BUNDLE_VERSION_WITH_READINGS_AND_PROVENANCE = 3
+
+#: First format version in which no stream promises an estimate nobody makes.
+BUNDLE_VERSION_WITHOUT_PROMISED_ESTIMATES = 4
 
 #: Attribute names written by format versions 1 and 2, mapped to their names now.
 #:
@@ -268,3 +288,48 @@ def rename_retired_attrs(dataset: xr.Dataset) -> bool:
             attrs[new] = attrs.pop(old)
             renamed = True
     return renamed
+
+
+def relabel_promised_estimates(dataset: xr.Dataset) -> bool:
+    """Relabel random components marked ``empirical`` that nothing estimated, in place.
+
+    Up to format 3, ingestion labelled a random component nobody stated
+    ``empirical``: a promise that a later stage would estimate it from the
+    data. No stage does (``docs/METHODS.md`` §2.4), and every product that
+    copies a stream variable's attributes carried the label along: a joined
+    product's columns, a baseline state's reading and its enhancement. The
+    component's label becomes ``unknown``, and a species-level ``empirical``,
+    which ingestion wrote only for a variable with no budget at all, becomes
+    ``unknown`` with it.
+
+    The rule needs no format version, which is why the loaders of products
+    that carry none (the grid, the baseline state) apply it to every file:
+    ``empirical`` means a figure was estimated, so a variable labelled so
+    with no random sigma beside it is the unkept promise and nothing else. A
+    variable that has a random sigma is left alone, and so is a sigma
+    companion: it carries only the species-level ``uncertainty_provenance``,
+    never a per-component label, so the baseline's order-statistic sigma
+    keeps its ``empirical``, which is true (§6.7).
+
+    Parameters
+    ----------
+    dataset : xarray.Dataset
+        A stream or a product read from disk.
+
+    Returns
+    -------
+    bool
+        Whether anything was relabelled.
+    """
+    relabelled = False
+    for name in map(str, dataset.data_vars):
+        if sigma_rand_name(name) in dataset.variables:
+            continue
+        attrs = dataset.variables[name].attrs
+        if attrs.get("uncertainty_provenance_random") != "empirical":
+            continue
+        attrs["uncertainty_provenance_random"] = "unknown"
+        if attrs.get("uncertainty_provenance") == "empirical":
+            attrs["uncertainty_provenance"] = "unknown"
+        relabelled = True
+    return relabelled

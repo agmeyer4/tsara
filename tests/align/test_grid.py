@@ -9,6 +9,7 @@ downstream then believes there were several.
 
 from __future__ import annotations
 
+import logging
 import warnings
 from pathlib import Path
 
@@ -398,6 +399,32 @@ def test_a_grid_round_trips_through_a_bundle(
     assert reloaded["ch4"].values == pytest.approx(grid["ch4"].values)
     assert reloaded.attrs["tsara_grid_freq"] == "60s"
     assert set(reloaded.data_vars) == set(grid.data_vars)
+
+
+def test_a_grid_built_before_phase_6_loses_its_unkept_empirical(
+    tmp_path: Path, campaign: dict[str, xr.Dataset], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The binner copies a stream variable's labels, so an old grid carries its promise.
+
+    Built as one was before Phase 6 from an ingested variable with no budget:
+    no random sigma, and `empirical` in the labels ingestion then wrote. A
+    grid has no format version, and needs none: the rule is exact on any
+    file (METHODS §2.4).
+    """
+    grid = build_output_grid(campaign, OutputGridConfig(freq="60s"))
+    grid = grid.drop_vars([n for n in ("sigma_rand_ch4", "sigma_sys_ch4") if n in grid])
+    grid["ch4"].attrs.update(
+        uncertainty_provenance="empirical",
+        uncertainty_provenance_random="empirical",
+        uncertainty_provenance_systematic="unknown",
+    )
+    save_grid(grid, tmp_path / "bundle")
+    with caplog.at_level(logging.INFO, logger="tsara.align.bundle"):
+        reloaded = load_grid(tmp_path / "bundle")
+    assert "promised an estimate nothing makes" in caplog.text
+    assert reloaded["ch4"].attrs["uncertainty_provenance"] == "unknown"
+    assert reloaded["ch4"].attrs["uncertainty_provenance_random"] == "unknown"
+    assert reloaded["ch4"].attrs["uncertainty_provenance_systematic"] == "unknown"
 
 
 def test_the_reloaded_grid_still_has_its_cells(

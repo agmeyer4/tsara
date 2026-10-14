@@ -37,7 +37,7 @@ from tsara.synthetic.generator import SyntheticDataset, generate
 from tsara.synthetic.profiling import RealDataProfile
 
 WithSources = Callable[[SyntheticConfig, dict[str, Any]], SyntheticConfig]
-RespellBundle = Callable[[Path], int]
+RewriteBundle = Callable[[Path, int], int]
 
 # ---------------------------------------------------------------------------
 # Round trip
@@ -487,12 +487,12 @@ def test_a_format_2_bundle_is_respelled_on_load(
     noisy_config: SyntheticConfig,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
-    respell_as_format_2: RespellBundle,
+    rewrite_as_format: RewriteBundle,
 ) -> None:
-    """Format 3 only renamed attributes, so an older bundle reads back identical."""
+    """Formats 3 and 4 changed only labels, so an older bundle reads back identical."""
     bundle = generate(noisy_config).save(tmp_path / "run")
     expected = load_bundle(bundle)
-    assert respell_as_format_2(bundle) > 0
+    assert rewrite_as_format(bundle, 2) > 0
 
     with caplog.at_level(logging.INFO, logger="tsara.synthetic.bundle"):
         reloaded = load_bundle(bundle)

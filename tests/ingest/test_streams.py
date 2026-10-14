@@ -244,12 +244,12 @@ def test_sigma_names_compose_with_the_generators_truth_prefix() -> None:
 
 
 def test_undeclared_uncertainty_emits_no_sigma_but_labels_it() -> None:
-    """METHODS §2.3: nothing invented, and the obligation is recorded."""
+    """METHODS §2.3: nothing invented, and the absence recorded."""
     stream = _build(_frame(), _instrument())
 
     assert sigma_rand_name("ch4") not in stream.data_vars
-    assert stream["ch4"].attrs["uncertainty_provenance"] == "empirical"
-    assert stream["ch4"].attrs["uncertainty_provenance_random"] == "empirical"
+    assert stream["ch4"].attrs["uncertainty_provenance"] == "unknown"
+    assert stream["ch4"].attrs["uncertainty_provenance_random"] == "unknown"
     assert stream["ch4"].attrs["uncertainty_provenance_systematic"] == "unknown"
 
 

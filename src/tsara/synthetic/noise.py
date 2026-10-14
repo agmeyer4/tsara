@@ -55,8 +55,8 @@ class NoiseRealization:
     reported_sigma : numpy.ndarray or None
         What the instrument publishes, i.e. ``sigma * report_bias``. None
         when the component has no ``report_as`` column, meaning the error is
-        real but undeclared and downstream code must fall back to empirical
-        estimation.
+        real but undeclared: whatever reads it back has no sigma for it, and
+        says so (``unknown``, METHODS §2.3).
     """
 
     error: npt.NDArray[np.float64]
@@ -391,8 +391,8 @@ def quantization_floor(resolution: float) -> float:
 
     The standard deviation of uniform rounding error on a step of width
     ``delta`` is ``delta / sqrt(12)`` (METHODS.md §2.5). Exposed here so that
-    tests of the Phase 6 detection floor can compare against the same
-    constant the generator used, rather than a re-derived literal.
+    the events stage's tests of its floor compare against the same constant
+    the generator used, rather than a re-derived literal.
 
     Parameters
     ----------

@@ -16,9 +16,9 @@ from typing import Any, TypeAlias
 import pytest
 import yaml
 
-#: The callable `respell_as_format_2` hands back: bundle directory in, count of
-#: attributes respelled out.
-RespellBundle: TypeAlias = Callable[[Path], int]
+#: The callable `rewrite_as_format` hands back: bundle directory and an older
+#: format version in, count of attributes rewritten out.
+RewriteBundle: TypeAlias = Callable[[Path, int], int]
 
 #: The callable `write_yaml` hands back. Named rather than spelled inline at
 #: every use site so that the tests reading it stay about configuration, and
@@ -159,40 +159,66 @@ def source_dict() -> dict[str, Any]:
 
 
 @pytest.fixture()
-def respell_as_format_2() -> RespellBundle:
-    """Return a helper that rewrites a saved stream bundle as format 2 wrote it.
+def rewrite_as_format() -> RewriteBundle:
+    """Return a helper that rewrites a saved stream bundle as an older format wrote it.
 
-    Format 3 renamed attributes and changed nothing else, so an honest format-2
-    bundle is a current one with the retired spellings put back and the version
-    number lowered. Built from `RETIRED_ATTR_NAMES` itself, so a name added to
-    that map is exercised without editing this helper -- and the count it
-    returns lets a test insist that something was actually respelled, since a
-    migration test over a bundle carrying none of the old names passes
-    vacuously.
+    Neither later format changed a value's number, only its labels, so an
+    honest older bundle is a current one with those labels put back and the
+    version number lowered. Before format 4 an unstated random component
+    said `empirical` where it now says `unknown` (and a species with no
+    budget at all said `empirical` too); before format 3 some attributes had
+    the names in `RETIRED_ATTR_NAMES`, which this helper reads, so a name
+    added to that map is exercised without editing it. The count it returns
+    lets a test insist that something was rewritten, since a migration test
+    over a bundle carrying none of the old labels passes vacuously.
     """
     import json
 
     import xarray as xr
 
-    from tsara.core.bundle import BUNDLE_MANIFEST, BUNDLE_STREAMS_DIR, RETIRED_ATTR_NAMES
+    from tsara.core.bundle import (
+        BUNDLE_MANIFEST,
+        BUNDLE_STREAMS_DIR,
+        BUNDLE_VERSION_WITH_READINGS_AND_PROVENANCE,
+        BUNDLE_VERSION_WITHOUT_PROMISED_ESTIMATES,
+        RETIRED_ATTR_NAMES,
+    )
+    from tsara.core.naming import sigma_rand_name
 
     current_to_retired = {new: old for old, new in RETIRED_ATTR_NAMES.items()}
 
-    def _respell(bundle: Path) -> int:
+    def _rewrite(bundle: Path, version: int) -> int:
         count = 0
         for target in sorted((bundle / BUNDLE_STREAMS_DIR).glob("*.nc")):
             with xr.open_dataset(target, engine="netcdf4", decode_coords="all") as opened:
                 stream = opened.load()
-            holders = [stream.attrs, *(stream.variables[name].attrs for name in stream.variables)]
-            for attrs in holders:
-                for new, old in current_to_retired.items():
-                    if new in attrs:
-                        attrs[old] = attrs.pop(new)
-                        count += 1
+            if version < BUNDLE_VERSION_WITHOUT_PROMISED_ESTIMATES:
+                # Ingestion never wrote a random `unknown` before format 4, so
+                # every one of them was an `empirical` then.
+                for name in map(str, stream.data_vars):
+                    attrs = stream.variables[name].attrs
+                    if sigma_rand_name(name) in stream.variables:
+                        continue
+                    if attrs.get("uncertainty_provenance_random") != "unknown":
+                        continue
+                    attrs["uncertainty_provenance_random"] = "empirical"
+                    if attrs.get("uncertainty_provenance") == "unknown":
+                        attrs["uncertainty_provenance"] = "empirical"
+                    count += 1
+            if version < BUNDLE_VERSION_WITH_READINGS_AND_PROVENANCE:
+                holders = [
+                    stream.attrs,
+                    *(stream.variables[name].attrs for name in stream.variables),
+                ]
+                for attrs in holders:
+                    for new, old in current_to_retired.items():
+                        if new in attrs:
+                            attrs[old] = attrs.pop(new)
+                            count += 1
             stream.to_netcdf(target, engine="netcdf4")
         descriptor = json.loads((bundle / BUNDLE_MANIFEST).read_text())
-        descriptor["bundle_format_version"] = 2
+        descriptor["bundle_format_version"] = version
         (bundle / BUNDLE_MANIFEST).write_text(json.dumps(descriptor))
         return count
 
-    return _respell
+    return _rewrite

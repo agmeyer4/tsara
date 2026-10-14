@@ -2,10 +2,10 @@
 
 Ingests raw, multi-rate trace gas timeseries (stationary and mobile
 platforms) as native-rate per-instrument streams, computes rolling baselines
-and enhancements, detects plume events (including nested multi-scale plumes),
-and extracts enhancement ratios with combined uncertainty quantification —
-producing synchronized matrices ready for downstream receptor modeling
-(e.g., PMF). The mathematics and rationale for every algorithm live in
+and enhancements, finds the events each parameter choice sees (nested across
+scales), and extracts enhancement ratios with combined uncertainty
+quantification — producing synchronized matrices ready for downstream
+receptor modeling (e.g., PMF). The mathematics and rationale for every algorithm live in
 ``docs/METHODS.md``.
 
 The public API is re-exported here so users can write ``from tsara import

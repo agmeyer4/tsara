@@ -2,14 +2,16 @@
 
 Where the manifest (:mod:`tsara.config.manifest`) describes the raw data,
 this module describes the science: the baseline parameter sweep and the
-method each variable's baseline is built with, plume detection thresholds,
-smoothing, source-complex clustering, regression/UQ settings, and an optional
-uniform output grid for the run that wants to export a rectangular table.
+method each variable's baseline is built with, how events are found
+(thresholds, records, triggers), smoothing, source-complex clustering,
+regression/UQ settings, and an optional uniform output grid for the run that
+wants to export a rectangular table.
 
 The sweep philosophy
 --------------------
 Several fields here are deliberately *lists* (baseline ``windows``,
-``quantiles``, smoothing ``cutoffs``, detection ``enter_sigma``). Each list
+``quantiles``, plumes ``enter_multiple`` and ``exit_multiple``, smoothing
+``cutoff_periods``). Each list
 becomes a named dimension of the parameter hypercube: the engine evaluates
 every combination, and the spread of results across the cube *is* the
 methodological uncertainty reported in Phase 7. A user who wants a single
@@ -289,7 +291,7 @@ class BaselineConfig(_StrictModel):
 
     ``windows`` and ``quantiles`` are sweep dimensions: every (window,
     quantile) pair is evaluated. Windows double as the *multi-scale
-    hierarchy* used for nested-plume parent/child bookkeeping in Phase 6 --
+    hierarchy* of the event catalog's parent-child tree (METHODS.md §6.8) --
     a sharp blip is an enhancement over the shortest window's baseline, a
     broad plume over the longest. ``min_readings`` is the validity rule, a
     count tied to the quantile (§6.4). ``methods`` chooses, per variable, how
@@ -436,92 +438,254 @@ class BaselineConfig(_StrictModel):
 
 
 # ---------------------------------------------------------------------------
-# Plume detection
+# Events
 # ---------------------------------------------------------------------------
 
 
-#: Empirical noise estimators (METHODS.md §2.5), detection's to run. Used only
-#: as the *fallback* noise scale for a species with no declared/reported random
-#: uncertainty (METHODS.md §2.3/§6) — the provenance order itself (declared
-#: > reported > empirical) is automatic, not a user choice; this field only
-#: picks the algorithm backing the empirical rung of that ladder. One name:
-#: the signal's rolling MAD (`mad`) was built, measured and rejected on
-#: 2026-09-29 (§2.5).
-NoiseEstimator = Literal["diff_mad"]
+#: Clean-level estimators (METHODS.md §6.8), registered by name in the events
+#: stage. One today: the half-sample mode, chosen over the midpoint of the
+#: shortest half, which collapses once plumes are most of a record.
+CleanLevelEstimator = Literal["half_sample_mode"]
 
 
-class DetectionConfig(_StrictModel):
-    """Threshold + hysteresis segmentation of enhancements into plume events.
+class PlatformStateConfig(_StrictModel):
+    """Where an instrument's stream says whether the platform is moving.
 
-    A plume *starts* when the enhancement exceeds ``enter_sigma`` × the
-    noise-sigma scale and *ends* only when it falls back below
-    ``exit_sigma`` × noise. The two-threshold (hysteresis) design stops a
-    plume that hovers near a single threshold from being chopped into dozens
-    of fragments by noise crossings.
-
-    The noise scale itself is *not* always the empirical estimator below: per
-    METHODS.md §2.3/§6, it comes from the measurement-uncertainty system in
-    provenance order (declared or reported ``sigma_rand`` when the species
-    has one, else the empirical estimate) — thresholds are expressed in
-    noise-sigma units precisely so they mean the same thing regardless of
-    which rung of that ladder supplied sigma for a given species.
+    A variable of the instrument's own stream, in its canonical units, and the
+    value above which the platform counts as moving. A parked stretch lasting
+    at least ``EventsConfig.record_gap`` splits records as an outage does
+    (METHODS.md §6.8), so that a long stop at a base and the drive that
+    follows are described apart; a moving stretch never splits, so a shorter
+    stop stays with its drive however long the legs either side.
     """
 
-    enter_sigma: tuple[float, ...] = Field(
+    variable: str = Field(description="A variable of the instrument's own stream, e.g. its speed.")
+    moving_above: float = Field(
+        ge=0,
+        allow_inf_nan=False,
+        description="The value above which the platform counts as moving, in the variable's units.",
+    )
+
+    @field_validator("variable")
+    @classmethod
+    def _an_identifier(cls, value: str) -> str:
+        if not value.isidentifier():
+            raise ValueError(
+                f"PlatformStateConfig.variable names a variable of the stream; got {value!r}."
+            )
+        return value
+
+
+class EventsConfig(_StrictModel):
+    """Finding events on the enhancements: thresholds, records, triggers.
+
+    Per variable, at every point of the baseline sweep, the events stage
+    describes plume-free air by its **clean level** (the most common
+    enhancement) and its **clean spread** (1.4826 times the median distance
+    below that level), and marks an event wherever the statistic
+    z = (enhancement - level) / spread reaches an entry multiple and stays
+    above an exit multiple (METHODS.md §6.8). Plumes only add, so the
+    readings below the most common value are plume-free air; the spread is
+    measured there. The two multiples are sweep dimensions, like the
+    baseline's window and quantile, because where an event starts and ends
+    moves with them, and that movement is methodological.
+
+    The clean spread is not a measurement uncertainty: it includes the
+    background's wobble at the window's scale, and a declared or reported
+    sigma plays no part in any threshold (§2.3).
+
+    Level and spread are computed per **record**: a stream split where
+    consecutive readings are more than ``record_gap`` apart (or, where
+    ``platform_state`` names a speed, where the platform stays parked for that
+    long) and cut into
+    equal parts no longer than ``max_record_length``, so that days of
+    different air are never described by one number. A record holding fewer
+    than ``min_clean_readings`` readings below its level has no description
+    and no events of its own, and says why; a sparse variable, such as a
+    canister's, takes its events from a dense one named in ``triggers``.
+    """
+
+    enter_multiple: tuple[float, ...] = Field(
         default=(3.0,),
         min_length=1,
         description=(
-            "Entry thresholds in noise-sigma units; a sweep dimension "
-            "('detection_enter_sigma') when more than one value is given."
+            "Entry thresholds, in multiples of the clean spread above the clean "
+            "level; a sweep dimension ('enter_multiple'). An event holds at least "
+            "one reading this far up."
         ),
     )
-    exit_sigma: float = Field(default=1.0, gt=0, description="Exit threshold in noise-sigma units.")
-    noise_estimator: NoiseEstimator = Field(
-        default="diff_mad",
+    exit_multiple: tuple[float, ...] = Field(
+        default=(1.0,),
+        min_length=1,
         description=(
-            "Empirical noise estimator (METHODS.md §2.5), used only when a "
-            "species has no declared/reported random uncertainty. 'diff_mad' "
-            "is the robust first-difference estimator; a rolling MAD of the "
-            "signal itself was measured and rejected (§2.5)."
+            "Exit thresholds, in the same units; a sweep dimension ('exit_multiple'). "
+            "An event runs while its readings stay this far up, so a lower exit "
+            "makes longer events. Every entry must exceed every exit."
         ),
-    )
-    noise_window: str = Field(
-        default="10min",
-        description=(
-            "Rolling window for the empirical noise estimate of the "
-            "enhancement signal (only used when noise_estimator applies)."
-        ),
-    )
-    min_duration: str = Field(
-        default="3s",
-        description="Events shorter than this are discarded as noise blips.",
     )
     max_internal_gap: str = Field(
         default="5s",
         description=(
-            "Sub-threshold dips shorter than this are bridged, keeping one "
-            "physical plume from splitting into several events."
+            "A dip below the exit threshold shorter than this is bridged, so that "
+            "noise does not split one plume in two."
+        ),
+    )
+    max_bridged_dropout: str = Field(
+        default="5s",
+        description=(
+            "A dropout (a hole in the readings) shorter than this is bridged as a dip "
+            "is, so that a single missing row does not split one plume in two; a "
+            "longer one ends the event. Nothing is filled in: the hole holds no "
+            "reading, and the event's covered share records it (METHODS.md §6.8)."
+        ),
+    )
+    record_gap: str = Field(
+        default="2h",
+        description=(
+            "A stream is split into records where consecutive finite readings are "
+            "more than this apart; the clean level and spread are computed per record."
+        ),
+    )
+    max_record_length: str = Field(
+        default="6h",
+        description=(
+            "A record longer than this is cut into equal parts no longer than it, "
+            "since a site or a van that logs for days without a gap would otherwise "
+            "be described by one number (METHODS.md §6.8)."
+        ),
+    )
+    min_clean_readings: int = Field(
+        default=100,
+        ge=1,
+        description=(
+            "Readings a record must hold below its clean level for its level and "
+            "spread to be reported. Fewer, and the record is blank with the reason "
+            "and defines no events. 100 is a floor for having a scale at all, not a "
+            "guarantee of the chance rate (METHODS.md §6.8)."
+        ),
+    )
+    clean_level_estimator: CleanLevelEstimator = Field(
+        default="half_sample_mode",
+        description="The registered estimator of the clean level (METHODS.md §6.8).",
+    )
+    platform_state: dict[str, PlatformStateConfig] = Field(
+        default_factory=dict,
+        description=(
+            "Per instrument, the variable of its stream that says whether the "
+            "platform is moving, and the value above which it is; a parked stretch "
+            "lasting at least record_gap splits records as an outage does. "
+            "Checked against the manifest when the two configs are combined."
+        ),
+    )
+    triggers: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Variables that take their events from another variable instead of "
+            "finding their own, for an instrument too sparse for a clean level of "
+            "its own, such as a canister. Keyed '<instrument>' (every gas variable "
+            "it declares) or '<instrument>.<variable>' (which wins over its "
+            "instrument's key), each naming its trigger as '<instrument>.<variable>', "
+            "of any field. Checked against the manifest when the two configs are "
+            "combined."
         ),
     )
 
-    @field_validator("noise_window", "min_duration", "max_internal_gap")
+    def trigger_for(self, instrument: str, variable: str) -> str | None:
+        """Return the variable a variable takes its events from, if any.
+
+        Parameters
+        ----------
+        instrument, variable : str
+            The variable, as the manifest names it.
+
+        Returns
+        -------
+        str or None
+            The trigger as ``'<instrument>.<variable>'``: the variable's own
+            key when ``triggers`` has one, else its instrument's, else
+            ``None``, meaning it finds its own events.
+        """
+        return self.triggers.get(f"{instrument}.{variable}", self.triggers.get(instrument))
+
+    @field_validator("max_internal_gap", "max_bridged_dropout", "record_gap", "max_record_length")
     @classmethod
     def _valid_durations(cls, value: str, info: ValidationInfo) -> str:
-        _validate_duration(value, field=f"DetectionConfig.{info.field_name}")
+        _validate_duration(value, field=f"EventsConfig.{info.field_name}")
+        return value
+
+    @field_validator("enter_multiple", "exit_multiple")
+    @classmethod
+    def _positive_and_increasing(
+        cls, value: tuple[float, ...], info: ValidationInfo
+    ) -> tuple[float, ...]:
+        """Require every multiple positive, and each list strictly increasing.
+
+        Enforced rather than silently sorted, as the baseline's windows are:
+        each list becomes a sweep coordinate, and a shuffled or repeated one
+        more likely holds a typo than an intention.
+        """
+        if any(not math.isfinite(m) or m <= 0 for m in value):
+            raise ValueError(
+                f"EventsConfig.{info.field_name} must be positive multiples of the clean "
+                f"spread; got {list(value)}."
+            )
+        if any(b <= a for a, b in zip(value, value[1:])):
+            raise ValueError(
+                f"EventsConfig.{info.field_name} must be strictly increasing; got {list(value)}."
+            )
+        return value
+
+    @field_validator("platform_state")
+    @classmethod
+    def _instruments_are_spelled_right(
+        cls, value: dict[str, PlatformStateConfig]
+    ) -> dict[str, PlatformStateConfig]:
+        """Require every key to be an instrument's name, an identifier."""
+        for key in value:
+            if not key.isidentifier():
+                raise ValueError(
+                    f"EventsConfig.platform_state is keyed by instrument; got {key!r}."
+                )
+        return value
+
+    @field_validator("triggers")
+    @classmethod
+    def _keys_and_triggers_are_spelled_right(cls, value: dict[str, str]) -> dict[str, str]:
+        """Require every key and trigger to be spelled as a variable is named.
+
+        A key is ``<instrument>`` or ``<instrument>.<variable>``, a trigger
+        ``<instrument>.<variable>``, every part an identifier. Whether they
+        exist is the combined config's question, since this schema cannot see
+        the manifest; the shape is checked here so that a misspelling fails at
+        once with the spelling wanted.
+        """
+        for key, trigger in value.items():
+            parts = key.split(".")
+            if len(parts) > 2 or not all(part.isidentifier() for part in parts):
+                raise ValueError(
+                    "EventsConfig.triggers keys are '<instrument>' or "
+                    f"'<instrument>.<variable>', e.g. 'iwas' or 'iwas.benzene'; got {key!r}."
+                )
+            instrument, dot, variable = trigger.partition(".")
+            if not dot or not instrument.isidentifier() or not variable.isidentifier():
+                raise ValueError(
+                    f"EventsConfig.triggers['{key}'] names its trigger as "
+                    f"'<instrument>.<variable>', e.g. 'ptr.benzene'; got {trigger!r}."
+                )
         return value
 
     @model_validator(mode="after")
-    def _hysteresis_ordering(self) -> DetectionConfig:
-        """Every entry threshold must sit above the exit threshold.
+    def _every_entry_above_every_exit(self) -> EventsConfig:
+        """Refuse a configuration in which any entry is at or below any exit.
 
-        enter <= exit would invert the hysteresis and make event boundaries
-        ill-defined.
+        Both are swept, so every pairing is run; at entry <= exit the
+        hysteresis inverts and an event's boundaries stop meaning anything.
         """
-        bad = [e for e in self.enter_sigma if e <= self.exit_sigma]
-        if bad:
+        if min(self.enter_multiple) <= max(self.exit_multiple):
             raise ValueError(
-                f"DetectionConfig.enter_sigma values {bad} must all exceed "
-                f"exit_sigma ({self.exit_sigma})."
+                f"Every EventsConfig.enter_multiple must exceed every exit_multiple, since "
+                f"both are swept; got enter {list(self.enter_multiple)} and exit "
+                f"{list(self.exit_multiple)}."
             )
         return self
 
@@ -703,8 +867,9 @@ class AnalysisConfig(_StrictModel):
     baseline: BaselineConfig = Field(
         description="Baseline settings: the sweep, the count rule and the method per variable."
     )
-    detection: DetectionConfig = Field(
-        default_factory=DetectionConfig, description="Plume event segmentation settings."
+    events: EventsConfig = Field(
+        default_factory=EventsConfig,
+        description="Events: thresholds, records and triggers (METHODS.md §6.8).",
     )
     smoothing: SmoothingConfig = Field(
         default_factory=SmoothingConfig, description="Optional low-pass alignment stage."
