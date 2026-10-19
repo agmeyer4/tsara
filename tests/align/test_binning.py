@@ -19,7 +19,7 @@ import xarray as xr
 
 from tsara.align import TsaraAlignError, bin_streams_onto_cells
 from tsara.align.variables import select_variables
-from tsara.core.naming import sigma_rand_name
+from tsara.core.naming import sigma_rand_name, sigma_sys_name
 from tsara.core.support import CellBounds, stream_cells, targets_overlap
 from tsara.core.timebase import SECOND_NS as SECOND
 
@@ -156,6 +156,46 @@ def test_a_binned_stream_is_marked_as_binned() -> None:
     joined = bin_streams_onto_cells({"a": stream}, cells(0.0, 4.0, 10))
     assert joined["ch4"].attrs["tsara_binned"] == 1
     assert joined["ch4"].attrs["cell_methods"] == "time: mean"
+
+
+@pytest.mark.parametrize("target_width_s", [10.0, 60.0], ids=["pass-through", "binned"])
+def test_only_the_random_sigma_is_moved_from_the_interval_it_was_quoted_at(
+    target_width_s: float,
+) -> None:
+    """`uncertainty_at_width` is the random figure's interval; a systematic one is never moved.
+
+    10 s cells under a random figure quoted at 1 s with tau 1 s: the random
+    sigma is moved onto the cells (to 0.7/sqrt(N_eff), N_eff about 4.6), and
+    the 4 ppb systematic stays 4 ppb on both of the binner's paths, since an
+    error shared by every reading does not average down (§3.3). It used to be
+    moved with the random figure's interval and timescale, to 1.78 ppb.
+    """
+    stream = make_stream(
+        0.0,
+        10.0,
+        12,
+        {
+            "ch4": np.full(12, 1900.0),
+            sigma_rand_name("ch4"): np.full(12, 0.7),
+            sigma_sys_name("ch4"): np.full(12, 4.0),
+        },
+        attrs={
+            "ch4": {
+                "units": "ppb",
+                "uncertainty_at_width": "1s",
+                "decorrelation_timescale": "1s",
+            }
+        },
+    )
+    joined = bin_streams_onto_cells(
+        {"a": stream}, cells(0.0, target_width_s, int(120 / target_width_s))
+    )
+    systematic = joined[sigma_sys_name("ch4")]
+    assert np.allclose(systematic.values, 4.0, rtol=1e-12)
+    assert systematic.attrs["tsara_sigma_at_support"] == "unchanged"
+    random = joined[sigma_rand_name("ch4")]
+    assert random.attrs["tsara_sigma_at_support"] == "ar1_neff"
+    assert (random.values < 0.7).all()
 
 
 def test_one_stream_can_pass_through_while_another_is_binned() -> None:
