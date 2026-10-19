@@ -1024,6 +1024,39 @@ weak rows have wild misses); the promised ± is the median σ_b.
 | 20 | 0.81 | 0.0483 | 0.0213 | 0.0455 | 2.14 | 0.38 / 0.77 |
 | 10 | 0.23 | 0.0140 | 0.0535 | 0.1371 | 2.56 | 0.46 / 0.74 |
 
+
+**Table 6. Only one gas's σ declared wrong** (Phase-7a walkthrough, notebook
+07 §3): the plume of Table 5 at two heights, 60 readings, noise 3 ppb on
+methane and 0.3 ppb on ethane, independent; methane's σ declared k × its true
+size, ethane's right; York's median ratio over 2,000 draws per row (truth
+0.05). Declaring methane's σ × k is exactly declaring ethane's σ ÷ k.
+
+| methane's σ declared, × its true size | York median ratio, peak 60 ppb (methane swings 7.0 × its noise) | peak 20 ppb (2.3 ×) |
+|---|---|---|
+| 0.25 | 0.0491 | 0.0428 |
+| 0.5 | 0.0493 | 0.0443 |
+| 0.8 | 0.0497 | 0.0473 |
+| 1 | 0.0500 | 0.0500 |
+| 1.25 | 0.0504 | 0.0539 |
+| 2 | 0.0516 | 0.0653 |
+| 4 | 0.0531 | 0.0791 |
+| least squares | 0.0490 | 0.0423 |
+
+**Table 7. Persistent errors, and two ways to account for them** (Phase-7a
+walkthrough, notebook 07 §4): the 60 ppb plume of Table 6, AR(1) noise with
+lag-one correlation ρ on both gases (τ = −1 s / ln ρ), σ's declared exactly.
+Each cell is the slopes' actual spread ÷ York's promised σ_b (1 is honest),
+then the share of events with the truth inside ±1σ / ±2σ (0.68 / 0.95 when
+honest). "Widened" multiplies σ_b by √(N / N_eff) over the event's 60 readings,
+N_eff from `tsara.core.propagation.n_effective` at the τ; "on B s means" fits
+non-overlapping means of B readings, each mean's σ set by N_eff(B).
+
+| ρ | τ | as it comes | widened by √(N/N_eff) | on 5 s means | on 10 s means | on 15 s means |
+|---|---|---|---|---|---|---|
+| 0.5 | 1.4 s | 1.72 (0.44 / 0.75) | 1.01 (0.68 / 0.95) | 1.15 (0.62 / 0.92) | 1.04 (0.67 / 0.95) | 1.01 (0.69 / 0.96) |
+| 0.7 | 2.8 s | 2.26 (0.33 / 0.62) | 0.97 (0.69 / 0.97) | 1.29 (0.57 / 0.88) | 1.07 (0.66 / 0.94) | 1.00 (0.69 / 0.96) |
+| 0.9 | 9.5 s | 2.92 (0.26 / 0.50) | 0.73 (0.83 / 1.00) | 1.41 (0.52 / 0.85) | 1.06 (0.67 / 0.95) | 0.88 (0.76 / 0.98) |
+
 What the tables say, each a question for 7c rather than for the line:
 
 1. **York removes least squares' dilution, and its σ_b is honest when its
@@ -1052,7 +1085,15 @@ What the tables say, each a question for 7c rather than for the line:
    analyzer whose cell flushes over several seconds is this case; the remedies
    (fitting on cells longer than the decorrelation time, which the binner
    propagates through N_eff (§3.4), or letting the sweep's spread carry it) are
-   7c's to choose.
+   7c's to choose. Table 7 measures two of them, both from the declared τ
+   through TSARA's own N_eff (§3.4): widening σ_b by √(N / N_eff) over the
+   event is honest at τ up to 2.8 s on 1 s readings and errs on the safe side
+   at 9.5 s (0.73); fitting on means of 10–15 s comes within 12 % at every τ
+   in the table, while 5 s means stay 15–41 % too tight. The means are the
+   less robust of the two: on a plume four times as long (240 readings, width
+   40 s) at τ 9.5 s, 10 s means are 1.46× too tight while the widening stays
+   honest (0.93), so a mean helps only when it is long beside τ. Neither moves
+   the ratio. Both need τ declared, and no file in the archive declares one.
 5. **York's σ_b promises a little less spread than its slopes have, and much
    less when the reference gas barely moves inside the event** (Table 5).
    σ_b is a first-order formula: even where methane swings twice its noise it
@@ -1067,6 +1108,16 @@ What the tables say, each a question for 7c rather than for the line:
    spread of the reference gas's enhancement inside the event over its σ,
    beside the MSWD and the plateau, and some account of the 1.2× where the
    signal is good (the sweep's spread, or resampling).
+6. **A wrong ratio between the two gases' σ's moves the slope itself**
+   (Table 6), where a wrong common scale (Table 3) only mis-sizes its ±. York's
+   line lies between least squares (methane exact) and the reverse fit (ethane
+   exact), and σ_ethane / σ_methane decides where: declaring methane's σ too
+   large tilts the line toward the reverse fit and reads high, too small slides
+   it toward least squares' dilution. On the weak plume, 20–25 % off reads −5 % to
+   +8 %, and 2× off +31 %; on the strong plume a few percent. No widening of
+   σ_b repairs it. So the precision a manifest must get right is the *ratio* of
+   the two gases' σ's; with σ_b widened by √MSWD the common scale stops
+   mattering.
 
 ---
 
