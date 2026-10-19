@@ -41,7 +41,7 @@ with the coverage flags. Three opt-in gates need data or time that CI does not
 have:
 
 ```bash
-TSARA_NOTEBOOKS=1 pytest tests/test_notebooks.py    # executes notebooks 04, 05 and 06
+TSARA_NOTEBOOKS=1 pytest tests/test_notebooks.py    # executes notebooks 04, 05, 06 and 07
                                                     # (about a minute each)
 TSARA_ARCHIVE=/path/to/Data pytest tests/test_notebooks.py
                                                     # executes notebooks 04b, 05b and 06b
@@ -54,7 +54,7 @@ TSARA_SLOW=1 pytest tests/events/test_methods_tables.py
 ```
 
 Run the notebook gates before a pull request that touches alignment, the
-baseline stage, the events stage or the notebooks, and the tables gate before
+baseline stage, the events stage, `tsara.ratios` or the notebooks, and the tables gate before
 one that touches the events stage.
 
 ## How the package is laid out

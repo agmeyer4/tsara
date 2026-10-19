@@ -334,7 +334,7 @@ reading order true.
 
 ## Notebooks
 
-The five walkthroughs are committed with their outputs, so they read on GitHub
+The seven walkthroughs are committed with their outputs, so they read on GitHub
 without being run, and none needs any real data:
 
 - [`01_synthetic_data_walkthrough.ipynb`](examples/notebooks/01_synthetic_data_walkthrough.ipynb)
@@ -376,6 +376,14 @@ without being run, and none needs any real data:
   catalog scored against the answer key as a join, a canister taking a dense
   analyzer's events, and the state and catalog saved and reloaded. Same shape
   as 05.
+- [`07_ratios_walkthrough.ipynb`](examples/notebooks/07_ratios_walkthrough.ipynb)
+  — the line a ratio is fitted with: least squares diluted by noise on the
+  reference gas and York's line not, York's promised ± tested against 2,000
+  repeats; the ± as precision and the MSWD as the test of whether one line fits,
+  read against the number of points; σ's declared at the wrong scale (which the
+  MSWD repairs) and in the wrong ratio between the gases (which moves the
+  slope); and errors that persist from reading to reading, which the MSWD
+  cannot see and a declared decorrelation time repairs. Same shape as 05.
 
 Three companions run on the real campaign archive instead, and are therefore
 committed **without** outputs:
@@ -411,7 +419,7 @@ mypy --strict src tests
 pytest --cov=tsara --cov-branch     # suite; the 100% line+branch floor fails the run
 TSARA_ARCHIVE=/path/to/Data TSARA_NOTEBOOKS=1 pytest tests/test_notebooks.py
                             # opt-in: executes notebooks 04b, 05b and 06b (against
-                            # the archive) and 04, 05 and 06, and requires every
+                            # the archive) and 04, 05, 06 and 07, and requires every
                             # check and ledger row to hold
 TSARA_SLOW=1 pytest tests/events/test_methods_tables.py
                             # opt-in: re-runs METHODS §6.8's generated-data tables
