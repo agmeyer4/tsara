@@ -6,9 +6,8 @@ campaign's archive as described by a YAML manifest, keeps every instrument on it
 own clock, computes rolling baselines, finds events, and fits ratios
 between species with the measurement error in *both* axes carried through to the
 answer. The output is both a catalog of discrete plume events and a continuous
-record (a baseline and an enhancement at every reading, and ratios over rolling
-windows), ready for source fingerprinting and downstream receptor modeling
-(e.g. PMF).
+record (a baseline and an enhancement at every reading), ready for source
+fingerprinting and downstream receptor modeling (e.g. PMF).
 
 The mathematics, the rationale, and the alternatives that were rejected all live
 in [`docs/METHODS.md`](docs/METHODS.md). It is written as the authoritative
@@ -17,7 +16,7 @@ section there before it has a caller.
 
 ## Status
 
-**Alpha — phases 1–6 of the roadmap are complete.** The package is
+**Alpha — phases 1–6 and 7a of the roadmap are complete.** The package is
 built one phase per review cycle, and only what is listed as done below exists.
 
 | Phase | | |
@@ -31,9 +30,12 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 4.6 | How support may be changed at all: one per-pair rule, a record on every column of what the join did, the borrowed share | ✅ done |
 | 5 | The baseline state: a baseline and an enhancement at every reading, per stream on its own cells, a window × quantile sweep, three baseline methods, uncertainties for both | ✅ done |
 | 6 | Events: plume-free air described per record, two-threshold events at every sweep point, triggers for sparse instruments, a catalog spelled like the answer key, the parent–child tree | ✅ done |
-| 7 | Regression (OLS / York / ODR), combined UQ, stability cube | planned |
-| 8 | Smoothing + spatiotemporal source complexes | planned |
-| 9 | `Pipeline` class + `tsara` CLI | planned |
+| 7a | Line fits: York's errors-in-both-variables line and least squares, through many groups of points at once | ✅ done |
+| 7b | Events grouped across the sweep into candidates, scored against the answer key | planned |
+| 7c | A ratio per candidate, the plateau test, combined uncertainty, the stability cube | planned |
+| 7d | A run function and the `tsara` CLI | planned |
+| 8 | Smoothing + spatiotemporal source complexes | planned, after the first campaign results |
+| 9 | `Pipeline` class | planned |
 | 10 | Docs + tutorial | planned |
 
 So today TSARA can **manufacture a campaign with a known answer key, read a
@@ -47,8 +49,9 @@ enhancement at every point of that sweep and of the event thresholds, as a state
 beside the readings and one catalog whose shared columns are spelled like the
 answer key's**. A manufactured campaign holds one atmosphere that
 every instrument samples, so any disagreement between two records of one gas
-is the instruments' own noise, rounding and support. It cannot yet fit ratios
-or build the stability cube; there is no CLI yet (phase 9).
+is the instruments' own noise, rounding and support. It can fit York's line
+and least squares through many groups of points at once, but does not yet fit
+them to events or build the stability cube; there is no CLI yet (7d).
 
 ## Install
 
@@ -313,8 +316,9 @@ src/tsara/
                methods, the baseline state, its bundle
   events/      Records, the clean level and spread, the detector, the event
                state, the catalog and its tree, their bundle
+  ratios/      The line fits: York's line and least squares, registered by name
   synthetic/   Ground-truth data generation, profiling, raw-file export
-               The five stages import core and config and never each other:
+               The six stages import core and config and never each other:
                they hand each other xarray Datasets
 docs/METHODS.md   The methods document: mathematics, rationale, rejected options
 examples/configs/    Commented YAML for every schema

@@ -772,16 +772,15 @@ class ClusteringConfig(_StrictModel):
 class RegressionConfig(_StrictModel):
     """Enhancement-ratio regression settings.
 
-    Ratios are computed as species-vs-``reference_species`` slopes within
-    each plume event (discrete mode) and over rolling windows (continuous
-    mode). ``york`` (METHODS.md §4.2) is the scientifically preferred
-    estimator: both axes carry measurement error — plain OLS attenuates
-    slopes toward zero (regression dilution) when x is noisy — and, unlike
-    ``scipy.odr``, York natively accepts per-point x-y error correlation,
-    the expected case when numerator and denominator come from the same
-    instrument. ``odr`` is retained as a numerical cross-check (they agree
-    when all per-point correlations are zero) and ``ols`` for its cheap,
-    familiar diagnostics.
+    Ratios are species-vs-``reference_species`` slopes fitted over stretches
+    of readings (METHODS.md §4). ``york`` (§4.2) is the scientifically
+    preferred estimator: both axes carry measurement error — plain OLS
+    attenuates slopes toward zero (regression dilution) when x is noisy —
+    and York accepts a per-point x-y error correlation, the expected case
+    when numerator and denominator come from the same instrument. ``ols``
+    is kept for its familiar diagnostics. The names are the estimators
+    registered in ``tsara.ratios``; ``odr`` was deleted with ``scipy.odr``'s
+    deprecation (§4.4).
     """
 
     reference_species: str = Field(
@@ -794,13 +793,12 @@ class RegressionConfig(_StrictModel):
             "analysis configs are combined."
         ),
     )
-    methods: tuple[Literal["ols", "york", "odr"], ...] = Field(
+    methods: tuple[Literal["ols", "york"], ...] = Field(
         default=("ols", "york"),
         min_length=1,
         description=(
-            "Regression estimators to run. 'york' is the default preferred "
-            "errors-in-both-axes estimator (METHODS.md §4.2); 'odr' is an "
-            "opt-in cross-check, not part of the default set."
+            "Regression estimators to run: 'york', the preferred "
+            "errors-in-both-axes estimator (METHODS.md §4.2), and 'ols' (§4.1)."
         ),
     )
     min_points: int = Field(
@@ -821,8 +819,8 @@ class RegressionConfig(_StrictModel):
     @field_validator("methods")
     @classmethod
     def _no_duplicate_methods(
-        cls, value: tuple[Literal["ols", "york", "odr"], ...]
-    ) -> tuple[Literal["ols", "york", "odr"], ...]:
+        cls, value: tuple[Literal["ols", "york"], ...]
+    ) -> tuple[Literal["ols", "york"], ...]:
         if len(set(value)) != len(value):
             raise ValueError("RegressionConfig.methods contains duplicates.")
         return value
