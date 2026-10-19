@@ -948,7 +948,8 @@ The five kinds of evidence of §11.1, in `tests/ratios/test_estimators.py`:
   against statsmodels (to 1e-10).
 - **Monte Carlo**, drawn from the textbook definition rather than TSARA's
   generator: the tables below, with two of their cases pinned as tests (at
-  2,000 fits and seeds of their own).
+  2,000 fits and seeds of their own). Table 5's rows are notebook 07 §1's
+  recipe; its figure draws two of them.
 - **Mutation:** 21 plausible bugs, each run against the test file, all
   caught (19 on the first run: starting from zero rather than least squares
   reaches the same answer and only the iteration count could see it, so a test
@@ -1004,6 +1005,25 @@ $x(t) = 40\exp(-((t-30)/10)^2)$, AR(1) errors with lag-one correlation ρ on bot
 | 0.5 | 1.0009 | 0.910 | 0.449 / 0.758 | 0.432 / 0.728 |
 | 0.9 | 1.0000 | 0.545 | 0.278 / 0.525 | 0.206 / 0.410 |
 
+
+**Table 5. York's promised σ_b against what happens, along a plume** (found in
+the Phase-7a walkthrough, notebook 07 §1): one plume, true Δmethane
+$20\exp(-t^2/(2\cdot 10^2))$ ppb, read once a second for n seconds centred on
+its peak; Δethane = 0.05 Δmethane; noise 3 ppb on methane and 0.3 ppb on
+ethane, declared exactly; 2,000 draws per row. Methane's true spread is the
+standard deviation of its true Δ over the n readings; the actual spread is
+1.4826 × the median absolute deviation of York's slopes (robust, since the
+weak rows have wild misses); the promised ± is the median σ_b.
+
+| readings | methane's true spread ÷ its noise | York median ratio | York's promised ± | actual spread | actual ÷ promised | truth inside ±1σ / ±2σ |
+|---|---|---|---|---|---|---|
+| 120 | 2.15 | 0.0501 | 0.0044 | 0.0053 | 1.21 | 0.60 / 0.91 |
+| 60 | 2.33 | 0.0499 | 0.0058 | 0.0067 | 1.16 | 0.61 / 0.92 |
+| 40 | 1.92 | 0.0496 | 0.0083 | 0.0096 | 1.16 | 0.63 / 0.91 |
+| 30 | 1.44 | 0.0504 | 0.0122 | 0.0165 | 1.35 | 0.55 / 0.87 |
+| 20 | 0.81 | 0.0483 | 0.0213 | 0.0455 | 2.14 | 0.38 / 0.77 |
+| 10 | 0.23 | 0.0140 | 0.0535 | 0.1371 | 2.56 | 0.46 / 0.74 |
+
 What the tables say, each a question for 7c rather than for the line:
 
 1. **York removes least squares' dilution, and its σ_b is honest when its
@@ -1033,6 +1053,20 @@ What the tables say, each a question for 7c rather than for the line:
    (fitting on cells longer than the decorrelation time, which the binner
    propagates through N_eff (§3.4), or letting the sweep's spread carry it) are
    7c's to choose.
+5. **York's σ_b promises a little less spread than its slopes have, and much
+   less when the reference gas barely moves inside the event** (Table 5).
+   σ_b is a first-order formula: even where methane swings twice its noise it
+   is about 1.2× too tight (Table 1 leans the same way with x spread evenly,
+   0.64 / 0.93 at a comparable signal). Where methane swings less than its
+   noise, the slope is in effect a division by a small noisy number, usually
+   fine and occasionally wild, and the formula cannot see the wild misses:
+   twice too tight or worse.
+   The line stays right where there is signal; its σ_b is not to be trusted
+   where there is little. The MSWD cannot see this either (the scatter about
+   the line is only the declared noise), so 7c needs a **signal test**, the
+   spread of the reference gas's enhancement inside the event over its σ,
+   beside the MSWD and the plateau, and some account of the 1.2× where the
+   signal is good (the sweep's spread, or resampling).
 
 ---
 
