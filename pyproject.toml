@@ -56,7 +56,6 @@ dependencies = [
     "xarray>=2023.6",
     "dask[array]>=2023.6",
     "scipy>=1.10",
-    "statsmodels>=0.14",
     "scikit-learn>=1.3",
     "typer>=0.9",
     # Persistence of TSARA bundle stage products (CLAUDE.md §5): netCDF4 is
@@ -96,6 +95,13 @@ dev = [
     # compliance claim mean something. Deliberately not a runtime dependency:
     # nothing in src/ imports it.
     "cf-xarray>=0.9",
+    # Least squares' reference in the test suite, for the same reason as
+    # cf-xarray: tsara.ratios fits OLS in closed form over many groups at once
+    # (statsmodels fits one model per call), and checking it against an
+    # independent implementation is what makes the closed form evidence.
+    # Declared up front as a runtime dependency until Phase 7a; nothing in
+    # src/ imports it.
+    "statsmodels>=0.14",
 ]
 # Plotting. Deliberately a separate extra rather than a hard dependency: TSARA
 # computes and persists results without ever drawing anything, and a headless

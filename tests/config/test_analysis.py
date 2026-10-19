@@ -319,17 +319,17 @@ def test_a_variable_key_wins_over_its_instrument_key() -> None:
 
 
 def test_york_is_the_default_preferred_method(analysis_dict: dict[str, Any]) -> None:
-    """York (errors-in-both-axes, correlation-aware) is default; odr is opt-in."""
+    """York (errors-in-both-axes, correlation-aware) runs by default, beside OLS."""
     config = AnalysisConfig.model_validate(analysis_dict)
     assert config.regression.methods == ("ols", "york")
-    assert "odr" not in config.regression.methods
 
 
-def test_all_three_methods_accepted(analysis_dict: dict[str, Any]) -> None:
-    ok = copy.deepcopy(analysis_dict)
-    ok["regression"]["methods"] = ["ols", "york", "odr"]
-    config = AnalysisConfig.model_validate(ok)
-    assert config.regression.methods == ("ols", "york", "odr")
+def test_odr_is_no_longer_a_method(analysis_dict: dict[str, Any]) -> None:
+    """``odr`` was deleted with scipy.odr's deprecation (METHODS §4.4)."""
+    bad = copy.deepcopy(analysis_dict)
+    bad["regression"]["methods"] = ["ols", "york", "odr"]
+    with pytest.raises(ValidationError):
+        AnalysisConfig.model_validate(bad)
 
 
 def test_unknown_method_rejected(analysis_dict: dict[str, Any]) -> None:

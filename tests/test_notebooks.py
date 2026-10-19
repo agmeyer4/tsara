@@ -17,7 +17,7 @@ Both are opt-in, because each takes longer than the rest of the suite:
   ``docs/METHODS.md`` quotes, re-measured from the files, and a count of the
   checks made from the definitions; the test requires no ledger entry to
   differ and every check to hold.
-* ``04``, ``05`` and ``06`` run when ``TSARA_NOTEBOOKS`` is set to anything
+* ``04``, ``05``, ``06`` and ``07`` run when ``TSARA_NOTEBOOKS`` is set to anything
   (about a minute each; generated data only). Each scoreboard cell prints
   ``N of N checks hold``, and the test requires exactly that.
 * ``05b`` and ``06b`` run with ``04b`` when ``TSARA_ARCHIVE`` is set, under the
@@ -159,7 +159,12 @@ def test_real_data_notebook_executes_and_its_ledger_agrees(tmp_path: Path, name:
 @requires_opt_in
 @pytest.mark.parametrize(
     "name",
-    ["04_alignment_walkthrough", "05_baseline_state_walkthrough", "06_events_walkthrough"],
+    [
+        "04_alignment_walkthrough",
+        "05_baseline_state_walkthrough",
+        "06_events_walkthrough",
+        "07_ratios_walkthrough",
+    ],
 )
 def test_generated_data_notebook_executes_and_every_check_holds(tmp_path: Path, name: str) -> None:
     env = clean_env()

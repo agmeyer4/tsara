@@ -133,9 +133,8 @@ clustering:
 # --- Enhancement-ratio regressions -------------------------------------------
 regression:
   reference_species: ch4  # denominator; must be a role=gas manifest variable
-  # 'york' (errors-in-both-axes, correlation-aware) is the default preferred
-  # estimator; 'odr' is an opt-in numerical cross-check, shown here alongside
-  # 'ols' to demonstrate that all three registered methods can run together.
-  methods: [ols, york, odr]
+  # 'york' (errors-in-both-axes, correlation-aware) is the preferred
+  # estimator; 'ols' is kept beside it for its familiar diagnostics.
+  methods: [ols, york]
   min_points: 8
   confidence_level: 0.95

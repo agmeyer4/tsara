@@ -736,17 +736,77 @@ component systematic (§3.3) rather than by an enormous τ.
 
 ---
 
-## 4. Regression estimators
+## 4. Regression estimators **[built 2026-10-19 — Phase 7a]**
 
-Registered names: `ols`, `york`, `odr`. Defaults: `("ols", "york")` (config:
-`RegressionConfig.methods`, `tsara.config.analysis`).
+Registered names: `ols`, `york` (`tsara.ratios.estimators`). Defaults:
+`("ols", "york")` (config: `RegressionConfig.methods`, `tsara.config.analysis`,
+whose names a test holds equal to the registry's). Built in Phase 7a as
+functions; no stage calls them yet: fitting events, and judging the fits
+across the sweep, are 7b and 7c.
 
-### 4.1 `ols` — ordinary least squares (statsmodels)
+**Many fits at once.** Both estimators fit one line per *group*: every row of
+the input carries the label of the fit it belongs to, and a label below zero
+belongs to none. A reading may appear in several rows, so fits may overlap
+(windows of several widths centred on one event) and may have holes (a parent
+event with its children's readings left out), and the events stage's
+per-reading event index, which is −1 outside any event (§6.8), can be passed
+as the labels as it is. Every group's sums run over its own rows in the order
+they arrive, and a group stops iterating the moment it converges, so **a group
+fitted beside others gets bit for bit the numbers it gets alone** (tested with
+shuffled rows, overlaps, holes and unlabelled rows). The design exists for
+cost: 7b fits one small line per event per sweep point, and a Python loop per
+fit would dominate the run.
 
-Kept for cheap, familiar diagnostics (R², residual structure). **Known bias:**
-with noise on the x-axis, OLS attenuates slopes toward zero (regression
-dilution); it is never the preferred ratio estimator here. See Cantrell (2008)
-and Wu & Yu (2018) for the atmospheric-chemistry context of this choice.
+**What every fit reports** (`LineFit`, one entry per group): `slope`,
+`intercept`, `slope_sigma`, `intercept_sigma`, `mswd` (York only), `r_squared`,
+`n` (points used), `n_dropped` (rows whose x or y was not finite), `iterations`
+(York only) and `status`:
+
+| `FitStatus` | when | line |
+|---|---|---|
+| `OK` | a line was fitted | yes |
+| `TOO_FEW_POINTS` | fewer than `MIN_FIT_POINTS` = 3 points: two fix a line exactly and leave no degree of freedom to judge it by | NaN |
+| `NO_SPREAD` | every x the same (asked of the values, not of a sum rounding can leave a hair above zero) | NaN |
+| `MISSING_SIGMA` | York only: a point with finite x and y and no finite sigma on an axis | NaN |
+| `NOT_CONVERGED` | York only: the slope still moving at `max_iter` | NaN |
+
+A group that cannot hold a line holds NaN and its reason, never a fallback
+(§2.3); York warns once per call with the number of groups it could not weigh
+or settle. A call that is wrong in itself raises `TsaraRatioError`: x and y of
+different shapes or not one-dimensional, labels that are not integers or do
+not label every row, `n_groups` smaller than a label, a sigma or correlation
+that does not broadcast to the rows, a negative sigma, a fitted point exact on
+both axes, a correlation not strictly between −1 and 1, a non-positive `rtol`
+or `max_iter`.
+
+**r² is reported and is not a judge of a ratio.** It is the squared
+correlation of the points, the same for every estimator, kept because it is
+familiar. r² = 1 − (scatter about the line) / (spread of y), so a source with
+none of the numerator gas (an ethane/methane ratio of 0, a landfill) has no
+spread of y to explain and reads r² near 0 however well its line is fitted,
+while a mixture of two sources, whose two gases still rise together, reads
+r² near 1 though its slope belongs to neither. What judges a ratio is the
+MSWD (§4.2) and how the slope holds across the sweep (§5).
+
+### 4.1 `ols` — ordinary least squares (closed form)
+
+Unweighted, from each group's centred sums (centred on the group's mean
+first, so values near 2000 ppb lose no precision):
+slope $b = S_{xy}/S_{xx}$, intercept $a = \bar{y} - b\bar{x}$, scatter
+$s^2 = \sum_i (y_i - a - bx_i)^2 / (n-2)$,
+$\sigma_b = s/\sqrt{S_{xx}}$, $\sigma_a = s\sqrt{1/n + \bar{x}^2/S_{xx}}$,
+$r^2 = S_{xy}^2/(S_{xx}S_{yy})$. It agrees with statsmodels' OLS, which is
+kept as the test's reference rather than called by the package (statsmodels
+fits one model per call). The sigmas a caller passes are checked like York's
+and not used: least squares is unweighted by definition.
+
+**Known bias:** with noise on the x-axis, OLS attenuates slopes toward zero by
+the factor $\mathrm{var}(x_\text{true}) / (\mathrm{var}(x_\text{true}) +
+\sigma_x^2)$ (regression dilution), measured to that factor in §4.5's Table 1.
+It is never the preferred ratio estimator here; it is kept for its familiar
+diagnostics and because it is the only line there is when no sigma is
+declared. See Cantrell (2008) and Wu & Yu (2018) for the atmospheric-chemistry
+context of this choice.
 
 ### 4.2 `york` — York (2004) errors-in-both-variables fit (own implementation)
 
@@ -755,7 +815,8 @@ errors $\sigma_{x,i}, \sigma_{y,i}$ **and per-point correlation $r_i$ between
 the x- and y-errors** — the parameter scipy's ODR cannot accept. $r_i \neq 0$
 is the physically expected case whenever numerator and denominator species
 come from the same instrument (e.g., EM27 gases retrieved from one spectrum
-share spectral noise, continuum fit, and airmass systematics).
+share spectral noise, continuum fit, and airmass systematics; an Aeris
+analyzer's methane and ethane come from one absorption spectrum).
 
 With weights $\omega_{x,i} = 1/\sigma_{x,i}^2$, $\omega_{y,i} = 1/\sigma_{y,i}^2$,
 $\alpha_i = \sqrt{\omega_{x,i}\,\omega_{y,i}}$, iterate on the slope *b*:
@@ -771,20 +832,58 @@ $$\beta_i = W_i\!\left[\frac{U_i}{\omega_{y,i}} + \frac{b\,V_i}{\omega_{x,i}}
 \qquad
 b_{\text{new}} = \frac{\sum_i W_i\,\beta_i\,V_i}{\sum_i W_i\,\beta_i\,U_i}$$
 
-iterated to convergence (typically < 10 iterations), then
-$a = \bar{Y} - b\bar{X}$, with analytic standard errors
-$\sigma_b^2 = 1/\sum_i W_i u_i^2$ (where $u_i = x_i - \bar{x}$ for the
-adjusted points $x_i = \bar{X} + \beta_i$) and goodness of fit
-$S = \sum_i W_i (Y_i - bX_i - a)^2 \sim \chi^2_{N-2}$.
+iterated to convergence, then $a = \bar{Y} - b\bar{X}$, with analytic standard
+errors $\sigma_b^2 = 1/\sum_i W_i u_i^2$ and
+$\sigma_a^2 = 1/\sum_i W_i + \bar{x}^2\sigma_b^2$ (where $u_i = x_i - \bar{x}$
+for the adjusted points $x_i = \bar{X} + \beta_i$, and $\bar{x}$ is their
+$W$-weighted mean) and goodness of fit
+$S = \sum_i W_i (Y_i - bX_i - a)^2 \sim \chi^2_{N-2}$, reported as the
+**MSWD** $= S/(N-2)$: about 1 when the declared sigmas explain the scatter,
+far above it when something else adds scatter (a second source, an
+understated sigma).
 
 Full equations: York, Evensen, Martínez & Delgado (2004). The implementation
-is ~60 lines, MIT-clean (precedent: TSARA's own ICARTT parser), and is
-validated in tests against the canonical Pearson (1901) dataset with York's
-weights — the standard cross-implementation benchmark for this estimator.
+is MIT-clean (precedent: TSARA's own ICARTT parser). **As built:**
 
-v1 default: $r_i = 0$ (reduces York to per-point-weighted ODR for the linear
-case). How $r_i$ is declared per instrument species-pair, or estimated, is an
-open design flag.
+- **In variances, not ω.** Multiplying numerator and denominator by
+  $\sigma_x^2\sigma_y^2$, $W_i = 1/(\sigma_{y,i}^2 + b^2\sigma_{x,i}^2 -
+  2br_i\sigma_{x,i}\sigma_{y,i})$, the inverse of the variance of a point's
+  distance from the line measured along y, and
+  $\beta_i = W_i[U_i\sigma_{y,i}^2 + bV_i\sigma_{x,i}^2 - (bU_i+V_i)r_i
+  \sigma_{x,i}\sigma_{y,i}]$. Identical algebra, but a sigma of exactly 0 on
+  one axis is allowed: with $\sigma_x = 0$ everywhere, York is weighted least
+  squares of y on x, exactly (tested).
+- **Start and stop.** The iteration starts from least squares and stops for a
+  group when $|b_\text{new} - b| \le \mathrm{rtol}\,(|b_\text{new}| + s)$, with
+  $\mathrm{rtol} = 10^{-12}$ and $s$ the group's natural slope scale, (spread
+  of y + rms σy) / spread of x, so that a slope of exactly 0, a source with
+  none of the numerator gas, converges as readily as any other. Measured over
+  20,000 fits per case (rule of §4.5, n of 5, 10, 30 and 100, noise on x from a
+  quarter of the spread of x to twice it): a median of 8–14 iterations and a
+  99th percentile of 10–50; the long tail is only at n ≤ 10, where least
+  squares reads a noisy x's slope near 0 and York creeps from there to its
+  answer (the slowest, at n = 5, took 1,236). `max_iter` = 1000, at which 2 of
+  those 320,000 fits would go unsettled, both with five points; a step
+  touches only the rows of groups still moving, so stragglers cost only
+  themselves.
+- **v1 default $r_i = 0$**, with $r$ a per-row argument. §4.5's Table 2
+  measures what ignoring a real correlation does: it tilts the line toward the
+  noise's own slope $r\sigma_y/\sigma_x$. How $r_i$ is declared per instrument
+  species-pair, or estimated, stays an open design flag.
+
+Validated (§4.5) against the canonical Pearson (1901) dataset with York's
+(1966) weights, the standard cross-implementation benchmark: TSARA reproduces
+the published answer, as printed independently by the R package bfsl (Sturm,
+2021): intercept 5.47991 ± 0.29497, slope −0.48053 ± 0.05799, χ² 11.87 on 8
+degrees of freedom, in 8 iterations.
+
+**A common scale on every sigma cancels in σ_b·√MSWD.** Multiplying every
+declared sigma by k leaves the slope unchanged, divides the MSWD by k² and
+multiplies σ_b by k, so σ_b·√MSWD does not change (tested to 1e-10, and
+statistically in §4.5's Table 3). If the combined uncertainty (§5) widens
+σ_b by √MSWD, a ratio needs only the *ratio* of its two axes' precisions,
+not their absolute levels. Whether it widens by √MSWD, by √max(1, MSWD), or
+not at all is §5's decision, and Table 3 is its evidence.
 
 ### 4.3 Which σ enters the point weights
 
@@ -792,27 +891,233 @@ York's derivation assumes point errors are **independent between points**.
 Therefore:
 
 - **Point weights use the random component** ($\sigma^{\mathrm{rand}}$, after
-  any pairing-bin propagation), which satisfies that assumption.
+  any pairing-bin propagation), which satisfies that assumption between
+  readings whose errors do not persist; §4.5's Table 4 measures what happens
+  when they do.
+- **A point with no declared random sigma is not weighed.** York reports its
+  group `MISSING_SIGMA` with no line rather than inventing a sigma (§2.3).
+  The 2024 archive's only per-point uncertainty columns are calibration
+  figures (§6.8) and no manifest declares a precision yet, so until the
+  instruments' precisions are declared York has nothing to weigh and least
+  squares is the only line.
 - **The systematic component is common-mode within an event** and must *not*
   be stuffed into per-point weights (it violates the independence assumption
   and corrupts both the fit and its reported error). It is propagated to the
   *ratio* analytically after the fit:
   - *offset-type* systematics largely cancel in the enhancement
     Δ = x − baseline (the baseline subtracts the common offset on window
-    timescales);
+    timescales), and a fit with an intercept ignores what remains;
   - *scale-type* systematics propagate directly: a relative scale uncertainty
     $s$ on either axis contributes relative uncertainty $s$ to the slope,
     added in quadrature at the event level.
 - **In neither component yet: the support error of §11.2.4.** A point built
   by a straddled or narrowed join carries a σ that omits the error that join
   made, so weighting by σ alone over-trusts it. Whether the recorded borrowed
-  share enters these weights is to be decided before this section is built,
-  not after.
+  share enters these weights is to be decided before the stage that weighs
+  joined points is built (7c), not after.
 
-### 4.4 `odr` — scipy.odr
+### 4.4 `odr` — deleted 2026-10-19
 
-Retained as a numerical cross-check on `york` (they agree when all
-$r_i = 0$) and for possible future nonlinear models. Not the default.
+`scipy.odr` was registered as a numerical cross-check on `york` and for
+possible future nonlinear models. It is deprecated as of SciPy 1.17 and is to
+be removed in 1.19, and as a cross-check it adds nothing York's tests lack:
+for a straight line with known variances and $r_i = 0$ it is the same
+maximum-likelihood line, which the tests reach three other ways (Deming's
+closed form for equal sigmas, the paper written out by hand, and a
+brute-force minimization of York's objective). Removed from
+`RegressionConfig.methods`; a configuration naming it is refused. `odrpack`
+is SciPy's named successor, should a nonlinear model ever be wanted.
+
+### 4.5 How the fits were checked
+
+The five kinds of evidence of §11.1, in `tests/ratios/test_estimators.py`:
+
+- **Published benchmark:** Pearson–York, above.
+- **Pencil:** three points on a line give that line and an MSWD of 0; least
+  squares on (0, 0), (1, 1), (2, 4) by hand (slope 2, intercept −⅓,
+  σ_slope √⅓, σ_intercept √(5/9), r² 12/13).
+- **Closed forms:** equal sigmas give Deming's line with
+  $\lambda = \sigma_y^2/\sigma_x^2$ (to 1e-11); an exact x gives weighted
+  least squares and its slope sigma; swapping the axes gives 1/b with σ_b/b²;
+  a common scale on the sigmas cancels as above; an offset on either axis
+  moves only the intercept.
+- **Independent reimplementations:** York written out from the paper in its
+  own ω and α, at r = 0, 0.6 and −0.4 with per-point sigmas (to 1e-10); York's
+  slope against a numerical minimization of its own objective
+  $S(b) = \sum_i (Y_i - a(b) - bX_i)^2 W_i(b)$ at r = 0 and 0.7; least squares
+  against statsmodels (to 1e-10).
+- **Monte Carlo**, drawn from the textbook definition rather than TSARA's
+  generator: the tables below, with two of their cases pinned as tests (at
+  2,000 fits and seeds of their own). Table 5's rows are notebook 07 §1's
+  recipe; its figure draws two of them.
+- **Mutation:** 21 plausible bugs, each run against the test file, all
+  caught (19 on the first run: starting from zero rather than least squares
+  reaches the same answer and only the iteration count could see it, so a test
+  now pins it; a stated group count equal to the labels' own was never
+  passed). One change is not a mutant: letting every row take part in every
+  step changes only the cost, since a settled group's slope is not updated.
+
+**Rule** for every table unless it says otherwise: 4,000 fits per row, each of n points
+about y = 2 + 0.05x; true x drawn uniform on [0, 20] (sd 5.77) independently
+per point; Gaussian errors σx on x and σy = 0.1 on y, declared exactly to York;
+coverage is the share of fits whose slope lies within k·σ_b of 0.05 (k = 1,
+nominally 0.683; k = 2, nominally 0.954); ratios are of the slope to 0.05.
+
+**Table 1. Independent errors.**
+
+| n | σx / sd(x) | OLS mean ratio (predicted) | York median ratio | York mean ratio | York cover 1σ / 2σ | York median MSWD | not settled |
+|---|---|---|---|---|---|---|---|
+| 10 | 0.25 | 0.945 (0.941) | 0.999 | 1.007 | 0.655 / 0.949 | 0.901 | 0 |
+| 10 | 0.5 | 0.816 (0.800) | 1.005 | 1.053 | 0.660 / 0.935 | 0.921 | 0 |
+| 10 | 1.0 | 0.513 (0.500) | 0.980 | 1.656 | 0.761 / 0.892 | 0.889 | 0 |
+| 30 | 0.25 | 0.943 (0.941) | 0.998 | 1.002 | 0.673 / 0.946 | 0.974 | 0 |
+| 30 | 0.5 | 0.805 (0.800) | 1.001 | 1.010 | 0.639 / 0.928 | 0.971 | 0 |
+| 30 | 1.0 | 0.508 (0.500) | 1.003 | 1.046 | 0.658 / 0.923 | 0.969 | 0 |
+| 100 | 0.25 | 0.941 (0.941) | 1.000 | 1.000 | 0.678 / 0.951 | 0.994 | 0 |
+| 100 | 0.5 | 0.802 (0.800) | 1.000 | 1.003 | 0.646 / 0.932 | 0.989 | 0 |
+| 100 | 1.0 | 0.502 (0.500) | 1.002 | 1.013 | 0.645 / 0.929 | 0.994 | 0 |
+
+**Table 2. Correlated errors, n = 30.**
+
+| r | σx | σy | along-y error variance, with r ÷ without | York with r: median ratio, cover 1σ / 2σ | York with r = 0: median ratio, cover 1σ / 2σ, median MSWD |
+|---|---|---|---|---|---|
+| 0.8 | 2.89 | 0.5 | 0.57 | 0.996, 0.619 / 0.919 | 1.488, 0.222 / 0.735, 0.48 |
+| 0.8 | 1.0 | 0.15 | 0.52 | 0.998, 0.669 / 0.946 | 1.053, 0.723 / 0.974, 0.50 |
+| 0.5 | 1.0 | 0.15 | 0.70 | 1.000, 0.672 / 0.953 | 1.035, 0.722 / 0.973, 0.68 |
+| -0.8 | 2.89 | 0.15 | 1.80 | 0.998, 0.682 / 0.954 | 0.990, 0.455 / 0.766, 1.75 |
+| 0.8 | 2.89 | 0.15 | 0.20 | 1.000, 0.583 / 0.908 | 1.006, 0.974 / 1.000, 0.20 |
+
+**Table 3. Sigmas declared at the wrong scale, n = 30, σx / sd(x) = 0.5.**
+
+| declared ÷ true | median MSWD | cover 1σ / 2σ with σ_b | with σ_b·√MSWD | with σ_b·√max(1, MSWD) |
+|---|---|---|---|---|
+| 0.5 | 3.895 | 0.360 / 0.640 | 0.628 / 0.922 | 0.628 / 0.922 |
+| 1.0 | 0.974 | 0.640 / 0.933 | 0.628 / 0.922 | 0.659 / 0.940 |
+| 2.0 | 0.243 | 0.933 / 0.998 | 0.628 / 0.922 | 0.933 / 0.998 |
+
+**Table 4. Errors that persist along a plume:** n = 60 readings in time order, true
+$x(t) = 40\exp(-((t-30)/10)^2)$, AR(1) errors with lag-one correlation ρ on both axes,
+σx = 1, σy = 0.05, declared exactly.
+
+| ρ | median ratio | median MSWD | cover 1σ / 2σ with σ_b | with σ_b·√MSWD |
+|---|---|---|---|---|
+| 0.0 | 0.9999 | 0.985 | 0.680 / 0.956 | 0.677 / 0.950 |
+| 0.5 | 1.0009 | 0.910 | 0.449 / 0.758 | 0.432 / 0.728 |
+| 0.9 | 1.0000 | 0.545 | 0.278 / 0.525 | 0.206 / 0.410 |
+
+
+**Table 5. York's promised σ_b against what happens, along a plume** (found in
+the Phase-7a walkthrough, notebook 07 §1): one plume, true Δmethane
+$20\exp(-t^2/(2\cdot 10^2))$ ppb, read once a second for n seconds centred on
+its peak; Δethane = 0.05 Δmethane; noise 3 ppb on methane and 0.3 ppb on
+ethane, declared exactly; 2,000 draws per row. Methane's true spread is the
+standard deviation of its true Δ over the n readings; the actual spread is
+1.4826 × the median absolute deviation of York's slopes (robust, since the
+weak rows have wild misses); the promised ± is the median σ_b.
+
+| readings | methane's true spread ÷ its noise | York median ratio | York's promised ± | actual spread | actual ÷ promised | truth inside ±1σ / ±2σ |
+|---|---|---|---|---|---|---|
+| 120 | 2.15 | 0.0501 | 0.0044 | 0.0053 | 1.21 | 0.60 / 0.91 |
+| 60 | 2.33 | 0.0499 | 0.0058 | 0.0067 | 1.16 | 0.61 / 0.92 |
+| 40 | 1.92 | 0.0496 | 0.0083 | 0.0096 | 1.16 | 0.63 / 0.91 |
+| 30 | 1.44 | 0.0504 | 0.0122 | 0.0165 | 1.35 | 0.55 / 0.87 |
+| 20 | 0.81 | 0.0483 | 0.0213 | 0.0455 | 2.14 | 0.38 / 0.77 |
+| 10 | 0.23 | 0.0140 | 0.0535 | 0.1371 | 2.56 | 0.46 / 0.74 |
+
+
+**Table 6. Only one gas's σ declared wrong** (Phase-7a walkthrough, notebook
+07 §3): the plume of Table 5 at two heights, 60 readings, noise 3 ppb on
+methane and 0.3 ppb on ethane, independent; methane's σ declared k × its true
+size, ethane's right; York's median ratio over 2,000 draws per row (truth
+0.05). Declaring methane's σ × k is exactly declaring ethane's σ ÷ k.
+
+| methane's σ declared, × its true size | York median ratio, peak 60 ppb (methane swings 7.0 × its noise) | peak 20 ppb (2.3 ×) |
+|---|---|---|
+| 0.25 | 0.0491 | 0.0428 |
+| 0.5 | 0.0493 | 0.0443 |
+| 0.8 | 0.0497 | 0.0473 |
+| 1 | 0.0500 | 0.0500 |
+| 1.25 | 0.0504 | 0.0539 |
+| 2 | 0.0516 | 0.0653 |
+| 4 | 0.0531 | 0.0791 |
+| least squares | 0.0490 | 0.0423 |
+
+**Table 7. Persistent errors, and two ways to account for them** (Phase-7a
+walkthrough, notebook 07 §4): the 60 ppb plume of Table 6, AR(1) noise with
+lag-one correlation ρ on both gases (τ = −1 s / ln ρ), σ's declared exactly.
+Each cell is the slopes' actual spread ÷ York's promised σ_b (1 is honest),
+then the share of events with the truth inside ±1σ / ±2σ (0.68 / 0.95 when
+honest). "Widened" multiplies σ_b by √(N / N_eff) over the event's 60 readings,
+N_eff from `tsara.core.propagation.n_effective` at the τ; "on B s means" fits
+non-overlapping means of B readings, each mean's σ set by N_eff(B).
+
+| ρ | τ | as it comes | widened by √(N/N_eff) | on 5 s means | on 10 s means | on 15 s means |
+|---|---|---|---|---|---|---|
+| 0.5 | 1.4 s | 1.72 (0.44 / 0.75) | 1.01 (0.68 / 0.95) | 1.15 (0.62 / 0.92) | 1.04 (0.67 / 0.95) | 1.01 (0.69 / 0.96) |
+| 0.7 | 2.8 s | 2.26 (0.33 / 0.62) | 0.97 (0.69 / 0.97) | 1.29 (0.57 / 0.88) | 1.07 (0.66 / 0.94) | 1.00 (0.69 / 0.96) |
+| 0.9 | 9.5 s | 2.92 (0.26 / 0.50) | 0.73 (0.83 / 1.00) | 1.41 (0.52 / 0.85) | 1.06 (0.67 / 0.95) | 0.88 (0.76 / 0.98) |
+
+What the tables say, each a question for 7c rather than for the line:
+
+1. **York removes least squares' dilution, and its σ_b is honest when its
+   assumptions hold** (Table 1): least squares reads its predicted factor, York
+   reads the truth at n ≥ 30, and its coverage sits a little under nominal.
+   **Its weak spot is few points with x noise near the spread of x**: there the
+   slope's distribution has a long upper tail, so the mean reads high while the
+   median does not, and coverage at 2σ falls. Weak events with few readings are
+   where a York ratio is least reliable.
+2. **An error correlation the fit is not told about tilts the line and
+   misstates its sigma** (Table 2): correlated noise has a slope of its own,
+   rσy/σx, and the line leans toward it, by most when the noise is large
+   beside the spread of x (the first row, +49 %); σ_b comes out too small
+   where the correlation is negative and too large where the errors run along
+   the line. Declared, the correlation restores the slope; where it leaves the
+   errors running nearly along the line (the last row), coverage stays low
+   even so. Methane and ethane from one Aeris spectrum are the case this
+   describes; whether their retrieval errors correlate is not known.
+3. **The MSWD measures a sigma's scale, and widening by it repairs a wrong
+   scale in either direction** (Table 3); √max(1, MSWD) repairs only an
+   understatement.
+4. **Errors that persist from reading to reading break σ_b, and the MSWD does
+   not see it** (Table 4): the marginal variance is unchanged, so the MSWD
+   stays near or below 1, while the readings carry less independent
+   information than their count. Widening by √MSWD makes it worse. A 1 s
+   analyzer whose cell flushes over several seconds is this case; the remedies
+   (fitting on cells longer than the decorrelation time, which the binner
+   propagates through N_eff (§3.4), or letting the sweep's spread carry it) are
+   7c's to choose. Table 7 measures two of them, both from the declared τ
+   through TSARA's own N_eff (§3.4): widening σ_b by √(N / N_eff) over the
+   event is honest at τ up to 2.8 s on 1 s readings and errs on the safe side
+   at 9.5 s (0.73); fitting on means of 10–15 s comes within 12 % at every τ
+   in the table, while 5 s means stay 15–41 % too tight. The means are the
+   less robust of the two: on a plume four times as long (240 readings, width
+   40 s) at τ 9.5 s, 10 s means are 1.46× too tight while the widening stays
+   honest (0.93), so a mean helps only when it is long beside τ. Neither moves
+   the ratio. Both need τ declared, and no file in the archive declares one.
+5. **York's σ_b promises a little less spread than its slopes have, and much
+   less when the reference gas barely moves inside the event** (Table 5).
+   σ_b is a first-order formula: even where methane swings twice its noise it
+   is about 1.2× too tight (Table 1 leans the same way with x spread evenly,
+   0.64 / 0.93 at a comparable signal). Where methane swings less than its
+   noise, the slope is in effect a division by a small noisy number, usually
+   fine and occasionally wild, and the formula cannot see the wild misses:
+   twice too tight or worse.
+   The line stays right where there is signal; its σ_b is not to be trusted
+   where there is little. The MSWD cannot see this either (the scatter about
+   the line is only the declared noise), so 7c needs a **signal test**, the
+   spread of the reference gas's enhancement inside the event over its σ,
+   beside the MSWD and the plateau, and some account of the 1.2× where the
+   signal is good (the sweep's spread, or resampling).
+6. **A wrong ratio between the two gases' σ's moves the slope itself**
+   (Table 6), where a wrong common scale (Table 3) only mis-sizes its ±. York's
+   line lies between least squares (methane exact) and the reverse fit (ethane
+   exact), and σ_ethane / σ_methane decides where: declaring methane's σ too
+   large tilts the line toward the reverse fit and reads high, too small slides
+   it toward least squares' dilution. On the weak plume, 20–25 % off reads −5 % to
+   +8 %, and 2× off +31 %; on the strong plume a few percent. No widening of
+   σ_b repairs it. So the precision a manifest must get right is the *ratio* of
+   the two gases' σ's; with σ_b widened by √MSWD the common scale stops
+   mattering.
 
 ---
 
@@ -5821,6 +6126,12 @@ should be in phase with is the user's choice, not TSARA's.
 - York, D., Evensen, N. M., Martínez, M. L., & Delgado, J. D. B. (2004).
   Unified equations for the slope, intercept, and standard errors of the best
   straight line. *American Journal of Physics*, 72(3), 367–375.
+- Pearson, K. (1901). On lines and planes of closest fit to systems of points
+  in space. *Philosophical Magazine*, 2(11), 559–572. (The benchmark data, §4.2.)
+- York, D. (1966). Least-squares fitting of a straight line. *Canadian Journal
+  of Physics*, 44, 1079–1086. (The benchmark weights, §4.2.)
+- Sturm, P. (2021). *bfsl: Best-Fit Straight Line*, R package version 0.2.0.
+  (An independent York implementation; its printed Pearson–York answer, §4.2.)
 - Cantrell, C. A. (2008). Technical Note: Review of methods for linear
   least-squares fitting of data and application to atmospheric chemistry
   problems. *Atmospheric Chemistry and Physics*, 8, 5477–5487.
