@@ -60,7 +60,8 @@ from tsara.core.naming import (
     sigma_rand_name,
     sigma_sys_name,
 )
-from tsara.core.support import COPY_RATIO, stream_cells
+from tsara.core.propagation import sigma_at_support
+from tsara.core.support import COPY_RATIO, median_width_s, stream_cells
 from tsara.core.timebase import NS_PER_S
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -437,8 +438,30 @@ def _one_variable(
     enhancement_attrs[BASELINE_METHOD_ATTR] = request.method.method
     if CELL_METHODS_ATTR in reading.attrs:
         enhancement_attrs[CELL_METHODS_ATTR] = reading.attrs[CELL_METHODS_ATTR]
-    # 6. The uncertainties, under the rules of §6.7.
-    sigmas = _sigma_columns(stream, request, result, baseline_values, enhancement, blank, dims)
+    # The reading's random error is in the enhancement unchanged, and so is how
+    # fast it decorrelates: a join averaging enhancements needs the timescale
+    # exactly as one averaging readings does. Without it the join would treat
+    # neighbouring readings' errors as independent and claim far too small a
+    # sigma for an averaged enhancement (§6.7).
+    if "decorrelation_timescale" in reading.attrs:
+        enhancement_attrs["decorrelation_timescale"] = reading.attrs["decorrelation_timescale"]
+    # 6. The uncertainties, under the rules of §6.7: the reading's random sigma
+    # on its own cells first, since the baseline's is on them.
+    reading_random, moved = _random_on_cells(stream, request)
+    if moved == "unscaled":
+        # Not moved, for want of a timescale: the enhancement's sigma still
+        # holds a figure quoted at another interval, so it says which, and a
+        # join reports it `unscaled` as it does for the reading's.
+        enhancement_attrs.update(
+            {
+                key: value
+                for key, value in reading.attrs.items()
+                if key in ("uncertainty_at_width", "uncertainty_at_width_ratio")
+            }
+        )
+    sigmas = _sigma_columns(
+        stream, request, result, reading_random, moved, baseline_values, enhancement, blank, dims
+    )
     # A component with no sigma column is said so on the enhancement, not left
     # to silence: the reading's own provenance for that component, `unknown`
     # when the reading states none (§6.7). No estimate stands in for it here:
@@ -481,19 +504,52 @@ def _blank_reason(
     return _BlankPoint(variable, point, kind, needs, held)
 
 
+def _random_on_cells(stream: xr.Dataset, request: BaselineRequest) -> tuple[np.ndarray | None, str]:
+    """Return the reading's random sigma restated on its own cells, and how it got there.
+
+    The enhancement's random sigma adds the reading's to the baseline's in
+    quadrature, and the baseline's is a figure on the cells. A reading's
+    figure quoted at another interval (``uncertainty_at_width``, a spec
+    sheet's "1 ppb at 5 s" on 1 s cells) is therefore moved onto the cells
+    first, by the arithmetic every join uses at its point of use (§10.8),
+    with the declared timescale. Without one it cannot be moved, and is used
+    as quoted, with the provenance ``unscaled``. ``unchanged`` when there was
+    nothing to move. The reading's own column is copied into the state as
+    stored; only the sum is formed on the cells.
+    """
+    values = _companion(stream, sigma_rand_name(request.variable))
+    attrs = stream[request.variable].attrs
+    quoted = attrs.get("uncertainty_at_width")
+    if values is None or quoted is None:
+        return values, "unchanged"
+    tau = attrs.get("decorrelation_timescale")
+    moved, how = sigma_at_support(
+        values,
+        quoted_width_s=duration_ns(str(quoted)) / NS_PER_S,
+        target_width_s=median_width_s(request.readings),
+        tau_s=None if tau is None else duration_ns(str(tau)) / NS_PER_S,
+    )
+    return moved, how
+
+
 def _sigma_columns(
     stream: xr.Dataset,
     request: BaselineRequest,
     result: BaselineResult,
+    reading_random: np.ndarray | None,
+    moved: str,
     baseline_values: np.ndarray,
     enhancement: np.ndarray,
     blank: np.ndarray,
     dims: tuple[str, ...],
 ) -> dict[str, tuple[tuple[str, ...], np.ndarray, dict[str, object]]]:
-    """Return the sigma companions of a baseline and its enhancement (§6.7)."""
+    """Return the sigma companions of a baseline and its enhancement (§6.7).
+
+    ``reading_random`` is the reading's random sigma on its cells and
+    ``moved`` how it got there (:func:`_random_on_cells`).
+    """
     variable = request.variable
     units = str(stream[variable].attrs.get("units", ""))
-    reading_random = _companion(stream, sigma_rand_name(variable))
     reading_systematic = _companion(stream, sigma_sys_name(variable))
     base = baseline_name(variable)
     enh = enhancement_name(variable)
@@ -546,6 +602,19 @@ def _sigma_columns(
         random_term = reading_random[:, None, None] ** 2
         if baseline_random is not None:
             random_term = random_term + baseline_random**2
+        # The rule, and how the reading's figure reached the cells when it was
+        # quoted at another interval.
+        quoted = stream[variable].attrs.get("uncertainty_at_width")
+        random_rule = {
+            "unchanged": "quadrature",
+            "unscaled": (
+                f"quadrature, with the reading's sigma as quoted at {quoted}: no "
+                "decorrelation timescale to move it onto the cells"
+            ),
+        }.get(
+            moved,
+            f"quadrature, with the reading's sigma moved from {quoted} onto the cells ({moved})",
+        )
         columns[sigma_rand_name(enh)] = (
             dims,
             np.where(np.isfinite(enhancement), np.sqrt(random_term), np.nan),
@@ -558,7 +627,7 @@ def _sigma_columns(
                 "uncertainty_provenance": str(
                     stream[variable].attrs.get("uncertainty_provenance_random", "unknown")
                 ),
-                SIGMA_RULE_ATTR: "quadrature",
+                SIGMA_RULE_ATTR: random_rule,
             },
         )
     # The enhancement's systematic sigma: by where the baseline came from.

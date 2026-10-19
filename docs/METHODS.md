@@ -1474,6 +1474,58 @@ Its random component is the reading's and the baseline's in quadrature,
 `sigma_rand_enhancement_<x>` = √(σ²_rand(*x*) + σ²_b), treating one
 reading's noise as independent of a quantile of hundreds; the reading's own
 share of its window is neglected, which overstates the figure by a hair.
+**The reading's random figure brings two things with it** (built
+2026-10-19). It is put on the cells before the sum, since σ_b is a figure on
+the cells: a figure quoted at another interval (`uncertainty_at_width`,
+§10.8, a spec sheet's "1 ppb at 5 s" on 1 s readings) is moved by
+`core.propagation.sigma_at_support` with the declared τ, the arithmetic every
+join uses at its point of use. Without τ it cannot be moved and is added as
+quoted, and `enhancement_<x>` then carries the reading's
+`uncertainty_at_width` and `uncertainty_at_width_ratio`, so that a join
+reports the sigma `unscaled` and warns, as it does for the reading's own;
+`tsara_sigma_rule` says which happened. And `enhancement_<x>` carries the
+reading's `decorrelation_timescale`, since the reading's random error is in
+the difference unchanged and a join averaging enhancements needs τ as much as
+one averaging readings. Before 2026-10-19 neither was done (found making the
+2026-10-02 group talk), and the joins treated the enhancement's errors as
+independent. Measured (rule: one generated 6 h record per τ, seed 11, a
+stationary 1 s analyzer on a smooth background with sparse blips, random
+5 ppb with τ and systematic 3 ppb; exported to raw files, ingested, baseline
+at *q* = 0.05, enhancements binned onto abutting 60 s cells; "realized" is
+the standard deviation of binned minus binned true enhancement over the 312
+cells whose true enhancement is below 0.5 ppb, "claimed" the mean binned
+random sigma over them, in ppb):
+
+| τ | window | claimed before | claimed | realized |
+|---|---|---|---|---|
+| 5 s | 2 min | 0.66 | 1.99 | 1.74 |
+| 5 s | 10 min | 0.65 | 1.95 | 1.91 |
+| 5 s | 60 min | 0.64 | 1.95 | 2.24 |
+| 30 s | 2 min | 0.65 | 3.78 | 2.52 |
+| 30 s | 10 min | 0.65 | 3.77 | 3.42 |
+| 30 s | 60 min | 0.64 | 3.76 | 3.91 |
+| 120 s | 2 min | 0.64 | 4.62 | 1.74 |
+| 120 s | 10 min | 0.64 | 4.62 | 3.48 |
+| 120 s | 60 min | 0.64 | 4.61 | 4.64 |
+
+Before, the realized scatter was 2.6–7.3 times the claim at every τ and
+window (1.6–3.2 times by the same rule on 10 s cells). Now the claim is
+0.87–1.33 times the realized scatter (0.92–1.28 on 10 s cells), except at the
+2 min window with τ = 30 s or 120 s, where it is 1.50 and 2.65 times (1.21 and
+1.98 on 10 s cells): so short a window follows the slow part of the noise,
+the baseline takes some of the reading's error out of the difference, and
+the quadrature treats the two as independent. That is the safe side and is
+left. Where the claim falls short, at the 60 min window with τ = 5 s, the
+excess is the long window's lag on the background's slope, a methodological
+error that the sweep measures (Phase 7), not a random one. The
+move was measured the same way (τ = 2 s, window 60 min, the 5 ppb declared
+instead as its 10 s equivalent, 2.87 ppb quoted at 10 s): per reading the
+enhancement claimed 2.88 ppb before both changes and 5.00 after, against a
+realized 5.18; its one-minute means claimed 0.37 and 1.27 against 1.66, the
+same 1.27 and 1.66 as with the figure declared at 1 s. One limit is left: σ_b
+is propagated as though it decorrelated with the reading's τ, though
+neighbouring windows share most of their readings, so an average understates
+it; it is Woodruff's floor (above).
 **A component the reading has no sigma for gets no column, and the
 enhancement says so** (decided 2026-09-29): `enhancement_<x>` carries
 `uncertainty_provenance_random` and `uncertainty_provenance_systematic` for
@@ -4687,11 +4739,19 @@ is. The fast path is not merely an optimization: averaging a cell onto itself
 is the identity mathematically and *not* in floating point, so the general
 path would perturb values that were never meant to change.
 
-**Uncertainty, in order.** A declared figure quoted at a different interval
-from the cells it sits on is first moved onto those cells (§10.8) — the
+**Uncertainty, in order.** A declared random figure quoted at a different
+interval from the cells it sits on is first moved onto those cells (§10.8) — the
 arithmetic ingestion deliberately refuses to do, done here at the point of
 use, or refused again and labelled `unscaled` when no decorrelation timescale
-was declared. Only then is the binned member's uncertainty propagated through
+was declared. A systematic figure is used as it stands and labelled
+`unchanged`: `uncertainty_at_width` is the random figure's interval, and no
+interval changes an error every reading shares (§3.3, §10.8). *Corrected
+2026-10-19:* until then the binner moved the systematic figure too, with the
+random one's interval and timescale, which §10.8 forbids; on 10 s cells under
+a random figure quoted at 1 s, a 4.0 ppb systematic came out 1.78 ppb at
+τ = 1 s and 3.98 ppb at τ = 5 min. It needed both an interval and a timescale
+declared, which no manifest of the real archive does, so no real product
+changed. Only then is the binned member's uncertainty propagated through
 the *same* overlap weights that formed its value (§3), the two components
 separately.
 
@@ -4729,7 +4789,7 @@ and per variable:
 |---|---|
 | `tsara_instrument` | which stream this species came from |
 | `tsara_binned` | 1 if averaged onto the clock, 0 if already on it |
-| `tsara_sigma_at_support` | how a declared σ was moved onto its own cells, or `unscaled` |
+| `tsara_sigma_at_support` | how a declared σ was moved onto its own cells, `unscaled` when it could not be, or `unchanged` when nothing was moved, which a systematic σ never is |
 | `tsara_n_readings` | distinct readings of this species behind the surviving pairs (§11.2.4, §11.4.1) |
 | `tsara_shared_readings` | distinct readings of this species that formed more than one surviving pair, so that neighbouring pairs share their error; 0 for a species on the clock, by construction (§11.4.1) |
 

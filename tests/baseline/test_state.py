@@ -478,6 +478,164 @@ def test_a_component_declared_zero_is_carried_as_zero_not_unknown() -> None:
     assert state["sigma_rand_enhancement_ch4"].attrs["uncertainty_provenance"] == "declared"
 
 
+def n_effective_textbook(n: int, rho: float) -> float:
+    """N_eff of the mean of ``n`` equally spaced AR(1) samples, from the double sum.
+
+    Var(mean) = sigma^2 / n * (1 + 2 sum_{k=1}^{n-1} (1 - k/n) rho^k), so
+    N_eff = n / (1 + 2 sum (1 - k/n) rho^k). Written here from the textbook
+    rather than borrowed from `tsara.core.propagation`.
+    """
+    k = np.arange(1, n)
+    return float(n / (1.0 + 2.0 * np.sum((1.0 - k / n) * rho**k)))
+
+
+def ar1_stream(seed: int, n: int, sigma: float, tau_s: float, *, declare_tau: bool) -> xr.Dataset:
+    """A flat 1900 ppb background on 1 s cells, read through AR(1) noise of known sigma and tau.
+
+    The noise is drawn from the textbook recursion x_i = rho x_(i-1) + e_i with
+    rho = exp(-1 s / tau) and Var(e) = sigma^2 (1 - rho^2), not from the
+    package's generator, so a misunderstanding shared with the package cannot
+    agree with itself. The reading declares sigma, and tau when asked to.
+    """
+    rng = np.random.default_rng(seed)
+    rho = np.exp(-1.0 / tau_s)
+    innovations = rng.normal(0.0, sigma * np.sqrt(1.0 - rho**2), n)
+    noise = np.empty(n)
+    noise[0] = rng.normal(0.0, sigma)
+    for i in range(1, n):
+        noise[i] = rho * noise[i - 1] + innovations[i]
+    reading_attrs: dict[str, object] = {"uncertainty_provenance_random": "declared"}
+    if declare_tau:
+        reading_attrs["decorrelation_timescale"] = f"{tau_s:g}s"
+    return make_stream(
+        cells(0.0, 1.0, n),
+        {"ch4": 1900.0 + noise, "sigma_rand_ch4": np.full(n, sigma)},
+        attrs={"ch4": reading_attrs, "sigma_rand_ch4": {"uncertainty_component": "random"}},
+    )
+
+
+def test_the_enhancement_keeps_the_readings_decorrelation_timescale() -> None:
+    """The reading's random error is in the enhancement, and so is how fast it decorrelates."""
+    declared = ar1_stream(1, 600, 5.0, 30.0, declare_tau=True)
+    state = baseline_state(declared, instrument="a", baseline=config())
+    assert state["enhancement_ch4"].attrs["decorrelation_timescale"] == "30s"
+    undeclared = ar1_stream(1, 600, 5.0, 30.0, declare_tau=False)
+    state = baseline_state(undeclared, instrument="a", baseline=config())
+    assert "decorrelation_timescale" not in state["enhancement_ch4"].attrs
+
+
+def test_averaged_enhancements_scatter_by_the_sigma_they_claim() -> None:
+    """Monte Carlo (METHODS §6.7): one-minute means of enhancements, against the truth.
+
+    Rule: 4 h of 1 s readings of a flat background through AR(1) noise of
+    sigma 5 ppb and tau 30 s (seed 1); baseline 30 min, q = 0.05; the
+    enhancements binned onto 238 abutting one-minute cells. The true
+    enhancement is zero everywhere, so the spread of the binned enhancements
+    (about their mean, which is the quantile's offset below the background) is
+    their realized error, and the claim is the mean binned random sigma.
+    Measured over seeds 1-10 the ratio of the two runs 0.92-1.07; without the
+    timescale on the enhancement the claim was sigma/sqrt(60), 0.65 ppb, about
+    a sixth of the 3.7 ppb realized, and a join could not have known better.
+    """
+    stream = ar1_stream(1, 4 * 3600, 5.0, 30.0, declare_tau=True)
+    state = baseline_state(
+        stream, instrument="a", baseline=config(windows=("30min",), quantiles=(0.05,))
+    )
+    minutes = cells(60.0, 60.0, 238)
+    binned = bin_streams_onto_cells({"a": state}, minutes, ["enhancement_ch4"])
+    values = binned["enhancement_ch4"].values[:, 0, 0]
+    claimed = binned["sigma_rand_enhancement_ch4"].values[:, 0, 0]
+    assert np.isfinite(values).all()
+    realized = float(np.std(values))
+    assert 0.85 < realized / float(np.mean(claimed)) < 1.15
+    # The claim the independent rule would have made is far outside the band.
+    assert realized / (5.0 / np.sqrt(60.0)) > 4.0
+
+
+def quoted_stream(*, tau: str | None) -> xr.Dataset:
+    """1 s readings whose random figure, 2 ppb, was quoted at 10 s."""
+    rng = np.random.default_rng(5)
+    reading_attrs: dict[str, object] = {
+        "uncertainty_provenance_random": "declared",
+        "uncertainty_at_width": "10s",
+        "uncertainty_at_width_ratio": 0.1,
+    }
+    if tau is not None:
+        reading_attrs["decorrelation_timescale"] = tau
+    return make_stream(
+        cells(0.0, 1.0, 1200),
+        {"ch4": 1900.0 + rng.normal(0.0, 1.0, 1200), "sigma_rand_ch4": np.full(1200, 2.0)},
+        attrs={"ch4": reading_attrs, "sigma_rand_ch4": {"uncertainty_component": "random"}},
+    )
+
+
+def test_a_figure_quoted_at_another_interval_is_moved_onto_the_cells_before_the_quadrature() -> (
+    None
+):
+    """A spec sheet's "2 ppb at 10 s" on 1 s cells is 2 sqrt(N_eff) at 1 s, under tau.
+
+    Closed form: ten 1 s values average to the 10 s one, so the 1 s sigma is
+    the quoted one times sqrt(N_eff(10, exp(-1/tau))). With a constant
+    baseline (no sigma of its own) the enhancement's random sigma is that
+    figure exactly; with a rolling baseline it is that figure and the
+    baseline's in quadrature, not the quoted figure added and then moved.
+    """
+    stream = quoted_stream(tau="4s")
+    moved = 2.0 * np.sqrt(n_effective_textbook(10, float(np.exp(-1.0 / 4.0))))
+    constant = baseline_state(
+        stream,
+        instrument="a",
+        baseline=config(methods={"a.ch4": {"method": "constant", "value": 0.0}}),
+    )
+    sigma = constant["sigma_rand_enhancement_ch4"]
+    assert np.allclose(sigma.values, moved, rtol=1e-12)
+    assert sigma.attrs["tsara_sigma_rule"] == (
+        "quadrature, with the reading's sigma moved from 10s onto the cells (ar1_neff)"
+    )
+    # The reading's own column is copied as stored; only the sum is on the cells.
+    assert np.array_equal(constant["sigma_rand_ch4"].values, np.full(1200, 2.0))
+    # Moved, so the enhancement's sigma describes its cells and says nothing more.
+    assert "uncertainty_at_width" not in constant["enhancement_ch4"].attrs
+    rolling = baseline_state(stream, instrument="a", baseline=config())
+    want = np.sqrt(moved**2 + rolling["sigma_rand_baseline_ch4"].values ** 2)
+    finite = np.isfinite(rolling["enhancement_ch4"].values)
+    assert np.allclose(rolling["sigma_rand_enhancement_ch4"].values[finite], want[finite])
+    # A join finds nothing left to move.
+    binned = bin_streams_onto_cells({"a": rolling}, cells(0.0, 60.0, 20), ["enhancement_ch4"])
+    assert binned["sigma_rand_enhancement_ch4"].attrs["tsara_sigma_at_support"] == "unchanged"
+
+
+def test_without_a_timescale_the_quoted_figure_stays_and_the_enhancement_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No tau, no move: the figure is used as quoted, and the interval travels with it.
+
+    The enhancement then carries the reading's `uncertainty_at_width`, so a
+    join reports its sigma `unscaled` and warns, as it does for the reading's
+    own, instead of taking a 10 s figure for a 1 s one in silence.
+    """
+    stream = quoted_stream(tau=None)
+    state = baseline_state(
+        stream,
+        instrument="a",
+        baseline=config(methods={"a.ch4": {"method": "constant", "value": 0.0}}),
+    )
+    assert (state["sigma_rand_enhancement_ch4"].values == 2.0).all()
+    attrs = state["enhancement_ch4"].attrs
+    assert attrs["uncertainty_at_width"] == "10s"
+    assert attrs["uncertainty_at_width_ratio"] == 0.1
+    assert state["sigma_rand_enhancement_ch4"].attrs["tsara_sigma_rule"] == (
+        "quadrature, with the reading's sigma as quoted at 10s: no decorrelation "
+        "timescale to move it onto the cells"
+    )
+    with caplog.at_level(logging.WARNING, logger="tsara.align.binning"):
+        binned = bin_streams_onto_cells({"a": state}, cells(0.0, 60.0, 20), ["enhancement_ch4"])
+    assert binned["sigma_rand_enhancement_ch4"].attrs["tsara_sigma_at_support"] == "unscaled"
+    assert any(
+        "enhancement_ch4 declares its uncertainty at 10s" in r.message for r in caplog.records
+    )
+
+
 # ---------------------------------------------------------------------------
 # Ground truth: the generator's true background
 # ---------------------------------------------------------------------------

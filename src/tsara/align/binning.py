@@ -560,7 +560,12 @@ def _one_variable(
         # it stands, moved only if it was quoted at another interval.
         for component, sigma_name in (("random", sigma_rand_name), ("systematic", sigma_sys_name)):
             resolved = _sigma_on_cells(
-                stream, variable, sigma_name(variable), median_width_s(readings), propagation_form
+                stream,
+                variable,
+                component,
+                sigma_name(variable),
+                median_width_s(readings),
+                propagation_form,
             )
             if resolved is None:
                 continue
@@ -644,6 +649,7 @@ def _warn_of_a_dropped_direction_sigma(stream: xr.Dataset, variable: str, instru
 def _sigma_on_cells(
     stream: xr.Dataset,
     variable: str,
+    component: str,
     sigma_variable: str,
     cell_width_s: float,
     form: PropagationForm,
@@ -656,6 +662,11 @@ def _sigma_on_cells(
     happens — or is refused and says so. A sigma may carry the sweep
     dimensions of its variable (the baseline's sigma does) or ``time`` alone;
     moving it is the same scaling of every value either way.
+
+    Only the random component is ever moved. ``uncertainty_at_width`` is the
+    interval the *random* figure was quoted at, and a systematic error is
+    shared by every reading, so no interval changes it (§3.3): it is used as
+    it stands, ``unchanged``.
     """
     if sigma_variable not in stream.data_vars:
         # This component was never declared or reported for the variable.
@@ -672,8 +683,9 @@ def _sigma_on_cells(
     dims = tuple(str(name) for name in array.dims)
     values = np.asarray(array.values, dtype=np.float64)
     quoted = stream[variable].attrs.get("uncertainty_at_width")
-    if quoted is None:
-        # No quoted interval: the sigma already describes the stream's own cells.
+    if quoted is None or component == "systematic":
+        # No quoted interval: the sigma already describes the stream's own
+        # cells. Or a systematic figure, which averaging does not reduce.
         return values, dims, "unchanged"
     # A figure quoted at another interval: moving it needs a decorrelation
     # timescale, and `sigma_at_support` refuses (returns "unscaled") without one.
@@ -800,7 +812,7 @@ def _bin_scalar(
     times_s = readings.midpoint_ns[pairs.reading_index].astype(np.float64) / NS_PER_S
     for component, sigma_name in (("random", sigma_rand_name), ("systematic", sigma_sys_name)):
         resolved = _sigma_on_cells(
-            stream, variable, sigma_name(variable), cell_width, propagation_form
+            stream, variable, component, sigma_name(variable), cell_width, propagation_form
         )
         if resolved is None:
             continue
