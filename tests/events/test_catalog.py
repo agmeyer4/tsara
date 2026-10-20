@@ -22,6 +22,7 @@ from tsara.events import (
     event_states,
     find_events,
     find_records,
+    link_candidates,
     link_parents,
 )
 from tsara.synthetic import SyntheticDataset
@@ -128,6 +129,18 @@ def test_one_row_per_event_and_sweep_point_each_with_a_readable_unique_key(
         catalog["events_at_point"]
         == catalog.groupby(["baseline_window", "enter_multiple"])["event_id"].transform("size")
     ).all()
+
+
+def test_each_event_names_its_candidate_as_the_rule_finds_it(
+    van: tuple[xr.Dataset, xr.Dataset, pd.DataFrame],
+) -> None:
+    """The catalog's candidate_id is the rule's (tsara.events.candidates): linked
+    again from the catalog without it, every event names the same candidate."""
+    _, _, catalog = van
+    assert catalog["candidate_id"].notna().all()
+    assert catalog["candidate_id"].iloc[0] == "van.ch4/w120s/c0"
+    again = link_candidates(catalog.drop(columns="candidate_id"))
+    assert again["candidate_id"].tolist() == catalog["candidate_id"].tolist()
 
 
 def test_each_row_is_the_detectors_event(van: tuple[xr.Dataset, xr.Dataset, pd.DataFrame]) -> None:

@@ -29,6 +29,7 @@ if TYPE_CHECKING:  # pragma: no cover
 __all__ = [
     "BUNDLE_ANALYSIS_CONFIG",
     "BUNDLE_BASELINE_DIR",
+    "BUNDLE_CANDIDATES_FILE",
     "BUNDLE_CATALOG_FILE",
     "BUNDLE_EVENTS_DIR",
     "BUNDLE_FORMAT_VERSION",
@@ -79,11 +80,13 @@ BUNDLE_BASELINE_DIR = "baseline"
 BUNDLE_ANALYSIS_CONFIG = "analysis.yaml"
 
 #: Subdirectory holding one netCDF file per instrument's event state, the
-#: catalog of every event beside them, and the events section of the analysis
-#: configuration (``analysis.yaml``, as for the baseline state). A directory
-#: beside the others for the baseline state's reason.
+#: catalog of every event beside them with the table of its candidates, and
+#: the events section of the analysis configuration (``analysis.yaml``, as for
+#: the baseline state). A directory beside the others for the baseline state's
+#: reason.
 BUNDLE_EVENTS_DIR = "events"
 BUNDLE_CATALOG_FILE = "catalog.parquet"
+BUNDLE_CANDIDATES_FILE = "candidates.parquet"
 
 #: Bumped only when the layout changes incompatibly, so a future reader can
 #: refuse (or migrate) an old bundle rather than misinterpreting it.

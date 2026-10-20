@@ -9,14 +9,16 @@ spells it (``tsara.synthetic.plumes.GROUND_TRUTH_COLUMNS``: ``event_id``,
 ``peak_time``, ``end_time``, ``latitude``, ``longitude``), so that scoring a
 run against its truth is a join. Later stages add tables keyed by
 ``event_id`` rather than editing this one; that key is the room §7 keeps
-for integration.
+for integration. Each event also names its **candidate**, the events of its
+window sharing its peak across the rest of the sweep
+(:mod:`tsara.events.candidates`).
 
 **The parent–child tree** (:func:`link_parents`). Along the baseline's
 window, at a fixed quantile and fixed thresholds, an event links to the
 event at the nearest longer window whose interval holds its peak, skipping a
 window at which nothing holds it. The link records containment, not origin:
 scale is not source (§6.1). It carries both durations, and it is the tree
-both of §6.1's candidate readings of a parent's ratio need.
+both of §6.1's proposed readings of a parent's ratio need.
 
 An ``event_id`` is spelled from the instrument, the variable, the sweep point
 and the event's number in time order, ``van.ch4/w600s/q0.05/e3/x1/17``, so a
@@ -42,6 +44,7 @@ from tsara.core.naming import (
 )
 from tsara.core.support import stream_cells
 from tsara.core.timebase import NS_PER_S
+from tsara.events.candidates import link_candidates
 from tsara.events.hysteresis import describe_events
 from tsara.events.records import TsaraEventError
 from tsara.events.state import ENTER_DIM, EVENTS_STAGE, EXIT_DIM, TRIGGER_ATTR
@@ -68,6 +71,7 @@ __all__ = [
 CATALOG_COLUMNS: tuple[str, ...] = (
     "event_id",
     "parent_event_id",
+    "candidate_id",
     "instrument",
     "species",
     "field",
@@ -106,6 +110,7 @@ _DTYPES: dict[str, str] = {
         (
             "event_id",
             "parent_event_id",
+            "candidate_id",
             "instrument",
             "species",
             "field",
@@ -166,7 +171,8 @@ def event_catalog(
     pandas.DataFrame
         One row per event, variable and sweep point, with
         :data:`CATALOG_COLUMNS`, sorted by instrument, variable, sweep point
-        and event number.
+        and event number, each event linked to its parent and to its
+        candidate (:func:`~tsara.events.candidates.link_candidates`).
 
     Raises
     ------
@@ -199,7 +205,7 @@ def event_catalog(
         ["instrument", "species", "baseline_window", *_TREE_KEYS[2:], "event_number"],
         kind="stable",
     ).reset_index(drop=True)
-    return link_parents(catalog)[list(CATALOG_COLUMNS)].astype(_DTYPES)
+    return link_candidates(link_parents(catalog))[list(CATALOG_COLUMNS)].astype(_DTYPES)
 
 
 def link_parents(catalog: pd.DataFrame) -> pd.DataFrame:
@@ -485,12 +491,12 @@ def _link_group(
         for longer in windows[i + 1 :]:
             if waiting.size == 0:
                 break
-            candidates = group[group["baseline_window"] == longer].sort_values("start_time")
-            starts = candidates["start_time"].to_numpy(dtype="datetime64[ns]").astype(np.int64)
-            ends = candidates["end_time"].to_numpy(dtype="datetime64[ns]").astype(np.int64)
+            longer_events = group[group["baseline_window"] == longer].sort_values("start_time")
+            starts = longer_events["start_time"].to_numpy(dtype="datetime64[ns]").astype(np.int64)
+            ends = longer_events["end_time"].to_numpy(dtype="datetime64[ns]").astype(np.int64)
             at = np.searchsorted(starts, peaks, side="right") - 1
             safe = np.clip(at, 0, None)
             held = (at >= 0) & (peaks < ends[safe]) if starts.size else np.zeros(peaks.size, bool)
-            parent[waiting[held]] = candidates["event_id"].to_numpy()[safe[held]]
-            parent_duration[waiting[held]] = candidates["duration_s"].to_numpy()[safe[held]]
+            parent[waiting[held]] = longer_events["event_id"].to_numpy()[safe[held]]
+            parent_duration[waiting[held]] = longer_events["duration_s"].to_numpy()[safe[held]]
             waiting, peaks = waiting[~held], peaks[~held]
