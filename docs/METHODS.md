@@ -2486,6 +2486,32 @@ events are fitted once. And a blip found at all three windows is three
 candidates linked by the tree; which window's ratio belongs to which plume
 is §6.1's open question.
 
+**On a real drive** (measured 2026-10-20; rule: TSARA ingestion of the
+Wyoming van's afternoon file of 2026-02-03,
+`WYO_aerisultra460/Eng/Ultra100460_260203_195917Eng.parquet`, 14,656 readings
+at 1 s over 4.06 h in one record, methane `CH4_ppm` converted to ppb and
+ethane `C2H6_ppb` from one spectrum, no QA/QC; the example sweep;
+`tests/events/test_candidates_real_drive.py` re-measures every number, opt-in
+with `TSARA_ARCHIVE` set):
+
+| | candidates at 2 / 10 / 60 min | peak z ≥ 5 | median peak z | clean spread at *q* 0.05 (median over readings) |
+|---|---|---|---|---|
+| methane | 138 / 90 / 49 | 92 / 53 / 31 | 8.9 / 7.5 / 7.2 | 2.51 / 3.44 / 4.77 ppb |
+| ethane | 160 / 105 / 73 | 58 / 43 / 28 | 4.0 / 4.0 / 4.3 | 0.25 / 0.28 / 0.39 ppb |
+
+At *q* 0.05, entry 5 and exit 1 the closed form expects under 0.01 chance
+events at each window, where 69, 37 and 20 methane events and 37, 29 and 18
+ethane events are found, so a candidate passing the gate stands far above
+what chance makes here; whether it is one source is the ratio's question.
+Ethane's candidates crowd just above entry, where the gate removes most of
+them, and methane's stand taller. The drive does not argue against a gate of
+5. The day's morning file was left out: it ends, from 18:35 to 19:11 UTC, in
+a calibration sequence (methane on plateaus of 11 to 53 ppm, then zero air,
+ethane near 1 ppb) that nothing in the file marks, its `Inlet Number` being 1
+throughout, and a `range` rule that masked it would mask real plumes too; how
+a campaign's calibrations are masked is an open question for its first
+results (CLAUDE.md).
+
 Checked by hand-checkable cases (two blips merged at a low exit, a peak
 moving with the quantile, absorbed against absent, overlapping events at one
 point, ties); by a reference written one event at a time from this

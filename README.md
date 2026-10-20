@@ -429,13 +429,15 @@ committed **without** outputs:
 ruff check . && ruff format --check .
 mypy --strict src tests
 pytest --cov=tsara --cov-branch     # suite; the 100% line+branch floor fails the run
-TSARA_ARCHIVE=/path/to/Data TSARA_NOTEBOOKS=1 pytest tests/test_notebooks.py
+TSARA_ARCHIVE=/path/to/Data TSARA_NOTEBOOKS=1 pytest tests/test_notebooks.py \
+    tests/events/test_candidates_real_drive.py
                             # opt-in: executes notebooks 04b, 05b and 06b (against
                             # the archive) and 04, 05, 06 and 07, and requires every
-                            # check and ledger row to hold
-TSARA_SLOW=1 pytest tests/events/test_methods_tables.py
+                            # check and ledger row to hold; re-measures METHODS
+                            # §6.8's real drive
+TSARA_SLOW=1 pytest tests/events/test_methods_tables.py tests/events/test_candidate_tables.py
                             # opt-in: re-runs METHODS §6.8's generated-data tables
-                            # (about 12 minutes)
+                            # (about 14 minutes)
 ```
 
 The first three are what continuous integration runs on every pull request
