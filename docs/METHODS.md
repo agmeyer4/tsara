@@ -2361,7 +2361,8 @@ its *z* at the child's peak reaching entry; and lineage cannot judge the
 longest window at all, which needs the view down (wander, above).
 
 **Candidates** **[decided and built 2026-10-20 — Phase 7b]**
-(`tsara.events.candidates`). At one baseline window the other three sweep
+(`tsara.events.candidates`; notebook 07 §5–§8 walks through it on generated
+air). At one baseline window the other three sweep
 dimensions mostly see the same things again, and the ratio stage (7c) fits a
 line over each thing's events, so it needs to know which events those are.
 Measured first (rule: notebook 06's landfill recipe at 6 h, seed 5; the

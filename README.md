@@ -395,7 +395,13 @@ without being run, and none needs any real data:
   read against the number of points; σ's declared at the wrong scale (which the
   MSWD repairs) and in the wrong ratio between the gases (which moves the
   slope); and errors that persist from reading to reading, which the MSWD
-  cannot see and a declared decorrelation time repairs. Same shape as 05.
+  cannot see and a declared decorrelation time repairs. Then which stretches to
+  fit, on manufactured air through the whole chain: how the sweep's events
+  relate inside one window (entry filters, exit nests, quantile shifts), the
+  rule that groups them into candidates against a reference written from its
+  definition, the tree that links a blip's candidates across windows, height
+  against agreement as evidence on the answer key, and what the ratio stage
+  receives. Same shape as 05.
 
 Three companions run on the real campaign archive instead, and are therefore
 committed **without** outputs:
