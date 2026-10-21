@@ -443,3 +443,41 @@ def test_tall_plumes_and_fragments_under_the_height_gate() -> None:
             rates.append(round(int((t["kind"][gate] == "fragment").sum()) / r.hours, 2))
         assert got == misses, record
     assert max(rates) == 1.67
+
+
+def parent_agreement(
+    catalog: pd.DataFrame, candidates: pd.DataFrame, window: float
+) -> tuple[float, float, int]:
+    """The rule of METHODS §6.8's "The tree, read from a seed" (spelled out again in
+    test_candidates_real_drive.py). At one window: the percent of events with a
+    parent whose parent's candidate is their candidate's parent; the percent of
+    candidates (those with such an event) whose events all agree; and the most
+    distinct candidates one candidate's events have parents in."""
+    own = catalog[catalog["trigger_event_id"].isna()]
+    candidate_of = dict(zip(own["event_id"], own["candidate_id"], strict=True))
+    parent_of = candidates.set_index("candidate_id")["parent_candidate_id"]
+    linked = own[(own["baseline_window"] == window) & own["parent_event_id"].notna()]
+    theirs = linked["parent_event_id"].map(candidate_of)
+    agree = (theirs == linked["candidate_id"].map(parent_of)).to_numpy()
+    by_candidate = pd.DataFrame(
+        {"candidate": linked["candidate_id"].to_numpy(), "agree": agree, "theirs": theirs}
+    ).groupby("candidate")
+    return (
+        round(100 * float(agree.mean()), 1),
+        round(100 * float(by_candidate["agree"].all().mean()), 1),
+        int(by_candidate["theirs"].nunique().max()),
+    )
+
+
+def test_the_tree_read_from_a_seed() -> None:
+    """A candidate's parent is its seed's parent's candidate; how often its other
+    events' parents agree, at 2 and 10 min (the windows with a longer one)."""
+    expected = {
+        "landfill 6 h": [(96.5, 96.0, 2), (97.6, 94.5, 2)],
+        "landfill 3 h": [(95.1, 81.0, 3), (96.5, 77.1, 2)],
+        "weak, wander": [(86.9, 60.8, 7), (77.7, 62.0, 2)],
+    }
+    for record, rows in expected.items():
+        r = run(record)
+        got = [parent_agreement(r.catalog, r.candidates, w) for w in WINDOWS[:2]]
+        assert got == rows, record

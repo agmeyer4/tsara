@@ -4,7 +4,12 @@ Each instrument's event state is one netCDF file, ``events/<instrument>.nc``,
 inside a bundle directory beside whatever else that bundle holds; the catalog
 of every event is ``events/catalog.parquet`` beside them, and the table of
 its candidates ``events/candidates.parquet``, built from that catalog as it
-is written so that the two cannot disagree; and the events section of the
+is written so that the two cannot disagree. The catalog must be the whole
+one :func:`~tsara.events.catalog.event_catalog` made from these states,
+since a candidate is numbered and counted over every event of its window: a
+table built from part of a catalog names different candidates, or counts
+them wrongly, under the ids the catalog carries. A filtered or edited
+catalog is therefore refused; filter after loading. And the events section of the
 analysis configuration that found them is ``events/analysis.yaml``. Only
 that section, for the reason the baseline state gives (``docs/METHODS.md``
 §6.6): it is all this stage read, and a copy of the whole would stop loading
@@ -36,6 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 import xarray as xr
 import yaml
@@ -50,11 +56,12 @@ from tsara.core.bundle import (
     TsaraBundleError,
     pin_time_encoding,
 )
+from tsara.core.naming import QUANTILE_DIM, WINDOW_DIM
 from tsara.core.support import check_bounds_intact
 from tsara.events.candidates import CANDIDATE_COLUMNS, event_candidates, link_candidates
 from tsara.events.catalog import CATALOG_COLUMNS
 from tsara.events.records import TsaraEventError
-from tsara.events.state import EVENTS_STAGE
+from tsara.events.state import ENTER_DIM, EVENTS_STAGE, EXIT_DIM
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Mapping
@@ -66,6 +73,10 @@ __all__ = ["EventStates", "load_events", "save_events"]
 #: The catalog's columns before each event named its candidate (Phase 6): a
 #: catalog with exactly these is linked on load rather than refused.
 _COLUMNS_BEFORE_CANDIDATES = tuple(c for c in CATALOG_COLUMNS if c != "candidate_id")
+
+#: An event state's count of the events of a variable at each sweep point is
+#: this prefix and the variable's name (:mod:`tsara.events.state`).
+_COUNT_PREFIX = "n_events_"
 
 
 @dataclass(frozen=True, eq=False)
@@ -112,7 +123,8 @@ def save_events(
         with its candidates, when none is given, so the directory never
         contradicts the run that wrote it; anything else is left alone.
     catalog : pandas.DataFrame, optional
-        The catalog (:func:`~tsara.events.catalog.event_catalog`). Its
+        The catalog (:func:`~tsara.events.catalog.event_catalog`), whole: every
+        event of these states, under the candidate ids it was given. Its
         candidate table (:func:`~tsara.events.candidates.event_candidates`)
         is built from it and the states, and written beside it.
     events : EventsConfig, optional
@@ -135,9 +147,10 @@ def save_events(
     TsaraBundleError
         If ``states`` is empty, a dataset is not an event state, a state has
         lost its cell boundaries, the catalog does not have the catalog's
-        columns or names an instrument whose state is not being saved,
-        ``path`` exists and is not a directory, or ``compression`` is not a
-        level from 1 to 9.
+        columns, names an instrument whose state is not being saved, is not
+        every event of the states (filtered) or names candidates other than
+        linking it gives (edited), ``path`` exists and is not a directory, or
+        ``compression`` is not a level from 1 to 9. Nothing is written then.
     """
     if not states:
         raise TsaraBundleError("No event states to save.")
@@ -155,6 +168,7 @@ def save_events(
         # Built before anything is written, so a catalog that does not belong
         # to these states leaves the directory as it was.
         candidates = _candidates_of(catalog, states, "save_events was handed a catalog")
+        _check_whole(catalog, states)
     if compression is not None and (
         isinstance(compression, bool)
         or not isinstance(compression, int)
@@ -269,6 +283,54 @@ def _candidates_of(
         return event_candidates(catalog, states)
     except TsaraEventError as exc:
         raise TsaraBundleError(f"{what} that does not belong to these event states: {exc}") from exc
+
+
+def _check_whole(catalog: pd.DataFrame, states: Mapping[str, xr.Dataset]) -> None:
+    """Refuse a catalog that is not every event of these states, as it was linked.
+
+    Two tests, because a filter can pass either one alone: the rows at each
+    sweep point of each variable must number the events its state counts
+    there (keeping one entry threshold leaves every id as linking gives it,
+    while each candidate's found and absent counts would describe the part),
+    and every row must name the candidate linking the catalog gives (an
+    edited id keeps every row).
+    """
+    keys = ["instrument", "species", WINDOW_DIM, QUANTILE_DIM, ENTER_DIM, EXIT_DIM]
+    counted = pd.concat(
+        [
+            state[name]
+            .to_series()
+            .rename("events")
+            .reset_index()
+            .assign(instrument=instrument, species=str(name)[len(_COUNT_PREFIX) :])
+            for instrument, state in states.items()
+            for name in state.data_vars
+            if str(name).startswith(_COUNT_PREFIX)
+        ]
+    )
+    rows = catalog.groupby(keys).size().rename("rows").reset_index()
+    points = counted.merge(rows, on=keys, how="outer").fillna({"events": 0, "rows": 0})
+    differ = points[points["events"] != points["rows"]]
+    if len(differ):
+        first = differ.iloc[0]
+        raise TsaraBundleError(
+            "save_events was handed a catalog that is not every event of these states: at "
+            f"{len(differ)} of {len(points)} sweep points its rows differ from the events the "
+            f"state counts (first, '{first['instrument']}.{first['species']}' at window "
+            f"{first[WINDOW_DIM]:g} s, quantile {first[QUANTILE_DIM]:g}, entry "
+            f"{first[ENTER_DIM]:g}, exit {first[EXIT_DIM]:g}: {int(first['rows'])} rows, "
+            f"{int(first['events'])} events). A candidate is numbered and counted over the "
+            "whole catalog, so a filtered one cannot be saved; save the catalog event_catalog "
+            "returned, and filter it after load_events."
+        )
+    linked = link_candidates(catalog)["candidate_id"].to_numpy()
+    edited = int(np.sum(linked != catalog["candidate_id"].to_numpy()))
+    if edited:
+        raise TsaraBundleError(
+            f"save_events was handed a catalog whose candidate ids are not its events': {edited} "
+            f"of {len(catalog)} rows name another candidate than linking the catalog gives. "
+            "Save the catalog event_catalog returned, and filter it after load_events."
+        )
 
 
 def _read_catalog(

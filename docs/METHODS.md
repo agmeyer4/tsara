@@ -2513,6 +2513,32 @@ throughout, and a `range` rule that masked it would mask real plumes too; how
 a campaign's calibrations are masked is an open question for its first
 results (CLAUDE.md).
 
+**The tree, read from a seed** (measured 2026-10-21, in the Phase-7b
+walkthrough; rule: at 2 and 10 min, the windows with a longer one, every
+event of a candidate whose own parent is set, at its own quantile, entry and
+exit; it agrees when its parent event's candidate is the candidate's parent;
+a candidate is counted when at least one of its events has a parent; the
+records of the tables above and the real drive's chain, re-measured by
+`tests/events/test_candidate_tables.py` and
+`tests/events/test_candidates_real_drive.py`). A candidate's parent is read
+from its seed alone, and its other events do not always lie inside the same
+longer-window candidate:
+
+| record | events agreeing at 2 / 10 min | candidates whose events all agree | most parent candidates of one candidate |
+|---|---|---|---|
+| landfill, 6 h | 96.5 / 97.6 % | 96.0 / 94.5 % | 2 / 2 |
+| landfill, 3 h | 95.1 / 96.5 % | 81.0 / 77.1 % | 3 / 2 |
+| weak plumes, wander | 86.9 / 77.7 % | 60.8 / 62.0 % | 7 / 2 |
+| real drive, methane | 87.7 / 83.1 % | 71.1 / 73.7 % | 5 / 3 |
+| real drive, ethane | 87.2 / 83.2 % | 65.5 / 58.6 % | 4 / 4 |
+
+The seed's parent holds for most of a candidate's events. Where plumes are
+dense or the air wanders, a longer window cuts the air differently at
+different quantiles and exits, and in a fifth to two-fifths of candidates
+some event's parent lies in another candidate. Nothing reads
+`parent_candidate_id` yet; the rule that will (which window's ratio belongs
+to which plume, §6.1) starts from this table, not from the column alone.
+
 Checked by hand-checkable cases (two blips merged at a low exit, a peak
 moving with the quantile, absorbed against absent, overlapping events at one
 point, ties); by a reference written one event at a time from this
@@ -2613,7 +2639,16 @@ catalog and its candidates included, so that the directory is the record of
 what ran. The candidate table is built from the catalog and the states as
 they are written, before anything is written, so a catalog naming an
 instrument whose state is not being saved is refused and leaves the
-directory as it was. `load_events` brings every state back exactly, refuses
+directory as it was. So is a catalog that is not the whole one
+`event_catalog` made from those states (added 2026-10-21, in the Phase-7b
+walkthrough, where a catalog kept to its taller events was found saved
+beside a table numbering other candidates under the same ids): a candidate is
+numbered and counted over every event of its window, so the rows at each
+sweep point must number the events the state counts there, and every row
+must name the candidate linking gives. Both are checked, because a filter can
+pass either alone: keeping one entry threshold leaves every id as linking
+gives it, while each candidate's found and absent counts would describe the
+part. Filter after loading. `load_events` brings every state back exactly, refuses
 a file another stage wrote, and refuses a table without the catalog's
 columns or the candidates'. A catalog written before candidates existed
 (Phase 6), with every column but `candidate_id` and no table beside it, is

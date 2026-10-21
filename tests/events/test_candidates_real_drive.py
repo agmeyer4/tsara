@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from tsara.baseline import baseline_state
@@ -58,6 +59,31 @@ instruments:
       latitude: {{column: lat_deg, role: gps_lat, units: degrees_north}}
       longitude: {{column: lon_deg, role: gps_lon, units: degrees_east}}
 """
+
+
+def parent_agreement(
+    catalog: pd.DataFrame, candidates: pd.DataFrame, window: float
+) -> tuple[float, float, int]:
+    """The rule of METHODS §6.8's "The tree, read from a seed", spelled out as in
+    test_candidate_tables.py rather than imported (test modules here import
+    nothing from each other). At one window: the percent of events with a
+    parent whose parent's candidate is their candidate's parent; the percent
+    of candidates (those with such an event) whose events all agree; and the
+    most distinct candidates one candidate's events have parents in."""
+    own = catalog[catalog["trigger_event_id"].isna()]
+    candidate_of = dict(zip(own["event_id"], own["candidate_id"], strict=True))
+    parent_of = candidates.set_index("candidate_id")["parent_candidate_id"]
+    linked = own[(own["baseline_window"] == window) & own["parent_event_id"].notna()]
+    theirs = linked["parent_event_id"].map(candidate_of)
+    agree = (theirs == linked["candidate_id"].map(parent_of)).to_numpy()
+    by_candidate = pd.DataFrame(
+        {"candidate": linked["candidate_id"].to_numpy(), "agree": agree, "theirs": theirs}
+    ).groupby("candidate")
+    return (
+        round(100 * float(agree.mean()), 1),
+        round(100 * float(by_candidate["agree"].all().mean()), 1),
+        int(by_candidate["theirs"].nunique().max()),
+    )
 
 
 def test_the_wyoming_van_on_the_afternoon_of_2026_02_03(tmp_path: Path) -> None:
@@ -110,3 +136,16 @@ def test_the_wyoming_van_on_the_afternoon_of_2026_02_03(tmp_path: Path) -> None:
         assert [round(float(np.nanmedian(spread[:, k])), 2) for k in range(3)] == spreads
         assert events[f"n_events_{variable}"].sel(point).values.tolist() == found
         assert (events[f"chance_events_{variable}"].sel(point).values < 0.01).all()
+
+    # The tree read from a seed, at 2 and 10 min, the windows with a longer one.
+    agreement = {
+        "ch4": [(87.7, 71.1, 5), (83.1, 73.7, 3)],
+        "c2h6": [(87.2, 65.5, 4), (83.2, 58.6, 4)],
+    }
+    for variable, shares in agreement.items():
+        own = catalog[catalog["species"] == variable]
+        got = [
+            parent_agreement(own, candidates[candidates["species"] == variable], w)
+            for w in (120.0, 600.0)
+        ]
+        assert got == shares, variable
