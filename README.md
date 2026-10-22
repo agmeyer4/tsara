@@ -254,6 +254,12 @@ the data rather than trusting the header, masks both sentinel families
 reconciles what a campaign's files say about themselves by joining
 disagreements rather than picking a winner. (`METHODS.md` §9.2)
 
+**What a file cannot say, a manifest can.** QA/QC is `range` and `flag`
+rules per variable, plus `exclude_periods`: files listing the stretches a
+campaign knows to leave out, such as calibrations and a known-bad hour, each
+with its scope and reason. Readings inside them are masked, never deleted,
+and counted like any rule. (`METHODS.md` §9.4)
+
 **A value is not an instant.** Most real archives publish intervals: a
 1-minute mean, a canister fill, a sample whose timestamp is a start time by
 specification. Every stream therefore carries CF cell boundaries and a

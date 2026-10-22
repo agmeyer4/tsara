@@ -9,6 +9,7 @@ against :mod:`tsara.core.naming` rather than against literal strings.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,8 @@ from tsara.config.manifest import (
 )
 from tsara.core.naming import (
     CELL_METHODS_ATTR,
+    EXCLUDED_PERIODS_ATTR,
+    EXCLUDED_PERIODS_FILES_ATTR,
     LOD_COUNT_KEY,
     RAW_TIME_START_COLUMN,
     RAW_TIME_STOP_COLUMN,
@@ -34,6 +37,7 @@ from tsara.core.naming import (
     sigma_sys_name,
 )
 from tsara.ingest.base import TsaraIngestError
+from tsara.ingest.periods import ExcludedPeriod
 from tsara.ingest.streams import build_stream
 from tsara.ingest.support import ResolvedSupport
 
@@ -692,3 +696,123 @@ def test_a_stream_without_cells_still_carries_the_declaration() -> None:
     )
     assert stream["ch4"].attrs["uncertainty_at_width"] == "1s"
     assert "uncertainty_at_width_ratio" not in stream["ch4"].attrs
+
+
+# ---------------------------------------------------------------------------
+# Declared periods
+# ---------------------------------------------------------------------------
+
+
+def _period(
+    start: str, end: str, instrument: str | None = None, variable: str | None = None
+) -> ExcludedPeriod:
+    return ExcludedPeriod(
+        int(pd.Timestamp(start).value),
+        int(pd.Timestamp(end).value),
+        instrument,
+        variable,
+        "cal",
+        "p.csv",
+    )
+
+
+def _two_gases() -> InstrumentConfig:
+    return _instrument(
+        ch4={"column": "CH4_dry", "role": "gas", "units": "ppm"},
+        co2={"column": "CO2_dry", "role": "gas", "units": "ppm"},
+    )
+
+
+def test_a_period_masks_readings_whose_cells_overlap_it() -> None:
+    """Cells [02, 04) and [04, 06) touch [03, 05); the instants 17:00:02/04 would not both."""
+    stream = build_stream(
+        _bounded_frame(),
+        _instrument(),
+        name="picarro",
+        platform=SITE,
+        support=_resolved(),
+        periods=[_period("2026-02-03T17:00:03Z", "2026-02-03T17:00:05Z")],
+    )
+    assert np.isnan(stream["ch4"].values).tolist() == [False, True, True, False]
+    assert stream["ch4"].attrs["qaqc_masked"] == "period:2"
+    assert stream["ch4"].attrs["masked_fraction"] == pytest.approx(0.5)
+
+
+def test_without_cells_a_period_masks_by_timestamp() -> None:
+    stream = _build(
+        _frame(), _instrument(), periods=[_period("2026-02-03T17:00:03Z", "2026-02-03T17:00:05Z")]
+    )
+    assert np.isnan(stream["ch4"].values).tolist() == [False, False, True, False]
+
+
+def test_a_period_limited_to_one_variable_leaves_the_others() -> None:
+    frame = _bounded_frame()
+    frame["CO2_dry"] = np.linspace(410.0, 411.0, len(frame))
+    stream = build_stream(
+        frame,
+        _two_gases(),
+        name="picarro",
+        platform=SITE,
+        support=_resolved(),
+        periods=[_period("2026-02-03T17:00:03Z", "2026-02-03T17:00:05Z", "picarro", "ch4")],
+    )
+    assert np.isnan(stream["ch4"].values).tolist() == [False, True, True, False]
+    assert not np.isnan(stream["co2"].values).any()
+    assert "qaqc_masked" not in stream["co2"].attrs
+
+
+def test_an_instrument_wide_period_masks_every_variable() -> None:
+    frame = _bounded_frame()
+    frame["CO2_dry"] = np.linspace(410.0, 411.0, len(frame))
+    stream = build_stream(
+        frame,
+        _two_gases(),
+        name="picarro",
+        platform=SITE,
+        support=_resolved(),
+        periods=[_period("2026-02-03T17:00:03Z", "2026-02-03T17:00:05Z", "picarro")],
+    )
+    assert np.isnan(stream["ch4"].values).tolist() == [False, True, True, False]
+    assert np.isnan(stream["co2"].values).tolist() == [False, True, True, False]
+
+
+def test_a_period_for_another_instrument_is_not_applied() -> None:
+    stream = _build(
+        _frame(),
+        _instrument(),
+        periods=[_period("2026-02-03T17:00:00Z", "2026-02-03T18:00:00Z", "aeris")],
+    )
+    assert not np.isnan(stream["ch4"].values).any()
+
+
+def test_the_stream_records_the_periods_and_their_files() -> None:
+    periods = [
+        _period("2026-02-03T17:00:03Z", "2026-02-03T17:00:05Z"),
+        _period("2026-02-03T19:00:00Z", "2026-02-03T20:00:00Z", "picarro", "ch4"),
+    ]
+    stream = _build(_frame(), _instrument(), periods=periods)
+    assert stream.attrs[EXCLUDED_PERIODS_ATTR] == (
+        "2026-02-03T17:00:03Z/2026-02-03T17:00:05Z (cal); "
+        "2026-02-03T19:00:00Z/2026-02-03T20:00:00Z picarro.ch4 (cal)"
+    )
+    assert stream.attrs[EXCLUDED_PERIODS_FILES_ATTR] == "p.csv"
+
+
+def test_without_periods_the_attrs_are_absent() -> None:
+    stream = _build(_frame(), _instrument())
+    assert EXCLUDED_PERIODS_ATTR not in stream.attrs
+    assert EXCLUDED_PERIODS_FILES_ATTR not in stream.attrs
+
+
+def test_a_period_covering_no_reading_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO, logger="tsara.ingest.streams"):
+        _build(
+            _frame(),
+            _instrument(),
+            periods=[
+                _period("2026-02-03T17:00:03Z", "2026-02-03T17:00:05Z"),
+                _period("2026-02-04T00:00:00Z", "2026-02-04T01:00:00Z"),
+            ],
+        )
+    assert "2026-02-04T00:00:00Z/2026-02-04T01:00:00Z (cal) covers none" in caplog.text
+    assert "2026-02-03T17:00:03Z/2026-02-03T17:00:05Z (cal) covers none" not in caplog.text

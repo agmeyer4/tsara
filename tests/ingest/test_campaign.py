@@ -20,6 +20,8 @@ import pytest
 from tsara.config.manifest import InstrumentConfig, Manifest, StationaryPlatform
 from tsara.core.bundle import BUNDLE_MANIFEST, BUNDLE_STREAMS_DIR, TsaraBundleError
 from tsara.core.naming import (
+    EXCLUDED_PERIODS_ATTR,
+    EXCLUDED_PERIODS_FILES_ATTR,
     LOD_COUNT_KEY,
     RAW_TIME_START_COLUMN,
     RAW_TIME_STOP_COLUMN,
@@ -933,3 +935,88 @@ def test_a_zero_clock_correction_is_not_announced(
         streams = ingest_campaign(manifest)
     assert "time_shift" not in caplog.text
     assert streams["picarro"].attrs[TIME_SHIFT_ATTR] == "0s"
+
+
+# ---------------------------------------------------------------------------
+# Declared periods, end to end
+# ---------------------------------------------------------------------------
+
+
+def _periods_file(tmp_path: Path, rows: str, name: str = "periods.csv") -> Path:
+    path = tmp_path / name
+    path.write_text("start,end,instrument,variable,reason\n" + rows, encoding="utf-8")
+    return path
+
+
+def test_declared_periods_mask_readings_end_to_end(tmp_path: Path) -> None:
+    """The archive's readings sit at :00, :02, :10 and :12 on inferred 2 s cells
+    centred on them, so [00:00:09, 00:00:11) touches the :10 cell and no other."""
+    base = _archive(tmp_path)
+    periods = _periods_file(tmp_path, "2026-01-01T00:00:09Z,2026-01-01T00:00:11Z,,,calibration\n")
+    streams = ingest_campaign(_manifest(base, exclude_periods=[str(periods)]))
+    stream = streams["picarro"]
+    assert np.isnan(stream["ch4"].values).tolist() == [False, False, True, False]
+    assert stream["ch4"].attrs["qaqc_masked"] == "period:1"
+    assert stream.attrs[EXCLUDED_PERIODS_ATTR] == (
+        "2026-01-01T00:00:09Z/2026-01-01T00:00:11Z (calibration)"
+    )
+    assert stream.attrs[EXCLUDED_PERIODS_FILES_ATTR] == "periods.csv"
+
+
+def test_a_period_naming_an_unknown_instrument_fails_before_any_file_is_read(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    base = _archive(tmp_path)
+    periods = _periods_file(tmp_path, "2026-01-01T00:00:09Z,2026-01-01T00:00:11Z,aeris,,\n")
+    with caplog.at_level(logging.INFO, logger="tsara.ingest.campaign"):
+        with pytest.raises(TsaraIngestError, match="instrument 'aeris'"):
+            ingest_campaign(_manifest(base, exclude_periods=[str(periods)]))
+    assert "Ingesting instrument" not in caplog.text
+
+
+def test_declared_periods_survive_the_bundle_round_trip(tmp_path: Path) -> None:
+    base = _archive(tmp_path)
+    periods = _periods_file(tmp_path, "2026-01-01T00:00:09Z,2026-01-01T00:00:11Z,,,calibration\n")
+    streams = ingest_campaign(_manifest(base, exclude_periods=[str(periods)]))
+    save_streams(streams, tmp_path / "bundle")
+    loaded = load_streams(tmp_path / "bundle")
+    assert loaded.manifest.exclude_periods == (periods,)
+    assert (
+        loaded["picarro"].attrs[EXCLUDED_PERIODS_ATTR]
+        == streams["picarro"].attrs[EXCLUDED_PERIODS_ATTR]
+    )
+    assert np.isnan(loaded["picarro"]["ch4"].values).tolist() == [False, False, True, False]
+
+
+def test_each_instrument_is_handed_only_the_periods_that_apply_to_it(tmp_path: Path) -> None:
+    """A period scoped to one instrument must not appear in another's record."""
+    base = _archive(tmp_path)
+    periods = _periods_file(
+        tmp_path,
+        "2026-01-01T00:00:09Z,2026-01-01T00:00:11Z,twin,,twin's calibration\n"
+        "2026-01-01T00:00:01Z,2026-01-01T00:00:03Z,,,everyone's\n",
+    )
+    picarro = {
+        "loader": {
+            "format": "csv",
+            "path_template": "picarro/*.csv",
+            "time": {"column": "t", "format": "%Y-%m-%d %H:%M:%S"},
+        },
+        "variables": {"ch4": {"column": "CH4", "role": "gas", "units": "ppb"}},
+    }
+    streams = ingest_campaign(
+        _manifest(
+            base,
+            instruments={"picarro": picarro, "twin": picarro},
+            exclude_periods=[str(periods)],
+        )
+    )
+    assert streams["picarro"].attrs[EXCLUDED_PERIODS_ATTR] == (
+        "2026-01-01T00:00:01Z/2026-01-01T00:00:03Z (everyone's)"
+    )
+    assert streams["twin"].attrs[EXCLUDED_PERIODS_ATTR] == (
+        "2026-01-01T00:00:09Z/2026-01-01T00:00:11Z twin (twin's calibration); "
+        "2026-01-01T00:00:01Z/2026-01-01T00:00:03Z (everyone's)"
+    )
+    assert np.isnan(streams["picarro"]["ch4"].values).tolist() == [False, True, False, False]
+    assert np.isnan(streams["twin"]["ch4"].values).tolist() == [False, True, True, False]

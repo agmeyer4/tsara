@@ -55,6 +55,7 @@ from tsara.core.support import nominal_cadence_ns
 from tsara.core.timebase import epoch_ns
 from tsara.ingest.base import TsaraIngestError
 from tsara.ingest.crawler import crawl
+from tsara.ingest.periods import check_excluded_periods, periods_for, read_excluded_periods
 from tsara.ingest.registry import read_file
 from tsara.ingest.streams import build_stream
 from tsara.ingest.support import (
@@ -194,6 +195,11 @@ def ingest_campaign(
         matches no files, or every one of its files fails to read.
     """
     selected = _select(manifest, instruments)
+    # Read once for the campaign and checked against every name before any
+    # data file is read, so a typo in a periods file fails fast rather than
+    # after a thousand-file crawl (tsara.ingest.periods).
+    periods = read_excluded_periods(manifest.exclude_periods)
+    check_excluded_periods(periods, manifest)
 
     streams: dict[str, xr.Dataset] = {}
     for name in selected:
@@ -210,6 +216,7 @@ def ingest_campaign(
             file_attrs=ingested.file_attrs,
             support=ingested.support,
             time_shift=instrument.time_shift,
+            periods=periods_for(periods, name),
         )
         logger.info(
             "Instrument '%s': %d samples from %d file(s).",

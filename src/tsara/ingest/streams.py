@@ -55,6 +55,8 @@ from tsara.config.manifest import MobilePlatform, StationaryPlatform
 from tsara.core.circular import wrap_degrees
 from tsara.core.naming import (
     ALTITUDE_COORD,
+    EXCLUDED_PERIODS_ATTR,
+    EXCLUDED_PERIODS_FILES_ATTR,
     LATITUDE_COORD,
     LOD_COUNT_KEY,
     LONGITUDE_COORD,
@@ -68,6 +70,7 @@ from tsara.core.naming import (
 from tsara.core.support import CellBounds, attach_time_bounds, support_attrs
 from tsara.core.timebase import epoch_ns
 from tsara.ingest.base import TsaraIngestError
+from tsara.ingest.periods import describe_periods, period_mask
 from tsara.ingest.qaqc import apply_qaqc, masked_fraction
 from tsara.ingest.uncertainty import resolve_uncertainty
 from tsara.ingest.units import canonical_units, convert_values
@@ -77,6 +80,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from pathlib import Path
 
     from tsara.config.manifest import InstrumentConfig, PlatformConfig, VariableConfig
+    from tsara.ingest.periods import ExcludedPeriod
     from tsara.ingest.support import ResolvedSupport
 
 logger = logging.getLogger(__name__)
@@ -95,6 +99,7 @@ def build_stream(
     file_attrs: Mapping[str, object] | None = None,
     support: ResolvedSupport | None = None,
     time_shift: str | None = None,
+    periods: Sequence[ExcludedPeriod] = (),
 ) -> xr.Dataset:
     """Turn one instrument's combined raw table into a native-rate stream.
 
@@ -136,6 +141,12 @@ def build_stream(
         rather than applied, because this function receives a frame whose
         axis is final: shifting here would move timestamps out from under the
         ordering and de-duplication that already ran on them.
+    periods : Sequence of ExcludedPeriod, optional
+        The declared periods that apply to this instrument
+        (:func:`tsara.ingest.periods.periods_for`). Each variable is masked
+        by the ones that cover it, with the other QA/QC rules; the stream
+        records them all, and a period covering none of the instrument's
+        readings is logged, since the data it names may not be loaded.
 
     Returns
     -------
@@ -166,7 +177,9 @@ def build_stream(
             files=files,
             lod_by_column=lod_by_column,
             cell_width_ns=None if bounds is None else bounds.width_ns,
+            periods=periods,
         )
+    _report_untouched_periods(frame, periods, name=name)
 
     dataset = xr.Dataset(
         data_vars=data_vars,
@@ -181,6 +194,7 @@ def build_stream(
             support=support,
             bounds=bounds,
             time_shift=time_shift,
+            periods=periods,
         ),
     )
     if bounds is not None and support is not None:
@@ -251,6 +265,7 @@ def _add_variable(
     files: Sequence[Path],
     lod_by_column: Mapping[str, int] = MappingProxyType({}),
     cell_width_ns: Any = None,
+    periods: Sequence[ExcludedPeriod] = (),
 ) -> None:
     """Convert, mask and resolve one variable, adding it and its sigmas.
 
@@ -283,7 +298,14 @@ def _add_variable(
         # no direction, so it is a declaration's consequence, not a model.
         values = wrap_degrees(values)
     converted = pd.Series(values, index=frame.index)
-    masked, reports = apply_qaqc(converted, variable.qaqc, frame, variable=canonical, path=label)
+    masked, reports = apply_qaqc(
+        converted,
+        variable.qaqc,
+        frame,
+        variable=canonical,
+        path=label,
+        periods=[p for p in periods if p.applies_to(instrument_name, canonical)],
+    )
     resolved = resolve_uncertainty(
         masked,
         variable.uncertainty,
@@ -366,6 +388,25 @@ def _add_variable(
         )
 
 
+def _report_untouched_periods(
+    frame: pd.DataFrame, periods: Sequence[ExcludedPeriod], *, name: str
+) -> None:
+    """Say which declared periods cover none of this instrument's readings.
+
+    INFO rather than a warning: the data a period names may simply not be
+    loaded (one drive of a campaign, one instrument of a van), and a
+    campaign-wide file lists every analyzer's calibration whether or not
+    this run reads that analyzer.
+    """
+    for period in periods:
+        if not period_mask(frame, [period]).any():
+            logger.info(
+                "Instrument '%s': excluded period %s covers none of its readings.",
+                name,
+                period.describe(),
+            )
+
+
 def _files_label(files: Sequence[Path]) -> Path:
     """Return something path-like to name in messages about a merged table.
 
@@ -394,6 +435,7 @@ def _stream_attrs(
     support: ResolvedSupport | None = None,
     bounds: CellBounds | None = None,
     time_shift: str | None = None,
+    periods: Sequence[ExcludedPeriod] = (),
 ) -> dict[str, Any]:
     """Build the self-describing attrs every stream carries.
 
@@ -426,6 +468,12 @@ def _stream_attrs(
         )
     if time_shift is not None:
         attrs[TIME_SHIFT_ATTR] = time_shift
+    if periods:
+        # Every period that applied, whether or not it covered a reading:
+        # what the configuration said, beside the per-variable counts of
+        # what it did.
+        attrs[EXCLUDED_PERIODS_ATTR] = describe_periods(periods)
+        attrs[EXCLUDED_PERIODS_FILES_ATTR] = ", ".join(sorted({p.source for p in periods}))
     if campaign:
         attrs["campaign"] = campaign
     if instrument.description:

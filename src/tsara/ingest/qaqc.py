@@ -27,6 +27,14 @@ Rules compose by union: a sample rejected by any rule is masked, and the
 count each rule rejected is reported separately so that "the range rule
 removed 40 % of this record" is visible rather than buried in a total.
 
+Declared periods
+----------------
+A campaign may also declare periods to leave out, calibrations and known-bad
+stretches, in files the manifest names (:mod:`tsara.ingest.periods`). They
+run here before the variable's own rules, as a rule of kind ``period`` with
+a report of its own, so that a ``range`` count is over readings a period had
+not already taken and the mostly-masked warning sees all three kinds.
+
 Why there is no spike rule
 --------------------------
 There was one — a centered rolling median/MAD (Hampel) test for sub-second
@@ -63,12 +71,14 @@ import pandas as pd
 
 from tsara.config.manifest import FlagRule, RangeRule
 from tsara.ingest.base import TsaraIngestError
+from tsara.ingest.periods import PERIOD_RULE_KIND, period_mask
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Sequence
     from pathlib import Path
 
     from tsara.config.manifest import QAQCRule
+    from tsara.ingest.periods import ExcludedPeriod
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +98,8 @@ class MaskReport:
     Attributes
     ----------
     kind : str
-        The rule's ``kind`` discriminator (``range`` or ``flag``).
+        The rule's ``kind`` discriminator (``range`` or ``flag``), or
+        ``period`` for the declared periods of :mod:`tsara.ingest.periods`.
     n_masked : int
         Samples this rule newly rejected — counted against samples that were
         still valid when it ran, so overlapping rules do not double-count.
@@ -113,6 +124,7 @@ def apply_qaqc(
     *,
     variable: str,
     path: Path,
+    periods: Sequence[ExcludedPeriod] = (),
 ) -> tuple[pd.Series, tuple[MaskReport, ...]]:
     """Mask samples rejected by an instrument's QA/QC rules.
 
@@ -129,12 +141,17 @@ def apply_qaqc(
         Canonical variable name, for messages.
     path : pathlib.Path
         File being read, for messages.
+    periods : Sequence of ExcludedPeriod, optional
+        Declared periods applying to this variable, masked first and
+        reported under the kind ``period``; a reading is covered when its
+        cell overlaps a period (:func:`tsara.ingest.periods.period_mask`).
 
     Returns
     -------
     tuple
         ``(masked_values, reports)`` — a new Series with rejected samples set
-        to ``NaN``, and one :class:`MaskReport` per rule in declared order.
+        to ``NaN``, and one :class:`MaskReport` per rule in declared order,
+        the periods' first when there are any.
 
     Raises
     ------
@@ -144,6 +161,18 @@ def apply_qaqc(
     masked = values.astype("float64").copy()
     reports: list[MaskReport] = []
     total = len(masked)
+
+    if periods:
+        # First, so that every rule below counts against readings a period
+        # had not already taken.
+        covered = pd.Series(period_mask(frame, periods), index=masked.index)
+        newly = int((covered & masked.notna()).sum())
+        masked = masked.mask(covered)
+        reports.append(MaskReport(kind=PERIOD_RULE_KIND, n_masked=newly, n_total=total))
+        if newly:
+            logger.debug(
+                "Declared periods masked %d/%d samples of %s in %s", newly, total, variable, path
+            )
 
     for rule in rules:
         # Counted against what was still valid, so two rules rejecting the

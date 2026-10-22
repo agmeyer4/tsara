@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -980,3 +981,46 @@ def test_a_malformed_duration_still_reads_as_a_duration_problem() -> None:
     message is the useful one."""
     with pytest.raises(ValidationError, match="not a valid timedelta"):
         SupportSpec.model_validate({"width": "60 furlongs"})
+
+
+# ---------------------------------------------------------------------------
+# Excluded periods
+# ---------------------------------------------------------------------------
+
+
+def test_exclude_periods_defaults_to_nothing(stationary_manifest_dict: dict[str, Any]) -> None:
+    assert Manifest.model_validate(stationary_manifest_dict).exclude_periods == ()
+
+
+def test_exclude_periods_accepts_one_file_as_a_string(
+    stationary_manifest_dict: dict[str, Any],
+) -> None:
+    spec = copy.deepcopy(stationary_manifest_dict)
+    spec["exclude_periods"] = "calibrations.csv"
+    assert Manifest.model_validate(spec).exclude_periods == (Path("calibrations.csv"),)
+
+
+def test_exclude_periods_accepts_a_list(stationary_manifest_dict: dict[str, Any]) -> None:
+    spec = copy.deepcopy(stationary_manifest_dict)
+    spec["exclude_periods"] = ["calibrations.csv", "/abs/bad_days.csv"]
+    assert Manifest.model_validate(spec).exclude_periods == (
+        Path("calibrations.csv"),
+        Path("/abs/bad_days.csv"),
+    )
+
+
+def test_exclude_periods_singular_spelling_is_accepted(
+    stationary_manifest_dict: dict[str, Any],
+) -> None:
+    spec = copy.deepcopy(stationary_manifest_dict)
+    spec["exclude_period"] = "calibrations.csv"
+    assert Manifest.model_validate(spec).exclude_periods == (Path("calibrations.csv"),)
+
+
+def test_exclude_periods_refuses_a_file_listed_twice(
+    stationary_manifest_dict: dict[str, Any],
+) -> None:
+    spec = copy.deepcopy(stationary_manifest_dict)
+    spec["exclude_periods"] = ["calibrations.csv", "calibrations.csv"]
+    with pytest.raises(ValidationError, match="more than once"):
+        Manifest.model_validate(spec)

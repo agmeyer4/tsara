@@ -17,6 +17,17 @@ description: >
 # directory, so the manifest can live in a repo alongside a data/ folder.
 base_path: ../data/raw
 
+# Periods to leave out of every analysis, declared in a file rather than
+# in code: calibrations, a stretch an instrument is known to have been
+# bad. Each row is start, end, instrument, variable, reason; start and end
+# carry an explicit UTC offset or Z (a bare local time is refused), an empty
+# instrument means every instrument and an empty variable every variable of
+# the one named. A reading whose cell overlaps a period is masked, never
+# deleted, and counted with the other QA/QC rules (METHODS.md §9.4). A
+# relative path resolves against this file's directory; a list of files is
+# accepted too.
+exclude_periods: excluded_periods_example.csv
+
 # --- Platform -----------------------------------------------------------
 # kind=mobile means coordinates come from a GPS instrument's timeseries.
 # The instrument and variable names below must exist in `instruments:`,

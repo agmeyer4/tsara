@@ -16,6 +16,7 @@ import pytest
 
 from tsara.config.manifest import FlagRule, QAQCRule, RangeRule
 from tsara.ingest.base import TsaraIngestError
+from tsara.ingest.periods import ExcludedPeriod
 from tsara.ingest.qaqc import apply_qaqc, masked_fraction
 
 PATH = Path("f.dat")
@@ -221,3 +222,95 @@ def test_empty_record_does_not_warn(caplog: pytest.LogCaptureFixture) -> None:
 def test_masked_fraction() -> None:
     assert masked_fraction(_series([1.0, np.nan, 3.0, np.nan])) == pytest.approx(0.5)
     assert masked_fraction(_series([])) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Declared periods
+# ---------------------------------------------------------------------------
+
+
+def _period(start: str, end: str) -> ExcludedPeriod:
+    return ExcludedPeriod(
+        int(pd.Timestamp(start).value), int(pd.Timestamp(end).value), None, None, "cal", "p.csv"
+    )
+
+
+def test_a_period_masks_and_reports_first() -> None:
+    """Without cells the frame's instants decide: 00:00:01 and 00:00:02 lie in [01, 03)."""
+    values = _series([1.0, 2.0, 3.0, 4.0])
+    masked, reports = apply_qaqc(
+        values,
+        [RangeRule(min=0.0)],
+        _frame(values),
+        variable="ch4",
+        path=PATH,
+        periods=[_period("2026-01-01T00:00:01Z", "2026-01-01T00:00:03Z")],
+    )
+    assert masked.isna().tolist() == [False, True, True, False]
+    assert [r.kind for r in reports] == ["period", "range"]
+    assert reports[0].n_masked == 2
+    assert reports[0].n_total == 4
+
+
+def test_a_rule_does_not_recount_what_a_period_took() -> None:
+    values = _series([1500.0, 1500.0, 2000.0])
+    _, reports = apply_qaqc(
+        values,
+        [RangeRule(min=1700.0)],
+        _frame(values),
+        variable="ch4",
+        path=PATH,
+        periods=[_period("2026-01-01T00:00:00Z", "2026-01-01T00:00:01Z")],
+    )
+    assert (reports[0].kind, reports[0].n_masked) == ("period", 1)
+    assert (reports[1].kind, reports[1].n_masked) == ("range", 1)
+
+
+def test_a_period_taking_most_of_a_record_warns(caplog: pytest.LogCaptureFixture) -> None:
+    values = _series([1.0, 2.0, 3.0, 4.0])
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.qaqc"):
+        apply_qaqc(
+            values,
+            [],
+            _frame(values),
+            variable="ch4",
+            path=PATH,
+            periods=[_period("2026-01-01T00:00:00Z", "2026-01-01T00:00:03Z")],
+        )
+    assert "left only 1 of 4" in caplog.text
+    assert "'period'" in caplog.text
+
+
+def test_no_periods_add_no_report() -> None:
+    values = _series([1.0, 2.0])
+    _, reports = apply_qaqc(values, [], _frame(values), variable="ch4", path=PATH, periods=[])
+    assert reports == ()
+
+
+def test_a_period_covering_nothing_still_reports_zero() -> None:
+    """The report exists so the stream's counts say the rule ran and took nothing."""
+    values = _series([1.0, 2.0])
+    masked, reports = apply_qaqc(
+        values,
+        [],
+        _frame(values),
+        variable="ch4",
+        path=PATH,
+        periods=[_period("2026-01-02T00:00:00Z", "2026-01-02T01:00:00Z")],
+    )
+    assert not masked.isna().any()
+    assert [(r.kind, r.n_masked) for r in reports] == [("period", 0)]
+
+
+def test_a_period_does_not_count_a_reading_that_was_already_missing() -> None:
+    """A hole in the file inside a calibration is not a reading the calibration took."""
+    values = _series([float("nan"), 2.0, 3.0])
+    _, reports = apply_qaqc(
+        values,
+        [],
+        _frame(values),
+        variable="ch4",
+        path=PATH,
+        periods=[_period("2026-01-01T00:00:00Z", "2026-01-01T00:00:02Z")],
+    )
+    assert reports[0].n_masked == 1
