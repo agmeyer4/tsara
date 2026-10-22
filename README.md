@@ -16,7 +16,7 @@ section there before it has a caller.
 
 ## Status
 
-**Alpha — phases 1–6 and 7a of the roadmap are complete.** The package is
+**Alpha — phases 1–6, 7a and 7b of the roadmap are complete.** The package is
 built one phase per review cycle, and only what is listed as done below exists.
 
 | Phase | | |
@@ -31,7 +31,7 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 5 | The baseline state: a baseline and an enhancement at every reading, per stream on its own cells, a window × quantile sweep, three baseline methods, uncertainties for both | ✅ done |
 | 6 | Events: plume-free air described per record, two-threshold events at every sweep point, triggers for sparse instruments, a catalog spelled like the answer key, the parent–child tree | ✅ done |
 | 7a | Line fits: York's errors-in-both-variables line and least squares, through many groups of points at once | ✅ done |
-| 7b | Events grouped across the sweep into candidates, scored against the answer key | planned |
+| 7b | Events grouped across the sweep into candidates, scored against the answer key | ✅ done |
 | 7c | A ratio per candidate, the plateau test, combined uncertainty, the stability cube | planned |
 | 7d | A run function and the `tsara` CLI | planned |
 | 8 | Smoothing + spatiotemporal source complexes | planned, after the first campaign results |
@@ -47,7 +47,8 @@ uncertainties, for each reading at every point of a window × quantile sweep, on
 the stream's own cells, saved beside it; and find events in every
 enhancement at every point of that sweep and of the event thresholds, as a state
 beside the readings and one catalog whose shared columns are spelled like the
-answer key's**. A manufactured campaign holds one atmosphere that
+answer key's, each event naming its candidate: the events of its window that
+share its peak across the rest of the sweep**. A manufactured campaign holds one atmosphere that
 every instrument samples, so any disagreement between two records of one gas
 is the instruments' own noise, rounding and support. It can fit York's line
 and least squares through many groups of points at once, but does not yet fit
@@ -113,12 +114,16 @@ save_state(states, "demo_bundle", baseline=analysis.baseline)
 
 # 6. Find events in every enhancement, at every point of the baseline
 #    sweep and of the entry x exit thresholds; list them as one table whose
-#    shared columns are spelled like the answer key's; checkpoint both.
-from tsara.events import event_catalog, event_states, save_events
+#    shared columns are spelled like the answer key's; gather each window's
+#    events that share a peak across the rest of the sweep into candidates;
+#    checkpoint all of it (the candidate table is written beside the catalog).
+from tsara.events import event_candidates, event_catalog, event_states, save_events
 
 found = event_states(states, analysis.events)
 catalog = event_catalog(found, states)
+candidates = event_candidates(catalog, found)
 print(len(catalog), "events, e.g.", catalog["event_id"].iloc[0])
+print(len(candidates), "candidates, e.g.", candidates["candidate_id"].iloc[0])
 save_events(found, "demo_bundle", catalog=catalog, events=analysis.events)
 ```
 
@@ -132,6 +137,7 @@ gps {'time': 21600, 'nv': 2} ['latitude', 'longitude']
 {'time': 10800, 'baseline_window': 3, 'baseline_quantile': 3, 'nv': 2}
 ['baseline_ch4', 'ch4', 'coverage_window_ch4', 'enhancement_ch4', 'n_readings_window_ch4', 'sigma_rand_baseline_ch4', 'sigma_rand_ch4', 'sigma_rand_enhancement_ch4', 'sigma_sys_baseline_ch4', 'sigma_sys_ch4', 'sigma_sys_enhancement_ch4']
 13081 events, e.g. aeris.c2h6/w120s/q0.01/e3/x1/0
+1053 candidates, e.g. aeris.c2h6/w120s/c0
 ```
 
 Four instruments, four different sampling rates, four `time` axes — that is the
@@ -262,7 +268,7 @@ introduces, so a long run can be inspected in a notebook, resumed after a crash,
 and audited later. A bundle is a plain directory: `bundle.json`, the resolved
 `manifest.yaml`, one netCDF per stream under `streams/`, one baseline state per
 instrument under `baseline/`, and one event state per instrument with the event
-catalog under `events/`; each stage writes beside its products only the section
+catalog and its candidate table under `events/`; each stage writes beside its products only the section
 of the analysis configuration it read.
 
 **A baseline is stated with its window.** There is no single true baseline: a
@@ -296,7 +302,13 @@ as its trigger. Events are rows of one catalog keyed by `event_id`, and each
 links to the event holding its peak at the nearest longer window: containment,
 not origin. On a manufactured campaign, scoring the catalog is a join against
 the answer key. An event is what one sweep point sees, not a verdict: whether
-it is a plume is judged across the sweep, in Phase 7. (`METHODS.md` §6.8)
+it is a plume is judged across the sweep, in Phase 7. The first step of that is
+a description: for each variable and window, the events across quantile, entry
+and exit that share a peak form one *candidate*, recording at how many sweep
+points it was found and how tall it stood. Measured on the answer key, its
+height tells a real candidate from a false one and its agreement across
+quantiles does not, since a noise spike is the same reading at every
+quantile. (`METHODS.md` §6.8)
 
 ## Repository layout
 
@@ -315,7 +327,7 @@ src/tsara/
   baseline/    Windows as cells, the weighted rolling quantile, the baseline
                methods, the baseline state, its bundle
   events/      Records, the clean level and spread, the detector, the event
-               state, the catalog and its tree, their bundle
+               state, the catalog and its tree, the candidates, their bundle
   ratios/      The line fits: York's line and least squares, registered by name
   synthetic/   Ground-truth data generation, profiling, raw-file export
                The six stages import core and config and never each other:
@@ -383,7 +395,13 @@ without being run, and none needs any real data:
   read against the number of points; σ's declared at the wrong scale (which the
   MSWD repairs) and in the wrong ratio between the gases (which moves the
   slope); and errors that persist from reading to reading, which the MSWD
-  cannot see and a declared decorrelation time repairs. Same shape as 05.
+  cannot see and a declared decorrelation time repairs. Then which stretches to
+  fit, on manufactured air through the whole chain: how the sweep's events
+  relate inside one window (entry filters, exit nests, quantile shifts), the
+  rule that groups them into candidates against a reference written from its
+  definition, the tree that links a blip's candidates across windows, height
+  against agreement as evidence on the answer key, and what the ratio stage
+  receives. Same shape as 05.
 
 Three companions run on the real campaign archive instead, and are therefore
 committed **without** outputs:
@@ -417,13 +435,15 @@ committed **without** outputs:
 ruff check . && ruff format --check .
 mypy --strict src tests
 pytest --cov=tsara --cov-branch     # suite; the 100% line+branch floor fails the run
-TSARA_ARCHIVE=/path/to/Data TSARA_NOTEBOOKS=1 pytest tests/test_notebooks.py
+TSARA_ARCHIVE=/path/to/Data TSARA_NOTEBOOKS=1 pytest tests/test_notebooks.py \
+    tests/events/test_candidates_real_drive.py
                             # opt-in: executes notebooks 04b, 05b and 06b (against
                             # the archive) and 04, 05, 06 and 07, and requires every
-                            # check and ledger row to hold
-TSARA_SLOW=1 pytest tests/events/test_methods_tables.py
+                            # check and ledger row to hold; re-measures METHODS
+                            # §6.8's real drive
+TSARA_SLOW=1 pytest tests/events/test_methods_tables.py tests/events/test_candidate_tables.py
                             # opt-in: re-runs METHODS §6.8's generated-data tables
-                            # (about 12 minutes)
+                            # (about 14 minutes)
 ```
 
 The first three are what continuous integration runs on every pull request

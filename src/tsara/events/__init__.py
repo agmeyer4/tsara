@@ -35,6 +35,11 @@ Shape of the subpackage
     The events as rows: one long table keyed by ``event_id``, spelled like
     the generator's answer key where the meaning is the same, with the
     parent-child tree along the baseline's window.
+``candidates``
+    The events of one window that share a peak across quantile, entry and
+    exit, gathered into candidates, seeded by height; each event's candidate,
+    and one row per candidate with how many sweep points found it and how
+    tall it stood. A description, as the tree is, not a verdict.
 ``bundle``
     Saving and reloading the event states, the catalog and the events
     configuration, in a directory beside the baseline states.
@@ -43,6 +48,7 @@ Shape of the subpackage
 from __future__ import annotations
 
 from tsara.events.bundle import EventStates, load_events, save_events
+from tsara.events.candidates import CANDIDATE_COLUMNS, event_candidates, link_candidates
 from tsara.events.catalog import CATALOG_COLUMNS, event_catalog, link_parents
 from tsara.events.clean import (
     MAD_TO_SIGMA,
@@ -71,6 +77,7 @@ from tsara.events.state import (
 )
 
 __all__ = [
+    "CANDIDATE_COLUMNS",
     "CATALOG_COLUMNS",
     "CHANCE_ASSUMPTION_ATTR",
     "CleanAir",
@@ -91,6 +98,7 @@ __all__ = [
     "clean_air",
     "describe_clean_air",
     "describe_events",
+    "event_candidates",
     "event_catalog",
     "event_state",
     "event_states",
@@ -99,6 +107,7 @@ __all__ = [
     "find_records",
     "get_clean_level_estimator",
     "half_sample_mode",
+    "link_candidates",
     "link_parents",
     "load_events",
     "quantization_step",

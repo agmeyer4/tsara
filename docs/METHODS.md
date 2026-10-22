@@ -39,6 +39,7 @@ attributes and this document, because each was once used for several:
 | **clean level**, **clean spread** | the events stage's description of plume-free air at one sweep point over one record: the most common enhancement, and 1.4826 × the median distance below it (§6.8). The events stage's thresholds are multiples of the clean spread | a measurement uncertainty or the instrument's noise: the clean spread includes the background's wobble at the window's scale. Not `scale` or `offset`, which are a unit conversion's |
 | **plume** | an enhancement in the air from an emission: what the generator injects and the events stage (`tsara.events`) looks for. No stage yet reports one: whether events are a plume is judged across the sweep (Phase 7) | an interval the stage reported, which is an *event* |
 | **event** | an interval the events stage reported on one variable at one sweep point (`event_id`): what one sweep point sees, not a verdict: one plume, part of one, several merged, or a chance crossing, which is why the expected chance rate is recorded (§6.8) | a plume, or a source. The stage that reports events is `events` (`tsara.events`), named for its product as `baseline` is; its product is the **event state** and the **event catalog**, saved under `events/` in a bundle. It was named `plumes` until the Phase-6 walkthrough; no bundle under the old name exists outside that branch, so none is migrated |
+| **candidate** | the events of one variable at one baseline window that share a peak across quantile, entry and exit (`candidate_id`, `tsara.events.candidates`, §6.8): what the sweep sees of one thing at one scale, with how many sweep points found it and how tall it stood | a plume, or a verdict that one is there: whether a candidate is believed is judged by the ratio stage (Phase 7c) |
 | **record** | a stretch of one stream over which the events stage computes its clean level and spread: split where consecutive readings are more than a set gap apart or, where the platform's speed is named, where it stays parked that long, and cut into pieces no longer than a set length (§6.8) | a file, a drive or a campaign |
 | **rolling** | the operation: a statistic over a window centred on each reading, moved along the record (`rolling_quantile`; Phase 7's fits over windows) | a stage or a product. The stage that computes baselines and enhancements is `baseline` (`tsara.baseline`); its product is the **baseline state**, saved under `baseline/` in a bundle. Both were named `rolling` until Phase 5 merged; no bundle under the old name exists outside that branch, so none is migrated |
 | **borrowed** | the share of a joined value resting on air outside its own cell (`borrowed_<name>`, `tsara_borrowed_share`, §11.2.4) | an uncertainty; it is a magnitude, and no threshold on it separates a blend from jitter |
@@ -1200,8 +1201,9 @@ Baselines were scoped on 2026-09-24 and built in Phase 5 (2026-09-28):
 (`tsara.baseline`). The numbers quoted were measured on the permitted 2024
 archive or on generated data under the rules stated beside them. Events were
 scoped on 2026-09-29 and built in Phase 6 (2026-09-30, `tsara.events`; §6.8),
-and the Phase-6 walkthrough added measured findings to §6.1 and §6.8;
-smoothing and clustering remain stubs (§6.9).
+and the Phase-6 walkthrough added measured findings to §6.1 and §6.8; Phase 7b
+gathered each window's events into candidates (2026-10-20, §6.8); smoothing
+and clustering remain stubs (§6.9).
 
 ### 6.1 What a baseline is for **[decided 2026-09-24 — Phase 5]**
 
@@ -1894,8 +1896,9 @@ names the limit of detection, §9.2.1) and renamed `events` in the Phase-6
 walkthrough, for its product: an event per sweep point, of which a plume is a
 judgement made later. An event seen by several variables is the union or
 intersection of their intervals, formed by a separate small operation, not
-by the detector; it is built in Phase 7, where fitting a pair over its
-events is its first caller (decided 2026-09-30).
+by the detector; first placed in Phase 7 (decided 2026-09-30), it is deferred
+past mid-November 2026, since a ratio's events come from one named variable
+(decided 2026-10-19).
 
 **What the thresholds are multiples of: the clean spread.** At window *w*,
 the enhancement of plume-free air is the instrument's noise, plus the
@@ -2287,7 +2290,7 @@ interval holds its peak, skipping a window at which nothing holds it (a blip
 found at 2 min and not at 10 min links to the landfill found at 60 min). The
 link carries both durations. It records containment, not origin: scale is not
 source (§6.1). No area mathematics (§7). The rule for a parent's ratio is
-Phase 7's, and both candidate readings of §6.1 need exactly this tree and the
+Phase 7's, and both readings §6.1 proposes need exactly this tree and the
 per-reading event index below. An interval holds a peak when start ≤ peak
 < end, as a cell holds its midpoint; an event with no peak (a triggered
 variable none of whose readings has an enhancement) has no parent, and nor
@@ -2296,8 +2299,11 @@ does an event at the longest window. On the example chain, 95 % of events at
 
 **What the sweep says about an event** (measured in the Phase-6 walkthrough,
 2026-09-30, for Phase 7). An event is what one sweep point sees; whether it is
-a plume is judged across the sweep in Phase 7, and this stage adds nothing for
-that judgement (no agreement column, no orphan flag). What Phase 7 will work
+a plume is judged across the sweep in Phase 7. Phase 6 added nothing for that
+judgement (no agreement column, no orphan flag); Phase 7b gathers each
+window's events into candidates and records how each stood across the sweep
+("Candidates", below), a description, and leaves the judgement to the ratio
+stage. What Phase 7 will work
 with was measured on the answer key, a false event being one none of whose
 readings carries a true plume of 1σ. False events are of four kinds, each told
 apart by a different signal:
@@ -2354,6 +2360,195 @@ evidence against an event only where the longer window could have seen it,
 its *z* at the child's peak reaching entry; and lineage cannot judge the
 longest window at all, which needs the view down (wander, above).
 
+**Candidates** **[decided and built 2026-10-20 — Phase 7b]**
+(`tsara.events.candidates`; notebook 07 §5–§8 walks through it on generated
+air). At one baseline window the other three sweep
+dimensions mostly see the same things again, and the ratio stage (7c) fits a
+line over each thing's events, so it needs to know which events those are.
+Measured first (rule: notebook 06's landfill recipe at 6 h, seed 5; the
+example sweep, the baseline at 2, 10 and 60 min × *q* 0.01, 0.05 and 0.10 and
+events at entry 3, 4 and 5 × exit 1, 1.5 and 2, the events configuration's
+defaults otherwise), three facts:
+
+- **A higher entry keeps the same intervals, those whose peak z reaches it.**
+  The detector bridges dips before it tests entry ("The detector", above), so
+  at a fixed window, quantile and exit, the events at entry 4 are the events
+  at entry 3 whose peak reaches 4, interval for interval: 54 of 54
+  comparisons (3 windows × 3 quantiles × 3 exits × entries 4 and 5).
+  Recurrence across entry and height are one signal, not two.
+- **Exit nests.** Every event at a higher exit lies inside one event at the
+  next lower exit (2,851 events checked, none outside). Lowering the exit
+  merges neighbours into one event, whose peak is the tallest of theirs.
+- **Quantile moves an event a little.** At entry 3, of every pair of an event
+  and another quantile at the same exit, the share in which an event there
+  holds the event's peak and the event holds its peak in turn is 86, 72 and
+  89 % at 2, 10 and 60 min.
+
+**The rule.** For one variable at one window, order its events at every
+quantile, entry and exit by peak z, the tallest first (a tie to the earlier
+peak, then to the earlier sweep point, quantile before entry before exit).
+The tallest event not yet taken is a seed. At every other sweep point of the
+window, the event whose interval holds the seed's peak (start ≤ peak < end;
+where cells overlapping by a little let two events of one point touch it,
+the later-starting one, as a triggered variable's reading goes to the later
+event) joins the seed's **candidate** when no candidate has taken it and the
+seed's interval holds its peak in turn. Repeat until every event is taken.
+So a candidate has at most one event per sweep point, every event belongs to
+exactly one candidate, the seed is its tallest, and entry copies always land
+together. Where a candidate has no event, the point is **absorbed** when an
+event there holds the seed's peak but belongs to another candidate or peaks
+outside the seed (a small blip merged into a taller neighbour at a low exit),
+and **absent** when nothing there holds it. The rule has no settings.
+
+A candidate lives in one window because a long window's event over a broad
+plume peaks on the blip riding on it, so that across windows the blip and its
+landfill would share a peak (§6.1: scale is not source). Across windows the
+tree links candidates: a candidate's parent is the candidate of its seed's
+parent. Not used: connected groups of events that hold each other's peaks,
+since holding each other's peaks is not transitive and such a group can chain
+two blips into one candidate with two events at one sweep point, which the
+seed rule cannot do by construction (argued, not measured).
+
+Each catalog row names its candidate (`candidate_id`, spelled from the
+instrument, the variable, the window and the candidate's number in time
+order, `van.ch4/w600s/c17`), a triggered variable's rows taking their
+trigger's. The candidate table holds one row per candidate: its seed event,
+peak time, enhancement and position at the peak; the span of its events from
+the earliest start to the latest end; at how many of the window's sweep
+points it was found, absorbed and absent (`n_found`, `n_absorbed`,
+`n_absent`, summing to the sweep points); its highest and lowest peak z; and
+its parent. It is a description, as the tree is, not a verdict: no column
+says whether a candidate is real.
+
+Scored against the answer key (rule: the record and sweep above, the recipe
+also at 3 h, seed 5, and with no plumes at 6 h, seeds 1 and 2; twelve hours
+of weak plumes, 6 an hour, Gaussian σ 20 s, peaks lognormal with median 5 ppb
+and σ_log 0.8, seed 1, in flat air and in a 30 ppb/day random walk; a true
+plume is held when an event of some candidate holds its true peak time):
+
+| record | candidates at 2 / 10 / 60 min | true plumes held | held by events of more than one candidate |
+|---|---|---|---|
+| landfill, 6 h (73 plumes) | 101 / 107 / 89 | 73 / 73 / 73 | 4 / 5 / 3 |
+| landfill, 3 h (35) | 121 / 69 / 36 | 35 / 35 / 35 | 1 / 2 / 2 |
+| weak plumes, wander (72) | 338 / 171 / 95 | 72 / 67 / 50 | 2 / 3 / 5 |
+
+**What tells a real candidate from a false one.** A candidate is false when no
+reading inside its seed's interval carries a true plume of 1σ (the rule of
+"What the sweep says about an event"), and a fragment when one does but the
+seed's interval holds no true plume's peak (a broad plume's flank, a sub-peak
+seen only at a high exit). False candidates per hour, at 2 / 10 / 60 min,
+"peak z" being a candidate's highest:
+
+| record | no gate | peak z ≥ 4 | peak z ≥ 5 | lowest peak z ≥ 4 | found at all 3 quantiles |
+|---|---|---|---|---|---|
+| landfill, 6 h | 2.67 / 8.83 / 6.67 | 0 / 0.50 / 0.17 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0.83 / 3.33 |
+| landfill, 3 h | 16.67 / 11.33 / 3.00 | 1.00 / 0.67 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0.33 / 1.67 |
+| weak plumes, flat air | 3.42 / 6.83 / 6.00 | 0.17 / 0.33 / 0.17 | 0 / 0 / 0 | 0 / 0 / 0 | 1.33 / 1.92 / 1.92 |
+| weak plumes, wander | 21.00 / 8.50 / 4.42 | 2.67 / 0.92 / 0.75 | 0.25 / 0.08 / 0.17 | 0.33 / 0.08 / 0.50 | 3.50 / 2.00 / 0.17 |
+| no plumes, seed 1 | 13.83 / 3.50 / 6.83 | 1.17 / 0 / 0.33 | 0 / 0 / 0 | 0 / 0 / 0 | 1.50 / 0.83 / 4.33 |
+| no plumes, seed 2 | 18.50 / 10.17 / 8.17 | 0.50 / 0.50 / 0.17 | 0 / 0 / 0 | 0.17 / 0.17 / 0 | 3.67 / 4.00 / 5.00 |
+
+And the price, the percent of the weak records' true plumes held by an event
+of a gated candidate, by the plume's sampled peak in noise σ (12 plumes at
+3–5σ, 26 at 5–10σ, 22 at 10–30σ; in flat air every gate holds all of them
+from 5σ up):
+
+| gate | 3–5σ, flat air | 3–5σ, wander | 5–10σ, wander | 10–30σ, wander |
+|---|---|---|---|---|
+| none | 100 / 100 / 100 | 100 / 100 / 92 | 100 / 100 / 62 | 100 / 100 / 73 |
+| peak z ≥ 4 | 83 / 100 / 100 | 100 / 67 / 50 | 100 / 96 / 38 | 100 / 100 / 68 |
+| peak z ≥ 5 | 25 / 83 / 83 | 75 / 17 / 42 | 100 / 69 / 27 | 100 / 100 / 59 |
+| lowest peak z ≥ 4 | 58 / 83 / 83 | 75 / 33 / 42 | 100 / 77 / 15 | 100 / 100 / 59 |
+
+On the landfill records every true plume is 30σ or taller, and under peak z ≥
+5 an event of a gated candidate holds every one at every window but one: at
+2 min on the 3 h record (34 of 35), a landfill's top is held only by a low
+event, since a short window sees a broad plume's flanks and not its top
+(§6.1). Fragments pass peak z ≥ 5 at most 1.67 an hour, there.
+
+So height is the evidence. A gate on it takes false candidates from 2.67–21.00
+an hour to 0–0.25 (peak z ≥ 5) on every record, those whose clean description
+is misplaced or whose air wanders included. Being found at every quantile is
+not evidence: on air with no plumes it still passes 0.83–5.00 an hour,
+because a noise spike is the same reading at every quantile, as it is at
+every window (above). Height costs weak plumes where the air wanders, at long
+windows, the price the recall table above already accepted; the short windows
+keep them. Fragments are real air from one source, for the ratio's fit to
+judge. **Decided (2026-10-20):** the gate belongs to the stage that judges,
+as a setting of the ratio stage (7c) with 5 as its default, and the candidate
+table keeps every candidate. Its z is in clean spreads, and its chance rate
+scales with the reading rate (the closed form above): a 10 Hz analyzer makes
+ten times as many chance events as a 1 s one at the same z.
+
+Two consequences for the ratio stage. Entry copies are identical intervals,
+so fitting each would count one interval several times and narrow the spread
+across the sweep by construction: a candidate's distinct (quantile, exit)
+events are fitted once. And a blip found at all three windows is three
+candidates linked by the tree; which window's ratio belongs to which plume
+is §6.1's open question.
+
+**On a real drive** (measured 2026-10-20; rule: TSARA ingestion of the
+Wyoming van's afternoon file of 2026-02-03,
+`WYO_aerisultra460/Eng/Ultra100460_260203_195917Eng.parquet`, 14,656 readings
+at 1 s over 4.06 h in one record, methane `CH4_ppm` converted to ppb and
+ethane `C2H6_ppb` from one spectrum, no QA/QC; the example sweep;
+`tests/events/test_candidates_real_drive.py` re-measures every number, opt-in
+with `TSARA_ARCHIVE` set):
+
+| | candidates at 2 / 10 / 60 min | peak z ≥ 5 | median peak z | clean spread at *q* 0.05 (median over readings) |
+|---|---|---|---|---|
+| methane | 138 / 90 / 49 | 92 / 53 / 31 | 8.9 / 7.5 / 7.2 | 2.51 / 3.44 / 4.77 ppb |
+| ethane | 160 / 105 / 73 | 58 / 43 / 28 | 4.0 / 4.0 / 4.3 | 0.25 / 0.28 / 0.39 ppb |
+
+At *q* 0.05, entry 5 and exit 1 the closed form expects under 0.01 chance
+events at each window, where 69, 37 and 20 methane events and 37, 29 and 18
+ethane events are found, so a candidate passing the gate stands far above
+what chance makes here; whether it is one source is the ratio's question.
+Ethane's candidates crowd just above entry, where the gate removes most of
+them, and methane's stand taller. The drive does not argue against a gate of
+5. The day's morning file was left out: it ends, from 18:35 to 19:11 UTC, in
+a calibration sequence (methane on plateaus of 11 to 53 ppm, then zero air,
+ethane near 1 ppb) that nothing in the file marks, its `Inlet Number` being 1
+throughout, and a `range` rule that masked it would mask real plumes too; how
+a campaign's calibrations are masked is an open question for its first
+results (CLAUDE.md).
+
+**The tree, read from a seed** (measured 2026-10-21, in the Phase-7b
+walkthrough; rule: at 2 and 10 min, the windows with a longer one, every
+event of a candidate whose own parent is set, at its own quantile, entry and
+exit; it agrees when its parent event's candidate is the candidate's parent;
+a candidate is counted when at least one of its events has a parent; the
+records of the tables above and the real drive's chain, re-measured by
+`tests/events/test_candidate_tables.py` and
+`tests/events/test_candidates_real_drive.py`). A candidate's parent is read
+from its seed alone, and its other events do not always lie inside the same
+longer-window candidate:
+
+| record | events agreeing at 2 / 10 min | candidates whose events all agree | most parent candidates of one candidate |
+|---|---|---|---|
+| landfill, 6 h | 96.5 / 97.6 % | 96.0 / 94.5 % | 2 / 2 |
+| landfill, 3 h | 95.1 / 96.5 % | 81.0 / 77.1 % | 3 / 2 |
+| weak plumes, wander | 86.9 / 77.7 % | 60.8 / 62.0 % | 7 / 2 |
+| real drive, methane | 87.7 / 83.1 % | 71.1 / 73.7 % | 5 / 3 |
+| real drive, ethane | 87.2 / 83.2 % | 65.5 / 58.6 % | 4 / 4 |
+
+The seed's parent holds for most of a candidate's events. Where plumes are
+dense or the air wanders, a longer window cuts the air differently at
+different quantiles and exits, and in a fifth to two-fifths of candidates
+some event's parent lies in another candidate. Nothing reads
+`parent_candidate_id` yet; the rule that will (which window's ratio belongs
+to which plume, §6.1) starts from this table, not from the column alone.
+
+Checked by hand-checkable cases (two blips merged at a low exit, a peak
+moving with the quantile, absorbed against absent, overlapping events at one
+point, ties); by a reference written one event at a time from this
+paragraph, agreeing on 40 random catalogs, counts included; on three hours
+of generated methane, by the entry and exit facts and the rule's promises;
+by `tests/events/test_candidate_tables.py`, which re-runs every number of
+this part through the package (opt-in, `TSARA_SLOW=1`, about two minutes);
+and by mutation, 19 of 19 on the rule and 9 of 9 on the catalog column and
+the saved table.
+
 **What the stage saves** (names settled in the build):
 
 - **The event state** (built 2026-09-30, `tsara.events.state`), one Dataset
@@ -2405,7 +2600,8 @@ longest window at all, which needs the view down (wander, above).
   time (the peak reading's cell midpoint) with the enhancement and *z*
   there, its reading count and covered share, its record's clean level and
   spread, the sweep point's count of events and expected chance count, its
-  parent and the parent's duration, and its position at the peak when the
+  parent and the parent's duration, its candidate (`candidate_id`, added in
+  Phase 7b; "Candidates", above), and its position at the peak when the
   stream carries positions (a site's everywhere; the GPS join onto a mobile
   gas stream's events is Phase 8's). An `event_id` is spelled from the
   instrument, the variable, the sweep point and the event's number in time
@@ -2423,25 +2619,56 @@ longest window at all, which needs the view down (wander, above).
   10 and 60 min, as the scoping measured. Later stages add tables keyed by
   `event_id` rather than editing this one; that key is the room §7 keeps for
   integration.
+- **The candidate table** (built 2026-10-20, `tsara.events.candidates`), one
+  row per candidate keyed by `candidate_id`, as "Candidates" above describes,
+  its shared columns spelled and typed as the answer key's (`instrument`,
+  `species`, `field`, `start_time`, `peak_time`, `end_time`, `latitude`,
+  `longitude`). It is rebuilt from the catalog by the rule itself, so a
+  catalog and its table cannot disagree.
 
-**Persistence** (built 2026-09-30, `tsara.events.bundle`). `save_events`
-writes one netCDF file per instrument, `events/<instrument>.nc`, the catalog
-as `events/catalog.parquet`, and the events section of the analysis
+**Persistence** (built 2026-09-30, `tsara.events.bundle`; the candidate
+table added 2026-10-20). `save_events` writes one netCDF file per
+instrument, `events/<instrument>.nc`, the catalog as
+`events/catalog.parquet` with the table of its candidates as
+`events/candidates.parquet`, and the events section of the analysis
 configuration as `events/analysis.yaml`, beside the baseline states and for
 the reasons they are saved as they are (§6.6): only the section the stage
 read, `bundle.json` untouched, the bundle format version unchanged since the
 directory is additive, and files a narrower run did not write removed, a
-catalog included, so that the directory is the record of what ran.
-`load_events` brings every state back exactly, refuses a file another stage
-wrote, and refuses a table without the catalog's columns. The catalog
-declares a type for every column, so it survives Parquet exactly: left to
-inference, a column holding only missing text is pandas' `object` and comes
-back from Parquet as its string type, which is how the first round trip was
-found to differ. Measured (rule: the drive-scale state above, one variable,
-200,000 readings, 81 sweep points, 36,620 events in its catalog): the state
-file is 120.8 MB uncompressed, 16.9 MB at zlib level 1 and 16.1 MB at level
-4, reloading identical, since its event index is mostly −1; the catalog is
-0.89 MB; writing at level 4 takes 2.0 s and loading 0.9 s.
+catalog and its candidates included, so that the directory is the record of
+what ran. The candidate table is built from the catalog and the states as
+they are written, before anything is written, so a catalog naming an
+instrument whose state is not being saved is refused and leaves the
+directory as it was. So is a catalog that is not the whole one
+`event_catalog` made from those states (added 2026-10-21, in the Phase-7b
+walkthrough, where a catalog kept to its taller events was found saved
+beside a table numbering other candidates under the same ids): a candidate is
+numbered and counted over every event of its window, so the rows at each
+sweep point must number the events the state counts there, and every row
+must name the candidate linking gives. Both are checked, because a filter can
+pass either alone: keeping one entry threshold leaves every id as linking
+gives it, while each candidate's found and absent counts would describe the
+part. Filter after loading. `load_events` brings every state back exactly, refuses
+a file another stage wrote, and refuses a table without the catalog's
+columns or the candidates'. A catalog written before candidates existed
+(Phase 6), with every column but `candidate_id` and no table beside it, is
+not refused: its candidates are linked on load, by the same rule, and the
+load says so. The catalog and the table declare a type for every column,
+so they survive Parquet exactly: left to inference, a column holding only
+missing text is pandas' `object` and comes back from Parquet as its string
+type, which is how the first round trip was found to differ. Measured (rule:
+the drive-scale state above, one variable, 200,000 readings, 81 sweep
+points, 36,620 events in its catalog; how those readings were generated was
+not recorded, so these numbers cannot be re-run): the state file is
+120.8 MB uncompressed, 16.9 MB at zlib level 1 and 16.1 MB at level 4,
+reloading identical, since its event index is mostly −1; the catalog was
+0.89 MB before `candidate_id`; writing at level 4 takes 2.0 s and loading
+0.9 s. Measured for the candidates under a stated rule (notebook 06's
+landfill recipe at 24 h, seed 5: 86,400 readings in four records, the
+example sweep): 15,256 events in 1,236 candidates; linking them takes
+0.07 s and building the table 0.10 s, beside 42.9 s for the baseline state;
+`candidate_id` grows the catalog from 0.38 to 0.40 MB, and the table is
+0.10 MB.
 
 ### 6.9 Smoothing, clustering **[stubs]**
 

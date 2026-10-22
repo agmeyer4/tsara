@@ -43,14 +43,15 @@ have:
 ```bash
 TSARA_NOTEBOOKS=1 pytest tests/test_notebooks.py    # executes notebooks 04, 05, 06 and 07
                                                     # (about a minute each)
-TSARA_ARCHIVE=/path/to/Data pytest tests/test_notebooks.py
+TSARA_ARCHIVE=/path/to/Data pytest tests/test_notebooks.py tests/events/test_candidates_real_drive.py
                                                     # executes notebooks 04b, 05b and 06b
                                                     # against the campaign archive and
-                                                    # requires every ledger row to reproduce
-TSARA_SLOW=1 pytest tests/events/test_methods_tables.py
+                                                    # requires every ledger row to reproduce;
+                                                    # re-measures §6.8's real drive
+TSARA_SLOW=1 pytest tests/events/test_methods_tables.py tests/events/test_candidate_tables.py
                                                     # re-runs METHODS §6.8's generated-data
                                                     # tables through the package (about
-                                                    # 12 minutes)
+                                                    # 14 minutes)
 ```
 
 Run the notebook gates before a pull request that touches alignment, the

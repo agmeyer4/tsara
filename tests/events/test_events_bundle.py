@@ -1,8 +1,9 @@
-"""Tests for saving and reloading event states and the catalog (tsara.events.bundle)."""
+"""Tests for saving and reloading event states, catalog and candidates (tsara.events.bundle)."""
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,7 @@ from tsara.baseline import baseline_state
 from tsara.config.analysis import BaselineConfig, EventsConfig
 from tsara.core.bundle import (
     BUNDLE_ANALYSIS_CONFIG,
+    BUNDLE_CANDIDATES_FILE,
     BUNDLE_CATALOG_FILE,
     BUNDLE_EVENTS_DIR,
     TsaraBundleError,
@@ -22,7 +24,14 @@ from tsara.core.bundle import (
 )
 from tsara.core.support import CellBounds, declared_bounds_name
 from tsara.core.timebase import SECOND_NS as SECOND
-from tsara.events import event_catalog, event_states, load_events, save_events
+from tsara.events import (
+    event_candidates,
+    event_catalog,
+    event_states,
+    link_candidates,
+    load_events,
+    save_events,
+)
 
 EVENTS = EventsConfig(enter_multiple=(3.0, 4.0), exit_multiple=(1.0,), triggers={"iwas": "van.ch4"})
 
@@ -98,7 +107,7 @@ def assert_identical(a: xr.Dataset, b: xr.Dataset) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_round_trip_is_exact_for_states_catalog_and_config(
+def test_the_round_trip_is_exact_for_states_catalog_candidates_and_config(
     tmp_path: Path, run: tuple[dict[str, xr.Dataset], dict[str, xr.Dataset], pd.DataFrame]
 ) -> None:
     _, states, catalog = run
@@ -106,6 +115,7 @@ def test_the_round_trip_is_exact_for_states_catalog_and_config(
     assert target == tmp_path / "bundle" / BUNDLE_EVENTS_DIR
     assert sorted(p.name for p in target.iterdir()) == [
         BUNDLE_ANALYSIS_CONFIG,
+        BUNDLE_CANDIDATES_FILE,
         BUNDLE_CATALOG_FILE,
         "iwas.nc",
         "van.nc",
@@ -117,6 +127,9 @@ def test_the_round_trip_is_exact_for_states_catalog_and_config(
         assert "time_bnds" in back.states[name].coords
     assert back.catalog is not None
     pd.testing.assert_frame_equal(back.catalog, catalog)
+    assert back.candidates is not None
+    pd.testing.assert_frame_equal(back.candidates, event_candidates(catalog, states))
+    assert len(back.candidates) > 0
     assert back.events == EVENTS
     # The events directory itself is a valid path too.
     assert sorted(load_events(target).states) == ["iwas", "van"]
@@ -184,10 +197,11 @@ def test_saving_without_a_catalog_or_config_writes_neither_and_says_so(
     with caplog.at_level(logging.INFO, logger="tsara.events.bundle"):
         target = save_events(states, tmp_path)
     assert not (target / BUNDLE_CATALOG_FILE).exists()
+    assert not (target / BUNDLE_CANDIDATES_FILE).exists()
     assert not (target / BUNDLE_ANALYSIS_CONFIG).exists()
     assert "without their events configuration" in caplog.text
     back = load_events(tmp_path)
-    assert back.catalog is None and back.events is None
+    assert back.catalog is None and back.candidates is None and back.events is None
 
 
 def test_what_an_earlier_run_left_is_removed_and_nothing_else(
@@ -195,8 +209,9 @@ def test_what_an_earlier_run_left_is_removed_and_nothing_else(
     run: tuple[dict[str, xr.Dataset], dict[str, xr.Dataset], pd.DataFrame],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A wider run with a catalog, then a narrower one without: the state file and
-    the catalog it no longer backs are removed, a note left there is kept."""
+    """A wider run with a catalog, then a narrower one without: the state file, the
+    catalog and the candidates it no longer backs are removed, a note left there is
+    kept."""
     _, states, catalog = run
     save_events(states, tmp_path, catalog=catalog)
     (tmp_path / BUNDLE_EVENTS_DIR / "notes.txt").write_text("kept")
@@ -205,7 +220,7 @@ def test_what_an_earlier_run_left_is_removed_and_nothing_else(
     names = sorted(p.name for p in (tmp_path / BUNDLE_EVENTS_DIR).iterdir())
     assert names == ["notes.txt", "van.nc"]
     assert "Removing stale event state file" in caplog.text
-    assert "Removing a catalog left by an earlier run" in caplog.text
+    assert "Removing a catalog or its candidates left by an earlier run" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +270,125 @@ def test_a_table_that_is_not_the_catalog_is_refused_at_save_and_at_load(
     catalog[["event_id"]].to_parquet(target / BUNDLE_CATALOG_FILE)
     with pytest.raises(TsaraBundleError, match="columns are not the catalog's"):
         load_events(tmp_path)
+
+
+def test_a_table_that_is_not_the_candidates_is_refused_at_load(
+    tmp_path: Path, run: tuple[dict[str, xr.Dataset], dict[str, xr.Dataset], pd.DataFrame]
+) -> None:
+    _, states, catalog = run
+    target = save_events(states, tmp_path, catalog=catalog)
+    catalog[["event_id"]].to_parquet(target / BUNDLE_CANDIDATES_FILE)
+    with pytest.raises(TsaraBundleError, match="columns are not the candidates'"):
+        load_events(tmp_path)
+
+
+def test_a_catalog_of_other_states_is_refused_before_anything_is_written(
+    tmp_path: Path, run: tuple[dict[str, xr.Dataset], dict[str, xr.Dataset], pd.DataFrame]
+) -> None:
+    """The van's catalog saved beside the canister's state alone: its candidates
+    cannot be counted against a sweep that is not there, and nothing is written."""
+    _, states, catalog = run
+    with pytest.raises(TsaraBundleError, match="does not belong to these event states"):
+        save_events({"iwas": states["iwas"]}, tmp_path / "bundle", catalog=catalog)
+    assert not (tmp_path / "bundle").exists()
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        # Taller events only: rows gone, and the rest renumbered by linking.
+        (lambda c: c[c["peak_z"] >= c["peak_z"].median()], "not every event"),
+        # One entry threshold: every id is still what linking gives, but each
+        # candidate's found and absent counts would describe the part.
+        (lambda c: c[c["enter_multiple"] == 3.0], "not every event"),
+        # One window: ids and the table survive, the bundle stops being the run.
+        (lambda c: c[c["baseline_window"] == 600.0], "not every event"),
+        # One event fewer.
+        (lambda c: c.iloc[1:], "not every event"),
+        # Every row kept, two candidates' ids swapped.
+        (
+            lambda c: c.assign(
+                candidate_id=c["candidate_id"].replace(
+                    {"van.ch4/w120s/c0": "van.ch4/w120s/c1", "van.ch4/w120s/c1": "van.ch4/w120s/c0"}
+                )
+            ),
+            "candidate ids are not its events'",
+        ),
+    ],
+    ids=["by height", "one entry", "one window", "one event fewer", "ids edited"],
+)
+def test_a_filtered_or_edited_catalog_is_refused_before_anything_is_written(
+    tmp_path: Path,
+    run: tuple[dict[str, xr.Dataset], dict[str, xr.Dataset], pd.DataFrame],
+    change: Callable[[pd.DataFrame], pd.DataFrame],
+    message: str,
+) -> None:
+    """A candidate is numbered and counted over the whole catalog, so a table
+    built from part of one would name other candidates, or count them wrongly,
+    under the ids the catalog carries: refused, with the remedy, and nothing
+    written. The whole catalog saves (the round trip above)."""
+    _, states, catalog = run
+    with pytest.raises(TsaraBundleError, match=message) as refused:
+        save_events(states, tmp_path / "bundle", catalog=change(catalog))
+    assert "filter it after load_events" in str(refused.value)
+    assert not (tmp_path / "bundle").exists()
+
+
+def test_rows_of_a_variable_the_states_do_not_hold_are_refused(
+    tmp_path: Path, run: tuple[dict[str, xr.Dataset], dict[str, xr.Dataset], pd.DataFrame]
+) -> None:
+    """Two catalogs concatenated: the second variable's rows, linked as linking
+    gives, name sweep points no state counts."""
+    _, states, catalog = run
+    ghost = link_candidates(catalog[catalog["species"] == "ch4"].assign(species="ghost"))
+    with pytest.raises(TsaraBundleError, match="not every event"):
+        save_events(states, tmp_path / "bundle", catalog=pd.concat([catalog, ghost]))
+
+
+def test_a_sweep_over_every_coordinate_saves_whole_and_one_exit_is_refused(tmp_path: Path) -> None:
+    """Two quantiles, two exits, two variables on one instrument and two
+    instruments naming a variable alike (CLAUDE.md, 2026-09-15): the sweep
+    points are told apart by every one of their coordinates, so the whole
+    catalog saves and one exit's part of it does not."""
+    t = np.arange(3600.0)
+    plumes = sum(40 * np.exp(-0.5 * ((t - c) / 15) ** 2) for c in (600.0, 1800.0, 3000.0))
+    noise = np.random.default_rng(2).normal(0, 0.7, (3, t.size))
+    streams = {
+        "pico": make_stream(t, {"ch4": 1900 + noise[0] + plumes}),
+        "van": make_stream(
+            t, {"ch4": 1900 + noise[1] + plumes, "c2h6": 2 + noise[2] + plumes / 20}
+        ),
+    }
+    config = BaselineConfig(windows=("2min",), quantiles=(0.05, 0.10))
+    baselines = {
+        name: baseline_state(stream, instrument=name, baseline=config)
+        for name, stream in streams.items()
+    }
+    states = event_states(baselines, EventsConfig(enter_multiple=(3.0,), exit_multiple=(1.0, 2.0)))
+    catalog = event_catalog(states, baselines)
+    save_events(states, tmp_path / "whole", catalog=catalog)
+    with pytest.raises(TsaraBundleError, match="not every event"):
+        save_events(states, tmp_path / "part", catalog=catalog[catalog["exit_multiple"] == 1.0])
+
+
+def test_a_phase_6_bundle_is_given_its_candidates_on_load(
+    tmp_path: Path,
+    run: tuple[dict[str, xr.Dataset], dict[str, xr.Dataset], pd.DataFrame],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Written before events named their candidates: a catalog without
+    candidate_id and no candidate table. Loaded, it is the catalog built today,
+    column for column and type for type, with the table beside it."""
+    _, states, catalog = run
+    target = save_events(states, tmp_path, catalog=catalog)
+    catalog.drop(columns="candidate_id").to_parquet(target / BUNDLE_CATALOG_FILE, index=False)
+    (target / BUNDLE_CANDIDATES_FILE).unlink()
+    with caplog.at_level(logging.INFO, logger="tsara.events.bundle"):
+        back = load_events(tmp_path)
+    assert "written before events named their candidates" in caplog.text
+    assert back.catalog is not None and back.candidates is not None
+    pd.testing.assert_frame_equal(back.catalog, catalog)
+    pd.testing.assert_frame_equal(back.candidates, event_candidates(catalog, states))
 
 
 @pytest.mark.parametrize(

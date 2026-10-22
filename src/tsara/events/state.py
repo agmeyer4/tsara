@@ -653,15 +653,15 @@ def _containing(
 ) -> npt.NDArray[np.int32]:
     """Return, per midpoint, the number of the interval holding it, -1 for none.
 
-    Events at one sweep point are in time order, so the candidate is the last
-    interval starting at or before the midpoint. Two intervals overlap only
+    Events at one sweep point are in time order, so the one that may hold a
+    midpoint is the last interval starting at or before it. Two intervals overlap only
     where cells at least as wide as the gap between two events touch both,
     and there a midpoint goes to the later one.
     """
-    candidate = np.searchsorted(starts, midpoints, side="right") - 1
-    safe = np.clip(candidate, 0, None)
+    latest = np.searchsorted(starts, midpoints, side="right") - 1
+    safe = np.clip(latest, 0, None)
     inside = (
-        (candidate >= 0) & (midpoints < stops[safe])
+        (latest >= 0) & (midpoints < stops[safe])
         if starts.size
         else np.zeros(midpoints.size, dtype=bool)
     )
