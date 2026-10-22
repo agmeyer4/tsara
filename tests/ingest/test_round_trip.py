@@ -972,3 +972,40 @@ def test_exporting_for_an_instrument_that_does_not_exist_is_refused(
 ) -> None:
     with pytest.raises(TsaraSyntheticError, match="Cannot export"):
         export_raw(generate(_cell_config()), tmp_path / "a", split={"nope": (1, 2)})
+
+
+# ---------------------------------------------------------------------------
+# Declared periods through the whole path
+# ---------------------------------------------------------------------------
+
+
+def test_a_declared_period_masks_exactly_the_readings_inside_it(tmp_path: Path) -> None:
+    """The generator knows every cell; a period must take those cells and no other.
+
+    The exported archive declares the cells it wrote, so the readings to be
+    masked are the ones whose declared cell overlaps the period, read off
+    the generated stream's own bounds rather than re-derived here.
+    """
+    generated = generate(_config())
+    manifest_path = export_raw(generated, tmp_path / "export")
+    periods = tmp_path / "periods.csv"
+    periods.write_text(
+        "start,end,instrument,variable,reason\n"
+        "2026-01-01T00:05:00Z,2026-01-01T00:07:00Z,,,calibration\n",
+        encoding="utf-8",
+    )
+    manifest = load_manifest(manifest_path).model_copy(update={"exclude_periods": (periods,)})
+    ingested = ingest_campaign(manifest)
+
+    start = pd.Timestamp("2026-01-01T00:05:00").value
+    end = pd.Timestamp("2026-01-01T00:07:00").value
+    for name, variable in (("analyzer", "ch4"), ("analyzer", "c2h6"), ("met", "wind_dir")):
+        bounds = (
+            generated.streams[name][TIME_BOUNDS_VAR].values.astype("datetime64[ns]").astype("int64")
+        )
+        inside = (bounds[:, 0] < end) & (bounds[:, 1] > start)
+        assert inside.any() and not inside.all()
+        got = ingested[name][variable].values
+        assert np.isnan(got).tolist() == inside.tolist(), (name, variable)
+        truth = generated.streams[name][variable].values
+        np.testing.assert_allclose(got[~inside], truth[~inside], rtol=RTOL)

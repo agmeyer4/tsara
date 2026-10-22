@@ -506,16 +506,26 @@ def _validate(model_cls: type[_ModelT], data: dict[str, Any], path: Path) -> _Mo
 
 
 def _resolve_base_path(manifest: Manifest, anchor: Path) -> Manifest:
-    """Resolve a relative ``base_path`` against the manifest file's directory.
+    """Resolve the manifest's relative paths against the manifest file's directory.
 
-    Rationale: a manifest checked into a project repo should be able to say
-    ``base_path: ../data`` and work for every collaborator regardless of
-    their working directory when they launch TSARA. Absolute paths pass
-    through untouched. Configs are frozen, so this returns a *new* Manifest
-    rather than mutating.
+    ``base_path`` and every ``exclude_periods`` file. Rationale: a manifest
+    checked into a project repo should be able to say ``base_path: ../data``
+    and ``exclude_periods: calibrations.csv`` and work for every collaborator
+    regardless of their working directory when they launch TSARA. Absolute
+    paths pass through untouched. Configs are frozen, so this returns a *new*
+    Manifest rather than mutating.
     """
-    if manifest.base_path.is_absolute():
+    updates: dict[str, object] = {}
+    if not manifest.base_path.is_absolute():
+        resolved = (anchor / manifest.base_path).resolve()
+        logger.debug("Resolved relative base_path %s -> %s", manifest.base_path, resolved)
+        updates["base_path"] = resolved
+    periods = tuple(
+        path if path.is_absolute() else (anchor / path).resolve()
+        for path in manifest.exclude_periods
+    )
+    if periods != manifest.exclude_periods:
+        updates["exclude_periods"] = periods
+    if not updates:
         return manifest
-    resolved = (anchor / manifest.base_path).resolve()
-    logger.debug("Resolved relative base_path %s -> %s", manifest.base_path, resolved)
-    return manifest.model_copy(update={"base_path": resolved})
+    return manifest.model_copy(update=updates)

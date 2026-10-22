@@ -3754,6 +3754,33 @@ that drives the point's inverse-variance weight to zero; for a systematic
 component, combined as a weighted mean of sigmas (§3.3) rather than in
 inverse variance, a single such value dominates the entire bin.
 
+**Declared periods** (built 2026-10-22). A campaign knows stretches of its
+data that no file marks: the 2026 vans' calibrations (four events, three of
+them on every analyzer at once, found by scanning the archive for methane
+plateaus above 4 ppm; CLAUDE.md), an inlet off, a logger writing nonsense.
+`Manifest.exclude_periods` names one or more CSV files of `start, end,
+instrument, variable, reason`, resolved against the manifest's directory as
+`base_path` is. A timestamp must carry an explicit offset or `Z`, because a
+file written in local time would mask the wrong hours of every day and
+nothing downstream could tell; an empty `instrument` means every
+instrument, an empty `variable` every variable of the one named, a variable
+without its instrument is refused (§1.6), and so is a column the format
+does not know, since a misspelt scope column would widen a period rather
+than narrow it. A reading is masked when its cell overlaps a period,
+`[start, end)` against `[cell start, cell stop)`, so a cell straddling a
+period's edge goes whole and one ending exactly at its start is kept; a
+stream without cells is masked by its timestamps. The periods run before
+the variable's own rules and report as a rule of kind `period` beside
+`range` and `flag`, in the same `qaqc_masked` count, so a range rule counts
+only readings a period had not taken and the mostly-masked warning sees all
+three. The stream records the periods that applied to the instrument in
+`tsara_excluded_periods` and their files in `tsara_excluded_periods_files`,
+and a period that covered none of an instrument's readings is logged, since
+the data it names may simply not be loaded. Deliberately not built: finding
+calibrations by their shape. A plateau of methane above 4 ppm is also a van
+parked in a plume, §9.5's argument again; the archive's own ETL knows when a
+valve switched, and a declared list is what it can write.
+
 ### 9.5 Why there is no spike rule
 
 There was one, and it was removed on 2026-08-26 (owner decision, Phase-3

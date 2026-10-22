@@ -32,6 +32,10 @@ Shape of the subpackage
 ``units``, ``qaqc``, ``uncertainty``
     Format-independent per-variable processing: convert to canonical units,
     mask bad samples, resolve the two-component uncertainty budget.
+``periods``
+    The periods a manifest declares to leave out (calibrations, known-bad
+    stretches), read from the files it names and checked against it; the
+    masking runs with the other QA/QC rules.
 ``timeparse``
     Shared across readers: where time lives in a file, and how it reaches
     UTC exactly once at nanosecond resolution.
@@ -69,6 +73,7 @@ from tsara.ingest.icartt import (
     parse_icartt_header,
     select_latest_revisions,
 )
+from tsara.ingest.periods import ExcludedPeriod, read_excluded_periods
 from tsara.ingest.qaqc import MaskReport, apply_qaqc
 from tsara.ingest.registry import available_readers, get_reader, read_file, register_reader
 from tsara.ingest.streams import build_stream
@@ -76,6 +81,7 @@ from tsara.ingest.uncertainty import ResolvedUncertainty, resolve_uncertainty
 from tsara.ingest.units import canonical_units, convert_spread, convert_values
 
 __all__ = [
+    "ExcludedPeriod",
     "FileMatch",
     "IcarttFilename",
     "IcarttHeader",
@@ -98,6 +104,7 @@ __all__ = [
     "load_streams",
     "parse_icartt_filename",
     "parse_icartt_header",
+    "read_excluded_periods",
     "read_file",
     "register_reader",
     "resolve_uncertainty",

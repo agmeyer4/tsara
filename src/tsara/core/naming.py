@@ -42,6 +42,8 @@ __all__ = [
     "COVERAGE_WINDOW_PREFIX",
     "DISPERSION_SUFFIX",
     "ENHANCEMENT_PREFIX",
+    "EXCLUDED_PERIODS_ATTR",
+    "EXCLUDED_PERIODS_FILES_ATTR",
     "INSTRUMENT_ATTR",
     "JOIN_RECORD_ATTRS",
     "LATITUDE_COORD",
@@ -190,6 +192,18 @@ SUPPORT_METHOD_PROVENANCE_ATTR = "tsara_support_method_provenance"
 #: upstream and again here, which no amount of internal consistency would
 #: reveal because both corrections are individually right.
 TIME_SHIFT_ATTR = "tsara_time_shift"
+
+#: Stream attributes recording the periods a manifest declared to leave out
+#: (``Manifest.exclude_periods``: calibrations, known-bad stretches).
+#:
+#: The first lists the periods that applied to the instrument, each as its
+#: span, the variable it was limited to if any, and its reason; the second
+#: names the files they came from. Both are written only when the manifest
+#: declares such a file, so an absent attribute means none was declared.
+#: The masked counts themselves travel per variable in ``qaqc_masked``,
+#: under the kind ``period``, beside the other QA/QC rules.
+EXCLUDED_PERIODS_ATTR = "tsara_excluded_periods"
+EXCLUDED_PERIODS_FILES_ATTR = "tsara_excluded_periods_files"
 
 #: Reserved columns by which a reader hands per-row cell boundaries to the
 #: rest of ingestion.

@@ -1,0 +1,4 @@
+start,end,instrument,variable,reason
+2025-04-14T18:32:00Z,2025-04-14T19:20:00Z,,,calibration: standards on every analyzer; the van's own log says when
+2025-04-16T22:10:00-06:00,2025-04-16T22:40:00-06:00,picarro,,inlet line off while the pump was swapped
+2025-04-18T15:00:00Z,2025-04-18T15:12:00Z,voc_spec,benzene,detector saturated on a solvent plume

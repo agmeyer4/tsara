@@ -591,3 +591,32 @@ def test_a_trigger_naming_what_cannot_take_or_give_events_is_refused(
     analysis["events"] = {"triggers": triggers}
     with pytest.raises(TsaraConfigError, match=message):
         _combined(write_yaml, manifest, analysis)
+
+
+# ---------------------------------------------------------------------------
+# Excluded-periods files are resolved like base_path
+# ---------------------------------------------------------------------------
+
+
+def test_relative_exclude_periods_resolved_against_manifest_dir(
+    write_yaml: WriteYaml, stationary_manifest_dict: dict[str, Any], tmp_path: Path
+) -> None:
+    spec = copy.deepcopy(stationary_manifest_dict)
+    spec["exclude_periods"] = ["periods/calibrations.csv", "/abs/bad_days.csv"]
+    manifest = load_manifest(write_yaml(spec, "manifest.yaml"))
+    assert manifest.exclude_periods == (
+        (tmp_path / "periods" / "calibrations.csv").resolve(),
+        Path("/abs/bad_days.csv"),
+    )
+
+
+def test_combined_config_resolves_exclude_periods_too(
+    write_yaml: WriteYaml,
+    stationary_manifest_dict: dict[str, Any],
+    analysis_dict: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    spec = copy.deepcopy(stationary_manifest_dict)
+    spec["exclude_periods"] = "calibrations.csv"
+    config = load_config(write_yaml({"manifest": spec, "analysis": analysis_dict}, "c.yaml"))
+    assert config.manifest.exclude_periods == ((tmp_path / "calibrations.csv").resolve(),)

@@ -1188,6 +1188,40 @@ class Manifest(_StrictModel):
     instruments: dict[str, InstrumentConfig] = Field(
         min_length=1, description="Mapping of instrument name -> config."
     )
+    exclude_periods: tuple[Path, ...] = Field(
+        default=(),
+        # One file may be written as a plain string, as path_template may.
+        validation_alias=AliasChoices("exclude_periods", "exclude_period"),
+        description=(
+            "Files listing periods to leave out of every analysis: calibrations, "
+            "a stretch an instrument is known to have been bad. Each is a CSV "
+            "with the columns start, end, instrument, variable, reason; start "
+            "and end are ISO 8601 timestamps carrying an explicit offset or Z "
+            "(a bare local time is refused); an empty instrument means every "
+            "instrument and an empty variable every variable of the one named. "
+            "Relative paths resolve against the manifest file's own directory, "
+            "like base_path. A reading whose cell overlaps a period is masked, "
+            "never deleted, and counted like any QA/QC rule (METHODS.md §9.4)."
+        ),
+    )
+
+    @field_validator("exclude_periods", mode="before")
+    @classmethod
+    def _one_periods_file_as_a_string(cls, value: object) -> object:
+        """Accept one file as a plain string, as ``path_template`` does."""
+        if isinstance(value, str | Path):
+            return (value,)
+        return value
+
+    @field_validator("exclude_periods")
+    @classmethod
+    def _periods_files_are_distinct(cls, value: tuple[Path, ...]) -> tuple[Path, ...]:
+        """Refuse a file listed twice: it would mask the same periods twice and count them once."""
+        if len(set(value)) != len(value):
+            raise ValueError(
+                f"exclude_periods lists a file more than once: {[str(p) for p in value]}."
+            )
+        return value
 
     @model_validator(mode="after")
     def _validate_mobile_gps_references(self) -> Manifest:
