@@ -16,7 +16,7 @@ section there before it has a caller.
 
 ## Status
 
-**Alpha — phases 1–6 and 7a of the roadmap are complete.** The package is
+**Alpha — phases 1–6, 7a and 7b of the roadmap are complete.** The package is
 built one phase per review cycle, and only what is listed as done below exists.
 
 | Phase | | |
@@ -31,7 +31,7 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 5 | The baseline state: a baseline and an enhancement at every reading, per stream on its own cells, a window × quantile sweep, three baseline methods, uncertainties for both | ✅ done |
 | 6 | Events: plume-free air described per record, two-threshold events at every sweep point, triggers for sparse instruments, a catalog spelled like the answer key, the parent–child tree | ✅ done |
 | 7a | Line fits: York's errors-in-both-variables line and least squares, through many groups of points at once | ✅ done |
-| 7b | Events grouped across the sweep into candidates, scored against the answer key | in progress |
+| 7b | Events grouped across the sweep into candidates, scored against the answer key | ✅ done |
 | 7c | A ratio per candidate, the plateau test, combined uncertainty, the stability cube | planned |
 | 7d | A run function and the `tsara` CLI | planned |
 | 8 | Smoothing + spatiotemporal source complexes | planned, after the first campaign results |
