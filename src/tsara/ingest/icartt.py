@@ -453,35 +453,54 @@ def parse_icartt_header(lines: list[str], path: Path) -> IcarttHeader:
     #
     # Two files in the target archive do exactly this (NLHEAD=36, NV=35, so
     # 47 lines are required), and both are structurally identical to 41
-    # sibling files that correctly declare 70. Clamping up to 12 + NV does
-    # not fully repair them -- their true header is longer still -- but it
-    # removes eleven junk lines, and the residue is caught downstream by the
-    # modal-width name check and the majority-vote time branch. Raising the
-    # floor is a no-op for every other file in the archive.
+    # sibling files that correctly declare 70. Where such a file's
+    # column-header line can be found -- the first line past the definitions
+    # that starts with the independent variable's name and has NV + 1 fields
+    # -- the header ends there, so no header text reaches the data; both
+    # archive files are repaired this way. Otherwise the floor is raised to
+    # 12 + NV, a lower bound, and the residue is left to the modal-width name
+    # check and the majority-vote time branch. Neither path touches any other
+    # file in the archive.
+    independent = _variable_from_line(lines[8], scale=1.0, missing=float("nan"))
     minimum_header = 12 + n_vars
     nlhead_understated = n_header < minimum_header
-    if n_header < minimum_header:
-        logger.warning(
-            "%s declares NLHEAD=%d, but NV=%d needs at least %d header lines "
-            "(12 fixed + %d variable definitions), so NLHEAD is provably wrong. "
-            "Reading data from line %d instead; expect residual header text in "
-            "the first rows.",
-            path,
-            n_header,
-            n_vars,
-            minimum_header,
-            n_vars,
-            minimum_header + 1,
-        )
-        n_header = minimum_header
-        if len(lines) < n_header:
-            raise TsaraIngestError(
-                f"'{path}' needs at least a {n_header}-line header for its "
-                f"{n_vars} declared variables but has only {len(lines)} lines."
+    if nlhead_understated:
+        found = _find_column_header(lines, independent.name, n_vars)
+        if found is not None:
+            logger.warning(
+                "%s declares NLHEAD=%d, but NV=%d needs at least %d header lines "
+                "(12 fixed + %d variable definitions), so NLHEAD is provably wrong. "
+                "Its column-header line is line %d, so the header is read as %d lines.",
+                path,
+                n_header,
+                n_vars,
+                minimum_header,
+                n_vars,
+                found,
+                found,
             )
+            n_header = found
+        else:
+            logger.warning(
+                "%s declares NLHEAD=%d, but NV=%d needs at least %d header lines "
+                "(12 fixed + %d variable definitions), so NLHEAD is provably wrong. "
+                "Reading data from line %d instead; expect residual header text in "
+                "the first rows.",
+                path,
+                n_header,
+                n_vars,
+                minimum_header,
+                n_vars,
+                minimum_header + 1,
+            )
+            n_header = minimum_header
+            if len(lines) < n_header:
+                raise TsaraIngestError(
+                    f"'{path}' needs at least a {n_header}-line header for its "
+                    f"{n_vars} declared variables but has only {len(lines)} lines."
+                )
 
-    independent = _variable_from_line(lines[8], scale=1.0, missing=float("nan"))
-    variables = tuple(
+    definitions = tuple(
         _variable_from_line(lines[12 + i], scale=scales[i], missing=missings[i])
         for i in range(n_vars)
     )
@@ -494,13 +513,13 @@ def parse_icartt_header(lines: list[str], path: Path) -> IcarttHeader:
     normal, index = _read_comment_block(lines, index)
     if index != n_header:
         # Deliberately debug, not warning. Measured against the target
-        # archive this mismatch fires on 44 of 1055 files and is right about
-        # none of them: 43 are PTR-MS files carrying one extra, blank-named
-        # definition line, which offsets the walk without making the file
-        # unreadable. A warning that is a false positive every time it fires
-        # trains readers to ignore warnings. The genuinely diagnosable case
-        # -- NLHEAD too small to be possible -- is checked above, where the
-        # arithmetic proves it rather than merely suggesting it.
+        # archive this mismatch fires on 44 of 1122 files, and on 43 of them
+        # the cause is one extra, blank-named definition line in the PTR-MS
+        # files, which offsets the walk. NLHEAD is right on all 43, so nothing
+        # below depends on where the walk ends: the column names come from
+        # line NLHEAD and the metadata from the whole header. The genuinely
+        # diagnosable case -- NLHEAD too small to be possible -- is checked
+        # above, where the arithmetic proves it rather than merely suggesting it.
         logger.debug(
             "%s: comment blocks end at line %d but NLHEAD is %d; trusting NLHEAD.",
             path,
@@ -508,11 +527,19 @@ def parse_icartt_header(lines: list[str], path: Path) -> IcarttHeader:
             n_header,
         )
 
-    # The data column header is the LAST normal comment line — a genuine
-    # quirk of the format. Falling back to the line immediately before the
-    # data keeps malformed-comment-count files readable.
-    header_line = normal[-1] if normal else lines[n_header - 1]
-    column_names = tuple(_split(header_line))
+    # The data column header is the last header line, the line immediately
+    # before the data: the format puts it last in the normal comment block,
+    # and that block ends at NLHEAD. It is read from NLHEAD rather than from
+    # where the walk above ends, because the walk is located by 12 + NV
+    # arithmetic that a malformed definition block offsets. That once handed
+    # the 43 PTR-MS files a one-name "header" (a comment line); the reader
+    # then fell back to the definitions, whose extra blank-named line shifted
+    # every name onto the next column (methanol read as propyne, benzene as
+    # methylfuran), and nothing failed. Measured over the 1122-file archive:
+    # line NLHEAD names the data's columns on every file whose NLHEAD is
+    # possible.
+    column_names = tuple(_split(lines[n_header - 1]))
+    variables = _bind_variables(definitions, column_names, path)
 
     # Scraped from the WHOLE header rather than from the two comment blocks
     # above, because the blocks are located by arithmetic (12 + NV) that a
@@ -680,6 +707,93 @@ def _variable_from_line(line: str, scale: float, missing: float) -> IcarttVariab
     )
 
 
+def _find_column_header(lines: list[str], independent: str, n_vars: int) -> int | None:
+    """Find the column-header line of a file whose NLHEAD is provably too small.
+
+    The column-header line names the independent variable first and then one
+    column per dependent variable, so it is the first line past the variable
+    definitions that starts with the independent variable's name and has
+    ``NV + 1`` fields. A comment line starting with that name and holding
+    exactly ``NV + 1`` comma-separated fields would be taken for it; none
+    does in the 2024 archive. Data rows start with a time value, not a name.
+    The search stops :data:`_RESIDUAL_HEADER_LIMIT` lines past the
+    definitions.
+
+    Parameters
+    ----------
+    lines : list of str
+        All lines of the file.
+    independent : str
+        The independent variable's name, from header line 9.
+    n_vars : int
+        NV, the number of dependent variables.
+
+    Returns
+    -------
+    int or None
+        The line's 1-based number, which is the header's true length, or
+        ``None`` when no line within the limit qualifies.
+    """
+    start = 12 + n_vars
+    for index in range(start, min(len(lines), start + _RESIDUAL_HEADER_LIMIT)):
+        fields = _split(lines[index])
+        if fields[0] == independent and len(fields) == n_vars + 1:
+            return index + 1
+    return None
+
+
+def _bind_variables(
+    definitions: tuple[IcarttVariable, ...], column_names: tuple[str, ...], path: Path
+) -> tuple[IcarttVariable, ...]:
+    """Name the dependent variables as the column-header line does.
+
+    The header states each dependent variable's name twice: in its
+    definition line and in the column-header line. Where the two agree
+    (every file in the 2024 archive but the 43 PTR-MS files) this returns the
+    definitions unchanged. Where the column-header line names exactly NV
+    dependent columns and the definitions name them differently, the
+    column-header line wins: it is the data's own statement of its columns,
+    and in the archive the disagreement is a malformed definition block (an
+    extra, blank-named definition line that shifts every definition onto the
+    next column). The scale factors, missing-value sentinels and per-variable
+    LOD flags are bound by position, as the format lays them out: the i-th
+    VSCAL and VMISS value belong to the i-th dependent column. Units and
+    descriptions come from the definition of the same name where one exists,
+    else from the definition at the same position.
+
+    Where the column-header line does not name NV columns, the definitions
+    are returned unchanged and the width of the data decides later
+    (:func:`_choose_column_names`).
+    """
+    # Mangled with the independent variable included, exactly as the data's
+    # column names are, so a variable here always names a column there.
+    names = _mangle_duplicates(list(column_names))[1:]
+    if len(names) != len(definitions) or names == [v.name for v in definitions]:
+        return definitions
+    by_name = {variable.name: variable for variable in definitions}
+    first = next(i for i, (a, b) in enumerate(zip(names, definitions)) if a != b.name)
+    logger.info(
+        "%s: the variable definitions name the columns differently from the "
+        "column-header line (column %d: definition %r, header %r); naming them "
+        "as the column-header line does, with scale factors and sentinels bound "
+        "by position.",
+        path,
+        first + 1,
+        definitions[first].name,
+        names[first],
+    )
+    return tuple(
+        IcarttVariable(
+            name=name,
+            units=by_name.get(name, positional).units,
+            description=by_name.get(name, positional).description,
+            scale=positional.scale,
+            missing=positional.missing,
+        )
+        for name, positional in zip(names, definitions, strict=True)
+    )
+
+
 def _read_comment_block(lines: list[str], index: int) -> tuple[tuple[str, ...], int]:
     """Read a count-prefixed comment block, returning it and the next index."""
     try:
@@ -801,9 +915,11 @@ def _choose_column_names(body: list[str], header: IcarttHeader, path: Path) -> l
     """Pick the column-name list that matches the data's actual width.
 
     An FFI-1001 file states its column names twice, and the two statements
-    disagree often enough to need a rule. The **declared** names are the last
-    normal comment line, which the format designates as the data column
-    header; the **definitions** are the NV variable-definition lines.
+    disagree often enough to need a rule. The **declared** names are the
+    column-header line, the last line of the header, which the format
+    designates as the data column header (line NLHEAD, or the line
+    :func:`parse_icartt_header` found where NLHEAD is impossible); the
+    **definitions** are the NV variable-definition lines.
 
     The old rule was "use the declared names, unless their count disagrees
     with NV, in which case NV is authoritative". Measured against the 1055
@@ -817,13 +933,18 @@ def _choose_column_names(body: list[str], header: IcarttHeader, path: Path) -> l
     :class:`~tsara.ingest.base.TsaraIngestError`.
 
     So the arbiter becomes the data rather than NV: prefer whichever list is
-    as wide as the rows actually are. Measurement is what makes this safe to
-    change. On the 1011 files where *both* lists match the row width their
-    contents are byte-identical, so preferring the declared names on a tie
-    changes nothing anywhere in the archive while keeping the format's own
-    designated statement of the column names authoritative. 43 files match on
-    definitions alone, 1 on the declared header alone, and **none** match on
-    neither.
+    as wide as the rows actually are, and on a tie the declared names.
+    Measured over the 1122 ICARTT files of the 2024 archive (2026-10-23): the
+    declared names match the row width on all 1122, the definitions on 1121.
+    Where both match, the lists are identical on 1078 files and differ on 43,
+    the Montana PTR-MS files, whose definition block carries an extra,
+    blank-named line that moves every definition one column on; there the
+    declared names are the right ones, checked value by value against each
+    file's own header (62.8 million values), which is why a tie goes to them.
+    One file matches on the declared names alone. Until that date the
+    declared names were read from where the comment-block walk ended, a
+    comment line on those 43 files, so they matched on the definitions alone
+    and every PTR-MS species was read under the next one's name.
 
     When neither list matches, the width disagreement is about the *rows*,
     not the names — the archive's uniformly-too-wide files, where every row
@@ -937,11 +1058,12 @@ def _apply_scales_and_missing(
     samples. Leaving the latter in place was measured against the 2024
     archive as the more dangerous option by a wide margin: 10.03% of every
     numeric value there is an LOD sentinel, and for the PTR-MS VOCs — the
-    species this package exists to fingerprint sources with — it reaches
-    67-70% of samples, far enough past half that the *median* of a real
-    benzene record is the sentinel rather than a concentration. A rolling
-    low-quantile baseline would therefore have called ``-88888 ppbv`` the
-    background (``docs/METHODS.md`` §9.2.1).
+    species this package exists to fingerprint sources with — it reaches 74%
+    of one species' samples across all 43 files and 66% of benzene's in one
+    record, far enough past half that the *median* of that benzene record is
+    the sentinel rather than a concentration. A rolling low-quantile baseline
+    would therefore have called ``-88888 ppbv`` the background
+    (``docs/METHODS.md`` §9.2.1).
 
     Masking is not the same as discarding the information: the per-variable
     counts returned here, and the flag values themselves, travel on into the
@@ -1107,14 +1229,17 @@ def _time_like_column(
         # Genuinely mixed, so count both interpretations and take the
         # majority. The rule this replaces asked only whether *any* value
         # was numeric, which let a single stray token decide the file: two
-        # PTR-MS VOC files in the target archive hold 10,201 and 7,817
+        # PTR-MS VOC files in the target archive held 10,201 and 7,817
         # datetime strings alongside exactly 2 numeric tokens leaked in from
         # a mis-declared header block, and the old test sent both down the
         # seconds-past-midnight branch. Every datetime row then failed to
         # convert and was dropped, reducing 10,235 rows to 2 -- 35 VOC
         # species, the archive's most valuable data, cut to nothing behind a
-        # warning. Only mixed columns pay for the second parse; the two
-        # unambiguous cases above short-circuit before reaching here.
+        # warning. (Since 2026-10-23 those two files' true header is found,
+        # so no header text reaches their data; the vote stays for any file
+        # whose header cannot be found.) Only mixed columns pay for the
+        # second parse; the two unambiguous cases above short-circuit before
+        # reaching here.
         parsed = pd.to_datetime(raw, errors="coerce", format="mixed")
         n_datetime = int(np.asarray(pd.notna(parsed)).sum())
         # Ties favour seconds, keeping the spec-compliant reading as the

@@ -674,7 +674,9 @@ def test_nlhead_smaller_than_its_variable_definitions_is_corrected(
     Two archive files declare NLHEAD=36 with NV=35, but 12 fixed lines plus 35
     definition lines cannot fit in 36. Trusting the number admits header text
     into the data block, which is where the stray numerics of the mixed-time
-    test above come from.
+    test above come from. Their column-header line can be found -- the first
+    line past the definitions that names the independent variable and has
+    NV + 1 fields -- so the header is read to there.
     """
     lines = _build().splitlines()
     lines[0] = "13, 1001"  # 12 + NV = 14, so 13 is provably impossible
@@ -683,8 +685,25 @@ def test_nlhead_smaller_than_its_variable_definitions_is_corrected(
     with caplog.at_level(logging.WARNING, logger="tsara.ingest.icartt"):
         header = parse_icartt_header(path.read_text().splitlines(), path)
 
-    assert header.n_header_lines == 14
+    assert header.n_header_lines == 19  # the line 'Time_Start, CH4_ppb, CO2_ppm'
     assert "provably wrong" in caplog.text
+    assert "Its column-header line is line 19" in caplog.text
+
+
+def test_impossible_nlhead_without_a_column_header_line_is_raised_to_its_floor(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """With no line to find, 12 + NV is the best bound there is, and it says so."""
+    lines = _build().splitlines()
+    lines[0] = "13, 1001"
+    lines[18] = "Time, CH4_ppb, CO2_ppm"  # the header line no longer names the time column
+    path = _write(tmp_path, "\n".join(lines) + "\n")
+
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.icartt"):
+        header = parse_icartt_header(path.read_text().splitlines(), path)
+
+    assert header.n_header_lines == 14
+    assert "expect residual header text" in caplog.text
 
 
 def test_impossible_nlhead_longer_than_the_file_is_an_error(tmp_path: Path) -> None:
@@ -695,6 +714,141 @@ def test_impossible_nlhead_longer_than_the_file_is_an_error(tmp_path: Path) -> N
 
     with pytest.raises(TsaraIngestError, match="needs at least a 14-line header"):
         parse_icartt_header(path.read_text().splitlines(), path)
+
+
+# ---------------------------------------------------------------------------
+# The PTR-MS definition block: one extra, blank-named line
+# ---------------------------------------------------------------------------
+#
+# All 43 Montana PTR-ToF-MS files (SLC-SOS, 2024) declare NV = 35 and then
+# write 36 definition lines: a blank-named ", ppbv" first, then all 35 names.
+# Read by NV, the definitions are [blank, Formaldehyde, ..., D4_siloxane], one
+# place off the data. Until 2026-10-23 the reader found its column header by
+# walking the comment blocks from 12 + NV, which the extra line offsets, got
+# a one-name "header", fell back to the definitions, and so read every PTR
+# species under the next one's name (methanol as propyne, benzene as
+# methylfuran) while D5-siloxane's sentinels went unmasked. Nothing failed.
+
+
+def _with_blank_definition(text: str) -> str:
+    """Insert the PTR-MS files' extra, blank-named definition line before the first."""
+    lines = text.splitlines()
+    lines.insert(12, ", ppbv")
+    lines[0] = f"{int(lines[0].split(',')[0]) + 1}, 1001"
+    return "\n".join(lines) + "\n"
+
+
+def test_an_extra_blank_definition_line_does_not_shift_the_names(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every column keeps its own name, and the last column its own sentinel."""
+    text = _with_blank_definition(
+        _build(rows=["42480.0, 1900.0, -9999.0", "42481.0, 1901.0, 415.5"])
+    )
+    path = _write(tmp_path, text)
+
+    with caplog.at_level(logging.INFO, logger="tsara.ingest.icartt"):
+        frame = read_icartt(path, LOADER).frame
+
+    assert list(frame.columns) == ["Time_Start", "CH4_ppb", "CO2_ppm"]
+    assert frame["CH4_ppb"].tolist() == [1900.0, 1901.0]
+    # The last column has no definition line inside NV's count; its sentinel
+    # is masked because VMISS binds to the columns by position.
+    assert np.isnan(frame["CO2_ppm"].iloc[0])
+    assert frame["CO2_ppm"].iloc[1] == 415.5
+    assert "using the variable definitions" not in caplog.text
+    assert "differently from the column-header line (column 1" in caplog.text
+
+
+def test_scale_factors_and_units_follow_the_columns_not_the_shifted_definitions(
+    tmp_path: Path,
+) -> None:
+    """VSCAL and VMISS are positional by the format; units come from the same-named definition."""
+    text = _with_blank_definition(
+        _build(
+            scales=[1000.0, 1.0],
+            missings=[-9999.0, -7777.0],
+            rows=["42480.0, 1.9, 415.0", "42481.0, -9999.0, -7777.0"],
+        )
+    )
+    path = _write(tmp_path, text)
+
+    header = parse_icartt_header(path.read_text().splitlines(), path)
+    frame = read_icartt(path, LOADER).frame
+
+    assert [(v.name, v.units, v.scale, v.missing) for v in header.variables] == [
+        ("CH4_ppb", "ppb", 1000.0, -9999.0),  # its own definition, the first VSCAL and VMISS
+        ("CO2_ppm", "ppb", 1.0, -7777.0),  # outside NV's count: the second definition's units
+    ]
+    assert frame["CH4_ppb"].iloc[0] == pytest.approx(1900.0)
+    assert frame["CO2_ppm"].iloc[0] == 415.0
+    assert frame[["CH4_ppb", "CO2_ppm"]].iloc[1].isna().all()
+
+
+def test_a_column_named_like_the_time_column_is_mangled_as_the_data_is(tmp_path: Path) -> None:
+    """The variables are named exactly as the data's columns, mangling included.
+
+    Mangled on its own, a dependent column repeating the independent
+    variable's name would keep that name and have its scale factor applied
+    to the time column.
+    """
+    lines = _build(scales=[1000.0, 1.0], rows=["42480.0, 1.9, 415.0"]).splitlines()
+    lines[18] = "Time_Start, Time_Start, CO2_ppm"
+    path = _write(tmp_path, "\n".join(lines) + "\n")
+
+    frame = read_icartt(path, LOADER).frame
+
+    assert list(frame.columns) == ["Time_Start", "Time_Start.1", "CO2_ppm"]
+    assert frame["Time_Start.1"].iloc[0] == pytest.approx(1900.0)
+    assert frame.index[0] == pd.Timestamp("2024-08-15 11:48:00")
+
+
+def test_a_definition_naming_no_column_binds_nothing(tmp_path: Path) -> None:
+    """Position can bind a definition only when the header line names NV columns.
+
+    Here NV is 1 and the header line names two dependent columns, neither of
+    them the definition's. The rows are read under the header line's names,
+    the definition binds to no column, and its sentinel masks nothing: the
+    file does not say which column it belongs to, so the reader does not guess.
+    """
+    lines = _build(
+        variables=[("N2O_ppb", "ppb", "Nitrous oxide")],
+        scales=[1.0],
+        missings=[-9999.0],
+        rows=["42480.0, -9999.0, 415.0"],
+    ).splitlines()
+    lines[17] = "Time_Start, CH4_ppb, CO2_ppm"
+    path = _write(tmp_path, "\n".join(lines) + "\n")
+
+    frame = read_icartt(path, LOADER).frame
+
+    assert list(frame.columns) == ["Time_Start", "CH4_ppb", "CO2_ppm"]
+    assert frame["CH4_ppb"].iloc[0] == -9999.0
+
+
+def test_an_impossible_nlhead_with_the_extra_line_reads_the_true_header(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Both of the archive's NLHEAD=36 files are PTR-MS files of this shape.
+
+    A comment that starts with the time column's name but has the wrong
+    number of fields is not the header; the line with NV + 1 fields is.
+    """
+    text = _with_blank_definition(
+        _build(normal=["PLATFORM: Test Van", "Time_Start, start of the averaging interval"])
+    )
+    lines = text.splitlines()
+    true_length = int(lines[0].split(",")[0])
+    lines[0] = "13, 1001"
+    path = _write(tmp_path, "\n".join(lines) + "\n")
+
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.icartt"):
+        frame = read_icartt(path, LOADER).frame
+
+    assert parse_icartt_header(lines, path).n_header_lines == true_length
+    assert list(frame.columns) == ["Time_Start", "CH4_ppb", "CO2_ppm"]
+    assert frame["CH4_ppb"].tolist() == [1900.0, 1901.0]
+    assert "residual header text" not in caplog.text
 
 
 def test_near_total_row_loss_is_an_error_not_a_warning(tmp_path: Path) -> None:
@@ -774,10 +928,11 @@ def test_names_matching_neither_the_rows_nor_nv_fall_back_to_definitions(
 #
 # These matter more than their line count suggests. Measured over the 2024
 # archive, 10.03% of every numeric value is an LOD sentinel, and in the
-# PTR-MS VOC files it reaches 67-70% of samples -- far enough past half that
-# the *median* of a real benzene record was the sentinel rather than a
-# concentration, so a rolling low-quantile baseline would have called
-# -88888 ppbv the background (docs/METHODS.md 9.2.1).
+# PTR-MS VOC files it reaches 74% of one species' samples and 66% of benzene's
+# in one record -- far enough past half that the *median* of that benzene
+# record was the sentinel rather than a concentration, so a rolling
+# low-quantile baseline would have called -88888 ppbv the background
+# (docs/METHODS.md 9.2.1).
 
 
 def test_llod_sentinel_is_masked(tmp_path: Path) -> None:

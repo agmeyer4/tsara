@@ -3436,9 +3436,10 @@ dozen ways, including names that falsely suggest a different epoch.
 Keying off the values raises the question of what to do when the values
 disagree with each other, and the answer has to be a **majority vote**, not
 an existence test. Asking "is *any* value numeric?" lets one token decide a
-whole file: two PTR-MS VOC files in the surveyed archive hold ten thousand
+whole file: two PTR-MS VOC files in the surveyed archive held ten thousand
 datetime strings alongside exactly two numeric tokens that leaked in from a
-mis-declared header block, and the existence test sent both down the
+mis-declared header block (no longer, since their true header is found;
+below), and the existence test sent both down the
 seconds-past-midnight branch, where every genuine timestamp then failed to
 convert and was discarded. The result was 2 surviving rows out of 10,235,
 across 35 VOC species, reported only as a warning. Counting both
@@ -3453,23 +3454,46 @@ variables needs its own definition line, so any valid header is at least
 `12 + NV` lines and a file claiming fewer is provably wrong about itself.
 Two archive files declare `NLHEAD = 36` with `NV = 35`; trusting that admits
 header text into the data block, which is exactly where the stray numerics
-above come from. The floor is raised to `12 + NV` with a warning naming the
-arithmetic. This is a partial repair by construction — those files' true
-header is longer still (70 lines), so a residue of comment text remains, and
-it is the majority vote plus ragged-row skipping that contain it. It is a
-no-op for every other file in the archive.
+above come from. Such a file's true header is found by its column-header
+line: the first line past the definitions that starts with the independent
+variable's name and has `NV + 1` fields. Both archive files have one, at
+line 70, so their header is read to there with a warning naming the
+arithmetic, and no header text reaches their data (since 2026-10-23; until
+then the floor was raised to `12 + NV`, a lower bound, and a residue of
+comment text was left to the majority vote and ragged-row skipping). Where
+no such line exists the floor is still raised to `12 + NV`, and the
+residue is contained as before. It is a no-op for every other file in the
+archive.
 
 The complementary diagnostic — walking the two comment blocks and comparing
 where they end against `NLHEAD` — is logged at **debug**, not warning. On
-the surveyed archive it fires on 44 of 1122 files and correctly diagnoses
-none of them: 43 are PTR-MS files carrying one extra, blank-named definition
-line that offsets the walk harmlessly. A warning that is a false positive
-every time it fires teaches its reader to ignore warnings.
+the surveyed archive it fires on 44 of 1122 files, 43 of them PTR-MS files
+carrying one extra, blank-named definition line that offsets the walk while
+`NLHEAD` is right. Nothing depends on where the walk ends: the column names
+come from line `NLHEAD` and the metadata from the whole header.
+
+**The offset walk was not harmless** (found 2026-10-23, in Phase-7c's
+planning). The column-header line used to be read from where the walk
+ended, which on those 43 files is a comment line, so the declared names were
+a one-name list, the width rule below fell back to the definitions, and the
+definitions, read by `NV`, are `[blank, Formaldehyde, …, D4_siloxane]`: one
+place off the data. Every species of the archive's VOC instrument was read
+under the next one's name (`Methanol_PPBV` held propyne, `Benzene_PPBV`
+methylfuran, `Toluene_PPBV` vinyl furan), D5-siloxane was dropped, and its
+sentinels went unmasked; the reader warned on every file ("using the
+variable definitions") and nothing failed. The column-header line is now
+read from line `NLHEAD`, the line the format puts last in the header; where
+it names `NV` columns differently from the definitions, it names them, and
+the scale factors, missing-value sentinels and per-variable LOD flags bind
+to the columns by position, as the format lays them out. Checked on all 43
+files against pandas reading each file's own header line: 62,759,480 values,
+every column, agree.
 
 **Column names are chosen by the width of the data, not by `NV`.** An
 FFI-1001 file states its column names twice — the variable definitions, and
-the last normal comment line, which the format designates as the data column
-header — and the two disagree often enough to need a rule. The rule "trust
+the column-header line — and the two disagree often enough to need a rule.
+
+The rule "trust
 `NV`" is right 1121 times in 1122 and wrong once, and the once is a hard
 failure rather than a degradation: a file declaring `NV = 1` with its
 independent *and* its single dependent variable both named `Time_UTC` yields
@@ -3477,10 +3501,11 @@ a duplicated name list, which pandas refuses outright with an untyped
 exception escaping a reader contracted to raise `TsaraIngestError`, while
 that file's column-header line carries the 7 correct names its 7-field rows
 need. So the arbiter is the modal field count of the data rows, preferring
-the declared header line, then the definitions. Measurement is what makes
-this safe: on the 1078 files where *both* lists match the row width their
-contents are byte-identical, so the preference is provably content-neutral
-across the archive. Where neither matches, the disagreement is about the
+the declared header line, then the definitions. Measured over the 1122 files
+(2026-10-23): the column-header line matches the row width on all 1122 and
+the definitions on 1121; where both match they are identical on 1078 files
+and differ on the 43 PTR-MS files above, where the column-header line is the
+right one, which is why a tie goes to it. Where neither matches, the disagreement is about the
 rows rather than the names — the uniformly-too-wide case that `index_col=False`
 already handles — so the file is not refused. Duplicate names are mangled
 `name`, `name.1` as pandas would, since a real ground-site file repeats two
@@ -3523,9 +3548,14 @@ Measurement settled it the other way. Over the 2024 archive:
 | share of every numeric value in the archive | **10.03%** |
 | share within the PTR-MS VOC files | **33-56%** |
 
-For a real PTR-MS record, benzene was 67% sentinel and propyne 70%, which is
-far enough past half that the **median of the record was the sentinel** rather
-than a concentration. A rolling low-quantile baseline (§6) would therefore
+For a real PTR-MS record (2024-08-16, `Stationary11`; rule: the share of
+rows holding an `LLOD_FLAG` or `ULOD_FLAG` value), benzene is 66% sentinel
+and propyne 65%, which is far enough past half that the **median of the
+record was the sentinel** rather than a concentration; across all 43 files
+the most censored species is acetaldehyde, at 74%. (Corrected 2026-10-23:
+first written as benzene 67% and propyne 70%, numbers read through the
+column-naming fault of §9.2, so they were methylfuran's and acetonitrile's
+on the same record.) A rolling low-quantile baseline (§6) would therefore
 have reported a background of `-88888 ppbv`, and every enhancement ratio
 built on it would have been meaningless. Leaving the values in place was not
 a conservative choice; it was a silent one.
@@ -3549,8 +3579,9 @@ chosen precisely to be impossible measurements.
 unreachable even in principle, because header metadata was scraped only from
 the two comment blocks, which are located by `12 + NV` arithmetic. The 43
 PTR-MS files carry one extra, blank-named variable-definition line, which
-offsets that walk; both blocks were then read from the wrong place and the
-metadata came back **empty** — on exactly the files with the highest
+offsets that walk (and, until 2026-10-23, the column names too; §9.2); both
+blocks were then read from the wrong place and the metadata came back
+**empty** — on exactly the files with the highest
 below-detection fractions in the archive. Metadata is now scraped from the
 whole header, since a `KEY: value` line means the same thing wherever it
 sits, and a data row (which begins with a numeric time field) can never
@@ -3579,9 +3610,12 @@ ICARTT archive:
 | values where the two modes disagree | **0.358%** |
 | size of the disagreement | ~1 unit in the last place, **1.2e-16** relative |
 
-End to end on the 43-file PTR-MS instrument, `exact` cost about 20-34% more
-ingestion time and changed 0.021% of finite benzene values by at most
-9.0e-17 ppb.
+End to end on the 43-file PTR-MS instrument (rule: all 43 files ingested
+with every species named, no QA/QC, best of two runs each), `exact` cost 38%
+more ingestion time (21.9 s against 30.2 s) and changed 0.004% of the
+786,612 finite benzene values, by at most 9e-17 ppb. (Corrected 2026-10-23:
+first written as 20-34% and 0.021% of benzene values, the latter read
+through the column-naming fault of §9.2, so of methylfuran's.)
 
 So the trade is a fraction of a percent of values moving by roughly thirteen
 orders of magnitude less than any instrument's precision, against a
