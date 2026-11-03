@@ -160,9 +160,12 @@ def test_a_step_across_a_logging_stop_says_so() -> None:
 
 def test_a_slow_drift_is_one_row_with_a_shift_end() -> None:
     """1 s late at the start, gaining 1 s every 10 minutes: under the 2 s
-    tolerance from one segment to the next, 6 s across the hour."""
+    tolerance from one segment to the next, 6 s across the hour. Measured to a
+    tenth of a second: in whole seconds the segment lags are a staircase, and
+    the line through them misses the rate by 5.7 % here (1.7 % at 0.1 s)."""
     survey = survey_clocks(
-        {"ref": _stream(), "inst": _stream(lambda t: 1.0 + t / 600.0)}, _config(ONE)
+        {"ref": _stream(), "inst": _stream(lambda t: 1.0 + t / 600.0)},
+        _config(ONE, resolution="0.1s"),
     )
     (row,) = survey.rows
     assert row.shift_end_ns is not None
@@ -173,7 +176,7 @@ def test_a_slow_drift_is_one_row_with_a_shift_end() -> None:
     # low (1 s per 700 s here instead of per 600).
     assert row.end_ns == _ns(4200)
     rate = (row.shift_ns - row.shift_end_ns) / (row.end_ns - row.start_ns)
-    assert rate == pytest.approx(1 / 600, rel=0.05)
+    assert rate == pytest.approx(1 / 600, rel=0.03)
     (drift,) = _faults(survey, "clock drift")
     assert "s per hour" in drift["detail"]
 
@@ -515,3 +518,125 @@ def test_a_tier_may_ask_for_fewer_paired_seconds() -> None:
     lenient = {"inst": [{"partner": "ref", "pairs": [["ch4", "ch4"]], "min_pairs": 60}]}
     survey = survey_clocks({"ref": sparse, "inst": _stream(5)}, _config(lenient))
     assert {row.shift_ns for row in survey.rows} == {-5 * SECOND}
+
+
+# ---------------------------------------------------------------------------
+# The lag below a second
+# ---------------------------------------------------------------------------
+
+
+def test_at_one_second_a_clock_7_7_s_late_reads_8_not_7() -> None:
+    """Whole seconds floor a 7.7 s lag to 7; the readings' own cells put it at
+    the nearest second, so the shift written leaves 0.3 s, not 0.7."""
+    survey = survey_clocks({"ref": _stream(), "inst": _stream(7.7)}, _config(ONE))
+    (row,) = survey.rows
+    assert row.shift_ns == -8 * SECOND
+
+
+def test_fractional_clock_errors_come_back_exactly_at_the_resolution(tmp_path: Path) -> None:
+    """The loop of the test above, with clock errors that are not whole
+    seconds: 'fast' 7.3 s then 19.6 s, 'slow' -4.25 s, on the 0.05 s lattice.
+    Every reading is the mean of the air over its cell and nothing is noisy, so
+    the survey must give the errors back exactly, through the chain, and its
+    table must put every reading on its true time."""
+    mean = {"method": "mean"}
+    config = SyntheticConfig.model_validate(
+        {
+            "name": "clocks",
+            "start": "2026-01-01T00:00:00Z",
+            "duration": "150min",
+            "seed": 11,
+            "platform": {"kind": "stationary", "latitude": 40.0, "longitude": -111.0},
+            "atmosphere": {
+                "fields": {
+                    "ch4": {"units": "ppb", "background": {"kind": "parametric", "offset": 1950.0}}
+                },
+                "sources": {
+                    "street": {
+                        "rate_per_hour": 40.0,
+                        "reference_species": "ch4",
+                        "shape": {"kind": "gaussian", "sigma": "4s"},
+                        "amplitude": {"kind": "lognormal", "median": 80.0, "sigma_log": 0.6},
+                    }
+                },
+            },
+            "instruments": {
+                "ref": {"native_rate": "1s", "support": mean, "measures": {"ch4": {}}},
+                "fast": {"native_rate": "1s", "support": mean, "measures": {"ch4": {}}},
+                "slow": {"native_rate": "2s", "support": mean, "measures": {"ch4": {}}},
+            },
+        }
+    )
+    generated = generate(config)
+    errors = {
+        "fast": [
+            ClockError("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z", "7.3s"),
+            ClockError("2026-01-01T01:00:00Z", "2026-01-01T03:00:00Z", "19.6s"),
+        ],
+        "slow": [ClockError("2026-01-01T00:00:00Z", "2026-01-01T03:00:00Z", "-4.25s")],
+    }
+    manifest = load_manifest(
+        export_raw(generated, tmp_path / "export", clock_errors=errors, reference_clock="ref")
+    )
+    survey_config = SurveyConfig.model_validate(
+        {
+            "reference_clock": "ref",
+            "resolution": "0.05s",
+            "tracers": {
+                "fast": [{"partner": "ref", "pairs": [["ch4", "ch4"]]}],
+                "slow": [
+                    {"partner": "fast", "pairs": [["ch4", "ch4"]]},
+                    {"partner": "ref", "pairs": [["ch4", "ch4"]]},
+                ],
+            },
+        }
+    )
+    survey = survey_clocks(
+        ingest_campaign(manifest.model_copy(update={"clock_corrections": ()})), survey_config
+    )
+    truth = {(r.instrument, r.shift_ns) for r in read_clock_corrections(manifest.clock_corrections)}
+    assert {(r.instrument, r.shift_ns) for r in survey.rows} == truth
+    assert not _faults(survey, "tiers disagree")
+
+    table = survey.write_table(tmp_path / "survey.csv")
+    corrected = ingest_campaign(manifest.model_copy(update={"clock_corrections": (table,)}))
+    for name in generated.streams:
+        np.testing.assert_array_equal(
+            corrected[name]["time"].values, generated.streams[name]["time"].values
+        )
+
+
+def test_each_measurement_and_segment_says_whether_the_noise_was_removed() -> None:
+    """With the readings' random sigma declared, every measured lag says the
+    noise was removed, and so does every decided segment; a segment no tier
+    measured says neither (NA). Without a sigma, nothing says it was."""
+
+    def declared(stream: xr.Dataset) -> xr.Dataset:
+        stream["sigma_rand_ch4"] = ("time", np.full(stream.sizes["time"], 0.3))
+        stream["ch4"].attrs["uncertainty_provenance_random"] = "declared"
+        return stream
+
+    stated = survey_clocks(
+        {"ref": declared(_stream()), "inst": declared(_stream(5.0))}, _config(ONE)
+    )
+    measured = stated.measurements[np.isfinite(stated.measurements.lag_s)]
+    assert len(measured) and measured.noise_removed.all()
+    segments = stated.segments.set_index("status").noise_removed
+    assert segments.loc["decided"].all()
+    assert segments.loc[["too short"]].isna().all()
+
+    plain = survey_clocks({"ref": _stream(), "inst": _stream(5.0)}, _config(ONE))
+    assert not plain.measurements.noise_removed.any()
+
+
+def test_a_lag_at_the_edge_of_the_cells_window_is_not_decided(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the lag on the readings' own cells lands at either end of its
+    window, the true one may lie beyond: the segment is not decided."""
+    import tsara.survey.clocks as clocks
+
+    monkeypatch.setattr(clocks, "refined_lag", lambda *a, **k: (7.0, True, False))
+    survey = survey_clocks({"ref": _stream(), "inst": _stream(5.0)}, _config(ONE))
+    assert survey.rows == ()
+    assert set(survey.segments.status) <= {"at search edge", "too short"}

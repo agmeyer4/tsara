@@ -40,6 +40,7 @@ def test_a_minimal_config_takes_the_defaults() -> None:
     config = SurveyConfig.model_validate(BASE)
     assert (config.segment, config.search, config.min_pairs) == ("30min", "120s", 300)
     assert (config.min_r, config.tolerance, config.running_median) == (0.6, "2s", "121s")
+    assert config.resolution == "1s"
     assert config.tracers["picarro"][0].pairs == (("h2o", "rh"),)
     assert config.tracers["picarro"][0].min_pairs == 100
     assert config.tracers["aeris"][0].min_pairs is None
@@ -105,6 +106,13 @@ def test_the_composition_order_puts_every_partner_first() -> None:
         ({"tracers": {"aeris": [{"partner": "airmar", "pairs": [["ch 4", "ch4"]]}]}}, "identifier"),
         ({"tracers": {}}, "at least 1 item"),
         ({"segmnet": "10min"}, "Extra inputs are not permitted"),
+        # Read as whole seconds, so a fraction would be cut off without a word:
+        # "20.7s" ran as 20, and "500ms" as a search of no width at all.
+        ({"search": "20.7s"}, "search .* whole number of seconds"),
+        ({"search": "500ms"}, "search .* whole number of seconds"),
+        ({"running_median": "121.5s"}, "running_median .* whole number of seconds"),
+        ({"resolution": "2s"}, "at most 1s"),
+        ({"resolution": "0s"}, "positive"),
     ],
 )
 def test_impossible_settings_are_refused(changes: dict[str, Any], match: str) -> None:

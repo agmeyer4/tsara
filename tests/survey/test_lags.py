@@ -7,6 +7,8 @@ air *later* than its partner, so the shift that corrects it is negative
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -16,7 +18,9 @@ from tsara.survey.lags import (
     SecondsSeries,
     SegmentLag,
     TsaraSurveyError,
+    cell_series,
     pooled_lag,
+    refined_lag,
     seconds_series,
 )
 
@@ -193,3 +197,299 @@ def test_a_pair_too_weak_to_decide_alone_cannot_veto() -> None:
     lag = _lag([strong, (noise, strong[1])])
     assert lag.lag_s == 5
     assert not lag.pairs_disagree
+
+
+# ---------------------------------------------------------------------------
+# The lag on the readings' own cells
+# ---------------------------------------------------------------------------
+
+SEGMENT_NS = 1800 * 1_000_000_000
+T0_NS = T0 * 1_000_000_000
+
+
+def _air(
+    starts: np.ndarray, stops: np.ndarray, centres: np.ndarray, amps: np.ndarray, width: float
+) -> np.ndarray:
+    """The exact mean over each cell of Gaussian plumes on a slow sine (seconds)."""
+    from scipy.special import erf
+
+    s2 = width * np.sqrt(2.0)
+    area = amps * width * np.sqrt(np.pi / 2)
+    plumes = (
+        area * (erf((stops[:, None] - centres) / s2) - erf((starts[:, None] - centres) / s2))
+    ).sum(axis=1)
+    w = 2 * np.pi / 1200.0
+    background = 5 * (np.cos(w * starts) - np.cos(w * stops)) / w
+    return np.asarray((plumes + background) / (stops - starts))
+
+
+def _cells_stream(
+    width: float,
+    phase: float,
+    late: float,
+    *,
+    seed: int = 0,
+    plume_width: float = 4.0,
+    noise: float = 0.0,
+    sigma: str | None = None,
+) -> xr.Dataset:
+    """An analyzer of contiguous cells over half an hour plus margins, its times ``late`` s late.
+
+    Every reading is the exact mean of the air over its own (true) cell, plus
+    white noise; ``sigma`` names the provenance of a stated random sigma equal
+    to that noise, or None for none.
+    """
+    rng = np.random.default_rng(seed)
+    centres = rng.uniform(-300, 2100, 53)
+    amps = rng.lognormal(3, 0.5, 53)
+    # Each analyzer its own noise: two drawing the same would share it, and agree exactly.
+    noise_rng = np.random.default_rng(
+        [seed, round(width * 1000), round(phase * 100), round(late * 100) + 1000]
+    )
+    starts = -300 + phase + width * np.arange(int(2400 / width))
+    stops = starts + width
+    values = _air(starts, stops, centres, amps, plume_width)
+    values = values + noise_rng.normal(0, noise, len(starts))
+
+    def to_ns(seconds: np.ndarray) -> np.ndarray:
+        return np.asarray(T0_NS + np.round((seconds + late) * 1e9)).astype("datetime64[ns]")
+
+    stream = xr.Dataset(
+        {
+            "ch4": ("time", values),
+            "time_bnds": (("time", "nv"), np.stack([to_ns(starts), to_ns(stops)], axis=1)),
+        },
+        coords={"time": to_ns((starts + stops) / 2)},
+    )
+    if sigma is not None:
+        stream["sigma_rand_ch4"] = ("time", np.full(len(starts), noise))
+        stream["ch4"].attrs["uncertainty_provenance_random"] = sigma
+    return stream
+
+
+def _refine(
+    own: xr.Dataset, ref: xr.Dataset, coarse_s: float, resolution_s: float, min_pairs: int = 300
+) -> tuple[float, bool, bool]:
+    pair = (
+        cell_series(own, "ch4", running_median_s=121),
+        cell_series(ref, "ch4", running_median_s=121),
+    )
+    return refined_lag(
+        [pair],
+        T0_NS,
+        T0_NS + SEGMENT_NS,
+        coarse_s=coarse_s,
+        resolution_ns=round(resolution_s * 1e9),
+        min_pairs=min_pairs,
+    )
+
+
+#: Two 1 s analyzers whose cells line up in true time, two half a cell apart,
+#: and a 0.993 s analyzer against a 2 s one (the Aeris and the Picarro).
+GEOMETRIES = [(1.0, 0.0, 1.0, 0.0), (1.0, 0.0, 1.0, 0.5), (0.993, 0.37, 2.0, 0.0)]
+
+
+@pytest.mark.parametrize("geometry", GEOMETRIES)
+@pytest.mark.parametrize("late", [7.3, 7.65, -4.25])
+def test_the_lag_on_cells_is_exact_on_exact_cell_means(
+    geometry: tuple[float, float, float, float], late: float
+) -> None:
+    """On readings that are each the exact mean of the air over their cell, the
+    lag comes back exactly, at every phase of the two sets of cells: the floor
+    of the whole-second peak is all it is given."""
+    own_width, own_phase, ref_width, ref_phase = geometry
+    own = _cells_stream(own_width, own_phase, late)
+    ref = _cells_stream(ref_width, ref_phase, 0.0)
+    lag, at_edge, removed = _refine(own, ref, coarse_s=np.floor(late), resolution_s=0.05)
+    assert lag == pytest.approx(late, abs=1e-9)
+    assert not at_edge
+    assert not removed
+
+
+def test_a_lag_between_steps_comes_back_to_the_nearest() -> None:
+    own, ref = _cells_stream(1.0, 0.0, 7.27), _cells_stream(1.0, 0.5, 0.0)
+    assert _refine(own, ref, coarse_s=7.0, resolution_s=0.1)[0] == pytest.approx(7.3)
+
+
+def test_at_one_second_the_lag_is_the_nearest_second_not_the_floor() -> None:
+    """A clock 7.7 s late: the whole seconds floor it to 7, the cells say 8."""
+    own, ref = _cells_stream(1.0, 0.0, 7.7), _cells_stream(1.0, 0.0, 0.0)
+    assert _refine(own, ref, coarse_s=7.0, resolution_s=1.0)[0] == 8.0
+
+
+def test_a_best_lag_at_either_end_of_the_window_is_flagged() -> None:
+    """Looked for within two seconds of a peak 4 s from the truth, the best lag
+    is the window's nearest end, and it says so."""
+    own, ref = _cells_stream(1.0, 0.0, 7.3), _cells_stream(1.0, 0.5, 0.0)
+    lag, at_edge, _ = _refine(own, ref, coarse_s=3.0, resolution_s=0.1)
+    assert lag == pytest.approx(5.0)
+    assert at_edge
+
+
+def test_too_few_fully_covered_cells_give_no_lag() -> None:
+    own, ref = _cells_stream(1.0, 0.0, 7.3), _cells_stream(1.0, 0.5, 0.0)
+    lag, at_edge, _ = _refine(own, ref, coarse_s=7.0, resolution_s=0.1, min_pairs=5000)
+    assert np.isnan(lag) and not at_edge
+
+
+def test_a_narrower_partner_is_joined_onto_the_wider_instruments_cells() -> None:
+    """The 2 s instrument against a 0.993 s partner: the join runs the other
+    way round from the pair's order, and the lag keeps its sign."""
+    own, ref = _cells_stream(2.0, 0.0, 6.4), _cells_stream(0.993, 0.37, 0.0)
+    assert _refine(own, ref, coarse_s=6.0, resolution_s=0.1)[0] == pytest.approx(6.4)
+
+
+def test_cell_series_takes_stated_sigma_only() -> None:
+    """A sigma counts only when declared or reported for every finite reading."""
+    stream = _cells_stream(1.0, 0.0, 0.0, noise=1.0, sigma="declared")
+    stream["ch4"].values[5] = np.nan
+    series = cell_series(stream, "ch4", running_median_s=121)
+    assert len(series.cells) == len(series.values) == len(stream.time) - 1
+    assert series.sigma is not None and np.all(series.sigma == 1.0)
+    for provenance in ("reported", "unknown", "zero"):
+        stream["ch4"].attrs["uncertainty_provenance_random"] = provenance
+        stated = cell_series(stream, "ch4", running_median_s=121).sigma is not None
+        assert stated == (provenance == "reported")
+    stream["ch4"].attrs["uncertainty_provenance_random"] = "declared"
+    stream["sigma_rand_ch4"].values[7] = np.nan
+    assert cell_series(stream, "ch4", running_median_s=121).sigma is None
+
+
+def test_a_stream_without_cells_gets_its_cadence_centred_on_each_time() -> None:
+    seconds = T0 + np.arange(0.0, 600.0, 2.0)
+    series = cell_series(_stream(seconds, _plumes(300)), "ch4", running_median_s=61)
+    assert (series.cells.width_ns == 2_000_000_000).all()
+    assert series.cells.midpoint_ns[0] == T0_NS
+
+
+def test_stated_noise_is_removed_and_the_lag_stops_chasing_it() -> None:
+    """Monte Carlo. Where two 1 s analyzers' cells line up in true time, the
+    join of one onto the other's cells averages two readings at every lag but
+    the true one, so their noise falls there and r rises: the lag is pulled
+    off. With the readings' sigma stated, that noise is taken out of the joined
+    series' variance and the pull goes (METHODS.md §12.4)."""
+    kept: list[float] = []
+    removed: list[float] = []
+    common: dict[str, Any] = {"plume_width": 12.0, "noise": 1.0}
+    for seed in range(3):
+        for late in (7.0, 7.2, 7.4, 7.6, 7.8):
+            for sigma, errors in ((None, kept), ("declared", removed)):
+                own = _cells_stream(1.0, 0.0, late, seed=seed, sigma=sigma, **common)
+                ref = _cells_stream(1.0, 0.0, 0.0, seed=seed, sigma=sigma, **common)
+                lag, _, said = _refine(own, ref, coarse_s=np.floor(late), resolution_s=0.05)
+                assert said == (sigma is not None)
+                errors.append(lag - late)
+    rms_kept = float(np.sqrt(np.mean(np.square(kept))))
+    rms_removed = float(np.sqrt(np.mean(np.square(removed))))
+    # Measured: 0.371 s kept, 0.085 s removed (METHODS.md §12.4).
+    assert rms_kept > 0.15
+    assert rms_removed < rms_kept / 2
+
+
+def test_a_tracer_without_a_finite_reading_has_no_cells() -> None:
+    stream = _cells_stream(1.0, 0.0, 0.0)
+    stream["ch4"].values[:] = np.nan
+    series = cell_series(stream, "ch4", running_median_s=121)
+    assert len(series.cells) == len(series.values) == 0
+
+
+def test_a_stated_sigma_larger_than_the_joined_series_spread_leaves_no_lag() -> None:
+    """Taking out more noise than the joined series varies by leaves nothing to
+    correlate: no lag rather than a made-up one."""
+    own = _cells_stream(1.0, 0.0, 7.3)
+    ref = _cells_stream(1.0, 0.5, 0.0, noise=1.0, sigma="declared")
+    ref["sigma_rand_ch4"].values[:] = 1e4
+    lag, _, removed = _refine(own, ref, coarse_s=7.0, resolution_s=0.1)
+    assert np.isnan(lag) and removed
+
+
+def _true_seconds(stream: xr.Dataset) -> np.ndarray:
+    """Each reading's true midpoint in seconds, for streams built by _cells_stream."""
+    return np.asarray(
+        (stream["time"].values - stream["time"].values[0]) / np.timedelta64(1, "s")
+        + float(stream["time_bnds"].values[0, 1] - stream["time_bnds"].values[0, 0]) / 2e9
+        - 300.0
+    )
+
+
+def test_a_cell_only_partly_covered_does_not_count() -> None:
+    """A 2 s analyzer against a 1 s one whose readings in the first half of each
+    2 s cell are missing from 300 to 900 s: there the mean of what is left
+    describes the cell's second half, half a second late. Counted, those cells
+    would pull the lag; only cells covered whole count, so it stays exact."""
+    own = _cells_stream(2.0, 0.0, 6.4)
+    ref = _cells_stream(1.0, 0.0, 0.0)
+    true = _true_seconds(ref)
+    first_half = np.floor(true) % 2 == 0
+    ref["ch4"].values[(true > 300) & (true < 900) & first_half] = np.nan
+    lag, at_edge, _ = _refine(own, ref, coarse_s=6.0, resolution_s=0.05)
+    assert lag == pytest.approx(6.4, abs=1e-9)
+    assert not at_edge
+
+
+def test_readings_too_sparse_for_a_median_cover_nothing() -> None:
+    """From 300 to 900 s the joined analyzer keeps two readings in ten: each
+    pair covers a cell whole, but 121 s hold too few readings for a median, so
+    they have no wiggle and must not count; nor must the instrument's own
+    readings without one (one in ten kept from 1000 to 1200 s)."""
+    own = _cells_stream(1.0, 0.0, 7.3)
+    ref = _cells_stream(1.0, 0.5, 0.0)
+    true_ref, true_own = _true_seconds(ref), _true_seconds(own)
+    index = np.arange(len(true_ref))
+    ref["ch4"].values[(true_ref > 300) & (true_ref < 900) & (index % 10 > 1)] = np.nan
+    index = np.arange(len(true_own))
+    own["ch4"].values[(true_own > 1000) & (true_own < 1200) & (index % 10 != 0)] = np.nan
+    for stream in (own, ref):
+        kept = len(cell_series(stream, "ch4", running_median_s=121).cells)
+        assert kept < np.isfinite(stream["ch4"].values).sum()
+    lag, at_edge, _ = _refine(own, ref, coarse_s=7.0, resolution_s=0.05)
+    assert lag == pytest.approx(7.3, abs=1e-9)
+    assert not at_edge
+
+
+def test_the_wider_partners_cells_are_those_that_see_the_instruments_segment() -> None:
+    """The partner has the wider cells, so its cells are the ones compared:
+    those seeing the instrument's segment, L seconds earlier on the partner's
+    clock. The instrument records nothing outside its segment, so cells taken
+    without moving them by L (60 s here) would lose 30 to nothing joined."""
+    own = _cells_stream(1.0, 0.0, 60.3)
+    own = own.sel(
+        time=(own.time >= np.datetime64(T0_NS, "ns"))
+        & (own.time < np.datetime64(T0_NS + SEGMENT_NS, "ns"))
+    )
+    ref = _cells_stream(2.0, 0.0, 0.0)
+    lag, _, _ = _refine(own, ref, coarse_s=60.0, resolution_s=0.1, min_pairs=890)
+    assert lag == pytest.approx(60.3)
+
+
+def test_the_lags_are_multiples_of_the_resolution_whatever_the_peak() -> None:
+    """A step of 0.3 s that does not divide the window: the lags tried are
+    multiples of 0.3 s, so a clock 7.2 s late is found exactly."""
+    own, ref = _cells_stream(1.0, 0.0, 7.2), _cells_stream(1.0, 0.5, 0.0)
+    assert _refine(own, ref, coarse_s=7.0, resolution_s=0.3)[0] == pytest.approx(7.2, abs=1e-9)
+
+
+def test_cells_are_ordered_by_start_where_the_cadence_changes() -> None:
+    """A 1 s record followed by a 5 s one: the first 5 s cell, centred 1.6 s
+    after the last 1 s reading, starts before it. The cells come back ordered
+    by start, each with its own reading's wiggle."""
+    times = np.r_[np.arange(0.0, 200.0), np.arange(200.6, 400.0, 5.0)]
+    widths = np.r_[np.full(200, 1.0), np.full(40, 5.0)]
+
+    def to_ns(seconds: np.ndarray) -> np.ndarray:
+        return np.asarray(T0_NS + np.round(seconds * 1e9)).astype("datetime64[ns]")
+
+    stream = xr.Dataset(
+        {
+            "ch4": ("time", times.copy()),
+            "time_bnds": (
+                ("time", "nv"),
+                np.stack([to_ns(times - widths / 2), to_ns(times + widths / 2)], axis=1),
+            ),
+        },
+        coords={"time": to_ns(times)},
+    )
+    series = cell_series(stream, "ch4", running_median_s=121)
+    assert (np.diff(series.cells.start_ns) >= 0).all()
+    swapped = np.flatnonzero(series.cells.width_ns == 5_000_000_000)[0]
+    assert series.cells.midpoint_ns[swapped] == T0_NS + 200_600_000_000

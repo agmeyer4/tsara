@@ -38,6 +38,7 @@ from pydantic import Field, ValidationInfo, field_validator, model_validator
 from tsara.config.base import StrictModel as _StrictModel
 from tsara.config.base import validate_positive_timedelta as _validate_duration
 from tsara.config.base import validate_stream_name as _validate_name
+from tsara.core.timebase import SECOND_NS
 
 __all__ = ["SurveyConfig", "TracerTier"]
 
@@ -115,6 +116,14 @@ class SurveyConfig(_StrictModel):
             "search is not decided, since the true one may lie beyond."
         ),
     )
+    resolution: str = Field(
+        default="1s",
+        description=(
+            "The step the lag is measured to, at most one second: the whole-second search "
+            "finds the peak, and the lag is then measured on the readings' own cells at "
+            "multiples of this within two seconds of it. The table's shifts are written to it."
+        ),
+    )
     min_pairs: int = Field(
         default=300,
         gt=0,
@@ -141,10 +150,34 @@ class SurveyConfig(_StrictModel):
         ),
     )
 
-    @field_validator("segment", "search", "tolerance", "running_median")
+    @field_validator("segment", "search", "tolerance", "running_median", "resolution")
     @classmethod
     def _durations_are_positive(cls, value: str, info: ValidationInfo) -> str:
         _validate_duration(value, field=f"SurveyConfig.{info.field_name}")
+        return value
+
+    @field_validator("search", "running_median")
+    @classmethod
+    def _whole_seconds(cls, value: str, info: ValidationInfo) -> str:
+        # Both are read as whole seconds; a fraction would be cut off without a
+        # word (measured: a search of "20.7s" ran as 20, and "500ms" as 0, so
+        # every segment sat at the edge of a search with no width).
+        import pandas as pd
+
+        if pd.Timedelta(value).value % SECOND_NS:
+            raise ValueError(f"{info.field_name} ({value}) must be a whole number of seconds.")
+        return value
+
+    @field_validator("resolution")
+    @classmethod
+    def _at_most_a_second(cls, value: str) -> str:
+        import pandas as pd
+
+        if pd.Timedelta(value) > pd.Timedelta("1s"):
+            raise ValueError(
+                f"resolution ({value}) must be at most 1s: the whole-second search already "
+                "gives the lag to a second."
+            )
         return value
 
     @field_validator("reference_clock")

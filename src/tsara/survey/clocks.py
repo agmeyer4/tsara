@@ -17,7 +17,10 @@ What it does, in order
    of time. An instrument is measured only on the segments where it has
    readings.
 2. **Tiers.** On each segment, each of the instrument's tiers gives a lag
-   against its partner (:func:`tsara.survey.lags.pooled_lag`). The first tier
+   against its partner: its peak on whole seconds
+   (:func:`tsara.survey.lags.pooled_lag`), then the lag itself on the
+   readings' own cells, to the survey's resolution
+   (:func:`tsara.survey.lags.refined_lag`). The first tier
    that decides sets the segment's lag; a later tier that decides too checks
    it, and a disagreement larger than the tolerance is named.
 3. **The chain.** The lag against the partner plus the partner's own lag to
@@ -49,7 +52,7 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -65,10 +68,13 @@ from tsara.core.naming import (
 )
 from tsara.core.timebase import NS_PER_S, SECOND_NS, SECONDS_PER_HOUR, iso_utc
 from tsara.survey.lags import (
+    CellSeries,
     SecondsSeries,
     SegmentLag,
     TsaraSurveyError,
+    cell_series,
     pooled_lag,
+    refined_lag,
     seconds_series,
 )
 
@@ -125,6 +131,7 @@ MEASUREMENT_COLUMNS: dict[str, str] = {
     "n_pairs": "int64",
     "at_edge": "bool",
     "pairs_disagree": "bool",
+    "noise_removed": "bool",
     "decided": "bool",
 }
 SEGMENT_COLUMNS: dict[str, str] = {
@@ -135,6 +142,7 @@ SEGMENT_COLUMNS: dict[str, str] = {
     "partner": "str",
     "lag_s": "float64",
     "lag_to_reference_s": "float64",
+    "noise_removed": "boolean",
     "status": "str",
 }
 FAULT_COLUMNS: dict[str, str] = {
@@ -145,8 +153,10 @@ FAULT_COLUMNS: dict[str, str] = {
     "detail": "str",
 }
 
-#: Gives the prepared series of one variable of one instrument.
+#: Give the prepared series of one variable of one instrument: on whole
+#: seconds for the search, on the readings' own cells for the lag.
 _SeriesOf = Callable[[str, str], SecondsSeries]
+_CellsOf = Callable[[str, str], CellSeries]
 
 
 @dataclass(frozen=True)
@@ -158,13 +168,17 @@ class ClockSurvey:
     measurements : pandas.DataFrame
         One row per instrument, tier and segment with readings: ``instrument``,
         ``tier`` (from 1), ``partner``, ``start``, ``end``, ``lag_s`` (seconds
-        the instrument shows the air later than its partner), ``r``,
-        ``n_pairs``, ``at_edge``, ``pairs_disagree``, ``decided``.
+        the instrument shows the air later than its partner, to the survey's
+        resolution), ``r`` and ``n_pairs`` (of the whole-second search),
+        ``at_edge``, ``pairs_disagree``, ``noise_removed`` (the joined
+        readings' stated noise was removed, :func:`~tsara.survey.lags.refined_lag`),
+        ``decided``.
     segments : pandas.DataFrame
         One row per instrument and segment with readings: ``instrument``,
         ``start``, ``end``, ``tier`` (the tier that decided, 0 for none),
         ``partner``, ``lag_s`` (against that partner),
-        ``lag_to_reference_s``, and ``status``: ``decided``, ``outlier``,
+        ``lag_to_reference_s``, ``noise_removed`` (the deciding tier's; NA
+        for none), and ``status``: ``decided``, ``outlier``,
         ``too short`` (fewer readings than any tier needs), ``no tier decided``,
         ``at search edge``, ``pairs disagree`` or ``partner undecided``.
     rows : tuple of ClockCorrection
@@ -199,6 +213,7 @@ class _Settings:
 
     segment_ns: int
     search_s: int
+    resolution_ns: int
     running_median_s: int
     tolerance_s: float
     min_pairs: int
@@ -255,14 +270,22 @@ def survey_clocks(streams: Mapping[str, xr.Dataset], config: SurveyConfig) -> Cl
         )
     settings = _settings(config)
     edges = _segment_edges([streams[name] for name in sorted(needed)], settings.segment_ns)
-    cache: dict[tuple[str, str], SecondsSeries] = {}
+    seconds: dict[tuple[str, str], SecondsSeries] = {}
+    cells: dict[tuple[str, str], CellSeries] = {}
 
     def series_of(instrument: str, variable: str) -> SecondsSeries:
-        if (instrument, variable) not in cache:
-            cache[(instrument, variable)] = seconds_series(
+        if (instrument, variable) not in seconds:
+            seconds[(instrument, variable)] = seconds_series(
                 streams[instrument], variable, running_median_s=settings.running_median_s
             )
-        return cache[(instrument, variable)]
+        return seconds[(instrument, variable)]
+
+    def cells_of(instrument: str, variable: str) -> CellSeries:
+        if (instrument, variable) not in cells:
+            cells[(instrument, variable)] = cell_series(
+                streams[instrument], variable, running_median_s=settings.running_median_s
+            )
+        return cells[(instrument, variable)]
 
     measurements: list[dict[str, object]] = []
     segments: list[dict[str, object]] = []
@@ -272,7 +295,7 @@ def survey_clocks(streams: Mapping[str, xr.Dataset], config: SurveyConfig) -> Cl
     for name in order:
         stream = streams[name]
         present = _segments_with_readings(stream, edges)
-        measured = _measure(name, config, settings, edges, present, series_of)
+        measured = _measure(name, config, settings, edges, present, series_of, cells_of)
         chosen = _chosen(measured)
         lags = _compose(config, chosen, to_reference)
         outliers = _outliers(lags, settings.tolerance_s)
@@ -333,6 +356,7 @@ def _settings(config: SurveyConfig) -> _Settings:
     return _Settings(
         segment_ns=int(pd.Timedelta(config.segment).value),
         search_s=int(pd.Timedelta(config.search).total_seconds()),
+        resolution_ns=int(pd.Timedelta(config.resolution).value),
         running_median_s=int(pd.Timedelta(config.running_median).total_seconds()),
         tolerance_s=pd.Timedelta(config.tolerance).value / NS_PER_S,
         min_pairs=config.min_pairs,
@@ -375,12 +399,21 @@ def _measure(
     edges: npt.NDArray[np.int64],
     present: Iterable[int],
     series_of: _SeriesOf,
+    cells_of: _CellsOf,
 ) -> list[_Measured]:
-    """Measure every tier of an instrument on every segment it has readings in."""
+    """Measure every tier of an instrument on every segment it has readings in.
+
+    The whole-second search finds each segment's peak; the lag is then
+    measured on the readings' own cells to the survey's resolution, wherever
+    the peak is inside the search (``docs/METHODS.md`` §12.4).
+    """
     measured = []
     for tier_number, tier in enumerate(config.tracers[name], start=1):
         pairs = [
             (series_of(name, own), series_of(tier.partner, theirs)) for own, theirs in tier.pairs
+        ]
+        on_cells = [
+            (cells_of(name, own), cells_of(tier.partner, theirs)) for own, theirs in tier.pairs
         ]
         min_pairs = tier.min_pairs or settings.min_pairs
         for k in present:
@@ -394,6 +427,16 @@ def _measure(
                 min_r=settings.min_r,
                 tolerance_s=settings.tolerance_s,
             )
+            if np.isfinite(lag.lag_s) and not lag.at_edge:
+                lag_s, at_edge, removed = refined_lag(
+                    on_cells,
+                    int(edges[k]),
+                    int(edges[k + 1]),
+                    coarse_s=lag.lag_s,
+                    resolution_ns=settings.resolution_ns,
+                    min_pairs=min_pairs,
+                )
+                lag = replace(lag, lag_s=lag_s, at_edge=at_edge, noise_removed=removed)
             decided = bool(
                 np.isfinite(lag.lag_s)
                 and not lag.at_edge
@@ -764,6 +807,7 @@ def _measurement_row(name: str, m: _Measured, edges: npt.NDArray[np.int64]) -> d
         "n_pairs": m.lag.n_pairs,
         "at_edge": m.lag.at_edge,
         "pairs_disagree": m.lag.pairs_disagree,
+        "noise_removed": m.lag.noise_removed,
         "decided": m.decided,
     }
 
@@ -785,6 +829,7 @@ def _segment_row(
         "partner": "" if m is None else m.partner,
         "lag_s": float("nan") if m is None else m.lag.lag_s,
         "lag_to_reference_s": composed.get(k, float("nan")),
+        "noise_removed": pd.NA if m is None else m.lag.noise_removed,
         "status": statuses[k],
     }
 

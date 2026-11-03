@@ -24,8 +24,15 @@ reference_clock: airmar
 segment: 30min
 
 # How far either way a lag is searched for. A best lag at the edge of the
-# search is never decided, since the true one may lie beyond.
+# search is never decided, since the true one may lie beyond. Whole seconds.
 search: 120s
+
+# The step the lag is measured to, at most a second. The search above finds
+# the peak on whole seconds; the lag is then measured on the readings' own
+# cells at multiples of this. Below a second, a joined analyzer's noise is
+# removed only when its manifest declares (or its files report) a random
+# sigma; each segment says whether it was.
+resolution: 0.1s
 
 # Paired seconds a lag needs before its correlation counts, and the
 # correlation at the best lag a segment needs to be decided.

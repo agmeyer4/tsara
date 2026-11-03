@@ -6533,7 +6533,7 @@ any out-of-order readings, so one landing on an earlier reading's exact time is
 dropped as a duplicate. Whether that is right is decided on the real steps of
 §12.2 (§12.7).
 
-### 12.4 The survey: measuring lags from tracer pairs **[built 2026-11-03 — stages 2 and 3]**
+### 12.4 The survey: measuring lags from tracer pairs **[built 2026-11-03 — stages 2 and 3; the lag below a second, walkthrough stage A1]**
 
 `tsara.survey` measures, before the pipeline, what a manifest can declare but
 files do not state; clocks are its first measurement (`tsara.survey.clocks`,
@@ -6557,9 +6557,13 @@ more tracer pairs (`[variable here, variable on the partner]`), optionally
 with its own `min_pairs`; the segment length (default 30 min, tunable); the
 search range (default ±120 s, shorter than a segment); the minimum paired
 seconds (default 300); the decision threshold (default r ≥ 0.6); the tolerance
-(default 2 s); and the running median's window (default 121 s). Every chain of
-partners must reach the reference clock without a loop, and the reference
-clock's instrument has no tiers; both are refused at load.
+(default 2 s); the running median's window (default 121 s); and the
+**resolution** the lag is measured to (default 1 s, at most 1 s). The search
+and the running median are read as whole seconds, so a fraction is refused
+rather than cut off (measured: a search of `20.7s` ran as 20, and `500ms` as a
+search of no width, every segment at its edge). Every chain of partners must
+reach the reference clock without a loop, and the reference clock's
+instrument has no tiers; both are refused at load.
 
 **Segments.** One grid for every instrument: whole multiples of the segment
 length from the epoch, so that segment k of an instrument and of its partner
@@ -6579,6 +6583,94 @@ at least the minimum number of them. A best lag at the edge of the search is
 not decided, since the true one may lie beyond; measured while building, a
 true lag just beyond the search shows as its peak's shoulder at the edge, and
 one far beyond as a weak peak inside it, which the threshold refuses.
+
+**The lag to a resolution.** Whole seconds throw away where each reading sits
+inside its second, so the search above can only find the peak, and finds it
+floored: a clock 7.7 s late reads 7, so the leftover error is one-sided,
+between 0 and 1 s, which on 4 s plumes is the difference between most plumes
+fitting and half of them (§12.1). The lag is therefore measured again on the
+readings' own cells (`tsara.survey.lags.refined_lag`): for every L on a
+lattice of multiples of the resolution within 2 s of the peak, the
+narrower-celled series' wiggles (each series less its own running median, on
+its own readings) are averaged, overlap-weighted, onto the wider-celled
+series' cells moved by L, through TSARA's one join (§1.3; the narrower onto
+the wider, the instrument's cells on a tie), and r is taken over the cells the
+join covers fully; the cells are chosen once, by the peak, so that every L is
+judged on the same ones. Pairs of a tier pool by averaging, as above. The
+whole-second r, its paired seconds and the search-edge and disagreement rules
+still decide a segment; the cells give its lag, and a best lag at either end
+of the 2 s window is not decided. Measured on generated air, under this rule:
+30 min segments with 40 Gaussian plumes each (amplitudes lognormal(3, 0.5)
+ppb; σ 2, 4 or 12 s) on a 5 ppb sine of 20 min period; every reading the
+exact mean of that air over its own cell (an erf integral), with white noise
+of 0, 1 or 3 ppb; the instrument written 7.0 to 7.9 s late in steps of 0.1 s;
+three geometries, two 1 s analyzers whose cells line up in true time, two half
+a cell apart, and a 0.993 s analyzer against a 2 s one; lags in 0.01 s steps.
+First the candidates, each written out from its definition (four draws of the
+air), without noise:
+
+| method | error without noise |
+|---|---|
+| whole seconds, floored (as first built) | 0.5 s low on average; up to 1.4 s |
+| whole seconds, rounded half up | up to 1.0 s |
+| a parabola through r at the whole-second peak | 0.1 to 1.0 s, by geometry |
+| **r on the readings' own cells** | **up to 0.02 s** |
+| the covariance (the cross-correlation of the two step functions) | 0.5 s, half a cell apart |
+| the median of plume centroids | 0.0 to 0.7 s, by window |
+
+Whole seconds cannot be exact, since the information is gone before the
+correlation is taken; and rounding a midpoint is ill-posed besides, since a
+1 s cell starting on a whole second has its midpoint on .5 (numpy rounds .5 to
+even). The covariance is piecewise linear in L with its corners where cells
+align, so it can only peak there. Then the method chosen, re-run through the
+package (`refined_lag` after the package's own whole-second search, 300 cells
+at least, six draws by ten lags): the root-mean-square error over the 2, 4 and
+12 s plumes, and in brackets the largest error, in seconds:
+
+| geometry | noise | noise kept | stated noise removed | stated sigma 1.5 times too large |
+|---|---|---|---|---|
+| two 1 s, lined up | none | 0 (0) | | |
+| | 1 ppb | 0.15–0.37 (0.40) | 0.02–0.09 (0.15) | 0 (0) |
+| | 3 ppb | 0.40–0.49 (0.53) | 0.10–0.45 (0.93) | 0–0.41 (1.0) |
+| two 1 s, half a cell apart | none | 0–0.011 (0.02) | | |
+| | 1 ppb | 0.014–0.026 (0.05) | 0.020–0.081 (0.14) | 0.04–0.50 (0.50) |
+| | 3 ppb | 0.016–0.41 (1.0) | 0.07–0.49 (0.94) | 0.50 (0.50) |
+| 0.993 s against 2 s | none | 0–0.028 (0.06) | | |
+| | 1 ppb | 0.016–0.061 (0.13) | the same | the same |
+| | 3 ppb | 0.08–0.27 (0.45) | 0.08–0.26 (0.45) | 0.08–0.25 (0.45) |
+
+Without noise the lag on the readings' own cells is exact where the cells line
+up, since each joined value is then exactly the other's reading; elsewhere a
+joined reading is the mean of a cell reaching past the one it is joined onto
+(the borrowed share, §11.2.4), which costs nothing on 2 and 4 s plumes and up
+to 0.02 s (half a cell apart) and 0.06 s (0.993 s on 2 s) on 12 s plumes,
+whose peaks are flat. The cell model allows a lag below a second; how far
+below depends on the plumes. **The noise term.** With noise, averaging lowers
+the joined series' noise by an amount that changes with L (two readings
+averaged half and half have half the noise variance of one), and r rises where
+the noise falls. Where the cells line up at the true lag that pulls the lag
+off it, toward the half-cell blends either side; half a cell apart it happens
+to pull toward the true lag; 0.993 s cells on 2 s cells average two or three
+readings at every L and barely move. When the joined readings carry a random
+sigma that the manifest declares or the files report (§2.4) for every one of
+them, each cell's noise variance, Σ w²σ² / (Σ w)² over its overlap weights w,
+is taken out of the joined series' variance before r is formed (the classical
+correction for attenuation), and the measurement and the segment say so
+(`noise_removed`). That trades a bias that depends on the geometry, sometimes
+helpfully, for none: where the cells line up it takes the root-mean-square
+error at 1 ppb from 0.15–0.37 s to 0.02–0.09 s; half a cell apart it costs a
+little (0.014–0.026 s becomes 0.020–0.081 s). It is never taken out with a
+sigma the survey estimates itself, because a wrong sigma moves the lag (the
+last column; its perfect score where the cells line up is the over-correction
+pushing toward alignment, which is where the true lag is there); a
+first-difference estimate read these readings' noise 1.04 to 1.29 times too
+high. At 3 ppb on 12 s plumes every variant scatters by up to a second: the
+peak is too flat for the noise. Monte Carlo in `tests/survey/test_lags.py`
+(two 1 s analyzers lined up in true time, 12 s plumes, 1 ppb, three draws by
+five lags): root-mean-square error 0.371 s with the noise kept, 0.085 s with
+it removed. What real data supports is another matter: on the 2024 SLC-SOS van
+r at the peak was 0.6 to 0.97, far more unshared variance than here, so the
+resolution worth asking for is measured there (§12.7).
 
 **Tiers.** A tier with several pairs averages their correlation curves before
 the best lag is chosen, so that weak pairs sharing a lag strengthen each
@@ -6625,9 +6717,11 @@ beyond its segments (a row reaching over a record's short end segments, or
 meeting its neighbour at a step's gap). Found building notebook 08: evaluated
 at the last segment's edge instead, a row reaching ten minutes further spread
 the same change over a longer stretch, so a clock drifting 6 s an hour was
-corrected at 5.4. A segment's lag is a whole number of seconds, so a drifting
-clock's points sit on a staircase up to half a second off the true line; the
-line through them recovers the rate.
+corrected at 5.4. At the default resolution a segment's lag is a whole
+number of seconds, so a drifting clock's lags sit on a staircase and the line
+through them misses the rate by a few percent: 5.7 % on a clock gaining 1 s
+every 10 minutes, 1.7 % at a resolution of 0.1 s
+(`tests/survey/test_survey_clocks.py`).
 
 **Where a step goes.** A step happens where a logger stopped or its clock
 jumped, not at a segment edge. Between two rows across a step, the survey
@@ -6668,7 +6762,12 @@ table: the survey finds both through the chain, puts the step at the reading
 it happened at, and its own table, applied at ingestion, puts every reading of
 every instrument on its true time to the nanosecond with no reading dropped;
 surveyed again, every decided lag is zero
-(`tests/survey/test_survey_clocks.py`).
+(`tests/survey/test_survey_clocks.py`). The same loop with clock errors that
+are not whole seconds (7.3 s, then 19.6 s; −4.25 s), every reading the mean of
+noise-free air over its cell, at a resolution of 0.05 s: the survey gives each
+error back exactly, through the chain, and its table puts every reading on its
+true time. At a resolution of a second a clock 7.7 s late is written as 8 s,
+not the 7 s the floor gave.
 
 ### 12.5 What the survey names instead of fitting **[built 2026-11-03 — stage 2]**
 
@@ -6721,6 +6820,9 @@ is the right file, not a longer table.
   by rows are the real SLC-SOS case, measured there.
 - What an overlap at a falling clock step does to ordering and de-duplication
   (§12.3).
+- The resolution real data supports (§12.4): segment-to-segment scatter and
+  the agreement of independent tiers on the 2024 SLC-SOS van, where r at the
+  peak is 0.6 to 0.97.
 
 ---
 
