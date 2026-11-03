@@ -40,6 +40,7 @@ from typing import Annotated, Literal
 from pydantic import (
     AliasChoices,
     Field,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -1205,21 +1206,39 @@ class Manifest(_StrictModel):
         ),
     )
 
-    @field_validator("exclude_periods", mode="before")
+    clock_corrections: tuple[Path, ...] = Field(
+        default=(),
+        validation_alias=AliasChoices("clock_corrections", "clock_correction"),
+        description=(
+            "Files of clock corrections: each row a stretch of one instrument, on "
+            "its recorded clock, and the shift that puts it on a reference clock. "
+            "Each is a CSV with the columns instrument, start, end, shift, "
+            "reference_clock, provenance (measured or declared) and optionally "
+            "shift_end (a drift: the shift runs linearly to it across the stretch) "
+            "and reason; start and end carry an explicit offset or Z, and shift is "
+            "a signed duration with its unit, added to the recorded times like "
+            "time_shift. Applied to each file as it is read, before its cells are "
+            "built; time_shift is added on top. A reading no row holds keeps its "
+            "recorded time and is counted and warned about. Relative paths resolve "
+            "against the manifest file's own directory (METHODS.md §12.3)."
+        ),
+    )
+
+    @field_validator("exclude_periods", "clock_corrections", mode="before")
     @classmethod
-    def _one_periods_file_as_a_string(cls, value: object) -> object:
+    def _one_file_as_a_string(cls, value: object) -> object:
         """Accept one file as a plain string, as ``path_template`` does."""
         if isinstance(value, str | Path):
             return (value,)
         return value
 
-    @field_validator("exclude_periods")
+    @field_validator("exclude_periods", "clock_corrections")
     @classmethod
-    def _periods_files_are_distinct(cls, value: tuple[Path, ...]) -> tuple[Path, ...]:
-        """Refuse a file listed twice: it would mask the same periods twice and count them once."""
+    def _files_are_distinct(cls, value: tuple[Path, ...], info: ValidationInfo) -> tuple[Path, ...]:
+        """Refuse a file listed twice: its rows would apply twice and count once."""
         if len(set(value)) != len(value):
             raise ValueError(
-                f"exclude_periods lists a file more than once: {[str(p) for p in value]}."
+                f"{info.field_name} lists a file more than once: {[str(p) for p in value]}."
             )
         return value
 

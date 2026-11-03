@@ -38,6 +38,9 @@ __all__ = [
     "BOUNDS_ATTR",
     "BOUNDS_DIM",
     "CELL_METHODS_ATTR",
+    "CLOCK_CORRECTIONS_ATTR",
+    "CLOCK_CORRECTIONS_FILES_ATTR",
+    "CLOCK_UNCORRECTED_ATTR",
     "COVERAGE_PREFIX",
     "COVERAGE_WINDOW_PREFIX",
     "DISPERSION_SUFFIX",
@@ -55,6 +58,7 @@ __all__ = [
     "RAW_TIME_START_COLUMN",
     "RAW_TIME_STOP_COLUMN",
     "READINGS_ATTR",
+    "REFERENCE_CLOCK_ATTR",
     "RESULTANT_LENGTH_SUFFIX",
     "SIGMA_RAND_PREFIX",
     "SIGMA_SYS_PREFIX",
@@ -204,6 +208,22 @@ TIME_SHIFT_ATTR = "tsara_time_shift"
 #: under the kind ``period``, beside the other QA/QC rules.
 EXCLUDED_PERIODS_ATTR = "tsara_excluded_periods"
 EXCLUDED_PERIODS_FILES_ATTR = "tsara_excluded_periods_files"
+
+#: Stream attributes recording the clock corrections a manifest declared
+#: (``Manifest.clock_corrections``, METHODS §12.3).
+#:
+#: The first lists every row for the instrument, each as its stretch on the
+#: recorded clock, its shift (and the shift at the stretch's end, for a
+#: drift), its provenance and reason; the second names the files they came
+#: from; the third the instrument whose clock they put this one on; the last
+#: the share of the instrument's readings that no row held, which keep their
+#: recorded times. Written only for an instrument with at least one row, so
+#: an absent attribute means no correction was declared for it -- the
+#: reference clock's own instrument, for one.
+CLOCK_CORRECTIONS_ATTR = "tsara_clock_corrections"
+CLOCK_CORRECTIONS_FILES_ATTR = "tsara_clock_corrections_files"
+REFERENCE_CLOCK_ATTR = "tsara_reference_clock"
+CLOCK_UNCORRECTED_ATTR = "tsara_clock_uncorrected_share"
 
 #: Reserved columns by which a reader hands per-row cell boundaries to the
 #: rest of ingestion.

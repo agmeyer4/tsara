@@ -259,7 +259,11 @@ disagreements rather than picking a winner. (`METHODS.md` §9.2)
 rules per variable, plus `exclude_periods`: files listing the stretches a
 campaign knows to leave out, such as calibrations and a known-bad hour, each
 with its scope and reason. Readings inside them are masked, never deleted,
-and counted like any rule. (`METHODS.md` §9.4)
+and counted like any rule. (`METHODS.md` §9.4) Clocks are declared the same
+way: `clock_corrections` names files of shifts, one row per stretch of one
+instrument, that put every instrument on one reference clock; each file's
+times are corrected as it is read, and a reading no row holds keeps its time
+and is counted. (`METHODS.md` §12)
 
 **A value is not an instant.** Most real archives publish intervals: a
 1-minute mean, a canister fill, a sample whose timestamp is a start time by

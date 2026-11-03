@@ -55,6 +55,9 @@ from tsara.config.manifest import MobilePlatform, StationaryPlatform
 from tsara.core.circular import wrap_degrees
 from tsara.core.naming import (
     ALTITUDE_COORD,
+    CLOCK_CORRECTIONS_ATTR,
+    CLOCK_CORRECTIONS_FILES_ATTR,
+    CLOCK_UNCORRECTED_ATTR,
     EXCLUDED_PERIODS_ATTR,
     EXCLUDED_PERIODS_FILES_ATTR,
     LATITUDE_COORD,
@@ -62,6 +65,7 @@ from tsara.core.naming import (
     LONGITUDE_COORD,
     RAW_TIME_START_COLUMN,
     RAW_TIME_STOP_COLUMN,
+    REFERENCE_CLOCK_ATTR,
     TIME_COORD,
     TIME_SHIFT_ATTR,
     sigma_rand_name,
@@ -80,6 +84,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from pathlib import Path
 
     from tsara.config.manifest import InstrumentConfig, PlatformConfig, VariableConfig
+    from tsara.ingest.clocks import ClockRecord
     from tsara.ingest.periods import ExcludedPeriod
     from tsara.ingest.support import ResolvedSupport
 
@@ -100,6 +105,7 @@ def build_stream(
     support: ResolvedSupport | None = None,
     time_shift: str | None = None,
     periods: Sequence[ExcludedPeriod] = (),
+    clock: ClockRecord | None = None,
 ) -> xr.Dataset:
     """Turn one instrument's combined raw table into a native-rate stream.
 
@@ -147,6 +153,11 @@ def build_stream(
         by the ones that cover it, with the other QA/QC rules; the stream
         records them all, and a period covering none of the instrument's
         readings is logged, since the data it names may not be loaded.
+    clock : ClockRecord, optional
+        The clock corrections orchestration has *already applied* to each
+        file (:mod:`tsara.ingest.clocks`), recorded here for the reason
+        ``time_shift`` is: the axis is final. Written into the stream's
+        attributes only when the instrument has at least one row.
 
     Returns
     -------
@@ -195,6 +206,7 @@ def build_stream(
             bounds=bounds,
             time_shift=time_shift,
             periods=periods,
+            clock=clock,
         ),
     )
     if bounds is not None and support is not None:
@@ -436,6 +448,7 @@ def _stream_attrs(
     bounds: CellBounds | None = None,
     time_shift: str | None = None,
     periods: Sequence[ExcludedPeriod] = (),
+    clock: ClockRecord | None = None,
 ) -> dict[str, Any]:
     """Build the self-describing attrs every stream carries.
 
@@ -474,6 +487,13 @@ def _stream_attrs(
         # what it did.
         attrs[EXCLUDED_PERIODS_ATTR] = describe_periods(periods)
         attrs[EXCLUDED_PERIODS_FILES_ATTR] = ", ".join(sorted({p.source for p in periods}))
+    if clock is not None and clock.rows:
+        # Every row for the instrument, whether or not it held a reading:
+        # what the table said, beside the share of readings it did not reach.
+        attrs[CLOCK_CORRECTIONS_ATTR] = "; ".join(row.describe() for row in clock.rows)
+        attrs[CLOCK_CORRECTIONS_FILES_ATTR] = ", ".join(sorted({r.source for r in clock.rows}))
+        attrs[REFERENCE_CLOCK_ATTR] = clock.rows[0].reference_clock
+        attrs[CLOCK_UNCORRECTED_ATTR] = clock.uncorrected_share
     if campaign:
         attrs["campaign"] = campaign
     if instrument.description:

@@ -5,7 +5,8 @@ is the one that turns a validated :class:`~tsara.config.manifest.Manifest`
 into the object later phases actually start from, by driving the pieces in
 the one order that is correct:
 
-    crawl → read each file → concatenate → sort → de-duplicate → assemble
+    crawl → read each file → correct its clock → concatenate → sort →
+    de-duplicate → assemble
 
 Why concatenate before assembling, rather than per file
 -------------------------------------------------------
@@ -50,10 +51,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
+from tsara.core.clocks import read_clock_corrections
 from tsara.core.naming import LOD_COUNT_KEY, SupportLabel
 from tsara.core.support import nominal_cadence_ns
 from tsara.core.timebase import epoch_ns
 from tsara.ingest.base import TsaraIngestError
+from tsara.ingest.clocks import ClockRecord, check_clock_corrections, corrections_for
 from tsara.ingest.crawler import crawl
 from tsara.ingest.periods import check_excluded_periods, periods_for, read_excluded_periods
 from tsara.ingest.registry import read_file
@@ -142,6 +145,8 @@ class _Ingested:
     #: Resolved here rather than in stream assembly because the per-file
     #: boundaries this is derived from only exist before concatenation.
     support: ResolvedSupport
+    #: The instrument's clock corrections and what they did, file by file.
+    clock: ClockRecord
     files: list[Path] = field(default_factory=list)
     #: What the files said about themselves, reconciled across all of them.
     #: See :func:`_merge_file_attrs`.
@@ -192,20 +197,33 @@ def ingest_campaign(
     ------
     TsaraIngestError
         If a requested instrument is not in the manifest, an instrument
-        matches no files, or every one of its files fails to read.
+        matches no files, every one of its files fails to read, or a
+        clock-correction row names an instrument the manifest lacks.
+    TsaraClockError
+        If a clock-correction file cannot be read or says something
+        impossible (:func:`tsara.core.clocks.read_clock_corrections`).
     """
     selected = _select(manifest, instruments)
     # Read once for the campaign and checked against every name before any
-    # data file is read, so a typo in a periods file fails fast rather than
-    # after a thousand-file crawl (tsara.ingest.periods).
+    # data file is read, so a typo in a periods or correction file fails fast
+    # rather than after a thousand-file crawl (tsara.ingest.periods,
+    # tsara.ingest.clocks).
     periods = read_excluded_periods(manifest.exclude_periods)
     check_excluded_periods(periods, manifest)
+    corrections = read_clock_corrections(manifest.clock_corrections)
+    check_clock_corrections(corrections, manifest)
 
     streams: dict[str, xr.Dataset] = {}
     for name in selected:
         instrument = manifest.instruments[name]
         logger.info("Ingesting instrument '%s'.", name)
-        ingested = _ingest_instrument(manifest, name, instrument)
+        clock = ClockRecord(corrections_for(corrections, name))
+        if corrections and not clock.rows:
+            logger.info(
+                "Instrument '%s': no clock correction declared; its recorded times are kept.",
+                name,
+            )
+        ingested = _ingest_instrument(manifest, name, instrument, clock=clock)
         streams[name] = build_stream(
             ingested.frame,
             instrument,
@@ -217,6 +235,7 @@ def ingest_campaign(
             support=ingested.support,
             time_shift=instrument.time_shift,
             periods=periods_for(periods, name),
+            clock=ingested.clock,
         )
         logger.info(
             "Instrument '%s': %d samples from %d file(s).",
@@ -241,8 +260,20 @@ def _select(manifest: Manifest, instruments: Sequence[str] | None) -> list[str]:
     return list(instruments)
 
 
-def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConfig) -> _Ingested:
-    """Crawl, read, concatenate, sort and de-duplicate one instrument."""
+def _ingest_instrument(
+    manifest: Manifest,
+    name: str,
+    instrument: InstrumentConfig,
+    *,
+    clock: ClockRecord | None = None,
+) -> _Ingested:
+    """Crawl, read, correct, concatenate, sort and de-duplicate one instrument.
+
+    ``clock`` carries the instrument's clock corrections; None means it has
+    none, and every recorded time is kept.
+    """
+    if clock is None:
+        clock = ClockRecord(())
     matches = crawl(manifest.base_path, instrument.loader, instrument.metadata)
     logger.debug("Instrument '%s': %d file(s) matched.", name, len(matches))
 
@@ -268,9 +299,14 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
             failures += 1
             logger.error("Skipping '%s' for instrument '%s': %s", match.path, name, exc)
             continue
-        frames.append(table.frame)
+        # The clock is corrected here, per file and before the cadence is
+        # measured, so that cadence and cells are built on corrected times and
+        # each reading is looked up by the time its own file recorded
+        # (METHODS.md §12.3). A no-op for an instrument with no rows.
+        frame = clock.correct(table.frame)
+        frames.append(frame)
         files.append(match.path)
-        cadences.append(nominal_cadence_ns(epoch_ns(pd.DatetimeIndex(table.frame.index))))
+        cadences.append(nominal_cadence_ns(epoch_ns(pd.DatetimeIndex(frame.index))))
         hint = table.attrs.get(LABEL_HINT_KEY)
         hints.append(str(hint) if hint is not None else None)
         # Kept, not discarded: this is what the file said about *itself*
@@ -291,6 +327,7 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
             failures,
             len(matches),
         )
+    clock.report(name)
 
     combined = frames[0] if len(frames) == 1 else pd.concat(frames)
     # Resolved before ordering, because the per-row width array below is
@@ -315,6 +352,7 @@ def _ingest_instrument(manifest: Manifest, name: str, instrument: InstrumentConf
         files=files,
         file_attrs=_merge_file_attrs(file_attrs),
         support=support,
+        clock=clock,
     )
 
 

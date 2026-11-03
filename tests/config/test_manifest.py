@@ -1024,3 +1024,37 @@ def test_exclude_periods_refuses_a_file_listed_twice(
     spec["exclude_periods"] = ["calibrations.csv", "calibrations.csv"]
     with pytest.raises(ValidationError, match="more than once"):
         Manifest.model_validate(spec)
+
+
+# ---------------------------------------------------------------------------
+# Clock corrections
+# ---------------------------------------------------------------------------
+
+
+def test_clock_corrections_default_to_nothing(stationary_manifest_dict: dict[str, Any]) -> None:
+    assert Manifest.model_validate(stationary_manifest_dict).clock_corrections == ()
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "expected"),
+    [
+        ("clock_corrections", "clocks.csv", (Path("clocks.csv"),)),
+        ("clock_correction", "clocks.csv", (Path("clocks.csv"),)),
+        ("clock_corrections", ["a.csv", "/abs/b.csv"], (Path("a.csv"), Path("/abs/b.csv"))),
+    ],
+)
+def test_clock_corrections_accept_a_string_a_list_and_the_singular(
+    stationary_manifest_dict: dict[str, Any], key: str, value: Any, expected: tuple[Path, ...]
+) -> None:
+    spec = copy.deepcopy(stationary_manifest_dict)
+    spec[key] = value
+    assert Manifest.model_validate(spec).clock_corrections == expected
+
+
+def test_clock_corrections_refuse_a_file_listed_twice(
+    stationary_manifest_dict: dict[str, Any],
+) -> None:
+    spec = copy.deepcopy(stationary_manifest_dict)
+    spec["clock_corrections"] = ["clocks.csv", "clocks.csv"]
+    with pytest.raises(ValidationError, match="clock_corrections lists a file more than once"):
+        Manifest.model_validate(spec)

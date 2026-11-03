@@ -4057,6 +4057,15 @@ against hand-written expectations.
 Only observable variables are exported; the `truth_`-prefixed answer key
 stays behind, and a test asserts no exported header contains it.
 
+**Clock errors** (Phase 3.6) are injected the same way: `export_raw`'s
+`clock_errors` writes stretches of an instrument's files on a wrong clock and
+the correction table that undoes them (§12.3), leaving the readings between
+stretches as they are, so the round trip checks that ingestion corrects the
+first and leaves the second alone, across several files, with reported cells,
+in local time and beside a `time_shift`. The exporter refuses an archive no
+table can describe: stretches whose recorded spans would overlap, or a reading
+from outside every stretch that would be recorded inside one.
+
 **A second mutation round, on temporal support**, was run in Phase 3.5 and is
 recorded in §10.9. It scored three of five and reached five of five after two
 fixes — one of which was the same defect this section describes, in a new
@@ -6473,7 +6482,7 @@ after which stop) is not in the file. So a correction comes in two layers:
 The survey still runs on files of the first kind; it names what it sees there
 (§12.5) rather than fitting it.
 
-### 12.3 The correction table
+### 12.3 The correction table **[built 2026-11-03 — stage 1]**
 
 A manifest names one or more CSV files of corrections
 (`Manifest.clock_corrections`, read the way `exclude_periods` is, §9.4), one
@@ -6489,26 +6498,40 @@ row per stretch of one instrument:
 | `provenance` | `measured` (written by the survey) or `declared` (written by a person) |
 | `reason` | free text |
 
-Refused when read, as excluded periods are: a timestamp without an offset; an
-end not after its start; two rows of one instrument that overlap; an
-instrument the manifest does not declare; a column the format does not know;
-an empty file; a file listed twice.
+Refused when read, as excluded periods are: a timestamp without an offset; a
+shift without a unit (a bare `10` could be seconds or nanoseconds); an end not
+after its start; a provenance other than the two; a column the format does not
+know; an empty file; a file listed twice; an instrument or reference clock the
+manifest does not declare. And three things the rows say together: two rows of
+one instrument that overlap, since a reading in both would have two shifts; a
+row putting an instrument on its own clock; and **more than one reference clock
+across the table**, since a campaign is corrected onto one clock, and streams
+put onto two would each line up with their own reference while sitting apart
+from each other by whatever separates the two clocks. The format lives in
+`tsara.core.clocks`, because ingestion reads it and the survey writes it, and
+stages never import each other.
 
 **Applied per file, right after the file is read and before its cadence is
 measured**, so that cadence and cells are built on corrected times (§10.5);
 `time_shift` is then added on top, unchanged. Each reading is shifted by the
 row whose stretch holds its recorded time. A reading that no row holds is left
-as recorded and counted: the stream records the rows applied, the files they
-came from and the share of its readings left uncorrected, and a warning names
-the uncorrected stretches (decided: warn and label, not refuse). The attribute
-names are settled in the build and listed here then.
+as recorded and counted, and a warning names the uncorrected stretches
+(decided: warn and label, not refuse). For an instrument with at least one row
+the stream records `tsara_clock_corrections` (every row, as its stretch,
+shift, reference clock, provenance and reason), `tsara_clock_corrections_files`,
+`tsara_reference_clock` and `tsara_clock_uncorrected_share` (the share of its
+readings no row held); an instrument with none carries none of the four, the
+reference clock's own instrument for one. A row holding none of its
+instrument's readings is logged, since the data it names may not be loaded.
 
-**Left for the build, by measurement:** what a clock step inside a file does
-to the readings around it. A shift that falls from one row to the next puts
-later readings before earlier ones (an overlap); one that rises leaves a hole.
-Neither drops or merges a reading by itself; how the ordering and
-de-duplication of §9.8 should treat an overlap is decided on the real steps of
-§12.2.
+**A clock step inside a file.** A shift that falls from one row to the next
+puts later readings before earlier ones (an overlap); one that rises leaves a
+hole. As built, the correction drops and merges nothing: the readings it moves
+before an earlier reading of their own file are counted and warned about, then
+sorted with the rest, and the ordering and de-duplication of §9.8 treat them as
+any out-of-order readings, so one landing on an earlier reading's exact time is
+dropped as a duplicate. Whether that is right is decided on the real steps of
+§12.2 (§12.7).
 
 ### 12.4 The survey: measuring lags from tracer pairs
 

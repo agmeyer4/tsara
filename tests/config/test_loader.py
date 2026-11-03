@@ -610,6 +610,18 @@ def test_relative_exclude_periods_resolved_against_manifest_dir(
     )
 
 
+def test_relative_clock_corrections_resolved_against_manifest_dir(
+    write_yaml: WriteYaml, stationary_manifest_dict: dict[str, Any], tmp_path: Path
+) -> None:
+    spec = copy.deepcopy(stationary_manifest_dict)
+    spec["clock_corrections"] = ["clocks/survey.csv", "/abs/declared.csv"]
+    manifest = load_manifest(write_yaml(spec, "manifest.yaml"))
+    assert manifest.clock_corrections == (
+        (tmp_path / "clocks" / "survey.csv").resolve(),
+        Path("/abs/declared.csv"),
+    )
+
+
 def test_combined_config_resolves_exclude_periods_too(
     write_yaml: WriteYaml,
     stationary_manifest_dict: dict[str, Any],

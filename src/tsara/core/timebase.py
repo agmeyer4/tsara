@@ -166,3 +166,25 @@ def timestamp_epoch_s(stamp: pd.Timestamp) -> float:
         Seconds since 1970-01-01T00:00:00Z.
     """
     return timestamp_epoch_ns(stamp) / NS_PER_S
+
+
+def iso_utc(ns: int) -> str:
+    """Spell epoch nanoseconds as an ISO 8601 UTC timestamp ending in ``Z``.
+
+    The one spelling TSARA's messages and attributes use for an instant read
+    from a file the user wrote (an excluded period, a clock correction), so
+    that what a warning prints can be pasted back into such a file.
+
+    Parameters
+    ----------
+    ns : int
+        Nanoseconds since 1970-01-01T00:00:00Z.
+
+    Returns
+    -------
+    str
+        For example ``2024-08-20T18:00:00Z``.
+    """
+    import pandas as pd
+
+    return pd.Timestamp(ns, unit="ns").isoformat() + "Z"
