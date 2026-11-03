@@ -18,10 +18,14 @@ Shape of the subpackage
     The clock survey: every instrument's tiers on every segment, the chain to
     the reference clock, outliers, rows, clock steps and drifts, and the
     faults it names.
+``bundle``
+    Saving and reloading a clock survey: the table to review, the three tables
+    behind it, and the settings.
 """
 
 from __future__ import annotations
 
+from tsara.survey.bundle import load_clock_survey, save_clock_survey
 from tsara.survey.clocks import FAULT_KINDS, ClockSurvey, survey_clocks
 from tsara.survey.lags import (
     SecondsSeries,
@@ -37,7 +41,9 @@ __all__ = [
     "SecondsSeries",
     "SegmentLag",
     "TsaraSurveyError",
+    "load_clock_survey",
     "pooled_lag",
+    "save_clock_survey",
     "seconds_series",
     "survey_clocks",
 ]

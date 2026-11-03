@@ -17,7 +17,7 @@ Both are opt-in, because each takes longer than the rest of the suite:
   ``docs/METHODS.md`` quotes, re-measured from the files, and a count of the
   checks made from the definitions; the test requires no ledger entry to
   differ and every check to hold.
-* ``04``, ``05``, ``06`` and ``07`` run when ``TSARA_NOTEBOOKS`` is set to anything
+* ``04``, ``05``, ``06``, ``07`` and ``08`` run when ``TSARA_NOTEBOOKS`` is set to anything
   (about a minute each; generated data only). Each scoreboard cell prints
   ``N of N checks hold``, and the test requires exactly that.
 * ``05b`` and ``06b`` run with ``04b`` when ``TSARA_ARCHIVE`` is set, under the
@@ -64,7 +64,7 @@ requires_archive = pytest.mark.skipif(
 )
 requires_opt_in = pytest.mark.skipif(
     not os.environ.get(NOTEBOOKS_ENV),
-    reason=f"Set {NOTEBOOKS_ENV}=1 to execute notebooks 04, 05 and 06 (about a minute each, "
+    reason=f"Set {NOTEBOOKS_ENV}=1 to execute notebooks 04 to 08 (about a minute each, "
     "generated data only).",
 )
 
@@ -164,6 +164,7 @@ def test_real_data_notebook_executes_and_its_ledger_agrees(tmp_path: Path, name:
         "05_baseline_state_walkthrough",
         "06_events_walkthrough",
         "07_ratios_walkthrough",
+        "08_clocks_walkthrough",
     ],
 )
 def test_generated_data_notebook_executes_and_every_check_holds(tmp_path: Path, name: str) -> None:

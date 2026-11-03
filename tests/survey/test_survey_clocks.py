@@ -167,7 +167,13 @@ def test_a_slow_drift_is_one_row_with_a_shift_end() -> None:
     (row,) = survey.rows
     assert row.shift_end_ns is not None
     assert row.shift_ns / SECOND == pytest.approx(-1.0, abs=1.0)
-    assert row.shift_end_ns / SECOND == pytest.approx(-7.0, abs=1.0)
+    # The row reaches over the record's short last segment, to 01:10. Found
+    # building notebook 08: the line must be evaluated at the row's own end, or
+    # the same change is spread over a longer stretch and the rate comes out
+    # low (1 s per 700 s here instead of per 600).
+    assert row.end_ns == _ns(4200)
+    rate = (row.shift_ns - row.shift_end_ns) / (row.end_ns - row.start_ns)
+    assert rate == pytest.approx(1 / 600, rel=0.05)
     (drift,) = _faults(survey, "clock drift")
     assert "s per hour" in drift["detail"]
 

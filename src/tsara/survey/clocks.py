@@ -83,7 +83,14 @@ if TYPE_CHECKING:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ClockSurvey", "FAULT_KINDS", "survey_clocks"]
+__all__ = [
+    "ClockSurvey",
+    "FAULT_COLUMNS",
+    "FAULT_KINDS",
+    "MEASUREMENT_COLUMNS",
+    "SEGMENT_COLUMNS",
+    "survey_clocks",
+]
 
 #: The faults the survey names (``docs/METHODS.md`` §12.5).
 FAULT_KINDS = (
@@ -104,30 +111,39 @@ _LOGGING_STOP_NS = 60 * SECOND_NS
 #: Same-signed clock steps in a row that make a fast drift.
 _FAST_DRIFT_STEPS = 3
 
-_MEASUREMENT_COLUMNS = (
-    "instrument",
-    "tier",
-    "partner",
-    "start",
-    "end",
-    "lag_s",
-    "r",
-    "n_pairs",
-    "at_edge",
-    "pairs_disagree",
-    "decided",
-)
-_SEGMENT_COLUMNS = (
-    "instrument",
-    "start",
-    "end",
-    "tier",
-    "partner",
-    "lag_s",
-    "lag_to_reference_s",
-    "status",
-)
-_FAULT_COLUMNS = ("instrument", "kind", "start", "end", "detail")
+#: The columns of the survey's three tables and their types, declared so that
+#: an empty table has the same types as a full one and a saved table reloads
+#: exactly (:mod:`tsara.survey.bundle`).
+MEASUREMENT_COLUMNS: dict[str, str] = {
+    "instrument": "str",
+    "tier": "int64",
+    "partner": "str",
+    "start": "str",
+    "end": "str",
+    "lag_s": "float64",
+    "r": "float64",
+    "n_pairs": "int64",
+    "at_edge": "bool",
+    "pairs_disagree": "bool",
+    "decided": "bool",
+}
+SEGMENT_COLUMNS: dict[str, str] = {
+    "instrument": "str",
+    "start": "str",
+    "end": "str",
+    "tier": "int64",
+    "partner": "str",
+    "lag_s": "float64",
+    "lag_to_reference_s": "float64",
+    "status": "str",
+}
+FAULT_COLUMNS: dict[str, str] = {
+    "instrument": "str",
+    "kind": "str",
+    "start": "str",
+    "end": "str",
+    "detail": "str",
+}
 
 #: Gives the prepared series of one variable of one instrument.
 _SeriesOf = Callable[[str, str], SecondsSeries]
@@ -299,12 +315,17 @@ def survey_clocks(streams: Mapping[str, xr.Dataset], config: SurveyConfig) -> Cl
             "".join(f", {n} {kind}" for kind, n in sorted(kinds.items())),
         )
     return ClockSurvey(
-        measurements=pd.DataFrame(measurements, columns=list(_MEASUREMENT_COLUMNS)),
-        segments=pd.DataFrame(segments, columns=list(_SEGMENT_COLUMNS)),
+        measurements=_table(measurements, MEASUREMENT_COLUMNS),
+        segments=_table(segments, SEGMENT_COLUMNS),
         rows=tuple(rows),
-        faults=pd.DataFrame(faults, columns=list(_FAULT_COLUMNS)),
+        faults=_table(faults, FAULT_COLUMNS),
         config=config,
     )
+
+
+def _table(records: Sequence[Mapping[str, object]], columns: Mapping[str, str]) -> pd.DataFrame:
+    """Build one of the survey's tables with its declared columns and types."""
+    return pd.DataFrame(list(records), columns=list(columns)).astype(dict(columns))
 
 
 def _settings(config: SurveyConfig) -> _Settings:
@@ -551,7 +572,7 @@ def _rows(
     rows = []
     for run, (start_ns, end_ns) in zip(runs, spans, strict=True):
         lags = np.array([decided[k] for k in run])
-        shift_ns, shift_end_ns = _shifts(run, lags, edges, settings.tolerance_s)
+        shift_ns, shift_end_ns = _shifts(run, lags, edges, start_ns, end_ns, settings.tolerance_s)
         if shift_end_ns is not None:
             hours = (end_ns - start_ns) / NS_PER_S / SECONDS_PER_HOUR
             faults.append(
@@ -665,14 +686,23 @@ def _shifts(
     run: Sequence[int],
     lags: npt.NDArray[np.float64],
     edges: npt.NDArray[np.int64],
+    start_ns: int,
+    end_ns: int,
     tolerance_s: float,
 ) -> tuple[int, int | None]:
-    """Return a row's shift, and its shift at the end when the row drifts."""
+    """Return a row's shift, and its shift at the end when the row drifts.
+
+    The line through the run's segment lags is evaluated at the row's own start
+    and end, which may lie beyond the run's segments: a row reaching over a
+    record's short end segments, or meeting its neighbour at a step's gap. Found
+    building notebook 08: evaluated at the last segment's edge instead, a row
+    reaching 10 minutes further spread the same change over a longer stretch, so
+    a clock drifting 6 s an hour was corrected at 5.4.
+    """
     if len(run) >= 3:
-        origin = float(edges[run[0]])
-        mids = np.array([(edges[k] + edges[k + 1]) / 2 - origin for k in run], dtype=np.float64)
+        mids = np.array([(edges[k] + edges[k + 1]) / 2 - start_ns for k in run], dtype=np.float64)
         slope, intercept = np.polyfit(mids, lags, 1)
-        at_end = intercept + slope * (float(edges[run[-1] + 1]) - origin)
+        at_end = intercept + slope * float(end_ns - start_ns)
         if abs(at_end - intercept) > tolerance_s:
             return -_ns(intercept), -_ns(at_end)
     return -_ns(float(np.median(lags))), None

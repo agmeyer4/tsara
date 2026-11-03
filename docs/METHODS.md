@@ -6533,7 +6533,7 @@ any out-of-order readings, so one landing on an earlier reading's exact time is
 dropped as a duplicate. Whether that is right is decided on the real steps of
 §12.2 (§12.7).
 
-### 12.4 The survey: measuring lags from tracer pairs **[built 2026-11-03 — stage 2]**
+### 12.4 The survey: measuring lags from tracer pairs **[built 2026-11-03 — stages 2 and 3]**
 
 `tsara.survey` measures, before the pipeline, what a manifest can declare but
 files do not state; clocks are its first measurement (`tsara.survey.clocks`,
@@ -6620,7 +6620,14 @@ too-short segments at the record's ends, the slivers a record's first and last
 segments usually are. A row of three or more segments whose least-squares line
 through their lags changes by more than the tolerance across the row is a
 clock drift, written with `shift_end`; otherwise the row's shift is minus the
-median lag.
+median lag. The line is evaluated at the row's own start and end, which may lie
+beyond its segments (a row reaching over a record's short end segments, or
+meeting its neighbour at a step's gap). Found building notebook 08: evaluated
+at the last segment's edge instead, a row reaching ten minutes further spread
+the same change over a longer stretch, so a clock drifting 6 s an hour was
+corrected at 5.4. A segment's lag is a whole number of seconds, so a drifting
+clock's points sit on a staircase up to half a second off the true line; the
+line through them recovers the rate.
 
 **Where a step goes.** A step happens where a logger stopped or its clock
 jumped, not at a segment edge. Between two rows across a step, the survey
@@ -6644,10 +6651,15 @@ and gets no rows (fault `after-check`): its lags are the residuals of a table
 already applied, and every decided one should sit within about a second of
 zero.
 
-**The table written.** `write_clock_corrections` (`tsara.core.clocks`) checks the
-rows as a table first, so that a file it writes is one ingestion accepts, and
-writes each shift as exact decimal seconds (`-10.5s`), since a person reads it.
-It refuses to write no rows.
+**The table written, and the survey saved.** `write_clock_corrections`
+(`tsara.core.clocks`) checks the rows as a table first, so that a file it writes
+is one ingestion accepts, and writes each shift as exact decimal seconds
+(`-10.5s`), since a person reads it. It refuses to write no rows.
+`save_clock_survey` writes a bundle's `survey/` directory: the table as
+`clock_corrections.csv` (absent when no row was derived, and a stale one
+removed), the three tables behind it as Parquet with declared column types, and
+the settings as a survey YAML; `load_clock_survey` reads it back exactly, each
+row through the reader ingestion uses.
 
 **Checked on a known answer.** Three methane analyzers on generated plumes,
 exported with clock errors (one 7 s fast, then 19 s fast from the second

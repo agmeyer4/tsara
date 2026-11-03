@@ -31,12 +31,18 @@ __all__ = [
     "BUNDLE_BASELINE_DIR",
     "BUNDLE_CANDIDATES_FILE",
     "BUNDLE_CATALOG_FILE",
+    "BUNDLE_CLOCK_TABLE_FILE",
     "BUNDLE_EVENTS_DIR",
     "BUNDLE_FORMAT_VERSION",
     "BUNDLE_GRID_FILE",
     "BUNDLE_MANIFEST",
     "BUNDLE_STAGE_KEY",
     "BUNDLE_STREAMS_DIR",
+    "BUNDLE_SURVEY_CONFIG",
+    "BUNDLE_SURVEY_DIR",
+    "BUNDLE_SURVEY_FAULTS_FILE",
+    "BUNDLE_SURVEY_MEASUREMENTS_FILE",
+    "BUNDLE_SURVEY_SEGMENTS_FILE",
     "BUNDLE_VERSION_WITHOUT_PROMISED_ESTIMATES",
     "BUNDLE_VERSION_WITH_CELLS",
     "BUNDLE_VERSION_WITH_READINGS_AND_PROVENANCE",
@@ -87,6 +93,17 @@ BUNDLE_ANALYSIS_CONFIG = "analysis.yaml"
 BUNDLE_EVENTS_DIR = "events"
 BUNDLE_CATALOG_FILE = "catalog.parquet"
 BUNDLE_CANDIDATES_FILE = "candidates.parquet"
+
+#: Subdirectory holding a clock survey: the correction table it derived, for a
+#: person to review and name in a manifest, the three tables behind it, and the
+#: survey settings. A directory beside the others for the baseline state's
+#: reason, although the survey runs before the pipeline rather than inside it.
+BUNDLE_SURVEY_DIR = "survey"
+BUNDLE_SURVEY_CONFIG = "survey.yaml"
+BUNDLE_CLOCK_TABLE_FILE = "clock_corrections.csv"
+BUNDLE_SURVEY_MEASUREMENTS_FILE = "measurements.parquet"
+BUNDLE_SURVEY_SEGMENTS_FILE = "segments.parquet"
+BUNDLE_SURVEY_FAULTS_FILE = "faults.parquet"
 
 #: Bumped only when the layout changes incompatibly, so a future reader can
 #: refuse (or migrate) an old bundle rather than misinterpreting it.

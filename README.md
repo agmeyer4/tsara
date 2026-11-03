@@ -415,6 +415,16 @@ without being run, and none needs any real data:
   definition, the tree that links a blip's candidates across windows, height
   against agreement as evidence on the answer key, and what the ratio stage
   receives. Same shape as 05.
+- [`08_clocks_walkthrough.ipynb`](examples/notebooks/08_clocks_walkthrough.ipynb)
+  — clocks: what a few seconds' error costs a per-plume fit between two
+  analyzers of one gas; an archive written on wrong clocks and the correction
+  table that puts it right as each file is read (and the readings a missing
+  row leaves alone, counted); one segment's lag from shared plumes against a
+  loop written from the definition; the survey on a whole campaign, the chain
+  through a partner to the reference clock and a step placed where it
+  happened; a drifting clock, an outlier and an undecided stretch, named; and
+  the loop closed, the survey's own table applied and the campaign surveyed
+  again. Same shape as 05.
 
 Three companions run on the real campaign archive instead, and are therefore
 committed **without** outputs:
@@ -451,7 +461,7 @@ pytest --cov=tsara --cov-branch     # suite; the 100% line+branch floor fails th
 TSARA_ARCHIVE=/path/to/Data TSARA_NOTEBOOKS=1 pytest tests/test_notebooks.py \
     tests/events/test_candidates_real_drive.py
                             # opt-in: executes notebooks 04b, 05b and 06b (against
-                            # the archive) and 04, 05, 06 and 07, and requires every
+                            # the archive) and 04 to 08, and requires every
                             # check and ledger row to hold; re-measures METHODS
                             # §6.8's real drive
 TSARA_SLOW=1 pytest tests/events/test_methods_tables.py tests/events/test_candidate_tables.py
