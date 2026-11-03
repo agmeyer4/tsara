@@ -25,6 +25,7 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 2 | Synthetic data generator with ground-truth plumes *and* ground-truth error | ✅ done |
 | 3 | Ingestion (reader registry, CSV / ICARTT / Parquet, crawler, QA/QC, units, uncertainty) | ✅ done |
 | 3.5 | Temporal support: every value carries the interval of air it describes | ✅ done |
+| 3.6 | Clocks: a correction table applied at ingestion, and a survey that measures it from tracer pairs | in progress |
 | 4 | Alignment & pairing (one joining operation, error propagation, circular stats, output grid) | ✅ done |
 | 4.5 | One atmosphere, realized once and sampled by every instrument; a variable's `field` | ✅ done |
 | 4.6 | How support may be changed at all: one per-pair rule, a record on every column of what the join did, the borrowed share | ✅ done |
