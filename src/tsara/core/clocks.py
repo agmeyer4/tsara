@@ -60,7 +60,7 @@ import numpy as np
 import pandas as pd
 
 from tsara.core.exceptions import TsaraError
-from tsara.core.timebase import NS_PER_S, iso_utc, timestamp_epoch_ns
+from tsara.core.timebase import NS_PER_S, SECOND_NS, iso_utc, timestamp_epoch_ns
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Iterable, Sequence
@@ -74,11 +74,24 @@ __all__ = [
     "TsaraClockError",
     "read_clock_corrections",
     "shift_at",
+    "write_clock_corrections",
 ]
 
 #: The columns a correction file must carry, and the ones it may.
 _REQUIRED_COLUMNS = ("instrument", "start", "end", "shift", "reference_clock", "provenance")
 _OPTIONAL_COLUMNS = ("shift_end", "reason")
+
+#: The order a written file's columns are in.
+_WRITTEN_COLUMNS = (
+    "instrument",
+    "start",
+    "end",
+    "shift",
+    "shift_end",
+    "reference_clock",
+    "provenance",
+    "reason",
+)
 
 #: Who wrote a row: the clock survey, or a person.
 _PROVENANCES = ("measured", "declared")
@@ -376,6 +389,67 @@ def shift_at(
             shift[inside] = row.shift_ns + np.rint(change * fraction).astype(np.int64)
         covered |= inside
     return shift, covered
+
+
+def write_clock_corrections(rows: Sequence[ClockCorrection], path: str | Path) -> Path:
+    """Write rows as a correction file that :func:`read_clock_corrections` reads back exactly.
+
+    The rows are checked as a table first, so that a file this writes is one
+    ingestion accepts. Shifts are written as decimal seconds, exact to the
+    nanosecond (``-10.5s``), since a person reviews the table before it is
+    used.
+
+    Parameters
+    ----------
+    rows : Sequence of ClockCorrection
+        The rows, written in the order given.
+    path : str or pathlib.Path
+        The CSV to write; its directory must exist.
+
+    Returns
+    -------
+    pathlib.Path
+        The file written.
+
+    Raises
+    ------
+    TsaraClockError
+        If there are no rows (an empty file is refused when read), or the rows
+        say something impossible together (:func:`read_clock_corrections`).
+    """
+    if not rows:
+        raise TsaraClockError(
+            "No clock corrections to write: a table with no rows is refused when read."
+        )
+    _check_table(rows)
+    target = Path(path)
+    pd.DataFrame(
+        [
+            {
+                "instrument": row.instrument,
+                "start": iso_utc(row.start_ns),
+                "end": iso_utc(row.end_ns),
+                "shift": _duration_text(row.shift_ns),
+                "shift_end": "" if row.shift_end_ns is None else _duration_text(row.shift_end_ns),
+                "reference_clock": row.reference_clock,
+                "provenance": row.provenance,
+                "reason": row.reason,
+            }
+            for row in rows
+        ],
+        columns=list(_WRITTEN_COLUMNS),
+    ).to_csv(target, index=False)
+    logger.info("Wrote %d clock correction(s) to '%s'.", len(rows), target)
+    return target
+
+
+def _duration_text(ns: int) -> str:
+    """Spell nanoseconds as exact decimal seconds with their unit: ``-10.5s``."""
+    whole, fraction = divmod(abs(ns), SECOND_NS)
+    text = f"{'-' if ns < 0 else ''}{whole}"
+    if fraction:
+        text += "." + f"{fraction:09d}".rstrip("0")
+    return text + "s"
 
 
 def _seconds(ns: int) -> str:

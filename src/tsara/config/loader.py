@@ -14,7 +14,7 @@ unique keys, but PyYAML's ``safe_load`` keeps whichever value came last and
 says nothing, so a variable pasted twice under one instrument would have
 silently lost its first definition.
 
-Four entry points:
+Five entry points:
 
 * :func:`load_manifest` — a YAML file containing a manifest.
 * :func:`load_analysis` — a YAML file containing analysis settings.
@@ -24,6 +24,8 @@ Four entry points:
   regression reference species must actually be a declared gas).
 * :func:`load_synthetic` — a YAML file describing a synthetic dataset to
   manufacture (Phase 2).
+* :func:`load_survey` — a YAML file of survey settings: what to measure
+  before the pipeline, such as each instrument's clock (Phase 3.6).
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from yaml.constructor import ConstructorError
 from tsara.config.analysis import AnalysisConfig, FromFieldMethod
 from tsara.config.base import StrictModel as _StrictModel
 from tsara.config.manifest import Manifest
+from tsara.config.survey import SurveyConfig
 from tsara.config.synthetic import SyntheticConfig
 from tsara.core.exceptions import TsaraConfigError
 
@@ -489,6 +492,30 @@ def load_synthetic(path: str | Path) -> SyntheticConfig:
     path = Path(path)
     config: SyntheticConfig = _validate(SyntheticConfig, read_yaml(path), path)
     logger.info("Loaded synthetic config '%s' from %s", config.name, path)
+    return config
+
+
+def load_survey(path: str | Path) -> SurveyConfig:
+    """Load and validate a survey-settings YAML file.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Path to the survey YAML.
+
+    Returns
+    -------
+    SurveyConfig
+        Frozen, validated survey settings.
+
+    Raises
+    ------
+    TsaraConfigError
+        If the file is missing, is not valid YAML, or fails validation.
+    """
+    path = Path(path)
+    config: SurveyConfig = _validate(SurveyConfig, read_yaml(path), path)
+    logger.info("Loaded survey settings from %s", path)
     return config
 
 

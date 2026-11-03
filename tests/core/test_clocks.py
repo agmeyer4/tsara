@@ -17,7 +17,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tsara.core.clocks import ClockCorrection, TsaraClockError, read_clock_corrections, shift_at
+from tsara.core.clocks import (
+    ClockCorrection,
+    TsaraClockError,
+    read_clock_corrections,
+    shift_at,
+    write_clock_corrections,
+)
 
 HEADER = "instrument,start,end,shift,shift_end,reference_clock,provenance,reason\n"
 
@@ -396,3 +402,59 @@ def test_no_rows_shift_nothing() -> None:
     shift, covered = shift_at([], times)
     assert shift.tolist() == [0]
     assert covered.tolist() == [False]
+
+
+# ---------------------------------------------------------------------------
+# Writing a table
+# ---------------------------------------------------------------------------
+
+
+def test_a_written_table_reads_back_exactly(tmp_path: Path) -> None:
+    rows = [
+        _row("2024-08-05T18:00:00Z", "2024-08-05T19:00:00Z", -10.5),
+        _row("2024-08-05T19:00:00Z", "2024-08-05T20:00:00.5Z", -0.000000001, 3.25),
+        dataclasses.replace(
+            _row("2024-08-05T18:00:00Z", "2024-08-05T20:00:00Z", 2, instrument="miro"),
+            reason='survey: 4 segments, "tier 1", lags +2 to +2 s',
+        ),
+    ]
+    path = write_clock_corrections(rows, tmp_path / "written.csv")
+    text = path.read_text(encoding="utf-8").splitlines()
+    assert text[0] == "instrument,start,end,shift,shift_end,reference_clock,provenance,reason"
+    assert text[1] == "aeris,2024-08-05T18:00:00Z,2024-08-05T19:00:00Z,-10.5s,,airmar,measured,"
+    assert ",-0.000000001s,3.25s," in text[2]
+    back = read_clock_corrections([path])
+    fields = (
+        "instrument",
+        "start_ns",
+        "end_ns",
+        "shift_ns",
+        "shift_end_ns",
+        "reference_clock",
+        "provenance",
+        "reason",
+    )
+    assert [[getattr(r, f) for f in fields] for r in back] == [
+        [getattr(r, f) for f in fields] for r in rows
+    ]
+    assert [(r.source, r.line) for r in back] == [
+        ("written.csv", 2),
+        ("written.csv", 3),
+        ("written.csv", 4),
+    ]
+
+
+def test_an_empty_table_is_not_written(tmp_path: Path) -> None:
+    with pytest.raises(TsaraClockError, match="No clock corrections to write"):
+        write_clock_corrections([], tmp_path / "empty.csv")
+    assert not (tmp_path / "empty.csv").exists()
+
+
+def test_a_table_that_would_be_refused_is_not_written(tmp_path: Path) -> None:
+    rows = [
+        _row("2024-08-05T18:00:00Z", "2024-08-05T19:00:00Z", 1),
+        _row("2024-08-05T18:30:00Z", "2024-08-05T20:00:00Z", 2),
+    ]
+    with pytest.raises(TsaraClockError, match="overlap"):
+        write_clock_corrections(rows, tmp_path / "bad.csv")
+    assert not (tmp_path / "bad.csv").exists()

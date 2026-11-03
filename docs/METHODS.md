@@ -6533,13 +6533,15 @@ any out-of-order readings, so one landing on an earlier reading's exact time is
 dropped as a duplicate. Whether that is right is decided on the real steps of
 §12.2 (§12.7).
 
-### 12.4 The survey: measuring lags from tracer pairs
+### 12.4 The survey: measuring lags from tracer pairs **[built 2026-11-03 — stage 2]**
 
 `tsara.survey` measures, before the pipeline, what a manifest can declare but
-files do not state; clocks are its first measurement (`tsara.survey.clocks`).
-It reads streams, never changes one, and writes a correction table with
-provenance `measured` and a report. **It is never applied by itself**: a
-person reviews the table and names it in the manifest.
+files do not state; clocks are its first measurement (`tsara.survey.clocks`,
+`survey_clocks`). It reads streams ingested without a correction table, never
+changes one, and returns its measurements, the rows of a correction table
+(provenance `measured`) and the faults it found. **It is never applied by
+itself**: `ClockSurvey.write_table` writes the rows for a person to review and
+name in the manifest.
 
 What it measures is a **lag**: how many seconds later one file puts the same
 air than another. That is the difference between the two clocks plus the
@@ -6548,56 +6550,136 @@ instruments' readings of one puff of air at one time needs exactly that sum,
 which is why the survey does not try to separate its parts. The shift it
 writes is minus the lag, composed to the reference clock.
 
-**Settings** (`SurveyConfig`, a YAML of its own, since the survey runs before
-the pipeline and not inside it): the reference clock; for each instrument an
-ordered list of tracer pairs, each naming the partner instrument and one
-variable on each side; the segment length (default 30 min, tunable); the
-search range; the minimum number of paired seconds in a segment; the decision
-threshold (default r ≥ 0.6); and the tolerance within which lags agree
-(default 2 s).
+**Settings** (`SurveyConfig`, a YAML of its own read by `load_survey`, since
+the survey runs before the pipeline and not inside it): the reference clock;
+for each instrument an ordered list of tiers, each naming a partner and one or
+more tracer pairs (`[variable here, variable on the partner]`), optionally
+with its own `min_pairs`; the segment length (default 30 min, tunable); the
+search range (default ±120 s, shorter than a segment); the minimum paired
+seconds (default 300); the decision threshold (default r ≥ 0.6); the tolerance
+(default 2 s); and the running median's window (default 121 s). Every chain of
+partners must reach the reference clock without a loop, and the reference
+clock's instrument has no tiers; both are refused at load.
 
-**One segment.** Each record is cut into segments of the set length. On a
-segment, both variables are put on whole seconds (each timestamp floored, the
-first reading of each second kept: a step inside the measurement, never
-written to a product) and each has its centred 121 s running median removed,
-so that plumes, not the background, drive the correlation. The lag is the L in
-the search range that maximizes Pearson's r between the partner's series at
-time t and the instrument's at t + L, over at least the minimum number of
-paired seconds. The segment is decided when that r reaches the threshold.
+**Segments.** One grid for every instrument: whole multiples of the segment
+length from the epoch, so that segment k of an instrument and of its partner
+are the same stretch of time. An instrument is measured on the segments where
+it has readings.
 
-**Tiers.** An instrument's tracer pairs are ranked. One gas on two analyzers
-comes first: the two share every plume and the same physics. Gases emitted
-together come next: they share only some plumes, and their lag also carries
-the difference in the analyzers' response times. A backup comes last. The
-first tier that decides a segment sets its lag; the others are reported beside
-it as checks.
+**One segment.** Each tracer variable is put on whole seconds (each timestamp
+floored, the first reading of each second kept: a step inside the
+measurement, never written to a product) and its centred running median is
+removed, so that plumes, not the background, drive the correlation. The median
+is used where its window holds at least a quarter of the readings it could
+(at least three), which keeps a 1 s record at 30 readings in 121 s and lets a
+5 s weather record take part. The lag is the L in the search range
+maximizing Pearson's r between the instrument's series at t and the partner's
+at t − L, over the segment's seconds where both have a value, when there are
+at least the minimum number of them. A best lag at the edge of the search is
+not decided, since the true one may lie beyond; measured while building, a
+true lag just beyond the search shows as its peak's shoulder at the edge, and
+one far beyond as a weak peak inside it, which the threshold refuses.
+
+**Tiers.** A tier with several pairs averages their correlation curves before
+the best lag is chosen, so that weak pairs sharing a lag strengthen each
+other. Averaging assumes they share it: measured while building, pairs certain
+alone at 4 s and at 10 s pool to a curve peaking at 7 s with r 0.76, a lag
+neither supports. So a pair that is decided on its own and puts its best lag
+further than the tolerance from the pooled one makes the tier's **pairs
+disagree**, and the tier undecided; a pair too weak to decide alone cannot.
+An instrument's tiers are ranked: one gas on two analyzers first (they share
+every plume and the same physics), gases emitted together next (they share
+only some plumes, and their lag also carries the difference in the analyzers'
+response times), a backup last. The first tier that decides a segment sets its
+lag. A later tier that decides too checks it: each tier's lag is composed to
+the reference clock through its own partner, and lags further apart than the
+tolerance are named.
+
+**The chain.** An instrument's lag against its partner, plus the partner's
+lag to the reference clock in the same segment, is its lag to the reference
+clock; the reference clock's instrument is zero everywhere, and a segment
+whose partner is undecided there is undecided (`partner undecided`). One
+well-measured link carries every instrument tied to it: on the 2024 SLC-SOS
+van, the Picarro log against the weather station by water, and every other
+analyzer against the Picarro log.
+
+**Outliers.** A decided segment whose lag differs by more than the tolerance
+from both its decided neighbours, while they agree with each other, is set
+aside: one segment against two is more likely a coincidence of plumes than two
+clock steps in a row. It stays inside the row around it.
 
 **Rows.** Consecutive decided segments whose lags agree within the tolerance
-become one row. A jump larger than the tolerance starts a new row and is
-reported as a clock step. A steady trend across a row (a straight line through
-its segments whose change over the row exceeds the tolerance) becomes a row
-with `shift_end` and is reported as a clock drift. A stretch with no decided
-segment produces no row, so ingestion leaves it uncorrected and says so
-(§12.3).
+become one row; a larger jump starts a new row and is a clock step. A segment
+with readings and no decision (`no tier decided`, `at search edge`, `pairs
+disagree`, `partner undecided`) ends the row before it, so its readings stay
+uncorrected and ingestion says so; segments with no readings do not. A segment
+holding fewer readings than any of the instrument's tiers needs paired seconds
+is `too short`: undecidable by construction, not by the evidence, it neither
+ends a row nor counts as undecided, and the first and last rows reach over the
+too-short segments at the record's ends, the slivers a record's first and last
+segments usually are. A row of three or more segments whose least-squares line
+through their lags changes by more than the tolerance across the row is a
+clock drift, written with `shift_end`; otherwise the row's shift is minus the
+median lag.
 
-**The chain.** An instrument is measured against its partner, not necessarily
-against the reference clock. Lags compose along the chain at each time
-(instrument → partner → … → the instrument that keeps the reference clock), so
-that one well-measured link carries every instrument tied to it: on the 2024
-SLC-SOS van, the Picarro log against the weather station by water, and every
-other analyzer against the Picarro log.
+**Where a step goes.** A step happens where a logger stopped or its clock
+jumped, not at a segment edge. Between two rows across a step, the survey
+looks at the instrument's readings from the last segment before the step to
+the first after it; when the longest gap between consecutive readings there
+exceeds twice their median spacing, the rows meet at the reading after it,
+and otherwise at the segment edge. Measured on the known answer below, this
+puts a step exactly where the exported clock error stepped; at the segment
+edge, readings between the edge and the step took the wrong shift, landed on
+earlier readings' times and were dropped as duplicates.
 
-**After-check.** The survey runs again on the streams ingested with the table.
-Every decided segment should then sit within about 1 s of zero, and the report
-says where one does not.
+**The recorded clock.** A table is keyed on the clock each file recorded (§12.3),
+while a stream's times are cell midpoints after any `time_shift`. Row edges are
+moved back by both, using the stream's own `tsara_time_shift`,
+`tsara_support_label` and `tsara_nominal_cell_width_s`: a start label sits half
+a cell before the midpoint, an end label half a cell after, and `mid` and
+`unknown` (centred when assumed) on it.
 
-### 12.5 What the survey names instead of fitting
+**After-check.** A stream that already carries clock corrections is measured
+and gets no rows (fault `after-check`): its lags are the residuals of a table
+already applied, and every decided one should sit within about a second of
+zero.
 
-A clock step, a clock drift, an undecided stretch, and tiers that disagree by
-more than the tolerance are each reported by name, with the segments behind
-them. A drift close to a cadence error, together with steps at the instrument's
-logging stops, is the signature of times counted by rows (§12.2), and is
-reported as that: the remedy is the right file, not a longer table.
+**The table written.** `write_clock_corrections` (`tsara.core.clocks`) checks the
+rows as a table first, so that a file it writes is one ingestion accepts, and
+writes each shift as exact decimal seconds (`-10.5s`), since a person reads it.
+It refuses to write no rows.
+
+**Checked on a known answer.** Three methane analyzers on generated plumes,
+exported with clock errors (one 7 s fast, then 19 s fast from the second
+hour; one 4 s slow, measured only against the first) and ingested without a
+table: the survey finds both through the chain, puts the step at the reading
+it happened at, and its own table, applied at ingestion, puts every reading of
+every instrument on its true time to the nanosecond with no reading dropped;
+surveyed again, every decided lag is zero
+(`tests/survey/test_survey_clocks.py`).
+
+### 12.5 What the survey names instead of fitting **[built 2026-11-03 — stage 2]**
+
+Each fault is reported by name with the stretch of segments behind it
+(`ClockSurvey.faults`, the kinds in `tsara.survey.FAULT_KINDS`):
+
+- **clock step**: lags jumping by more than the tolerance between rows, with
+  the longest gap in the readings across it when that is a logging stop of a
+  minute or more;
+- **clock drift**: a row written with `shift_end`, with its rate in seconds per
+  hour;
+- **fast drift**: three or more clock steps of one sign in a row, a drift
+  faster than the tolerance per segment, which a shorter segment resolves;
+- **undecided**: each run of segments with readings that no row covers, with
+  why each was not decided;
+- **tiers disagree**: two tiers composing to the reference clock further apart
+  than the tolerance;
+- **outlier**: a segment set aside against two agreeing neighbours;
+- **after-check**: a stream measured but given no rows.
+
+A drift close to a cadence error, together with steps at the instrument's
+logging stops, is the signature of times counted by rows (§12.2): the remedy
+is the right file, not a longer table.
 
 ### 12.6 Alternatives not taken
 
@@ -6619,9 +6701,12 @@ reported as that: the remedy is the right file, not a longer table.
 
 - §12.1's table and §12.2's Picarro-log steps, re-measured through the
   package on the 2024 SLC-SOS logs.
-- A known answer: a generated campaign exported with injected clock errors (a
-  constant, a step, a drift, and times counted by rows), the survey recovering
-  each within the tolerance, the table applied, the after-check clean.
+- A known answer: a generated campaign exported with injected clock errors,
+  the survey recovering each, the table applied, the after-check clean. Done
+  for a constant and a step through the chain (§12.4). A drift, a fast drift
+  and a step across a logging stop are checked on hand-built streams in the
+  survey's tests, since the exporter writes constant errors only; times counted
+  by rows are the real SLC-SOS case, measured there.
 - What an overlap at a falling clock step does to ordering and de-duplication
   (§12.3).
 

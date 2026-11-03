@@ -1,0 +1,69 @@
+# Survey settings: what to measure before the pipeline (docs/METHODS.md §12).
+#
+# The clock survey reads a campaign ingested WITHOUT a correction table,
+# measures how many seconds later each instrument's files put the same air
+# than a partner's, segment by segment, chains every instrument to one
+# reference clock, and writes the rows of a correction table. Nothing it
+# writes is applied until a person has read the table and named it in the
+# manifest's clock_corrections.
+#
+#   from tsara import load_manifest, load_survey
+#   from tsara.ingest import ingest_campaign
+#   from tsara.survey import survey_clocks
+#   survey = survey_clocks(ingest_campaign(load_manifest("manifest.yaml")),
+#                          load_survey("survey_example.yaml"))
+#   survey.write_table("clock_corrections.csv")   # review, then name it
+
+# The instrument whose clock every other is put on. It has no tiers: here a
+# GPS-timed weather station, whose receiver keeps UTC.
+reference_clock: airmar
+
+# One lag is measured per segment of this length, on a grid shared by every
+# instrument. Shorter segments follow a clock that changes faster; longer
+# ones hold more plumes each. Tune it to the campaign.
+segment: 30min
+
+# How far either way a lag is searched for. A best lag at the edge of the
+# search is never decided, since the true one may lie beyond.
+search: 120s
+
+# Paired seconds a lag needs before its correlation counts, and the
+# correlation at the best lag a segment needs to be decided.
+min_pairs: 300
+min_r: 0.6
+
+# Segments whose lags agree within this become one row of the table; a larger
+# jump is a clock step, and a steady change larger than this across a row is
+# a clock drift.
+tolerance: 2s
+
+# The centred running median removed from every series first, so that plumes
+# rather than the background's slow swings decide the correlation.
+running_median: 121s
+
+# For each instrument, its tiers in order. A tier names the partner it is
+# measured against and its tracer pairs: [variable here, variable on the
+# partner], expected to show the same plumes. The first tier that decides a
+# segment sets its lag; the others check it. Every chain of partners must end
+# at the reference clock.
+tracers:
+  picarro:
+    - partner: airmar
+      pairs: [[h2o, rh]]          # water against relative humidity
+      min_pairs: 100              # the weather station logs every 5 s
+  aeris:
+    - partner: picarro
+      pairs: [[ch4, ch4]]         # one gas on two analyzers first ...
+    - partner: picarro
+      pairs: [[h2o, h2o]]         # ... then a backup
+  miro:
+    - partner: picarro
+      pairs: [[ch4, ch4], [co, co]]   # two pairs in one tier are pooled
+  caps:
+    - partner: miro
+      pairs: [[nox, nox]]
+    - partner: picarro
+      pairs: [[nox, co2]]         # gases emitted together, when the MIRO is off
+  ptr:
+    - partner: picarro
+      pairs: [[aromatics, co]]
