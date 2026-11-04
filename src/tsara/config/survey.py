@@ -37,6 +37,7 @@ from pydantic import Field, ValidationInfo, field_validator, model_validator
 
 from tsara.config.base import StrictModel as _StrictModel
 from tsara.config.base import validate_positive_timedelta as _validate_duration
+from tsara.config.base import validate_signed_timedelta as _validate_signed
 from tsara.config.base import validate_stream_name as _validate_name
 from tsara.core.timebase import SECOND_NS
 
@@ -124,6 +125,15 @@ class SurveyConfig(_StrictModel):
             "multiples of this within two seconds of it. The table's shifts are written to it."
         ),
     )
+    max_bridged: str = Field(
+        default="0s",
+        description=(
+            "Up to how long a stretch of undecided segments a row may bridge, when the lags "
+            "on either side agree within the tolerance and the instrument's readings run "
+            "across it without a logging stop (a gap of a minute or more). 0s, the default, "
+            "never bridges: an undecided stretch keeps its recorded times and is named."
+        ),
+    )
     min_pairs: int = Field(
         default=300,
         gt=0,
@@ -154,6 +164,16 @@ class SurveyConfig(_StrictModel):
     @classmethod
     def _durations_are_positive(cls, value: str, info: ValidationInfo) -> str:
         _validate_duration(value, field=f"SurveyConfig.{info.field_name}")
+        return value
+
+    @field_validator("max_bridged")
+    @classmethod
+    def _not_negative(cls, value: str) -> str:
+        import pandas as pd
+
+        _validate_signed(value, field="SurveyConfig.max_bridged")
+        if pd.Timedelta(value) < pd.Timedelta(0):
+            raise ValueError(f"max_bridged ({value}) must not be negative.")
         return value
 
     @field_validator("search", "running_median")
@@ -211,6 +231,19 @@ class SurveyConfig(_StrictModel):
             raise ValueError(
                 f"search ({self.search}) must be shorter than a segment ({self.segment})."
             )
+        segment_s = pd.Timedelta(self.segment).total_seconds()
+        for name, tiers in self.tracers.items():
+            for number, tier in enumerate(tiers, start=1):
+                needed = tier.min_pairs or self.min_pairs
+                if needed > segment_s:
+                    # Paired seconds cannot outnumber a segment's seconds, so
+                    # this tier could never decide; measured before this check,
+                    # every segment came out "too short" and nothing was said.
+                    raise ValueError(
+                        f"tracers: '{name}' tier {number} needs {needed} paired seconds, "
+                        f"more than a segment of {self.segment} holds, so it could never "
+                        "decide. Lengthen the segment or lower min_pairs."
+                    )
         if self.reference_clock in self.tracers:
             raise ValueError(
                 f"reference_clock '{self.reference_clock}' has tiers: the instrument "

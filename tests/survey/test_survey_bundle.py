@@ -141,4 +141,4 @@ def test_a_table_is_saved_with_its_declared_types(tmp_path: Path, survey: ClockS
     """A table whose types drifted (a tier read back as float) is written as declared."""
     drifted = dataclasses.replace(survey, segments=survey.segments.astype({"tier": "float64"}))
     save_clock_survey(drifted, tmp_path)
-    assert str(load_clock_survey(tmp_path).segments.tier.dtype) == "int64"
+    assert str(load_clock_survey(tmp_path).segments.tier.dtype) == "Int64"

@@ -478,6 +478,12 @@ def test_a_weak_correlation_decides_nothing() -> None:
     measured = survey.measurements.dropna(subset=["lag_s"])
     assert len(measured) == 6 and (measured.r < 0.6).all()
     assert set(survey.segments.status) == {"no tier decided", "too short"}
+    # With no row at all, the whole record is named, its sliver of a last segment too.
+    (undecided,) = _faults(survey, "undecided")
+    assert (undecided["start"], undecided["end"]) == (
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T01:10:00Z",
+    )
 
 
 def test_the_first_tier_that_decides_sets_the_lag() -> None:
@@ -495,7 +501,7 @@ def test_the_first_tier_that_decides_sets_the_lag() -> None:
         {"ref": _stream(), "inst": _stream(9, variables=late)}, _config({"inst": tiers})
     )
     assert {row.shift_ns for row in survey.rows} == {-9 * SECOND}
-    assert set(survey.segments.tier.unique()) <= {0, 1}
+    assert set(survey.segments.tier.dropna().unique()) == {1}
 
 
 def test_segments_are_whole_multiples_of_the_segment_from_the_epoch() -> None:
@@ -621,9 +627,11 @@ def test_each_measurement_and_segment_says_whether_the_noise_was_removed() -> No
     )
     measured = stated.measurements[np.isfinite(stated.measurements.lag_s)]
     assert len(measured) and measured.noise_removed.all()
-    segments = stated.segments.set_index("status").noise_removed
-    assert segments.loc["decided"].all()
-    assert segments.loc[["too short"]].isna().all()
+    segments = stated.segments.set_index("status")
+    assert segments.noise_removed.loc["decided"].all()
+    assert segments.noise_removed.loc[["too short"]].isna().all()
+    # A segment no tier decided names no tier (it read 0, like a real tier).
+    assert segments.tier.loc[["too short"]].isna().all()
 
     plain = survey_clocks({"ref": _stream(), "inst": _stream(5.0)}, _config(ONE))
     assert not plain.measurements.noise_removed.any()
@@ -640,3 +648,196 @@ def test_a_lag_at_the_edge_of_the_cells_window_is_not_decided(
     survey = survey_clocks({"ref": _stream(), "inst": _stream(5.0)}, _config(ONE))
     assert survey.rows == ()
     assert set(survey.segments.status) <= {"at search edge", "too short"}
+
+
+# ---------------------------------------------------------------------------
+# Walkthrough stage A2: rules the code-only pass found wrong
+# ---------------------------------------------------------------------------
+
+
+def test_a_backup_tier_decides_where_the_first_tiers_partner_is_undecided() -> None:
+    """ref <- mid <- end, with end's backup straight against ref. mid is tied to
+    ref by its CO, missing from 00:30 to 00:40; end's first tier still decides
+    against mid's methane there, but cannot reach the reference clock. Its
+    backup measured the lag directly, so the segment is decided by tier 2 and
+    end keeps one row (found in the walkthrough: it was left undecided)."""
+    both = {"ch4": lambda t: TRUTH[t.astype(int)], "co": lambda t: TRUTH[t.astype(int)]}
+    mid_vars = {
+        "ch4": lambda t: TRUTH[t.astype(int)],
+        "co": lambda t: np.where((t >= 1800) & (t < 2400), np.nan, TRUTH[t.astype(int)]),
+    }
+    config = _config(
+        {
+            "mid": [{"partner": "ref", "pairs": [["co", "co"]]}],
+            "end": [
+                {"partner": "mid", "pairs": [["ch4", "ch4"]]},
+                {"partner": "ref", "pairs": [["ch4", "ch4"]]},
+            ],
+        }
+    )
+    survey = survey_clocks(
+        {
+            "ref": _stream(variables=both),
+            "mid": _stream(3, variables=mid_vars),
+            "end": _stream(-4, seed=5),
+        },
+        config,
+    )
+    end = survey.segments[survey.segments.instrument == "end"].set_index("start")
+    assert end.loc["2026-01-01T00:30:00Z", "tier"] == 2
+    assert end.loc["2026-01-01T00:30:00Z", "status"] == "decided"
+    assert [row.shift_ns for row in survey.rows if row.instrument == "end"] == [4 * SECOND]
+    assert not [f for f in _faults(survey, "undecided") if f["instrument"] == "end"]
+
+
+def test_a_step_inside_an_undecided_segment_leaves_nothing_undecided() -> None:
+    """The tracer is missing from 00:40 to 00:50 and the clock steps from 5 s
+    to 15 s late at 00:45, leaving its 10 s hole. The rows meet at the hole and
+    correct every reading of that segment, so it is not named undecided (found
+    in the walkthrough: it was, counted from segments, not the rows' spans)."""
+    hole = {
+        "ch4": lambda t: np.where((t >= 2400) & (t < 3000), np.nan, TRUTH[t.astype(int)]),
+        "co2": lambda t: np.full(len(t), 420.0),
+    }
+    step = _stream(lambda t: np.where(t < 2700, 5.0, 15.0), variables=hole)
+    survey = survey_clocks({"ref": _stream(), "inst": step}, _config(ONE))
+    first, second = survey.rows
+    assert first.end_ns == second.start_ns == _ns(2700 + 15)
+    assert len(_faults(survey, "clock step")) == 1
+    assert not _faults(survey, "undecided")
+
+
+def test_an_outliers_neighbours_are_adjacent_not_across_an_empty_stretch() -> None:
+    """Readings 5 s late, then none for ten minutes, ten minutes 12 s late, none
+    again, and 5 s late to the end. The 12 s stretch sits between two logging
+    stops, where the clock may really have been elsewhere: it is its own row
+    with a step either side, not an outlier inside one row at 5 s."""
+    pieces = [
+        _stream(5, first=0, n=1195),
+        _stream(12, first=1788, n=600),
+        _stream(5, first=2995, n=600),
+    ]
+    inst = xr.concat(pieces, dim="time")
+    survey = survey_clocks({"ref": _stream(), "inst": inst}, _config(ONE))
+    assert [row.shift_ns for row in survey.rows] == [-5 * SECOND, -12 * SECOND, -5 * SECOND]
+    assert not _faults(survey, "outlier")
+    assert len(_faults(survey, "clock step")) == 2
+
+
+def test_an_outlier_is_still_set_aside_past_a_segment_too_short_to_measure() -> None:
+    """Adjacency passes over segments too short to measure: a 12 s segment
+    between two 5 s ones, the second reached past a sliver, is still set
+    aside inside one row."""
+    pieces = [
+        _stream(5, first=0, n=1800),
+        _stream(12, first=1800, n=600),
+        _stream(5, first=2410, n=20),
+        _stream(5, first=3000, n=600),
+    ]
+    inst = xr.concat(pieces, dim="time")
+    survey = survey_clocks({"ref": _stream(), "inst": inst}, _config(ONE))
+    assert [f["start"] for f in _faults(survey, "outlier")] == ["2026-01-01T00:30:00Z"]
+    assert [row.shift_ns for row in survey.rows] == [-5 * SECOND]
+
+
+HOLE = {
+    "ch4": lambda t: np.where((t >= 1800) & (t < 2400), np.nan, TRUTH[t.astype(int)]),
+    "co2": lambda t: np.full(len(t), 420.0),
+}
+
+
+def test_up_to_max_bridged_of_undecided_segments_are_bridged() -> None:
+    """The ten minutes without a tracer, between lags that agree, readings
+    unbroken: bridged into one row, named, and nothing left undecided."""
+    survey = survey_clocks(
+        {"ref": _stream(), "inst": _stream(5, variables=HOLE)}, _config(ONE, max_bridged="10min")
+    )
+    (row,) = survey.rows
+    assert row.shift_ns == -5 * SECOND
+    assert row.reason.endswith(", 1 undecided bridged")
+    (bridge,) = _faults(survey, "bridged")
+    assert (bridge["start"], bridge["end"]) == ("2026-01-01T00:30:00Z", "2026-01-01T00:40:00Z")
+    assert not _faults(survey, "undecided")
+    assert set(survey.faults.kind) <= set(FAULT_KINDS)
+
+
+@pytest.mark.parametrize(
+    ("max_bridged", "stop", "late"),
+    [
+        ("5min", None, 5.0),  # longer than allowed
+        ("10min", (2000, 2090), 5.0),  # a logging stop of 90 s inside it
+    ],
+)
+def test_an_undecided_stretch_is_not_bridged_beyond_its_rule(
+    max_bridged: str, stop: tuple[int, int] | None, late: float
+) -> None:
+    inst = _stream(late, variables=HOLE)
+    if stop is not None:
+        true = (inst["time"].values - np.datetime64(T0.value, "ns")) / np.timedelta64(1, "s") - late
+        inst = inst.isel(time=~((true >= stop[0]) & (true < stop[1])))
+    survey = survey_clocks({"ref": _stream(), "inst": inst}, _config(ONE, max_bridged=max_bridged))
+    assert len(survey.rows) == 2
+    assert not _faults(survey, "bridged")
+    assert len(_faults(survey, "undecided")) == 1
+
+
+def test_a_step_across_an_undecided_stretch_is_a_step_not_a_bridge() -> None:
+    late = lambda t: np.where(t < 2100, 5.0, 15.0)  # noqa: E731
+    survey = survey_clocks(
+        {"ref": _stream(), "inst": _stream(late, variables=HOLE)},
+        _config(ONE, max_bridged="10min"),
+    )
+    assert [row.shift_ns for row in survey.rows] == [-5 * SECOND, -15 * SECOND]
+    assert len(_faults(survey, "clock step")) == 1
+    assert not _faults(survey, "bridged")
+
+
+def test_a_backup_tier_whose_partner_is_undecided_cannot_decide_either() -> None:
+    """end's first tier, against ref, has no ethane from 00:30 to 00:40; its
+    backup, against mid, decides there, but mid is undecided in that segment.
+    Neither reaches the reference clock: the segment is 'partner undecided'."""
+    both = {"ch4": lambda t: TRUTH[t.astype(int)], "co": lambda t: TRUTH[t.astype(int)]}
+
+    def gap(t: np.ndarray) -> np.ndarray:
+        return np.asarray((t >= 1800) & (t < 2400))
+
+    mid_vars = {
+        "ch4": lambda t: TRUTH[t.astype(int)],
+        "co": lambda t: np.where(gap(t), np.nan, TRUTH[t.astype(int)]),
+    }
+    end_vars = {
+        "ch4": lambda t: TRUTH[t.astype(int)],
+        "c2h6": lambda t: np.where(gap(t), np.nan, TRUTH[t.astype(int)]),
+    }
+    config = _config(
+        {
+            "mid": [{"partner": "ref", "pairs": [["co", "co"]]}],
+            "end": [
+                {"partner": "ref", "pairs": [["c2h6", "ch4"]]},
+                {"partner": "mid", "pairs": [["ch4", "ch4"]]},
+            ],
+        }
+    )
+    survey = survey_clocks(
+        {
+            "ref": _stream(variables=both),
+            "mid": _stream(3, variables=mid_vars),
+            "end": _stream(-4, seed=5, variables=end_vars),
+        },
+        config,
+    )
+    end = survey.segments[survey.segments.instrument == "end"].set_index("start")
+    assert end.loc["2026-01-01T00:30:00Z", "status"] == "partner undecided"
+    assert pd.isna(end.loc["2026-01-01T00:30:00Z", "tier"])
+
+
+def test_a_segment_agreeing_with_one_neighbour_is_no_outlier() -> None:
+    """Lags of 5, 5, 7.6, 6, 6, 6 s: the third differs by more than the
+    tolerance from the 5 s before it but not from the 6 s after, so it is a
+    step to a new row, not a segment set aside."""
+    late = lambda t: np.select([t < 1200, t < 1800], [5.0, 7.6], 6.0)  # noqa: E731
+    survey = survey_clocks(
+        {"ref": _stream(), "inst": _stream(late)}, _config(ONE, resolution="0.1s")
+    )
+    assert not _faults(survey, "outlier")
+    assert _faults(survey, "clock step")

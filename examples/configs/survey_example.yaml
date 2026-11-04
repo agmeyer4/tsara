@@ -44,6 +44,13 @@ min_r: 0.6
 # a clock drift.
 tolerance: 2s
 
+# Up to how long a stretch of undecided segments a row may bridge, when the
+# lags on either side agree within the tolerance and the readings run across
+# it without a logging stop (a gap of a minute or more). The default, 0s,
+# never bridges; a van whose tracers go quiet for a while in mid-drive (zero
+# air, a calibration, a parked stretch without plumes) may want a little.
+max_bridged: 30min
+
 # The centred running median removed from every series first, so that plumes
 # rather than the background's slow swings decide the correlation.
 running_median: 121s

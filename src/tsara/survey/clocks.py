@@ -22,7 +22,9 @@ What it does, in order
    readings' own cells, to the survey's resolution
    (:func:`tsara.survey.lags.refined_lag`). The first tier
    that decides sets the segment's lag; a later tier that decides too checks
-   it, and a disagreement larger than the tolerance is named.
+   it, and a disagreement larger than the tolerance is named. A tier whose
+   partner is undecided in the segment cannot set it, so the next tier that
+   decides and reaches the reference clock does.
 3. **The chain.** The lag against the partner plus the partner's own lag to
    the reference clock in the same segment is the lag to the reference clock.
    The reference clock's instrument is zero everywhere; a segment whose
@@ -30,12 +32,16 @@ What it does, in order
 4. **Outliers.** A decided segment differing by more than the tolerance from
    both its decided neighbours, while they agree with each other, is set
    aside: one segment against two is more likely a coincidence of plumes than
-   two clock steps in a row. It stays inside the row around it.
+   two clock steps in a row. It stays inside the row around it. Neighbours
+   are the adjacent segments, past only segments too short to measure: across
+   a stretch with no readings the clock may really have been elsewhere.
 5. **Rows.** Consecutive decided segments whose lags agree within the
    tolerance become one row; a larger jump starts a new row and is named a
    clock step. A segment with readings but no decision ends the row before it,
    so its readings stay uncorrected and ingestion says so; segments with no
-   readings at all do not. A row of three or more segments whose least-squares
+   readings at all do not. Up to ``max_bridged`` of undecided segments are
+   bridged instead, when the lags either side agree and the readings run
+   across without a logging stop. A row of three or more segments whose least-squares
    line changes by more than the tolerance across it is a clock drift, written
    with ``shift_end``. The shift is minus the lag.
 6. **The recorded clock.** A table is keyed on the clock each file recorded,
@@ -104,6 +110,7 @@ FAULT_KINDS = (
     "clock drift",
     "fast drift",
     "undecided",
+    "bridged",
     "tiers disagree",
     "outlier",
     "after-check",
@@ -138,7 +145,7 @@ SEGMENT_COLUMNS: dict[str, str] = {
     "instrument": "str",
     "start": "str",
     "end": "str",
-    "tier": "int64",
+    "tier": "Int64",
     "partner": "str",
     "lag_s": "float64",
     "lag_to_reference_s": "float64",
@@ -175,7 +182,7 @@ class ClockSurvey:
         ``decided``.
     segments : pandas.DataFrame
         One row per instrument and segment with readings: ``instrument``,
-        ``start``, ``end``, ``tier`` (the tier that decided, 0 for none),
+        ``start``, ``end``, ``tier`` (the tier that decided, NA for none),
         ``partner``, ``lag_s`` (against that partner),
         ``lag_to_reference_s``, ``noise_removed`` (the deciding tier's; NA
         for none), and ``status``: ``decided``, ``outlier``,
@@ -215,6 +222,7 @@ class _Settings:
     search_s: int
     resolution_ns: int
     running_median_s: int
+    max_bridged_ns: int
     tolerance_s: float
     min_pairs: int
     min_r: float
@@ -296,13 +304,13 @@ def survey_clocks(streams: Mapping[str, xr.Dataset], config: SurveyConfig) -> Cl
         stream = streams[name]
         present = _segments_with_readings(stream, edges)
         measured = _measure(name, config, settings, edges, present, series_of, cells_of)
-        chosen = _chosen(measured)
+        chosen = _chosen(measured, config, to_reference)
         lags = _compose(config, chosen, to_reference)
-        outliers = _outliers(lags, settings.tolerance_s)
+        fewest = _fewest_pairs(name, config, settings)
+        short = {k for k, count in present.items() if count < fewest}
+        outliers = _outliers(lags, settings.tolerance_s, short)
         decided = {k: lag for k, lag in lags.items() if k not in outliers}
-        statuses = _statuses(
-            present, chosen, lags, outliers, measured, _fewest_pairs(name, config, settings)
-        )
+        statuses = _statuses(present, lags, outliers, measured, fewest)
         own_faults = _tier_disagreements(measured, config, to_reference, settings) + [
             _Fault("outlier", k, k, f"lag {lags[k]:+g} s against neighbours")
             for k in sorted(outliers)
@@ -358,6 +366,7 @@ def _settings(config: SurveyConfig) -> _Settings:
         search_s=int(pd.Timedelta(config.search).total_seconds()),
         resolution_ns=int(pd.Timedelta(config.resolution).value),
         running_median_s=int(pd.Timedelta(config.running_median).total_seconds()),
+        max_bridged_ns=int(pd.Timedelta(config.max_bridged).value),
         tolerance_s=pd.Timedelta(config.tolerance).value / NS_PER_S,
         min_pairs=config.min_pairs,
         min_r=config.min_r,
@@ -447,11 +456,23 @@ def _measure(
     return measured
 
 
-def _chosen(measured: Sequence[_Measured]) -> dict[int, _Measured]:
-    """Return, per segment, the first tier that decided it."""
+def _chosen(
+    measured: Sequence[_Measured],
+    config: SurveyConfig,
+    to_reference: Mapping[str, Mapping[int, float]],
+) -> dict[int, _Measured]:
+    """Return, per segment, the first tier that decided it and reaches the reference clock.
+
+    A tier whose partner is undecided in the segment has nothing to compose
+    with, so it gives way to the next that decides: that is what a backup tier
+    is for. Found in the walkthrough: taking the first tier that decided,
+    composable or not, left a segment undecided while its backup had measured
+    the lag straight against the reference clock.
+    """
     chosen: dict[int, _Measured] = {}
     for m in sorted(measured, key=lambda m: (m.k, m.tier)):
-        if m.decided and m.k not in chosen:
+        reaches = m.partner == config.reference_clock or m.k in to_reference[m.partner]
+        if m.decided and reaches and m.k not in chosen:
             chosen[m.k] = m
     return chosen
 
@@ -462,33 +483,43 @@ def _compose(
     to_reference: Mapping[str, Mapping[int, float]],
 ) -> dict[int, float]:
     """Return the lag to the reference clock of each segment the chain decides."""
-    composed: dict[int, float] = {}
-    for k, m in chosen.items():
-        if m.partner == config.reference_clock:
-            composed[k] = m.lag.lag_s
-        elif k in to_reference[m.partner]:
-            composed[k] = m.lag.lag_s + to_reference[m.partner][k]
-    return composed
+    return {
+        k: m.lag.lag_s
+        + (0.0 if m.partner == config.reference_clock else to_reference[m.partner][k])
+        for k, m in chosen.items()
+    }
 
 
-def _outliers(lags: Mapping[int, float], tolerance_s: float) -> set[int]:
-    """Return the decided segments that disagree with both decided neighbours, which agree."""
-    keys = sorted(lags)
+def _outliers(lags: Mapping[int, float], tolerance_s: float, short: set[int]) -> set[int]:
+    """Return the decided segments that disagree with both neighbours, which agree.
+
+    A neighbour is the adjacent segment, reached past segments too short to
+    measure only, and it must be decided. Found in the walkthrough: taking the
+    nearest decided segment however far away set aside a stretch between two
+    logging stops hours apart, where the clock may really have been elsewhere.
+    """
     out = set()
-    for before, k, after in zip(keys, keys[1:], keys[2:], strict=False):
-        lb, lk, la = lags[before], lags[k], lags[after]
-        if (
-            abs(lk - lb) > tolerance_s
-            and abs(lk - la) > tolerance_s
-            and abs(lb - la) <= tolerance_s
-        ):
-            out.add(k)
+    for k, lag in lags.items():
+        before, after = _neighbour(k, -1, short), _neighbour(k, 1, short)
+        if before not in lags or after not in lags:
+            continue
+        lb, la = lags[before], lags[after]
+        if abs(lag - lb) > tolerance_s and abs(lag - la) > tolerance_s:
+            if abs(lb - la) <= tolerance_s:
+                out.add(k)
     return out
+
+
+def _neighbour(k: int, step: int, short: set[int]) -> int:
+    """Return the segment next to k in one direction, past segments too short to measure."""
+    k += step
+    while k in short:
+        k += step
+    return k
 
 
 def _statuses(
     present: Mapping[int, int],
-    chosen: Mapping[int, _Measured],
     composed: Mapping[int, float],
     outliers: set[int],
     measured: Sequence[_Measured],
@@ -502,6 +533,8 @@ def _statuses(
     """
     edge = {m.k for m in measured if m.lag.at_edge}
     disagree = {m.k for m in measured if m.lag.pairs_disagree}
+    # Decided by a tier, but by none that reaches the reference clock.
+    stranded = {m.k for m in measured if m.decided}
     statuses = {}
     for k, count in present.items():
         if k in outliers:
@@ -510,7 +543,7 @@ def _statuses(
             statuses[k] = "decided"
         elif count < fewest_pairs:
             statuses[k] = "too short"
-        elif k in chosen:
+        elif k in stranded:
             statuses[k] = "partner undecided"
         elif k in edge:
             statuses[k] = "at search edge"
@@ -563,14 +596,17 @@ def _rows(
     stream: xr.Dataset,
     chosen: Mapping[int, _Measured],
 ) -> tuple[list[ClockCorrection], list[_Fault], set[int]]:
-    """Group decided segments into rows; name the clock steps and drifts.
+    """Group decided segments into rows; name the clock steps, drifts and bridges.
 
-    Returns the rows, the faults, and the segments the rows cover. Segments too
-    short to measure neither break a row nor end one: inside a row they are
-    covered, and at the record's two ends the first and last rows reach over
-    them. Between two rows across a clock step, the boundary goes where the
-    readings have their longest gap, when it is a gap and not jitter: a step
-    happens where a logger stopped or its clock jumped, not at a segment edge.
+    Returns the rows, the faults, and the segments whose readings the rows
+    cover. Segments too short to measure neither break a row nor end one:
+    inside a row they are covered, and at the record's two ends the first and
+    last rows reach over them. Undecided segments end a row, unless up to
+    ``max_bridged`` of them lie between lags that agree and the readings run
+    across them without a logging stop: then the row bridges them. Between two
+    rows across a clock step, the boundary goes where the readings have their
+    longest gap, when it is a gap and not jitter: a step happens where a logger
+    stopped or its clock jumped, not at a segment edge.
     """
     # What ends a row: readings with no decision. An outlier stays inside the
     # row around it, and a segment too short to measure is no evidence either way.
@@ -580,26 +616,43 @@ def _rows(
     runs: list[list[int]] = []
     #: Between run i and run i + 1: the jump when it was a clock step, else 0.
     jumps: list[float] = []
+    #: Per run, how many undecided segments it bridges.
+    bridged: list[int] = []
     faults: list[_Fault] = []
+    times = _times_ns(stream)
     for k in sorted(decided):
         if not runs:
             runs.append([k])
+            bridged.append(0)
             continue
         last = runs[-1][-1]
         jump = decided[k] - decided[last]
+        between = undecided & set(range(last + 1, k))
         if abs(jump) > settings.tolerance_s:
             faults.append(_step(edges, last, k, decided, stream))
             jumps.append(jump)
             runs.append([k])
-        elif undecided & set(range(last + 1, k)):
+            bridged.append(0)
+        elif between and not _bridgeable(times, edges, last, k, settings.max_bridged_ns):
             jumps.append(0.0)
             runs.append([k])
+            bridged.append(0)
         else:
+            if between:
+                faults.append(
+                    _Fault(
+                        "bridged",
+                        last + 1,
+                        k - 1,
+                        f"{len(between)} segment(s) with no decision between lags of "
+                        f"{decided[last]:+g} s and {decided[k]:+g} s, readings unbroken",
+                    )
+                )
+                bridged[-1] += len(between)
             runs[-1].append(k)
     faults += _fast_drifts(runs, jumps)
 
     spans = [[int(edges[run[0]]), int(edges[run[-1] + 1])] for run in runs]
-    times = _times_ns(stream)
     for i, jump in enumerate(jumps):
         if jump != 0.0:
             boundary = _step_boundary(
@@ -607,13 +660,13 @@ def _rows(
             )
             if boundary is not None:
                 spans[i][1] = spans[i + 1][0] = boundary
-    covered = {k for run in runs for k in range(run[0], run[-1] + 1)}
     if runs:
-        _reach_over_short_ends(runs, spans, statuses, edges, covered)
+        _reach_over_short_ends(runs, spans, statuses, edges)
+    covered = _covered(times, edges, statuses, spans)
 
     offset = _recorded_offset_ns(stream)
     rows = []
-    for run, (start_ns, end_ns) in zip(runs, spans, strict=True):
+    for run, (start_ns, end_ns), n_bridged in zip(runs, spans, bridged, strict=True):
         lags = np.array([decided[k] for k in run])
         shift_ns, shift_end_ns = _shifts(run, lags, edges, start_ns, end_ns, settings.tolerance_s)
         if shift_end_ns is not None:
@@ -640,12 +693,59 @@ def _rows(
                 reason=(
                     f"clock survey: {len(run)} segment{'s' if len(run) != 1 else ''}, "
                     f"tier {tiers}, lags {lags.min():+g} to {lags.max():+g} s"
+                    + (f", {n_bridged} undecided bridged" if n_bridged else "")
                 ),
                 source="survey",
                 line=0,
             )
         )
     return rows, faults, covered
+
+
+def _bridgeable(
+    times: npt.NDArray[np.int64],
+    edges: npt.NDArray[np.int64],
+    before: int,
+    after: int,
+    max_bridged_ns: int,
+) -> bool:
+    """Say whether a row may bridge the segments between two decided ones whose lags agree.
+
+    Only up to ``max_bridged`` of them, and only where the readings run on
+    without a logging stop from the segment before to the segment after: steps
+    happen where a logger stopped (§12.2), so a stop is where the clock may
+    have changed unseen.
+    """
+    if int(edges[after] - edges[before + 1]) > max_bridged_ns:
+        return False
+    across = times[(times >= edges[before]) & (times < edges[after + 1])]
+    return not (np.diff(across) >= _LOGGING_STOP_NS).any()
+
+
+def _covered(
+    times: npt.NDArray[np.int64],
+    edges: npt.NDArray[np.int64],
+    statuses: Mapping[int, str],
+    spans: Sequence[Sequence[int]],
+) -> set[int]:
+    """Return the segments with readings every one of which a row's span holds.
+
+    Counted on the rows' final spans, not their segments: rows meeting at a
+    step's gap inside an undecided segment correct all of its readings, and it
+    is not undecided. Found in the walkthrough: counting segments named such a
+    segment undecided while its readings were corrected.
+    """
+    if not spans:
+        return set()
+    starts = np.array([span[0] for span in spans], dtype=np.int64)
+    ends = np.array([span[1] for span in spans], dtype=np.int64)
+    # The span starting last at or before each reading, which holds it if the
+    # reading is also before that span's end (spans neither overlap nor touch out of order).
+    which = np.searchsorted(starts, times, side="right") - 1
+    held = (which >= 0) & (times < ends[np.clip(which, 0, None)])
+    segment = np.searchsorted(edges, times, side="right") - 1
+    loose = set(segment[~held].tolist())
+    return {k for k in statuses if k not in loose}
 
 
 def _step_boundary(times: npt.NDArray[np.int64], first_ns: int, stop_ns: int) -> int | None:
@@ -671,18 +771,15 @@ def _reach_over_short_ends(
     spans: list[list[int]],
     statuses: Mapping[int, str],
     edges: npt.NDArray[np.int64],
-    covered: set[int],
 ) -> None:
     """Extend the first row back and the last row on over the record's short end segments."""
     k = runs[0][0] - 1
     while statuses.get(k) == "too short":
         spans[0][0] = int(edges[k])
-        covered.add(k)
         k -= 1
     k = runs[-1][-1] + 1
     while statuses.get(k) == "too short":
         spans[-1][1] = int(edges[k + 1])
-        covered.add(k)
         k += 1
 
 
@@ -825,7 +922,7 @@ def _segment_row(
         "instrument": name,
         "start": iso_utc(int(edges[k])),
         "end": iso_utc(int(edges[k + 1])),
-        "tier": 0 if m is None else m.tier,
+        "tier": pd.NA if m is None else m.tier,
         "partner": "" if m is None else m.partner,
         "lag_s": float("nan") if m is None else m.lag.lag_s,
         "lag_to_reference_s": composed.get(k, float("nan")),

@@ -41,9 +41,14 @@ def test_a_minimal_config_takes_the_defaults() -> None:
     assert (config.segment, config.search, config.min_pairs) == ("30min", "120s", 300)
     assert (config.min_r, config.tolerance, config.running_median) == (0.6, "2s", "121s")
     assert config.resolution == "1s"
+    assert config.max_bridged == "0s"
     assert config.tracers["picarro"][0].pairs == (("h2o", "rh"),)
     assert config.tracers["picarro"][0].min_pairs == 100
     assert config.tracers["aeris"][0].min_pairs is None
+
+
+def test_a_segment_holding_exactly_the_paired_seconds_a_tier_needs_is_allowed() -> None:
+    SurveyConfig.model_validate(_spec(segment="5min", min_pairs=300))
 
 
 def test_the_composition_order_puts_every_partner_first() -> None:
@@ -113,6 +118,18 @@ def test_the_composition_order_puts_every_partner_first() -> None:
         ({"running_median": "121.5s"}, "running_median .* whole number of seconds"),
         ({"resolution": "2s"}, "at most 1s"),
         ({"resolution": "0s"}, "positive"),
+        ({"max_bridged": "-1min"}, "must not be negative"),
+        ({"max_bridged": "soon"}, "not a valid timedelta"),
+        # Paired seconds cannot outnumber a segment's: such a tier never decides.
+        ({"segment": "3min", "min_pairs": 200}, "'aeris' tier 1 needs 200 paired seconds"),
+        (
+            {
+                "tracers": {
+                    "aeris": [{"partner": "airmar", "pairs": [["ch4", "ch4"]], "min_pairs": 2000}]
+                }
+            },
+            "'aeris' tier 1 needs 2000 paired seconds, more than a segment of 30min",
+        ),
     ],
 )
 def test_impossible_settings_are_refused(changes: dict[str, Any], match: str) -> None:

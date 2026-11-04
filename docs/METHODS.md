@@ -6533,7 +6533,7 @@ any out-of-order readings, so one landing on an earlier reading's exact time is
 dropped as a duplicate. Whether that is right is decided on the real steps of
 §12.2 (§12.7).
 
-### 12.4 The survey: measuring lags from tracer pairs **[built 2026-11-03 — stages 2 and 3; the lag below a second, walkthrough stage A1]**
+### 12.4 The survey: measuring lags from tracer pairs **[built 2026-11-03 — stages 2 and 3; walkthrough stages A1 and A2]**
 
 `tsara.survey` measures, before the pipeline, what a manifest can declare but
 files do not state; clocks are its first measurement (`tsara.survey.clocks`,
@@ -6557,13 +6557,17 @@ more tracer pairs (`[variable here, variable on the partner]`), optionally
 with its own `min_pairs`; the segment length (default 30 min, tunable); the
 search range (default ±120 s, shorter than a segment); the minimum paired
 seconds (default 300); the decision threshold (default r ≥ 0.6); the tolerance
-(default 2 s); the running median's window (default 121 s); and the
-**resolution** the lag is measured to (default 1 s, at most 1 s). The search
-and the running median are read as whole seconds, so a fraction is refused
-rather than cut off (measured: a search of `20.7s` ran as 20, and `500ms` as a
-search of no width, every segment at its edge). Every chain of partners must
-reach the reference clock without a loop, and the reference clock's
-instrument has no tiers; both are refused at load.
+(default 2 s); the running median's window (default 121 s); the
+**resolution** the lag is measured to (default 1 s, at most 1 s); and
+`max_bridged`, how long a stretch of undecided segments a row may bridge
+(default 0 s, never; see Rows). The search and the running median are read
+as whole seconds, so a fraction is refused rather than cut off (measured: a
+search of `20.7s` ran as 20, and `500ms` as a search of no width, every
+segment at its edge). A tier needing more paired seconds than a segment holds
+is refused, since it could never decide (measured: a 3 min segment with 200
+pairs needed came out `too short` everywhere and wrote nothing). Every chain
+of partners must reach the reference clock without a loop, and the reference
+clock's instrument has no tiers; both are refused at load.
 
 **Segments.** One grid for every instrument: whole multiples of the segment
 length from the epoch, so that segment k of an instrument and of its partner
@@ -6682,15 +6686,21 @@ disagree**, and the tier undecided; a pair too weak to decide alone cannot.
 An instrument's tiers are ranked: one gas on two analyzers first (they share
 every plume and the same physics), gases emitted together next (they share
 only some plumes, and their lag also carries the difference in the analyzers'
-response times), a backup last. The first tier that decides a segment sets its
-lag. A later tier that decides too checks it: each tier's lag is composed to
+response times), a backup last. The first tier that decides a segment and
+reaches the reference clock sets its lag: a tier whose partner is undecided in
+that segment has nothing to compose with and gives way to the next. Found in
+the walkthrough: taking the first tier that decided, whether or not it reached
+the reference clock, left a segment undecided while its backup had measured
+the lag straight against the reference clock. A later tier that decides too
+checks the one chosen: each tier's lag is composed to
 the reference clock through its own partner, and lags further apart than the
 tolerance are named.
 
 **The chain.** An instrument's lag against its partner, plus the partner's
 lag to the reference clock in the same segment, is its lag to the reference
-clock; the reference clock's instrument is zero everywhere, and a segment
-whose partner is undecided there is undecided (`partner undecided`). One
+clock; the reference clock's instrument is zero everywhere, and a segment that
+a tier decides but none of its deciding tiers can carry to the reference clock
+is undecided (`partner undecided`). One
 well-measured link carries every instrument tied to it: on the 2024 SLC-SOS
 van, the Picarro log against the weather station by water, and every other
 analyzer against the Picarro log.
@@ -6698,7 +6708,12 @@ analyzer against the Picarro log.
 **Outliers.** A decided segment whose lag differs by more than the tolerance
 from both its decided neighbours, while they agree with each other, is set
 aside: one segment against two is more likely a coincidence of plumes than two
-clock steps in a row. It stays inside the row around it.
+clock steps in a row. It stays inside the row around it. Its neighbours are
+the adjacent segments, reached past segments too short to measure but not past
+a segment with no readings. Found in the walkthrough: taking the nearest
+decided segments however far away set aside a stretch between two logging
+stops hours apart, where the clock may really have been elsewhere; now it is
+its own row with a step on either side.
 
 **Rows.** Consecutive decided segments whose lags agree within the tolerance
 become one row; a larger jump starts a new row and is a clock step. A segment
@@ -6709,7 +6724,21 @@ holding fewer readings than any of the instrument's tiers needs paired seconds
 is `too short`: undecidable by construction, not by the evidence, it neither
 ends a row nor counts as undecided, and the first and last rows reach over the
 too-short segments at the record's ends, the slivers a record's first and last
-segments usually are. A row of three or more segments whose least-squares line
+segments usually are. **Bridging.** Up to `max_bridged` of undecided segments
+between two decided ones are bridged into one row instead, when the two lags
+agree within the tolerance and the instrument's readings run from the segment
+before to the segment after without a logging stop (a gap of a minute or
+more): a logging stop is where a clock steps unseen (§12.2), and a lag that
+agrees on both sides of an unbroken record is the evidence that it did not.
+The bridge is named, and the row's reason counts the segments it bridged. At
+the default of 0 s nothing is bridged; a van whose tracers go quiet in mid-drive
+(zero air, a calibration, a parked stretch without plumes) may want some.
+Which segments a row covers is counted on its final span, not its segments:
+rows meeting at a step's gap inside an undecided segment correct all its
+readings, so it is not undecided (found in the walkthrough: it was named
+undecided while its readings were corrected). A segment no tier decided names
+no tier (`tier` is NA; it read 0, like a real tier). A row of three or more
+segments whose least-squares line
 through their lags changes by more than the tolerance across the row is a
 clock drift, written with `shift_end`; otherwise the row's shift is minus the
 median lag. The line is evaluated at the row's own start and end, which may lie
@@ -6769,7 +6798,7 @@ error back exactly, through the chain, and its table puts every reading on its
 true time. At a resolution of a second a clock 7.7 s late is written as 8 s,
 not the 7 s the floor gave.
 
-### 12.5 What the survey names instead of fitting **[built 2026-11-03 — stage 2]**
+### 12.5 What the survey names instead of fitting **[built 2026-11-03 — stage 2; `bridged`, walkthrough stage A2]**
 
 Each fault is reported by name with the stretch of segments behind it
 (`ClockSurvey.faults`, the kinds in `tsara.survey.FAULT_KINDS`):
@@ -6781,8 +6810,10 @@ Each fault is reported by name with the stretch of segments behind it
   hour;
 - **fast drift**: three or more clock steps of one sign in a row, a drift
   faster than the tolerance per segment, which a shorter segment resolves;
-- **undecided**: each run of segments with readings that no row covers, with
-  why each was not decided;
+- **undecided**: each run of segments with readings that no row's span holds,
+  with why each was not decided;
+- **bridged**: a stretch of undecided segments a row bridges (`max_bridged`),
+  with the agreeing lags either side;
 - **tiers disagree**: two tiers composing to the reference clock further apart
   than the tolerance;
 - **outlier**: a segment set aside against two agreeing neighbours;
