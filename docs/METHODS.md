@@ -6533,6 +6533,44 @@ any out-of-order readings, so one landing on an earlier reading's exact time is
 dropped as a duplicate. Whether that is right is decided on the real steps of
 §12.2 (§12.7).
 
+**A clock set back.** A logger whose clock goes back records some seconds
+twice, once before the step and once after it. The table is keyed on recorded
+time, so both readings of such a second take the shift of the row holding it,
+which is wrong for one of them whenever a row's edge falls inside the repeated
+stretch. This is a stated limit, not handled, because the sources this phase
+corrects hardly have it. Measured on the 2024 SLC-SOS sources, every file read
+in the order it was written: a step back is a row recorded earlier than the
+row before it in the same file; the rows it makes ambiguous are those, on
+either side of it, recorded between the time after the step and the latest
+time before it; a row is a reading when any of its values is not the missing
+code.
+
+| source | files | rows | steps back | ambiguous readings |
+|---|---|---|---|---|
+| Picarro log (`User_Sync.dat`) | 567 | 1,013,534 | 0 | 0 |
+| Aeris log (`.txt`) | 56 | 1,666,270 | 11 | 43 |
+| weather station log (`UWTR_WX_Sprinter_*.csv`), GPS receiver's clock / logging computer's | 24 | 314,336 / 317,881 | 0 / 0 | 0 |
+| tracking feed (`.xlsx`; the four `DataJson`/`DataKML` files of 08-27 and 08-28 are another format, not read) | 9 | 124,913 | 20 | none: no recorded time occurs twice |
+| MIRO, CAPS and ROZE ICARTT | 21, 41, 41 | 6,085,034 | 0 | 0 |
+| PTR ICARTT | 43 | 1,800,370 | 14 | 0 |
+
+Only the Aeris's clock goes back: once in each of 11 of its 56 files, 4 s to
+12.5 min after the file's first reading (all but one within 3 min), by 2.0 s
+against its steady 0.993 s cadence (a step of −1.006 to −1.007 s), which puts
+3 or 4 readings inside the repeated second, 43 in all. Those readings are the
+limit's whole cost on these sources. The readings before such a step sit 2 s
+apart from the rest of their file on its own clock, which is a clock step in
+the first minutes of a file, finer than a segment (§12.4) can see. The PTR's 14
+steps (12 of 1 to 3 s, one of 3,599 s and one of 1,076 s, all in stationary
+files) lie inside stretches where every row is the missing code, so no reading
+is ambiguous. The feed's 20, in its 2024-08-22 and 08-23 files and up to
+12.2 h long, are rows written in chunks out of time order: no recorded time
+occurs twice, and sorted they form one record. Across files, consecutive files
+of one source overlap once, two CAPS files sharing 2 s on 2024-08-04. The
+correction runs on each file's rows in the order written, before any sort, so
+a key on (file, row) instead of recorded time could separate the two copies if
+a campaign ever needs it.
+
 ### 12.4 The survey: measuring lags from tracer pairs **[built 2026-11-03 — stages 2 and 3; walkthrough stages A1 and A2]**
 
 `tsara.survey` measures, before the pipeline, what a manifest can declare but
@@ -6772,7 +6810,13 @@ a cell before the midpoint, an end label half a cell after, and `mid` and
 **After-check.** A stream that already carries clock corrections is measured
 and gets no rows (fault `after-check`): its lags are the residuals of a table
 already applied, and every decided one should sit within about a second of
-zero.
+zero. That holds however much of the stream the table corrected: a stream
+corrected only up to a clock step is measured after the step too, and its lag
+there appears among the survey's segments as a residual, not as a row. One rule: rows come
+from the campaign as written, and the after-check checks them. A residual is
+mended in the table, by hand or by surveying the uncorrected streams again. A
+second table cannot be laid over the first, since two rows of one instrument
+may not overlap across all the tables a manifest names (§12.3).
 
 **The table written, and the survey saved.** `write_clock_corrections`
 (`tsara.core.clocks`) checks the rows as a table first, so that a file it writes
@@ -6851,6 +6895,8 @@ is the right file, not a longer table.
   by rows are the real SLC-SOS case, measured there.
 - What an overlap at a falling clock step does to ordering and de-duplication
   (§12.3).
+- What the Aeris log's 2 s step back in the first minutes of 11 files (§12.3)
+  costs the segment that holds it.
 - The resolution real data supports (§12.4): segment-to-segment scatter and
   the agreement of independent tiers on the 2024 SLC-SOS van, where r at the
   peak is 0.6 to 0.97.
