@@ -6851,13 +6851,43 @@ every 10 minutes, 1.7 % at a resolution of 0.1 s
 
 **Where a step goes.** A step happens where a logger stopped or its clock
 jumped, not at a segment edge. Between two rows across a step, the survey
-looks at the instrument's readings from the last segment before the step to
-the first after it; when the longest gap between consecutive readings there
-exceeds twice their median spacing, the rows meet at the reading after it,
-and otherwise at the segment edge. Measured on the known answer below, this
-puts a step exactly where the exported clock error stepped; at the segment
-edge, readings between the edge and the step took the wrong shift, landed on
-earlier readings' times and were dropped as duplicates.
+looks at the instrument's readings from the last decided segment before the
+step to the first after it, across any undecided segments between, for the
+one gap the step explains. First the hole a clock leaves when it jumps
+forward (its shift falling by J): a gap longer than twice the readings'
+median spacing whose excess over that spacing is J within the tolerance. A
+clock set back leaves no hole, and no gap can match it. Failing a hole, a
+logging stop (a minute or more), where clocks step (§12.2). The rows meet at
+the reading after that gap when it is the only one of its kind; when there is
+none, or more than one (two logging stops, two gaps the size of the jump),
+they meet at the segment edges, leaving any undecided segment between them
+undecided and named. Measured on the known answer below, this puts a step exactly where
+the exported clock error stepped; at the segment edge, readings between the
+edge and the step took the wrong shift, landed on earlier readings' times and
+were dropped as duplicates. Found in the second walkthrough of 2026-11-04: the
+rule was first the longest gap of any kind, which a dropout inside an
+undecided stretch can be. Measured on 1 s plume streams with 10 min segments,
+the tracer missing for 30 min and the clock stepping 10 s in the middle
+(readings shifted 10 s wrong in that stretch, before → after the fix):
+
+| case | before | after |
+|---|---|---|
+| clock jumps forward, no dropout | 0, at the step | 0, at the step |
+| clock set back, no dropout | 0, at the edges, named undecided | the same |
+| clock set back, a 5 s dropout elsewhere | **695**, at the dropout, not named | 0, at the edges, named undecided |
+| clock jumps forward, a 30 s dropout elsewhere | **670**, at the dropout, not named | 0, at the step |
+| clock set back at a 90 s logging stop | 0, at the stop | the same |
+
+The last three, on one hour of readings with the tracer missing for 20 min,
+are tests in `tests/survey/test_survey_clocks.py` (395 and 370 readings wrong
+before the fix, 0 after); the first two were tested already. So are the
+rule's limits: two logging stops leave a clock set back at the edges; a
+forward jump's hole places it before a logging stop elsewhere does; two gaps
+the size of the jump leave it at the edges, a logging stop being no
+tiebreak; a hole is measured beyond the readings' own spacing (on a record of
+one reading every 5 s a 10 s jump leaves a 15 s gap); and one dropped reading
+(a 2 s gap on 1 s readings) places nothing, though its 1 s excess is within
+the tolerance of a 3 s jump whose own hole fell inside a dropout.
 
 **The recorded clock.** A table is keyed on the clock each file recorded (§12.3),
 while a stream's times are cell midpoints after any `time_shift`. Row edges are

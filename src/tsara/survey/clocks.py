@@ -682,7 +682,11 @@ def _rows(
     for i, jump in enumerate(jumps):
         if jump != 0.0:
             boundary = _step_boundary(
-                times, int(edges[runs[i][-1]]), int(edges[runs[i + 1][0] + 1])
+                times,
+                int(edges[runs[i][-1]]),
+                int(edges[runs[i + 1][0] + 1]),
+                jump,
+                settings.tolerance_s,
             )
             if boundary is not None:
                 spans[i][1] = spans[i + 1][0] = boundary
@@ -776,22 +780,43 @@ def _covered(
     return {k for k in statuses if k not in loose}
 
 
-def _step_boundary(times: npt.NDArray[np.int64], first_ns: int, stop_ns: int) -> int | None:
-    """Return where a step's rows should meet: the reading after the longest gap, if one.
+def _step_boundary(
+    times: npt.NDArray[np.int64], first_ns: int, stop_ns: int, jump_s: float, tolerance_s: float
+) -> int | None:
+    """Return where a step's rows should meet: the reading after the one gap the step left.
 
-    Searched over ``[first_ns, stop_ns)``, the last segment before the step to
-    the first after it. A gap counts when it exceeds twice the readings'
-    median spacing there; otherwise the readings run on unbroken and the step
-    stays at the segment edge, which None says.
+    Searched over ``[first_ns, stop_ns)``, from the last decided segment
+    before the step to the first after it, so across any undecided segments
+    between. A gap can place the step only if the step explains it. First the
+    hole a clock leaves when it jumps forward, its shift falling by
+    ``-jump_s``: a gap longer than twice the readings' median spacing whose
+    excess over that spacing is the jump, within the tolerance. A clock set
+    back leaves no hole, and no gap can match it, since an excess is never
+    negative. Failing a hole, a logging stop of a minute or more, where clocks
+    step (§12.2). Only the one such gap places the step: when there is none,
+    or more than one of the kind looked for, the rows meet at the segment
+    edges, which None says, and an undecided segment between them stays
+    undecided and named. Found in the second walkthrough: the longest gap of
+    any kind was taken, so a 5 s dropout inside an undecided stretch placed a
+    clock set back 10 s, and the readings between them took a shift 10 s
+    wrong without being named.
     """
-    # Both segments are decided, and a correlation needs two paired readings,
-    # so there are always at least four readings here to take gaps between.
+    # Both runs' segments are decided, and a correlation needs two paired
+    # readings, so there are always at least four readings here to take gaps
+    # between.
     across = times[(times >= first_ns) & (times < stop_ns)]
     gaps = np.diff(across)
-    longest = int(np.argmax(gaps))
-    if gaps[longest] <= 2 * np.median(gaps):
-        return None
-    return int(across[longest + 1])
+    spacing = float(np.median(gaps))
+    excess_s = (gaps - spacing) / NS_PER_S
+    holes = (gaps > 2 * spacing) & (np.abs(excess_s + jump_s) <= tolerance_s)
+    stops = gaps >= _LOGGING_STOP_NS
+    for candidates in (holes, stops):
+        found = np.flatnonzero(candidates)
+        if len(found) == 1:
+            return int(across[found[0] + 1])
+        if len(found) > 1:
+            return None
+    return None
 
 
 def _reach_over_short_ends(

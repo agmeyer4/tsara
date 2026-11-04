@@ -66,19 +66,24 @@ def _stream(
     attrs: dict[str, object] | None = None,
     first: int = 0,
     n: int = N,
+    dropouts: tuple[tuple[int, int], ...] = (),
 ) -> xr.Dataset:
     """Readings at true seconds ``first..first+n``, recorded at t - shift(t).
 
     So ``recorded + shift`` is the truth: a clock running 5 s fast is ``-5``.
 
     ``variables`` maps a name to a function of the true seconds; by default one
-    ``ch4`` reading the shared plumes with a little noise.
+    ``ch4`` reading the shared plumes with a little noise. Each of
+    ``dropouts`` leaves out every reading of the true seconds ``[start, stop)``.
     """
     true_s = np.arange(first, first + n, dtype=float)
-    shifts = shift(true_s) if callable(shift) else np.full(n, float(shift))
+    for start, stop in dropouts:
+        true_s = true_s[(true_s < start) | (true_s >= stop)]
+    count = len(true_s)
+    shifts = shift(true_s) if callable(shift) else np.full(count, float(shift))
     rng = np.random.default_rng(seed)
     makers = variables or {"ch4": lambda t: TRUTH[t.astype(int)]}
-    data = {name: make(true_s) + rng.normal(0, 0.3, n) for name, make in makers.items()}
+    data = {name: make(true_s) + rng.normal(0, 0.3, count) for name, make in makers.items()}
     recorded = T0 + pd.to_timedelta(true_s - shifts, unit="s")
     order = np.argsort(np.asarray(recorded))
     stream = xr.Dataset(
@@ -891,3 +896,126 @@ def test_cells_that_do_not_line_up_keep_whole_seconds_and_are_named() -> None:
     (fault,) = _faults(survey, "whole seconds")
     assert fault["detail"].startswith("6 segments measured on whole seconds")
     assert (fault["start"], fault["end"]) == ("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z")
+
+
+#: The tracer missing for twenty minutes, true 00:20 to 00:40, while the
+#: instrument logs another variable: two undecided segments around a step.
+LONG_HOLE = {
+    "ch4": lambda t: np.where((t >= 1200) & (t < 2400), np.nan, TRUTH[t.astype(int)]),
+    "co2": lambda t: np.full(len(t), 420.0),
+}
+
+
+def _clock_steps_at_1800(before: float, after: float) -> Callable[[np.ndarray], np.ndarray]:
+    def clock(t: np.ndarray) -> np.ndarray:
+        return np.where(t < 1800, before, after)
+
+    return clock
+
+
+def test_a_clock_set_back_inside_an_undecided_stretch_is_not_placed_at_a_dropout() -> None:
+    """The clock goes back 10 s (shift -15 to -5) at true 00:30, inside a
+    stretch the survey cannot decide, and the readings drop out for 5 s at
+    00:23:20. A clock set back leaves no hole, so nothing in the readings says
+    where it stepped: the rows meet at the segment edges and the stretch is
+    named undecided. Found in the second walkthrough: the longest gap of any
+    kind placed the step, the rows met at the dropout, 395 readings took a
+    shift 10 s wrong, and the stretch was not named."""
+    inst = _stream(_clock_steps_at_1800(-15.0, -5.0), variables=LONG_HOLE, dropouts=((1400, 1405),))
+    survey = survey_clocks({"ref": _stream(), "inst": inst}, _config(ONE))
+    first, second = survey.rows
+    assert (first.shift_ns, second.shift_ns) == (-15 * SECOND, -5 * SECOND)
+    assert (first.end_ns, second.start_ns) == (_ns(1200), _ns(2400))
+    (undecided,) = _faults(survey, "undecided")
+    assert (undecided["start"], undecided["end"]) == (
+        "2026-01-01T00:20:00Z",
+        "2026-01-01T00:40:00Z",
+    )
+
+
+def test_a_clock_jumping_forward_is_placed_at_its_own_hole_not_a_longer_dropout() -> None:
+    """The clock jumps 10 s forward (shift -5 to -15) at true 00:30, leaving a
+    hole of 11 s in the recorded times, and the readings drop out for 30 s at
+    00:23:20. The hole's excess over the 1 s spacing is the jump; the
+    dropout's is not, and it is no logging stop: the rows meet at the hole, so
+    every reading of the undecided stretch is corrected right (found in the
+    second walkthrough: they met at the dropout, 370 readings 10 s wrong)."""
+    inst = _stream(_clock_steps_at_1800(-5.0, -15.0), variables=LONG_HOLE, dropouts=((1400, 1430),))
+    survey = survey_clocks({"ref": _stream(), "inst": inst}, _config(ONE))
+    first, second = survey.rows
+    assert first.end_ns == second.start_ns == _ns(1800 + 15)
+    assert not _faults(survey, "undecided")
+
+
+def test_a_clock_set_back_at_a_logging_stop_is_placed_at_the_stop() -> None:
+    """The clock goes back 10 s at true 00:30 across a logging stop of 90 s:
+    clocks step where loggers stop (METHODS §12.2), so the stop places it."""
+    inst = _stream(_clock_steps_at_1800(-15.0, -5.0), variables=LONG_HOLE, dropouts=((1790, 1880),))
+    survey = survey_clocks({"ref": _stream(), "inst": inst}, _config(ONE))
+    first, second = survey.rows
+    assert first.end_ns == second.start_ns == _ns(1880 + 5)
+    (step,) = _faults(survey, "clock step")
+    assert step["detail"].endswith("across a logging stop of 81 s")
+    assert not _faults(survey, "undecided")
+
+
+def _meet_at_the_edges(survey: ClockSurvey) -> None:
+    """Assert the two rows meet at the segment edges around the undecided stretch, named."""
+    first, second = survey.rows
+    assert (first.end_ns, second.start_ns) == (_ns(1200), _ns(2400))
+    (undecided,) = _faults(survey, "undecided")
+    assert (undecided["start"], undecided["end"]) == (
+        "2026-01-01T00:20:00Z",
+        "2026-01-01T00:40:00Z",
+    )
+
+
+def test_two_logging_stops_leave_a_clock_set_back_unplaced() -> None:
+    """Two logging stops of 90 s in the undecided stretch, the clock set back
+    at the second: either could be where it stepped, so neither places it."""
+    clock = _clock_steps_at_1800(-15.0, -5.0)
+    inst = _stream(clock, variables=LONG_HOLE, dropouts=((1400, 1490), (1790, 1880)))
+    _meet_at_the_edges(survey_clocks({"ref": _stream(), "inst": inst}, _config(ONE)))
+
+
+def test_a_forward_jumps_hole_places_it_before_a_logging_stop_does() -> None:
+    """The clock jumps 10 s forward at 00:30, and the readings stop for 90 s at
+    00:23:20: the hole matching the jump is the step's, the stop is not."""
+    clock = _clock_steps_at_1800(-5.0, -15.0)
+    inst = _stream(clock, variables=LONG_HOLE, dropouts=((1400, 1490),))
+    first, second = survey_clocks({"ref": _stream(), "inst": inst}, _config(ONE)).rows
+    assert first.end_ns == second.start_ns == _ns(1800 + 15)
+
+
+def test_a_dropped_reading_is_no_hole_however_well_it_matches() -> None:
+    """A 3 s forward jump whose hole falls inside a 10 s dropout, so no gap
+    matches it, and one reading dropped at 00:23:20: a 2 s gap on 1 s readings,
+    whose excess of 1 s is within the 2 s tolerance of the jump. A gap must
+    first be longer than twice the spacing, so the dropped reading places
+    nothing and the rows meet at the segment edges."""
+    clock = _clock_steps_at_1800(-5.0, -8.0)
+    inst = _stream(clock, variables=LONG_HOLE, dropouts=((1400, 1401), (1795, 1805)))
+    _meet_at_the_edges(survey_clocks({"ref": _stream(), "inst": inst}, _config(ONE)))
+
+
+def test_two_gaps_the_size_of_the_jump_leave_it_unplaced_whatever_the_stops() -> None:
+    """A 10 s forward jump at 00:30 leaves its hole, a 10 s dropout at 00:21:40
+    leaves another of the same size, and the readings stop for 90 s at
+    00:25:00. Two gaps fit the jump, so neither places it, and a logging stop
+    is no tiebreak: it is a weaker sign than a gap the size of the jump."""
+    clock = _clock_steps_at_1800(-5.0, -15.0)
+    dropouts = ((1300, 1310), (1500, 1590))
+    inst = _stream(clock, variables=LONG_HOLE, dropouts=dropouts)
+    _meet_at_the_edges(survey_clocks({"ref": _stream(), "inst": inst}, _config(ONE)))
+
+
+def test_a_hole_is_measured_beyond_the_readings_own_spacing() -> None:
+    """A record of one reading every 5 s, like the van's weather station:
+    a 10 s forward jump leaves a gap of 15 s, whose excess over the spacing
+    is the jump. Compared without the spacing it would be 5 s more than the
+    jump, beyond the tolerance, and the step would go to the segment edges."""
+    clock = _clock_steps_at_1800(-5.0, -15.0)
+    inst = _stream(clock, variables=LONG_HOLE).isel(time=slice(None, None, 5))
+    tiers = {"inst": [{"partner": "ref", "pairs": [["ch4", "ch4"]], "min_pairs": 60}]}
+    first, second = survey_clocks({"ref": _stream(), "inst": inst}, _config(tiers)).rows
+    assert first.end_ns == second.start_ns == _ns(1800 + 15)
