@@ -23,13 +23,13 @@ T0 = pd.Timestamp("2026-01-01T00:00:00")
 N = 2400
 
 
-def _stream(lag_s: float, seed: int) -> xr.Dataset:
+def _stream(shift_s: float, seed: int) -> xr.Dataset:
     rng = np.random.default_rng(0)
     plumes = np.zeros(N + 100)
     for centre in rng.choice(N, size=N // 30, replace=False):
         plumes += rng.lognormal(3, 0.5) * np.exp(-0.5 * ((np.arange(N + 100) - centre) / 3.0) ** 2)
     noise = np.random.default_rng(seed).normal(0, 0.3, N)
-    times = T0 + pd.to_timedelta(np.arange(N) + lag_s, unit="s")
+    times = T0 + pd.to_timedelta(np.arange(N) - shift_s, unit="s")
     return xr.Dataset({"ch4": ("time", plumes[:N] + noise)}, coords={"time": np.asarray(times)})
 
 
@@ -47,14 +47,14 @@ CONFIG = SurveyConfig.model_validate(
 
 @pytest.fixture(scope="module")
 def survey() -> ClockSurvey:
-    """A survey with rows: the instrument 6 s late."""
-    return survey_clocks({"ref": _stream(0, 1), "inst": _stream(6, 2)}, CONFIG)
+    """A survey with rows: the instrument 6 s late, so its shift is -6 s."""
+    return survey_clocks({"ref": _stream(0, 1), "inst": _stream(-6, 2)}, CONFIG)
 
 
 @pytest.fixture(scope="module")
 def rowless() -> ClockSurvey:
-    """A survey with no rows: the lag lies beyond the search."""
-    return survey_clocks({"ref": _stream(0, 1), "inst": _stream(45, 2)}, CONFIG)
+    """A survey with no rows: the shift lies beyond the search."""
+    return survey_clocks({"ref": _stream(0, 1), "inst": _stream(-45, 2)}, CONFIG)
 
 
 def _assert_same(back: ClockSurvey, survey: ClockSurvey) -> None:

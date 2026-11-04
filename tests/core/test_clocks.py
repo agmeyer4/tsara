@@ -132,11 +132,35 @@ def test_a_shift_is_a_signed_duration_with_its_unit(
 def test_describe_names_the_stretch_shift_clock_and_provenance() -> None:
     row = _row("2024-08-20T18:00:00Z", "2024-08-20T20:00:00Z", -10, -9.5)
     assert row.describe() == (
-        "2024-08-20T18:00:00Z/2024-08-20T20:00:00Z shift -10 s to -9.5 s onto airmar (measured)"
+        "2024-08-20T18:00:00Z/2024-08-20T20:00:00Z shift -10 s to -9.5 s (moved earlier) "
+        "onto airmar (measured)"
     )
     with_reason = dataclasses.replace(row, shift_end_ns=None, reason="a step")
-    assert with_reason.describe().endswith("shift -10 s onto airmar (measured; a step)")
+    assert with_reason.describe().endswith(
+        "shift -10 s (moved earlier) onto airmar (measured; a step)"
+    )
     assert row.where() == "clocks.csv:2"
+
+
+@pytest.mark.parametrize(
+    ("shift_s", "shift_end_s", "words"),
+    [
+        (-7.0, None, "(moved earlier)"),
+        (4.0, None, "(moved later)"),
+        (0.0, None, "(unchanged)"),
+        (0.0, -2.0, "(moved earlier)"),
+        (2.0, 0.0, "(moved later)"),
+        (-1.0, 2.0, "(moved earlier, then later)"),
+        (1.0, -2.0, "(moved later, then earlier)"),
+    ],
+)
+def test_describe_says_which_way_the_readings_move(
+    shift_s: float, shift_end_s: float | None, words: str
+) -> None:
+    """The sign is spelled in words beside the number, so that a reader of a
+    warning does not have to remember which way a shift runs."""
+    row = _row("2024-08-20T18:00:00Z", "2024-08-20T20:00:00Z", shift_s, shift_end_s)
+    assert f"{words} onto airmar" in row.describe()
 
 
 # ---------------------------------------------------------------------------

@@ -221,7 +221,7 @@ def test_a_row_holding_no_reading_is_logged(caplog: pytest.LogCaptureFixture) ->
     with caplog.at_level(logging.INFO, logger="tsara.ingest.clocks"):
         record.report("picarro")
     (message,) = [r.getMessage() for r in caplog.records]
-    assert "2024-08-05T18:01:40Z/2024-08-05T18:03:20Z shift +2 s onto gps" in message
+    assert "2024-08-05T18:01:40Z/2024-08-05T18:03:20Z shift +2 s (moved later) onto gps" in message
     assert "holds none of its readings" in message
 
 
@@ -305,7 +305,8 @@ def test_a_corrected_stream_records_its_rows_and_the_rest_records_nothing(
         streams = ingest_campaign(manifest)
     attrs = streams["picarro"].attrs
     assert attrs["tsara_clock_corrections"] == (
-        "2024-08-05T18:00:00Z/2024-08-05T18:15:00Z shift -3 s onto gps (measured; CH4 survey)"
+        "2024-08-05T18:00:00Z/2024-08-05T18:15:00Z shift -3 s (moved earlier) onto gps "
+        "(measured; CH4 survey)"
     )
     assert attrs["tsara_clock_corrections_files"] == "clocks.csv"
     assert attrs["tsara_reference_clock"] == "gps"

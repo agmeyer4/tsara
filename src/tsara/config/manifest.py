@@ -992,17 +992,18 @@ class InstrumentConfig(_StrictModel):
     time_shift: str | None = Field(
         default=None,
         description=(
-            "Signed offset ADDED to every timestamp and to both cell "
-            "boundaries, correcting the instrument clock onto true "
-            "air-at-inlet time. A logger running 5 s fast takes '-5s'; a 9 s "
-            "inlet lag also takes '-9s'. Default None applies nothing, which "
-            "is right for an archive already lag-corrected upstream -- and "
-            "the applied value is recorded in the stream attributes, so a "
-            "double correction is visible rather than silent. Support (what "
-            "interval a value describes) and offset (how its clock relates to "
-            "UTC) are separate concepts and are kept apart deliberately; "
-            "estimating a shift by cross-correlation is a future stage, not "
-            "this field."
+            "Signed shift ADDED to every timestamp and to both cell "
+            "boundaries (corrected = recorded + shift), correcting the "
+            "instrument clock onto true air-at-inlet time. A logger running "
+            "5 s fast takes '-5s'; a 9 s inlet delay also takes '-9s'. "
+            "Default None applies nothing, which is right for an archive "
+            "already time-corrected upstream -- and the applied value is "
+            "recorded in the stream attributes, so a double correction is "
+            "visible rather than silent. Support (what interval a value "
+            "describes) and clock (how its times relate to UTC) are separate "
+            "concepts and are kept apart deliberately; a shift that changes "
+            "along the record belongs in a correction table "
+            "(clock_corrections), which the clock survey measures."
         ),
     )
 

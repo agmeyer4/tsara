@@ -419,7 +419,7 @@ without being run, and none needs any real data:
   — clocks: what a few seconds' error costs a per-plume fit between two
   analyzers of one gas; an archive written on wrong clocks and the correction
   table that puts it right as each file is read (and the readings a missing
-  row leaves alone, counted); one segment's lag from shared plumes against a
+  row leaves alone, counted); one segment's shift from shared plumes against a
   loop written from the definition; the survey on a whole campaign, the chain
   through a partner to the reference clock and a step placed where it
   happened; a drifting clock, an outlier and an undecided stretch, named; and

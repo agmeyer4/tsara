@@ -30,9 +30,11 @@ cannot silently turn a drift into a constant.
   file, because a table written in local time would correct the wrong hours of
   every day and nothing downstream could tell.
 * ``shift`` is a signed duration with its unit (``-10s``, ``0.5s``), added to
-  every timestamp in the stretch: the sign rule of ``time_shift``, so a logger
-  running 5 s fast takes ``-5s``. A bare number is refused, since ``10`` could
-  mean seconds or nanoseconds.
+  every timestamp in the stretch, ``corrected = recorded + shift``: the sign
+  rule of ``time_shift``, so a logger running 5 s fast, whose file shows the
+  air 5 s late, takes ``-5s``. Every clock number in TSARA is a shift in this
+  sense, the clock survey's included. A bare number is refused, since ``10``
+  could mean seconds or nanoseconds.
 * ``shift_end``, when given, is the shift at ``end``: the shift then runs
   linearly in recorded time from ``shift`` at ``start``, which is how a
   steadily drifting clock is written. Empty means a constant shift.
@@ -141,12 +143,16 @@ class ClockCorrection:
     line: int
 
     def describe(self) -> str:
-        """One line for messages and attributes: stretch, shift, clock, provenance, reason."""
-        shift = _seconds(self.shift_ns)
-        if self.shift_end_ns is not None:
-            shift += f" to {_seconds(self.shift_end_ns)}"
+        """One line for messages and attributes: stretch, shift, clock, provenance, reason.
+
+        The shift is spelled with its direction in words beside the sign,
+        ``shift -7 s (moved earlier)``, so that a reader of a warning or an
+        attribute does not have to remember which way the sign runs.
+        """
+        ends = (self.shift_ns,) if self.shift_end_ns is None else (self.shift_ns, self.shift_end_ns)
+        shift = " to ".join(_seconds(ns) for ns in ends)
         stretch = f"{iso_utc(self.start_ns)}/{iso_utc(self.end_ns)}"
-        text = f"{stretch} shift {shift} onto {self.reference_clock}"
+        text = f"{stretch} shift {shift} ({_direction(ends)}) onto {self.reference_clock}"
         detail = self.provenance + (f"; {self.reason}" if self.reason else "")
         return f"{text} ({detail})"
 
@@ -455,3 +461,15 @@ def _duration_text(ns: int) -> str:
 def _seconds(ns: int) -> str:
     """Spell a signed duration in seconds, for messages and attributes."""
     return f"{ns / NS_PER_S:+g} s"
+
+
+def _direction(shifts_ns: tuple[int, ...]) -> str:
+    """Say in words which way a row moves its readings: a constant shift, or a drift's two ends."""
+    signs = [int(np.sign(ns)) for ns in shifts_ns]
+    if all(sign == 0 for sign in signs):
+        return "unchanged"
+    if all(sign <= 0 for sign in signs):
+        return "moved earlier"
+    if all(sign >= 0 for sign in signs):
+        return "moved later"
+    return "moved earlier, then later" if signs[0] < 0 else "moved later, then earlier"

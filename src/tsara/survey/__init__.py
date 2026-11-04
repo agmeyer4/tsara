@@ -6,14 +6,16 @@ and then names in the manifest; it never changes a stream, and nothing it
 writes is applied until a manifest names it (``docs/METHODS.md`` §12). Its
 first measurement is clocks: how far apart each instrument's files put the
 same air, segment by segment, chained to one reference clock, written as the
-rows of a correction table (:mod:`tsara.core.clocks`).
+rows of a correction table (:mod:`tsara.core.clocks`). Every clock number it
+writes is a shift: seconds added to a recorded time, ``corrected = recorded +
+shift``.
 
 Shape of the subpackage
 -----------------------
-``lags``
-    One lag: a variable on whole seconds with its running median removed, and
-    the lag at which a tier of tracer pairs correlates best over one segment;
-    the package's error class.
+``shifts``
+    One shift: a variable on whole seconds with its running median removed,
+    and the shift at which a tier of tracer pairs correlates best over one
+    segment; the package's error class.
 ``clocks``
     The clock survey: every instrument's tiers on every segment, the chain to
     the reference clock, outliers, rows, clock steps and drifts, and the
@@ -27,11 +29,11 @@ from __future__ import annotations
 
 from tsara.survey.bundle import load_clock_survey, save_clock_survey
 from tsara.survey.clocks import FAULT_KINDS, ClockSurvey, survey_clocks
-from tsara.survey.lags import (
+from tsara.survey.shifts import (
     SecondsSeries,
-    SegmentLag,
+    SegmentShift,
     TsaraSurveyError,
-    pooled_lag,
+    pooled_shift,
     seconds_series,
 )
 
@@ -39,10 +41,10 @@ __all__ = [
     "ClockSurvey",
     "FAULT_KINDS",
     "SecondsSeries",
-    "SegmentLag",
+    "SegmentShift",
     "TsaraSurveyError",
     "load_clock_survey",
-    "pooled_lag",
+    "pooled_shift",
     "save_clock_survey",
     "seconds_series",
     "survey_clocks",

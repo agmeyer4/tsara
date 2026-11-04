@@ -1018,14 +1018,14 @@ def test_a_declared_period_masks_exactly_the_readings_inside_it(tmp_path: Path) 
 # Clock errors through the whole path (docs/METHODS.md §12.3)
 # ---------------------------------------------------------------------------
 
-#: The analyzer's clock reads 3 s behind for the first 8 minutes and 5 s ahead
-#: from the tenth on; the two minutes between are written as they are, so the
-#: round trip checks that uncorrected readings are left alone as well as that
-#: the others are put right.
+#: The analyzer's clock reads 3 s behind for the first 8 minutes (shift +3 s)
+#: and 5 s ahead from the tenth on (-5 s); the two minutes between are written
+#: as they are, so the round trip checks that uncorrected readings are left
+#: alone as well as that the others are put right.
 CLOCK_ERRORS = {
     "analyzer": [
-        ClockError("2026-01-01T00:00:00Z", "2026-01-01T00:08:00Z", "-3s"),
-        ClockError("2026-01-01T00:10:00Z", "2026-01-01T00:30:00Z", "5s"),
+        ClockError("2026-01-01T00:00:00Z", "2026-01-01T00:08:00Z", "3s"),
+        ClockError("2026-01-01T00:10:00Z", "2026-01-01T00:30:00Z", "-5s"),
     ]
 }
 
@@ -1118,23 +1118,24 @@ def test_the_exported_table_travels_with_its_manifest(
 @pytest.mark.parametrize(
     ("errors", "match"),
     [
-        # A later error 2 s smaller than an earlier one, with only 1 s between:
-        # the recorded stretches overlap, which the table refuses.
+        # A later shift 2 s larger than an earlier one (the clock set back 2 s),
+        # with only 1 s between: the recorded stretches overlap, which the
+        # table refuses.
         (
             [
-                ClockError("2026-01-01T00:00:00Z", "2026-01-01T00:05:00Z", "3s"),
-                ClockError("2026-01-01T00:05:01Z", "2026-01-01T00:10:00Z", "1s"),
+                ClockError("2026-01-01T00:00:00Z", "2026-01-01T00:05:00Z", "-3s"),
+                ClockError("2026-01-01T00:05:01Z", "2026-01-01T00:10:00Z", "-1s"),
             ],
             "overlap once recorded",
         ),
         # Running 5 s fast up to minute 5 puts the readings just after it,
         # written as they are, inside the row's recorded stretch.
         (
-            [ClockError("2026-01-01T00:00:00Z", "2026-01-01T00:05:00Z", "5s")],
+            [ClockError("2026-01-01T00:00:00Z", "2026-01-01T00:05:00Z", "-5s")],
             "would be recorded inside the stretch of a correction row",
         ),
-        ([ClockError("2026-01-01T00:00:00", "2026-01-01T00:05:00Z", "1s")], "with an offset or Z"),
-        ([ClockError("2026-01-01T00:05:00Z", "2026-01-01T00:05:00Z", "1s")], "end is not after"),
+        ([ClockError("2026-01-01T00:00:00", "2026-01-01T00:05:00Z", "-1s")], "with an offset or Z"),
+        ([ClockError("2026-01-01T00:05:00Z", "2026-01-01T00:05:00Z", "-1s")], "end is not after"),
     ],
 )
 def test_clock_errors_that_cannot_be_written_are_refused(
@@ -1152,7 +1153,7 @@ def test_the_reference_clock_must_be_a_stream_free_of_clock_errors(tmp_path: Pat
         export_raw(generated, tmp_path / "b", clock_errors=CLOCK_ERRORS, reference_clock="gps")
     both = {
         **CLOCK_ERRORS,
-        "met": [ClockError("2026-01-01T00:00:00Z", "2026-01-01T00:30:00Z", "-1s")],
+        "met": [ClockError("2026-01-01T00:00:00Z", "2026-01-01T00:30:00Z", "1s")],
     }
     with pytest.raises(TsaraSyntheticError, match="none can keep the reference clock"):
         export_raw(generated, tmp_path / "c", clock_errors=both)

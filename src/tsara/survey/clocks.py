@@ -1,4 +1,4 @@
-"""The clock survey: a lag per segment from tracer pairs, chained to one clock, written as rows.
+"""The clock survey: a shift per segment from tracer pairs, chained to one clock, written as rows.
 
 Where this sits
 ---------------
@@ -9,6 +9,13 @@ segment, and turns the measurements into the rows of a correction table
 (``docs/METHODS.md`` §12.4). It never changes a stream and never applies what
 it writes.
 
+The sign
+--------
+Every number here is a **shift**, the correction table's own: seconds added
+to a recorded time, ``corrected = recorded + shift``. An instrument whose file
+shows the air 7 s after its partner's is measured at -7 s onto that partner,
+and the row the survey writes carries the same -7 s.
+
 What it does, in order
 ----------------------
 1. **Segments.** Time is cut into segments of the set length on one grid
@@ -16,18 +23,18 @@ What it does, in order
    so that segment k of an instrument and of its partner are the same stretch
    of time. An instrument is measured only on the segments where it has
    readings.
-2. **Tiers.** On each segment, each of the instrument's tiers gives a lag
-   against its partner: its peak on whole seconds
-   (:func:`tsara.survey.lags.pooled_lag`), then the lag itself on the
+2. **Tiers.** On each segment, each of the instrument's tiers gives a shift
+   onto its partner: its peak on whole seconds
+   (:func:`tsara.survey.shifts.pooled_shift`), then the shift itself on the
    readings' own cells, to the survey's resolution
-   (:func:`tsara.survey.lags.refined_lag`). The first tier
-   that decides sets the segment's lag; a later tier that decides too checks
-   it, and a disagreement larger than the tolerance is named. A tier whose
-   partner is undecided in the segment cannot set it, so the next tier that
-   decides and reaches the reference clock does.
-3. **The chain.** The lag against the partner plus the partner's own lag to
-   the reference clock in the same segment is the lag to the reference clock.
-   The reference clock's instrument is zero everywhere; a segment whose
+   (:func:`tsara.survey.shifts.refined_shift`). The first tier that decides
+   sets the segment's shift; a later tier that decides too checks it, and a
+   disagreement larger than the tolerance is named. A tier whose partner is
+   undecided in the segment cannot set it, so the next tier that decides and
+   reaches the reference clock does.
+3. **The chain.** The shift onto the partner plus the partner's own shift onto
+   the reference clock in the same segment is the shift onto the reference
+   clock. The reference clock's instrument is zero everywhere; a segment whose
    partner is undecided there is undecided.
 4. **Outliers.** A decided segment differing by more than the tolerance from
    both its decided neighbours, while they agree with each other, is set
@@ -35,22 +42,22 @@ What it does, in order
    two clock steps in a row. It stays inside the row around it. Neighbours
    are the adjacent segments, past only segments too short to measure: across
    a stretch with no readings the clock may really have been elsewhere.
-5. **Rows.** Consecutive decided segments whose lags agree within the
+5. **Rows.** Consecutive decided segments whose shifts agree within the
    tolerance become one row; a larger jump starts a new row and is named a
    clock step. A segment with readings but no decision ends the row before it,
    so its readings stay uncorrected and ingestion says so; segments with no
    readings at all do not. Up to ``max_bridged`` of undecided segments are
-   bridged instead, when the lags either side agree and the readings run
-   across without a logging stop. A row of three or more segments whose least-squares
-   line changes by more than the tolerance across it is a clock drift, written
-   with ``shift_end``. The shift is minus the lag.
+   bridged instead, when the shifts either side agree and the readings run
+   across without a logging stop. A row of three or more segments whose
+   least-squares line changes by more than the tolerance across it is a clock
+   drift, written with ``shift_end``.
 6. **The recorded clock.** A table is keyed on the clock each file recorded,
    while a stream's times are cell midpoints after any ``time_shift``; row
    edges are moved back by both, using the stream's own label and nominal
    width (``docs/METHODS.md`` §12.4).
 
 A stream that already carries clock corrections is measured as an after-check
-and gets no rows: its lags are residuals of a table already applied.
+and gets no rows: its shifts are residuals of a table already applied.
 """
 
 from __future__ import annotations
@@ -73,14 +80,14 @@ from tsara.core.naming import (
     TIME_SHIFT_ATTR,
 )
 from tsara.core.timebase import NS_PER_S, SECOND_NS, SECONDS_PER_HOUR, iso_utc
-from tsara.survey.lags import (
+from tsara.survey.shifts import (
     CellSeries,
     SecondsSeries,
-    SegmentLag,
+    SegmentShift,
     TsaraSurveyError,
     cell_series,
-    pooled_lag,
-    refined_lag,
+    pooled_shift,
+    refined_shift,
     seconds_series,
 )
 
@@ -133,7 +140,7 @@ MEASUREMENT_COLUMNS: dict[str, str] = {
     "partner": "str",
     "start": "str",
     "end": "str",
-    "lag_s": "float64",
+    "shift_onto_partner_s": "float64",
     "r": "float64",
     "n_pairs": "int64",
     "at_edge": "bool",
@@ -147,8 +154,8 @@ SEGMENT_COLUMNS: dict[str, str] = {
     "end": "str",
     "tier": "Int64",
     "partner": "str",
-    "lag_s": "float64",
-    "lag_to_reference_s": "float64",
+    "shift_onto_partner_s": "float64",
+    "shift_onto_reference_s": "float64",
     "noise_removed": "boolean",
     "status": "str",
 }
@@ -161,7 +168,7 @@ FAULT_COLUMNS: dict[str, str] = {
 }
 
 #: Give the prepared series of one variable of one instrument: on whole
-#: seconds for the search, on the readings' own cells for the lag.
+#: seconds for the search, on the readings' own cells for the shift.
 _SeriesOf = Callable[[str, str], SecondsSeries]
 _CellsOf = Callable[[str, str], CellSeries]
 
@@ -174,20 +181,22 @@ class ClockSurvey:
     ----------
     measurements : pandas.DataFrame
         One row per instrument, tier and segment with readings: ``instrument``,
-        ``tier`` (from 1), ``partner``, ``start``, ``end``, ``lag_s`` (seconds
-        the instrument shows the air later than its partner, to the survey's
-        resolution), ``r`` and ``n_pairs`` (of the whole-second search),
-        ``at_edge``, ``pairs_disagree``, ``noise_removed`` (the joined
-        readings' stated noise was removed, :func:`~tsara.survey.lags.refined_lag`),
+        ``tier`` (from 1), ``partner``, ``start``, ``end``,
+        ``shift_onto_partner_s`` (seconds added to the instrument's recorded
+        times to put it on its partner's clock, to the survey's resolution),
+        ``r`` and ``n_pairs`` (of the whole-second search), ``at_edge``,
+        ``pairs_disagree``, ``noise_removed`` (the joined readings' stated
+        noise was removed, :func:`~tsara.survey.shifts.refined_shift`),
         ``decided``.
     segments : pandas.DataFrame
         One row per instrument and segment with readings: ``instrument``,
         ``start``, ``end``, ``tier`` (the tier that decided, NA for none),
-        ``partner``, ``lag_s`` (against that partner),
-        ``lag_to_reference_s``, ``noise_removed`` (the deciding tier's; NA
-        for none), and ``status``: ``decided``, ``outlier``,
-        ``too short`` (fewer readings than any tier needs), ``no tier decided``,
-        ``at search edge``, ``pairs disagree`` or ``partner undecided``.
+        ``partner``, ``shift_onto_partner_s`` (onto that partner),
+        ``shift_onto_reference_s`` (the chain's, the number a row carries),
+        ``noise_removed`` (the deciding tier's; NA for none), and ``status``:
+        ``decided``, ``outlier``, ``too short`` (fewer readings than any tier
+        needs), ``no tier decided``, ``at search edge``, ``pairs disagree`` or
+        ``partner undecided``.
     rows : tuple of ClockCorrection
         The derived correction rows, provenance ``measured``.
     faults : pandas.DataFrame
@@ -230,12 +239,12 @@ class _Settings:
 
 @dataclass(frozen=True)
 class _Measured:
-    """One tier's lag on one segment."""
+    """One tier's shift on one segment."""
 
     tier: int
     partner: str
     k: int
-    lag: SegmentLag
+    shift: SegmentShift
     decided: bool
 
 
@@ -248,7 +257,7 @@ class _Fault:
 
 
 def survey_clocks(streams: Mapping[str, xr.Dataset], config: SurveyConfig) -> ClockSurvey:
-    """Measure each instrument's lag to the reference clock and derive correction rows.
+    """Measure each instrument's shift onto the reference clock and derive correction rows.
 
     Parameters
     ----------
@@ -261,7 +270,7 @@ def survey_clocks(streams: Mapping[str, xr.Dataset], config: SurveyConfig) -> Cl
     Returns
     -------
     ClockSurvey
-        Measurements, segment lags, rows and faults.
+        Measurements, segment shifts, rows and faults.
 
     Raises
     ------
@@ -305,14 +314,14 @@ def survey_clocks(streams: Mapping[str, xr.Dataset], config: SurveyConfig) -> Cl
         present = _segments_with_readings(stream, edges)
         measured = _measure(name, config, settings, edges, present, series_of, cells_of)
         chosen = _chosen(measured, config, to_reference)
-        lags = _compose(config, chosen, to_reference)
+        shifts = _compose(config, chosen, to_reference)
         fewest = _fewest_pairs(name, config, settings)
         short = {k for k, count in present.items() if count < fewest}
-        outliers = _outliers(lags, settings.tolerance_s, short)
-        decided = {k: lag for k, lag in lags.items() if k not in outliers}
-        statuses = _statuses(present, lags, outliers, measured, fewest)
+        outliers = _outliers(shifts, settings.tolerance_s, short)
+        decided = {k: shift for k, shift in shifts.items() if k not in outliers}
+        statuses = _statuses(present, shifts, outliers, measured, fewest)
         own_faults = _tier_disagreements(measured, config, to_reference, settings) + [
-            _Fault("outlier", k, k, f"lag {lags[k]:+g} s against neighbours")
+            _Fault("outlier", k, k, f"shift {shifts[k]:+g} s against neighbours")
             for k in sorted(outliers)
         ]
         if CLOCK_CORRECTIONS_ATTR in stream.attrs:
@@ -334,7 +343,7 @@ def survey_clocks(streams: Mapping[str, xr.Dataset], config: SurveyConfig) -> Cl
         to_reference[name] = decided
 
         measurements += [_measurement_row(name, m, edges) for m in measured]
-        segments += [_segment_row(name, k, edges, chosen, lags, statuses) for k in present]
+        segments += [_segment_row(name, k, edges, chosen, shifts, statuses) for k in present]
         faults += [_fault_row(name, f, edges) for f in own_faults]
         kinds = Counter(f.kind for f in own_faults)
         logger.info(
@@ -412,7 +421,7 @@ def _measure(
 ) -> list[_Measured]:
     """Measure every tier of an instrument on every segment it has readings in.
 
-    The whole-second search finds each segment's peak; the lag is then
+    The whole-second search finds each segment's peak; the shift is then
     measured on the readings' own cells to the survey's resolution, wherever
     the peak is inside the search (``docs/METHODS.md`` §12.4).
     """
@@ -427,7 +436,7 @@ def _measure(
         min_pairs = tier.min_pairs or settings.min_pairs
         for k in present:
             first_s, stop_s = int(edges[k] // SECOND_NS), int(edges[k + 1] // SECOND_NS)
-            lag = pooled_lag(
+            shift = pooled_shift(
                 pairs,
                 first_s,
                 stop_s,
@@ -436,23 +445,23 @@ def _measure(
                 min_r=settings.min_r,
                 tolerance_s=settings.tolerance_s,
             )
-            if np.isfinite(lag.lag_s) and not lag.at_edge:
-                lag_s, at_edge, removed = refined_lag(
+            if np.isfinite(shift.shift_s) and not shift.at_edge:
+                shift_s, at_edge, removed = refined_shift(
                     on_cells,
                     int(edges[k]),
                     int(edges[k + 1]),
-                    coarse_s=lag.lag_s,
+                    coarse_s=shift.shift_s,
                     resolution_ns=settings.resolution_ns,
                     min_pairs=min_pairs,
                 )
-                lag = replace(lag, lag_s=lag_s, at_edge=at_edge, noise_removed=removed)
+                shift = replace(shift, shift_s=shift_s, at_edge=at_edge, noise_removed=removed)
             decided = bool(
-                np.isfinite(lag.lag_s)
-                and not lag.at_edge
-                and not lag.pairs_disagree
-                and lag.r >= settings.min_r
+                np.isfinite(shift.shift_s)
+                and not shift.at_edge
+                and not shift.pairs_disagree
+                and shift.r >= settings.min_r
             )
-            measured.append(_Measured(tier_number, tier.partner, k, lag, decided))
+            measured.append(_Measured(tier_number, tier.partner, k, shift, decided))
     return measured
 
 
@@ -467,7 +476,7 @@ def _chosen(
     with, so it gives way to the next that decides: that is what a backup tier
     is for. Found in the walkthrough: taking the first tier that decided,
     composable or not, left a segment undecided while its backup had measured
-    the lag straight against the reference clock.
+    the shift straight onto the reference clock.
     """
     chosen: dict[int, _Measured] = {}
     for m in sorted(measured, key=lambda m: (m.k, m.tier)):
@@ -482,15 +491,15 @@ def _compose(
     chosen: Mapping[int, _Measured],
     to_reference: Mapping[str, Mapping[int, float]],
 ) -> dict[int, float]:
-    """Return the lag to the reference clock of each segment the chain decides."""
+    """Return the shift onto the reference clock of each segment the chain decides."""
     return {
-        k: m.lag.lag_s
+        k: m.shift.shift_s
         + (0.0 if m.partner == config.reference_clock else to_reference[m.partner][k])
         for k, m in chosen.items()
     }
 
 
-def _outliers(lags: Mapping[int, float], tolerance_s: float, short: set[int]) -> set[int]:
+def _outliers(shifts: Mapping[int, float], tolerance_s: float, short: set[int]) -> set[int]:
     """Return the decided segments that disagree with both neighbours, which agree.
 
     A neighbour is the adjacent segment, reached past segments too short to
@@ -499,12 +508,12 @@ def _outliers(lags: Mapping[int, float], tolerance_s: float, short: set[int]) ->
     logging stops hours apart, where the clock may really have been elsewhere.
     """
     out = set()
-    for k, lag in lags.items():
+    for k, shift in shifts.items():
         before, after = _neighbour(k, -1, short), _neighbour(k, 1, short)
-        if before not in lags or after not in lags:
+        if before not in shifts or after not in shifts:
             continue
-        lb, la = lags[before], lags[after]
-        if abs(lag - lb) > tolerance_s and abs(lag - la) > tolerance_s:
+        lb, la = shifts[before], shifts[after]
+        if abs(shift - lb) > tolerance_s and abs(shift - la) > tolerance_s:
             if abs(lb - la) <= tolerance_s:
                 out.add(k)
     return out
@@ -531,8 +540,8 @@ def _statuses(
     ``too short``: undecidable by construction rather than by the evidence, as
     the slivers a record's first and last segments usually are.
     """
-    edge = {m.k for m in measured if m.lag.at_edge}
-    disagree = {m.k for m in measured if m.lag.pairs_disagree}
+    edge = {m.k for m in measured if m.shift.at_edge}
+    disagree = {m.k for m in measured if m.shift.pairs_disagree}
     # Decided by a tier, but by none that reaches the reference clock.
     stranded = {m.k for m in measured if m.decided}
     statuses = {}
@@ -562,7 +571,7 @@ def _tier_disagreements(
 ) -> list[_Fault]:
     """Name each segment where two tiers put the instrument on the reference clock differently.
 
-    Tiers may have different partners, so each tier's lag is composed to the
+    Tiers may have different partners, so each tier's shift is composed to the
     reference clock through its own partner before they are compared; a tier
     whose partner is undecided in the segment cannot be compared.
     """
@@ -571,18 +580,18 @@ def _tier_disagreements(
         if not m.decided:
             continue
         if m.partner == config.reference_clock:
-            composed = m.lag.lag_s
+            composed = m.shift.shift_s
         elif m.k in to_reference[m.partner]:
-            composed = m.lag.lag_s + to_reference[m.partner][m.k]
+            composed = m.shift.shift_s + to_reference[m.partner][m.k]
         else:
             continue
         by_segment.setdefault(m.k, []).append((m.tier, composed))
     faults = []
     for k, tiers in sorted(by_segment.items()):
-        lags = [lag for _, lag in tiers]
-        if max(lags) - min(lags) > settings.tolerance_s:
-            detail = ", ".join(f"tier {tier} {lag:+g} s" for tier, lag in tiers)
-            faults.append(_Fault("tiers disagree", k, k, detail + " to the reference clock"))
+        shifts = [shift for _, shift in tiers]
+        if max(shifts) - min(shifts) > settings.tolerance_s:
+            detail = ", ".join(f"tier {tier} {shift:+g} s" for tier, shift in tiers)
+            faults.append(_Fault("tiers disagree", k, k, detail + " onto the reference clock"))
     return faults
 
 
@@ -602,7 +611,7 @@ def _rows(
     cover. Segments too short to measure neither break a row nor end one:
     inside a row they are covered, and at the record's two ends the first and
     last rows reach over them. Undecided segments end a row, unless up to
-    ``max_bridged`` of them lie between lags that agree and the readings run
+    ``max_bridged`` of them lie between shifts that agree and the readings run
     across them without a logging stop: then the row bridges them. Between two
     rows across a clock step, the boundary goes where the readings have their
     longest gap, when it is a gap and not jitter: a step happens where a logger
@@ -644,7 +653,7 @@ def _rows(
                         "bridged",
                         last + 1,
                         k - 1,
-                        f"{len(between)} segment(s) with no decision between lags of "
+                        f"{len(between)} segment(s) with no decision between shifts of "
                         f"{decided[last]:+g} s and {decided[k]:+g} s, readings unbroken",
                     )
                 )
@@ -667,8 +676,10 @@ def _rows(
     offset = _recorded_offset_ns(stream)
     rows = []
     for run, (start_ns, end_ns), n_bridged in zip(runs, spans, bridged, strict=True):
-        lags = np.array([decided[k] for k in run])
-        shift_ns, shift_end_ns = _shifts(run, lags, edges, start_ns, end_ns, settings.tolerance_s)
+        shifts = np.array([decided[k] for k in run])
+        shift_ns, shift_end_ns = _row_shift(
+            run, shifts, edges, start_ns, end_ns, settings.tolerance_s
+        )
         if shift_end_ns is not None:
             hours = (end_ns - start_ns) / NS_PER_S / SECONDS_PER_HOUR
             faults.append(
@@ -676,8 +687,8 @@ def _rows(
                     "clock drift",
                     run[0],
                     run[-1],
-                    f"lag {-shift_ns / NS_PER_S:+.2f} s to {-shift_end_ns / NS_PER_S:+.2f} s, "
-                    f"{(shift_ns - shift_end_ns) / NS_PER_S / hours:+.2f} s per hour",
+                    f"shift {shift_ns / NS_PER_S:+.2f} s to {shift_end_ns / NS_PER_S:+.2f} s, "
+                    f"{(shift_end_ns - shift_ns) / NS_PER_S / hours:+.2f} s per hour",
                 )
             )
         tiers = ", ".join(str(t) for t in sorted({chosen[k].tier for k in run}))
@@ -692,7 +703,7 @@ def _rows(
                 provenance="measured",
                 reason=(
                     f"clock survey: {len(run)} segment{'s' if len(run) != 1 else ''}, "
-                    f"tier {tiers}, lags {lags.min():+g} to {lags.max():+g} s"
+                    f"tier {tiers}, shifts {shifts.min():+g} to {shifts.max():+g} s"
                     + (f", {n_bridged} undecided bridged" if n_bridged else "")
                 ),
                 source="survey",
@@ -709,7 +720,7 @@ def _bridgeable(
     after: int,
     max_bridged_ns: int,
 ) -> bool:
-    """Say whether a row may bridge the segments between two decided ones whose lags agree.
+    """Say whether a row may bridge the segments between two decided ones whose shifts agree.
 
     Only up to ``max_bridged`` of them, and only where the readings run on
     without a logging stop from the segment before to the segment after: steps
@@ -787,13 +798,13 @@ def _step(
     edges: npt.NDArray[np.int64],
     before: int,
     after: int,
-    lags: Mapping[int, float],
+    shifts: Mapping[int, float],
     stream: xr.Dataset,
 ) -> _Fault:
     """Name a clock step, and the longest gap in the readings across it if it is a logging stop."""
     times = _times_ns(stream)
     across = times[(times >= edges[before]) & (times < edges[after + 1])]
-    detail = f"lag {lags[before]:+g} s to {lags[after]:+g} s"
+    detail = f"shift {shifts[before]:+g} s to {shifts[after]:+g} s"
     gap = int(np.max(np.diff(across))) if len(across) > 1 else 0
     if gap >= _LOGGING_STOP_NS:
         detail += f", across a logging stop of {gap / NS_PER_S:.0f} s"
@@ -822,9 +833,9 @@ def _fast_drifts(runs: Sequence[Sequence[int]], jumps: Sequence[float]) -> list[
     return faults
 
 
-def _shifts(
+def _row_shift(
     run: Sequence[int],
-    lags: npt.NDArray[np.float64],
+    shifts: npt.NDArray[np.float64],
     edges: npt.NDArray[np.int64],
     start_ns: int,
     end_ns: int,
@@ -832,7 +843,7 @@ def _shifts(
 ) -> tuple[int, int | None]:
     """Return a row's shift, and its shift at the end when the row drifts.
 
-    The line through the run's segment lags is evaluated at the row's own start
+    The line through the run's segment shifts is evaluated at the row's own start
     and end, which may lie beyond the run's segments: a row reaching over a
     record's short end segments, or meeting its neighbour at a step's gap. Found
     building notebook 08: evaluated at the last segment's edge instead, a row
@@ -841,11 +852,11 @@ def _shifts(
     """
     if len(run) >= 3:
         mids = np.array([(edges[k] + edges[k + 1]) / 2 - start_ns for k in run], dtype=np.float64)
-        slope, intercept = np.polyfit(mids, lags, 1)
+        slope, intercept = np.polyfit(mids, shifts, 1)
         at_end = intercept + slope * float(end_ns - start_ns)
         if abs(at_end - intercept) > tolerance_s:
-            return -_ns(intercept), -_ns(at_end)
-    return -_ns(float(np.median(lags))), None
+            return _ns(intercept), _ns(at_end)
+    return _ns(float(np.median(shifts))), None
 
 
 def _ns(seconds: float) -> int:
@@ -899,12 +910,12 @@ def _measurement_row(name: str, m: _Measured, edges: npt.NDArray[np.int64]) -> d
         "partner": m.partner,
         "start": iso_utc(int(edges[m.k])),
         "end": iso_utc(int(edges[m.k + 1])),
-        "lag_s": m.lag.lag_s,
-        "r": m.lag.r,
-        "n_pairs": m.lag.n_pairs,
-        "at_edge": m.lag.at_edge,
-        "pairs_disagree": m.lag.pairs_disagree,
-        "noise_removed": m.lag.noise_removed,
+        "shift_onto_partner_s": m.shift.shift_s,
+        "r": m.shift.r,
+        "n_pairs": m.shift.n_pairs,
+        "at_edge": m.shift.at_edge,
+        "pairs_disagree": m.shift.pairs_disagree,
+        "noise_removed": m.shift.noise_removed,
         "decided": m.decided,
     }
 
@@ -924,9 +935,9 @@ def _segment_row(
         "end": iso_utc(int(edges[k + 1])),
         "tier": pd.NA if m is None else m.tier,
         "partner": "" if m is None else m.partner,
-        "lag_s": float("nan") if m is None else m.lag.lag_s,
-        "lag_to_reference_s": composed.get(k, float("nan")),
-        "noise_removed": pd.NA if m is None else m.lag.noise_removed,
+        "shift_onto_partner_s": float("nan") if m is None else m.shift.shift_s,
+        "shift_onto_reference_s": composed.get(k, float("nan")),
+        "noise_removed": pd.NA if m is None else m.shift.noise_removed,
         "status": statuses[k],
     }
 

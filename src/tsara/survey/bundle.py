@@ -8,8 +8,8 @@ A clock survey is saved as a ``survey`` directory inside a bundle:
     content with it. Absent when the survey derived no rows.
 ``measurements.parquet``, ``segments.parquet``, ``faults.parquet``
     The three tables behind it (:class:`~tsara.survey.clocks.ClockSurvey`):
-    every tier's lag on every segment, the lag each segment was given, and the
-    faults named. Written with their declared columns and types, which Parquet
+    every tier's shift on every segment, the shift each segment was given, and
+    the faults named. Written with their declared columns and types, which Parquet
     keeps, so a reload is exact.
 ``survey.yaml``
     The settings the survey ran with: a survey YAML like any other, which

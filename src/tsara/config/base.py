@@ -111,8 +111,8 @@ def validate_signed_timedelta(value: str, *, field: str) -> None:
     (different stacks, different transport paths), so zero and negative values
     must both be accepted here. The second such field has now landed:
     ``InstrumentConfig.time_shift``, where a logger running fast and an inlet
-    lag both produce a negative correction, and a logger running slow a
-    positive one.
+    delay both produce a negative shift, and a logger running slow a positive
+    one.
 
     Raises ``ValueError`` (which Pydantic converts into a field-scoped
     validation error) if the string doesn't parse. Unlike its positive-only

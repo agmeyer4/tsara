@@ -1,11 +1,12 @@
 # Survey settings: what to measure before the pipeline (docs/METHODS.md §12).
 #
 # The clock survey reads a campaign ingested WITHOUT a correction table,
-# measures how many seconds later each instrument's files put the same air
-# than a partner's, segment by segment, chains every instrument to one
-# reference clock, and writes the rows of a correction table. Nothing it
-# writes is applied until a person has read the table and named it in the
-# manifest's clock_corrections.
+# measures the shift that puts each instrument's files on a partner's clock,
+# segment by segment, chains every instrument to one reference clock, and
+# writes the rows of a correction table. A shift is seconds added to a
+# recorded time (corrected = recorded + shift): a file showing the air 7 s
+# late needs -7 s. Nothing it writes is applied until a person has read the
+# table and named it in the manifest's clock_corrections.
 #
 #   from tsara import load_manifest, load_survey
 #   from tsara.ingest import ingest_campaign
@@ -18,34 +19,34 @@
 # GPS-timed weather station, whose receiver keeps UTC.
 reference_clock: airmar
 
-# One lag is measured per segment of this length, on a grid shared by every
+# One shift is measured per segment of this length, on a grid shared by every
 # instrument. Shorter segments follow a clock that changes faster; longer
 # ones hold more plumes each. Tune it to the campaign.
 segment: 30min
 
-# How far either way a lag is searched for. A best lag at the edge of the
+# How far either way a shift is searched for. A best shift at the edge of the
 # search is never decided, since the true one may lie beyond. Whole seconds.
 search: 120s
 
-# The step the lag is measured to, at most a second. The search above finds
-# the peak on whole seconds; the lag is then measured on the readings' own
+# The step the shift is measured to, at most a second. The search above finds
+# the peak on whole seconds; the shift is then measured on the readings' own
 # cells at multiples of this. Below a second, a joined analyzer's noise is
 # removed only when its manifest declares (or its files report) a random
 # sigma; each segment says whether it was.
 resolution: 0.1s
 
-# Paired seconds a lag needs before its correlation counts, and the
-# correlation at the best lag a segment needs to be decided.
+# Paired seconds a shift needs before its correlation counts, and the
+# correlation at the best shift a segment needs to be decided.
 min_pairs: 300
 min_r: 0.6
 
-# Segments whose lags agree within this become one row of the table; a larger
+# Segments whose shifts agree within this become one row of the table; a larger
 # jump is a clock step, and a steady change larger than this across a row is
 # a clock drift.
 tolerance: 2s
 
 # Up to how long a stretch of undecided segments a row may bridge, when the
-# lags on either side agree within the tolerance and the readings run across
+# shifts on either side agree within the tolerance and the readings run across
 # it without a logging stop (a gap of a minute or more). The default, 0s,
 # never bridges; a van whose tracers go quiet for a while in mid-drive (zero
 # air, a calibration, a parked stretch without plumes) may want a little.
@@ -58,7 +59,7 @@ running_median: 121s
 # For each instrument, its tiers in order. A tier names the partner it is
 # measured against and its tracer pairs: [variable here, variable on the
 # partner], expected to show the same plumes. The first tier that decides a
-# segment sets its lag; the others check it. Every chain of partners must end
+# segment sets its shift; the others check it. Every chain of partners must end
 # at the reference clock.
 tracers:
   picarro:

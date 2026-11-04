@@ -172,29 +172,31 @@ class RawUnits:
 
 @dataclass(frozen=True)
 class ClockError:
-    """A clock error to write into one instrument's exported files.
+    """A clock error to write into one instrument's exported files, given by its correction.
 
-    From ``start`` to ``end`` of true time, the instrument's clock reads
-    ``error`` ahead of the truth: the files receive each reading's time plus
-    the error, and the correction table written beside the manifest holds the
-    row that undoes it, keyed on the recorded clock as a real table is
-    (``docs/METHODS.md`` §12.3). Same shape as ``time_shift``: write the
-    archive wrong, declare the fix, check that the answer comes back right --
-    for a stretch rather than a whole instrument.
+    From ``start`` to ``end`` of true time, the instrument's clock is wrong by
+    whatever ``shift`` corrects: the files receive each reading's time less the
+    shift, so that ``recorded + shift`` is the truth again, and the correction
+    table written beside the manifest holds the same shift, keyed on the
+    recorded clock as a real table is (``docs/METHODS.md`` §12.3). The answer
+    key, the table and the clock survey therefore all carry one number. Same
+    shape as ``time_shift``: write the archive wrong, declare the fix, check
+    that the answer comes back right -- for a stretch rather than a whole
+    instrument.
 
     Attributes
     ----------
     start, end : str
         The stretch of true time, ISO 8601 with an explicit offset or ``Z``.
-    error : str
-        A signed duration with its unit (``"4s"``, ``"-2.5s"``): how far the
-        recorded times run ahead of the truth. The table's shift is its
-        negative.
+    shift : str
+        A signed duration with its unit (``"-4s"``, ``"2.5s"``): the seconds
+        that, added to the recorded times, put them back on the truth. A clock
+        running 4 s fast, whose files show the air 4 s late, is ``"-4s"``.
     """
 
     start: str
     end: str
-    error: str
+    shift: str
 
 
 @dataclass(frozen=True)
@@ -203,10 +205,10 @@ class _ClockPiece:
 
     start_ns: int
     end_ns: int
-    error_ns: int
+    clock_shift_ns: int
     #: Where the stretch lands on the recorded clock: the true stretch, less
-    #: the declared time_shift, plus the error. This is what the table's row
-    #: holds, because the table is keyed on recorded time.
+    #: the declared time_shift, less the clock's shift. This is what the
+    #: table's row holds, because the table is keyed on recorded time.
     recorded_start_ns: int
     recorded_end_ns: int
 
@@ -302,7 +304,8 @@ def export_raw(
         convention lands hours from the start it belongs to.
     clock_errors : Mapping of str to sequence of ClockError, optional
         Stretches in which an instrument's clock runs wrong, keyed by
-        instrument name. The files receive the wrong times and
+        instrument name, each given by the shift that corrects it. The files
+        receive the wrong times and
         :data:`EXPORT_CLOCK_CORRECTIONS` the rows that undo them, named by the
         manifest's ``clock_corrections``; readings outside every stretch are
         written as they are, so ingestion must also leave them alone and
@@ -484,14 +487,14 @@ def _clock_pieces(
         start_ns, end_ns = timestamp_epoch_ns(start), timestamp_epoch_ns(end)
         if end_ns <= start_ns:
             raise TsaraSyntheticError(f"Clock error {error} for '{name}': end is not after start.")
-        error_ns = int(pd.Timedelta(error.error).value)
+        clock_shift_ns = int(pd.Timedelta(error.shift).value)
         pieces.append(
             _ClockPiece(
                 start_ns=start_ns,
                 end_ns=end_ns,
-                error_ns=error_ns,
-                recorded_start_ns=start_ns - shift_ns + error_ns,
-                recorded_end_ns=end_ns - shift_ns + error_ns,
+                clock_shift_ns=clock_shift_ns,
+                recorded_start_ns=start_ns - shift_ns - clock_shift_ns,
+                recorded_end_ns=end_ns - shift_ns - clock_shift_ns,
             )
         )
     ordered = sorted(pieces, key=lambda piece: piece.recorded_start_ns)
@@ -500,9 +503,9 @@ def _clock_pieces(
             # The table would hold two overlapping rows, which ingestion
             # refuses: a reading in both would have two shifts.
             raise TsaraSyntheticError(
-                f"Clock errors for '{name}' overlap once recorded: a later error smaller "
-                "than an earlier one needs a gap between them at least as long as the "
-                "difference."
+                f"Clock errors for '{name}' overlap once recorded: a later shift larger "
+                "than an earlier one (a clock set back) needs a gap between them at least "
+                "as long as the difference."
             )
     return tuple(pieces)
 
@@ -612,11 +615,11 @@ def _write_csv(
     cells = stream[TIME_BOUNDS_VAR].values.astype("datetime64[ns]").astype(np.int64)
     midpoints = stream[TIME_COORD].values.astype("datetime64[ns]").astype(np.int64)
     stamps = {"start": cells[:, 0], "end": cells[:, 1]}.get(label, midpoints)
-    # What each written time is moved back by: the declared time_shift, less
-    # the clock error of the stretch the reading's label time falls in. One
+    # What each written time is moved back by: the declared time_shift, plus
+    # the clock shift of the stretch the reading's label time falls in. One
     # value per row, applied to the time column and both boundary columns, so a
     # wrong clock moves a cell without resizing it.
-    moved_ns = shift_ns - _clock_error_ns(stamps, clock_pieces)
+    moved_ns = shift_ns + _clock_shift_ns(stamps, clock_pieces)
     _check_clock_pieces(stamps - moved_ns, stamps, clock_pieces, target)
 
     # Bounds dropped before `to_dataframe`: a two-dimensional coordinate turns
@@ -672,14 +675,14 @@ def _write_csv(
     frame.to_csv(target, index=False)
 
 
-def _clock_error_ns(
+def _clock_shift_ns(
     stamps: npt.NDArray[np.int64], pieces: Sequence[_ClockPiece]
 ) -> npt.NDArray[np.int64]:
-    """Return each reading's clock error: its stretch's, or zero outside every one."""
-    error = np.zeros(stamps.shape, dtype=np.int64)
+    """Return the shift correcting each reading's clock: its stretch's, else zero."""
+    shift = np.zeros(stamps.shape, dtype=np.int64)
     for piece in pieces:
-        error[(stamps >= piece.start_ns) & (stamps < piece.end_ns)] = piece.error_ns
-    return error
+        shift[(stamps >= piece.start_ns) & (stamps < piece.end_ns)] = piece.clock_shift_ns
+    return shift
 
 
 def _check_clock_pieces(
@@ -707,7 +710,7 @@ def _check_clock_pieces(
             raise TsaraSyntheticError(
                 f"Writing '{target.name}': {int(caught.sum())} reading(s) outside every clock "
                 "error would be recorded inside the stretch of a correction row, which would "
-                "then shift them. Leave a gap at least as long as the error between a "
+                "then shift them. Leave a gap at least as long as the shift between a "
                 "stretch's edge and the readings outside it."
             )
 
@@ -725,8 +728,8 @@ def _write_clock_corrections(
             "instrument": name,
             "start": iso_utc(piece.recorded_start_ns),
             "end": iso_utc(piece.recorded_end_ns),
-            # In nanoseconds, so that the shift read back is the error exactly.
-            "shift": f"{-piece.error_ns}ns",
+            # In nanoseconds, so that the shift read back is the one declared exactly.
+            "shift": f"{piece.clock_shift_ns}ns",
             "reference_clock": reference,
             "provenance": "declared",
             "reason": "exported clock error",

@@ -1,12 +1,20 @@
-"""One lag: how many seconds later one series shows the same plumes than another.
+"""One shift: how many seconds to add to one series' times to put its plumes on another's.
 
 Where this sits
 ---------------
 The clock survey (:mod:`tsara.survey.clocks`) cuts records into segments and
 asks, segment by segment, how far apart two instruments' files put the same
 air (``docs/METHODS.md`` §12.4). This module answers that question once: for
-one segment and one tier of tracer pairs, the lag at which the two series
+one segment and one tier of tracer pairs, the shift at which the two series
 correlate best, how well, and on how many paired seconds.
+
+The sign
+--------
+Every clock number in TSARA is a **shift**: seconds added to a recorded time,
+``corrected = recorded + shift``, the rule of ``time_shift`` and of the
+correction table (§12.3). Here the shift puts the instrument on its partner's
+clock: an instrument whose file shows the air 7 s after its partner's needs
+-7 s, one whose file shows it 4 s before needs +4 s.
 
 How a series is prepared
 ------------------------
@@ -20,43 +28,43 @@ median needs a quarter of the readings its window could hold (at least three)
 before it is trusted, which keeps a 1 s record at the 30 readings of the
 alignment work and lets a 5 s weather record take part at all.
 
-The lag of a segment
---------------------
-For every lag L in the search range, Pearson's r between the instrument's
-wiggles at t and the partner's at t - L, over the seconds of the segment where
-both have a value, if there are at least the minimum number of them. L is
-positive when the instrument shows the air later than its partner. A tier with
-several pairs averages their correlation curves before the best lag is chosen,
-so that each pair counts once whatever its cadence, and weak pairs that share
-a lag strengthen each other. Averaging assumes the pairs share their lag; when
-two pairs disagree it peaks between them, at a lag neither supports (measured:
-pairs at 4 and 10 s pool to 7 s at r 0.76). So a pair that is decided on its
-own and puts its best lag further than the tolerance from the pooled one makes
-the tier's pairs disagree, and the tier undecided; a pair too weak to decide
-alone cannot. A best lag at the edge of the search is reported but never
-decided, since the true one may lie beyond.
-
-The lag below a second
+The shift of a segment
 ----------------------
+For every shift s in the search range, Pearson's r between the instrument's
+wiggles at t and the partner's at t + s, over the seconds of the segment where
+both have a value, if there are at least the minimum number of them. A tier
+with several pairs averages their correlation curves before the best shift is
+chosen, so that each pair counts once whatever its cadence, and weak pairs
+that share a shift strengthen each other. Averaging assumes the pairs share
+their shift; when two pairs disagree it peaks between them, at a shift neither
+supports (measured: pairs at -4 and -10 s pool to -7 s at r 0.76). So a pair
+that is decided on its own and puts its best shift further than the tolerance
+from the pooled one makes the tier's pairs disagree, and the tier undecided; a
+pair too weak to decide alone cannot. A best shift at the edge of the search
+is reported but never decided, since the true one may lie beyond.
+
+The shift below a second
+------------------------
 Whole seconds throw away each reading's position within its second, so the
-lag above can only be a whole number of seconds, and a floored one: a clock
-7.7 s late reads 7. That search finds the peak; the lag itself is then
-measured on the readings' own cells (:func:`refined_lag`). For every L on a
-lattice of the survey's ``resolution`` within two seconds of the peak, the
-narrower-celled series' wiggles are averaged, overlap-weighted, onto the
-wider-celled series' cells moved by L, through the same join as every other
-in TSARA (:func:`tsara.core.support.overlap_pairs`), and r is taken over the
-cells the join covers fully. On air whose readings are exact cell means this
-is exact where the two sets of cells line up, and on 2 and 4 s plumes at every
-phase; on 12 s plumes the share of a joined reading lying outside the cell
-moves it by up to 0.06 s (measured, ``docs/METHODS.md`` §12.4). With noise one
-bias is left: averaging lowers the noise of the joined
-series, by an amount that changes with L, and r rises where it falls. When the
-joined readings carry a declared or reported random sigma, that noise is
-removed from the joined series' variance (each cell's share is
-sum(w^2 sigma^2) / sum(w)^2 of its overlap weights w), and the measurement
-says so; it is never removed with a sigma the survey estimates itself, since a
-wrong one moves the lag (§12.4).
+shift above can only be a whole number of seconds, and a one-sided one, lying
+up to a second above the true shift: a file 7.7 s late (true shift -7.7 s)
+peaks at -7. That search finds the peak; the
+shift itself is then measured on the readings' own cells
+(:func:`refined_shift`). For every s on a lattice of the survey's
+``resolution`` within two seconds of the peak, the narrower-celled series'
+wiggles are averaged, overlap-weighted, onto the wider-celled series' cells
+put on the other clock by s, through the same join as every other in TSARA
+(:func:`tsara.core.support.overlap_pairs`), and r is taken over the cells the
+join covers fully. On air whose readings are exact cell means this is exact
+where the two sets of cells line up, and on 2 and 4 s plumes at every phase;
+on 12 s plumes the share of a joined reading lying outside the cell moves it
+by up to 0.06 s (measured, ``docs/METHODS.md`` §12.4). With noise one bias is
+left: averaging lowers the noise of the joined series, by an amount that
+changes with s, and r rises where it falls. When the joined readings carry a
+declared or reported random sigma, that noise is removed from the joined
+series' variance (each cell's share is sum(w^2 sigma^2) / sum(w)^2 of its
+overlap weights w), and the measurement says so; it is never removed with a
+sigma the survey estimates itself, since a wrong one moves the shift (§12.4).
 """
 
 from __future__ import annotations
@@ -81,11 +89,11 @@ if TYPE_CHECKING:  # pragma: no cover
 __all__ = [
     "CellSeries",
     "SecondsSeries",
-    "SegmentLag",
+    "SegmentShift",
     "TsaraSurveyError",
     "cell_series",
-    "pooled_lag",
-    "refined_lag",
+    "pooled_shift",
+    "refined_shift",
     "seconds_series",
 ]
 
@@ -94,10 +102,10 @@ __all__ = [
 _MEDIAN_FILL = 0.25
 _MEDIAN_MIN_READINGS = 3
 
-#: How far either side of the whole-second peak the lag is looked for on the
-#: readings' own cells. The floored peak can sit up to about 1.4 s from the
-#: true lag (measured, METHODS §12.4), so two seconds hold it; a best lag at
-#: either end means the peak was not where the whole seconds put it.
+#: How far either side of the whole-second peak the shift is looked for on the
+#: readings' own cells. The whole-second peak can sit up to about 1.4 s from
+#: the true shift (measured, METHODS §12.4), so two seconds hold it; a best
+#: shift at either end means the peak was not where the whole seconds put it.
 _REFINE_NS = 2 * SECOND_NS
 
 #: The random-sigma provenances a stream can carry that are statements about
@@ -135,30 +143,31 @@ class SecondsSeries:
 
 
 @dataclass(frozen=True)
-class SegmentLag:
-    """The best lag of one segment for one tier.
+class SegmentShift:
+    """The best shift of one segment for one tier.
 
     Attributes
     ----------
-    lag_s : float
-        Seconds the instrument shows the air later than its partner; NaN when no
-        lag had enough paired seconds.
+    shift_s : float
+        Seconds added to the instrument's recorded times to put it on its
+        partner's clock (negative when its file shows the air later); NaN when
+        no shift had enough paired seconds.
     r : float
-        The correlation at that lag, pooled over the tier's pairs.
+        The correlation at that shift, pooled over the tier's pairs.
     n_pairs : int
         Paired seconds behind it, summed over the tier's pairs.
     at_edge : bool
-        True when the best lag is at the edge of the search.
+        True when the best shift is at the edge of the search.
     pairs_disagree : bool
-        True when a pair decided on its own puts its best lag further than the
-        tolerance from the pooled lag.
+        True when a pair decided on its own puts its best shift further than
+        the tolerance from the pooled shift.
     noise_removed : bool
-        True when the lag was measured on the readings' own cells with the
+        True when the shift was measured on the readings' own cells with the
         joined readings' stated noise removed, for every pair of the tier
-        (:func:`refined_lag`).
+        (:func:`refined_shift`).
     """
 
-    lag_s: float
+    shift_s: float
     r: float
     n_pairs: int
     at_edge: bool
@@ -247,7 +256,7 @@ def cell_series(stream: xr.Dataset, variable: str, *, running_median_s: int) -> 
         random sigma when the stream states one (provenance ``declared`` or
         ``reported``) for every finite reading. A reading without a wiggle is
         left out, so the cells around it are not covered whole and do not
-        count (:func:`refined_lag`).
+        count (:func:`refined_shift`).
 
     Raises
     ------
@@ -325,7 +334,7 @@ def _stated_sigma(
     return sigma if np.all(np.isfinite(sigma)) else None
 
 
-def pooled_lag(
+def pooled_shift(
     pairs: Sequence[tuple[SecondsSeries, SecondsSeries]],
     first_s: int,
     stop_s: int,
@@ -334,8 +343,8 @@ def pooled_lag(
     min_pairs: int,
     min_r: float,
     tolerance_s: float,
-) -> SegmentLag:
-    """Return the best lag of one segment for one tier of tracer pairs.
+) -> SegmentShift:
+    """Return the best shift of one segment for one tier of tracer pairs.
 
     Parameters
     ----------
@@ -345,27 +354,28 @@ def pooled_lag(
         The segment, ``[first_s, stop_s)`` in epoch seconds of the instrument's
         series.
     search_s : int
-        The lag is searched in ``[-search_s, search_s]``.
+        The shift is searched in ``[-search_s, search_s]``.
     min_pairs : int
-        Paired seconds a lag needs before its correlation counts.
+        Paired seconds a shift needs before its correlation counts.
     min_r : float
         The correlation at which a pair is decided on its own.
     tolerance_s : float
-        How far a pair decided on its own may put its best lag from the pooled
-        one before the tier's pairs disagree.
+        How far a pair decided on its own may put its best shift from the
+        pooled one before the tier's pairs disagree.
 
     Returns
     -------
-    SegmentLag
-        The best lag; NaN lag and r when no lag of any pair had enough pairs.
+    SegmentShift
+        The best shift; NaN shift and r when no shift of any pair had enough
+        pairs.
     """
-    lags = np.arange(-search_s, search_s + 1)
+    shifts = np.arange(-search_s, search_s + 1)
     curves, counts = [], []
     for own, partner in pairs:
         curve, count = _curve(
             own.window(first_s, stop_s),
             partner.window(first_s - search_s, stop_s + search_s),
-            lags,
+            shifts,
             search_s,
             min_pairs,
         )
@@ -374,8 +384,8 @@ def pooled_lag(
     stacked = np.vstack(curves)
     usable = np.isfinite(stacked).any(axis=0)
     if not usable.any():
-        return SegmentLag(lag_s=float("nan"), r=float("nan"), n_pairs=0, at_edge=False)
-    pooled = np.full(len(lags), -np.inf)
+        return SegmentShift(shift_s=float("nan"), r=float("nan"), n_pairs=0, at_edge=False)
+    pooled = np.full(len(shifts), -np.inf)
     pooled[usable] = np.nanmean(stacked[:, usable], axis=0)
     best = int(np.argmax(pooled))
     n = int(sum(count[best] for count in counts))
@@ -384,13 +394,13 @@ def pooled_lag(
         if np.isfinite(curve).any():
             peak = int(np.nanargmax(curve))
             disagree |= bool(
-                curve[peak] >= min_r and abs(int(lags[peak] - lags[best])) > tolerance_s
+                curve[peak] >= min_r and abs(int(shifts[peak] - shifts[best])) > tolerance_s
             )
-    return SegmentLag(
-        lag_s=float(lags[best]),
+    return SegmentShift(
+        shift_s=float(shifts[best]),
         r=float(pooled[best]),
         n_pairs=n,
-        at_edge=abs(int(lags[best])) == search_s,
+        at_edge=abs(int(shifts[best])) == search_s,
         pairs_disagree=disagree,
     )
 
@@ -398,20 +408,20 @@ def pooled_lag(
 def _curve(
     a: npt.NDArray[np.float64],
     b: npt.NDArray[np.float64],
-    lags: npt.NDArray[np.int64],
+    shifts: npt.NDArray[np.int64],
     search_s: int,
     min_pairs: int,
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.int64]]:
-    """Return r and the paired seconds at every lag: ``a(t)`` against ``b(t - L)``.
+    """Return r and the paired seconds at every shift: ``a(t)`` against ``b(t + s)``.
 
-    ``b`` starts ``search_s`` seconds before ``a``, so ``b(t - L)`` for the
-    segment's seconds is the slice beginning ``search_s - L`` in.
+    ``b`` starts ``search_s`` seconds before ``a``, so ``b(t + s)`` for the
+    segment's seconds is the slice beginning ``search_s + s`` in.
     """
-    r = np.full(len(lags), np.nan)
-    count = np.zeros(len(lags), dtype=np.int64)
+    r = np.full(len(shifts), np.nan)
+    count = np.zeros(len(shifts), dtype=np.int64)
     a_ok = np.isfinite(a)
-    for i, lag in enumerate(lags):
-        start = search_s - int(lag)
+    for i, shift in enumerate(shifts):
+        start = search_s + int(shift)
         y = b[start : start + len(a)]
         both = a_ok & np.isfinite(y)
         n = int(np.count_nonzero(both))
@@ -426,7 +436,7 @@ def _curve(
     return r, count
 
 
-def refined_lag(
+def refined_shift(
     pairs: Sequence[tuple[CellSeries, CellSeries]],
     first_ns: int,
     stop_ns: int,
@@ -435,7 +445,7 @@ def refined_lag(
     resolution_ns: int,
     min_pairs: int,
 ) -> tuple[float, bool, bool]:
-    """Return one segment's lag measured on the readings' own cells, to a resolution.
+    """Return one segment's shift measured on the readings' own cells, to a resolution.
 
     Parameters
     ----------
@@ -446,22 +456,22 @@ def refined_lag(
         The segment, ``[first_ns, stop_ns)`` in epoch nanoseconds on the
         instrument's clock.
     coarse_s : float
-        The whole-second peak (:func:`pooled_lag`), around which the lag is
-        looked for.
+        The whole-second peak (:func:`pooled_shift`), around which the shift
+        is looked for.
     resolution_ns : int
-        The lattice step: lags are multiples of it, within two seconds of the
-        peak.
+        The lattice step: shifts are multiples of it, within two seconds of
+        the peak.
     min_pairs : int
-        Fully covered cells a lag needs before its correlation counts.
+        Fully covered cells a shift needs before its correlation counts.
 
     Returns
     -------
-    lag_s : float
-        The lag at which the tier's pooled correlation is highest, in seconds
-        the instrument shows the air later than its partner; NaN when no lag
-        had enough fully covered cells.
+    shift_s : float
+        The shift at which the tier's pooled correlation is highest: seconds
+        added to the instrument's recorded times to put it on its partner's
+        clock; NaN when no shift had enough fully covered cells.
     at_edge : bool
-        True when it lies at either end of the lattice, so the true lag may
+        True when it lies at either end of the lattice, so the true shift may
         lie beyond.
     noise_removed : bool
         True when every pair's joined readings stated a random sigma, and their
@@ -470,30 +480,30 @@ def refined_lag(
     Notes
     -----
     In each pair the series with the narrower cells (the instrument's, on a
-    tie) is joined onto the other's cells moved by L, as every join in TSARA
-    puts the narrower support onto the wider (``docs/METHODS.md`` §1.3). The
-    wider series' cells are chosen once, by the whole-second peak, so every L
-    is judged on the same cells. Pairs are pooled by averaging their curves,
-    as in :func:`pooled_lag`.
+    tie) is joined onto the other's cells put on its clock by s, as every
+    join in TSARA puts the narrower support onto the wider
+    (``docs/METHODS.md`` §1.3). The wider series' cells are chosen once, by
+    the whole-second peak, so every s is judged on the same cells. Pairs are
+    pooled by averaging their curves, as in :func:`pooled_shift`.
     """
     coarse_ns = round(coarse_s * NS_PER_S)
     lowest = -((_REFINE_NS - coarse_ns) // resolution_ns)  # ceil((coarse - 2 s) / step)
     highest = (coarse_ns + _REFINE_NS) // resolution_ns
-    lags_ns = np.arange(lowest, highest + 1, dtype=np.int64) * resolution_ns
+    shifts_ns = np.arange(lowest, highest + 1, dtype=np.int64) * resolution_ns
     curves = []
     removed = True
     for own, partner in pairs:
-        curve, noise = _cell_curve(own, partner, first_ns, stop_ns, coarse_ns, lags_ns, min_pairs)
+        curve, noise = _cell_curve(own, partner, first_ns, stop_ns, coarse_ns, shifts_ns, min_pairs)
         curves.append(curve)
         removed &= noise
     stacked = np.vstack(curves)
     usable = np.isfinite(stacked).any(axis=0)
     if not usable.any():
         return float("nan"), False, removed
-    pooled = np.full(len(lags_ns), -np.inf)
+    pooled = np.full(len(shifts_ns), -np.inf)
     pooled[usable] = np.nanmean(stacked[:, usable], axis=0)
     best = int(np.argmax(pooled))
-    return int(lags_ns[best]) / NS_PER_S, best in (0, len(lags_ns) - 1), removed
+    return int(shifts_ns[best]) / NS_PER_S, best in (0, len(shifts_ns) - 1), removed
 
 
 def _cell_curve(
@@ -502,28 +512,28 @@ def _cell_curve(
     first_ns: int,
     stop_ns: int,
     coarse_ns: int,
-    lags_ns: npt.NDArray[np.int64],
+    shifts_ns: npt.NDArray[np.int64],
     min_pairs: int,
 ) -> tuple[npt.NDArray[np.float64], bool]:
-    """Return r at every lag on the readings' own cells, and whether the noise was removed.
+    """Return r at every shift on the readings' own cells, and whether the noise was removed.
 
-    ``own`` at t against ``partner`` at t - L: the partner joined onto the
-    instrument's cells moved back by L, or the instrument joined onto the
-    partner's cells moved on by L, whichever has the narrower cells.
+    ``own`` at t against ``partner`` at t + s: the partner joined onto the
+    instrument's cells moved on by s, or the instrument joined onto the
+    partner's cells moved back by s, whichever has the narrower cells.
     """
     if np.median(own.cells.width_ns) >= np.median(partner.cells.width_ns):
-        target, joined, sign, offset = own, partner, -1, 0
+        target, joined, sign, offset = own, partner, 1, 0
     else:
-        target, joined, sign, offset = partner, own, 1, coarse_ns
+        target, joined, sign, offset = partner, own, -1, coarse_ns
     middle = target.cells.midpoint_ns
-    inside = (middle >= first_ns - offset) & (middle < stop_ns - offset)
+    inside = (middle >= first_ns + offset) & (middle < stop_ns + offset)
     start, stop = target.cells.start_ns[inside], target.cells.stop_ns[inside]
     x = target.values[inside]
     width = (stop - start).astype(np.float64)
     noise = joined.sigma is not None
-    curve = np.full(len(lags_ns), np.nan)
-    for i, lag in enumerate(lags_ns):
-        found = overlap_pairs(joined.cells, CellBounds(start + sign * lag, stop + sign * lag))
+    curve = np.full(len(shifts_ns), np.nan)
+    for i, shift in enumerate(shifts_ns):
+        found = overlap_pairs(joined.cells, CellBounds(start + sign * shift, stop + sign * shift))
         w = found.overlap_ns.astype(np.float64)
         total = np.bincount(found.target_index, weights=w, minlength=len(start))
         weighted = np.bincount(
