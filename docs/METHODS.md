@@ -2716,8 +2716,8 @@ v1:
   pipeline.
 - **Drive-path-aware plume deconvolution** for mobile platforms.
 - **Clock-lag estimation by cross-correlation.** No longer deferred: decided
-  on 2026-11-03 and being built as Phase 3.6, the clock survey and the
-  correction table of §12.
+  and built on 2026-11-03 as Phase 3.6, the clock survey and the correction
+  table of §12.
 - **Decorrelation-timescale estimation.** τ is what every $N_{\mathrm{eff}}$
   correction needs (§3.4) and what no file declares: `UncertaintySpec.
   decorrelation_timescale` lets a manifest *state* one, but establishing it for
@@ -6439,17 +6439,20 @@ should be in phase with is the user's choice, not TSARA's.
 
 ---
 
-## 12. Clocks (Phase 3.6) **[decided 2026-11-03; being built]**
+## 12. Clocks **[decided and built 2026-11-03 — Phase 3.6]**
 
 §10 settled *what interval* of air a value describes. This section settles
 *when*: how one instrument's clock relates to another's, how that is measured,
 and how a correction is declared and applied. §10.7 already keeps the two
 apart: a clock error is not support, and on real data it is the larger error.
 
-Written before the code, as the decisions of 2026-11-03. Each subsection says
-what is decided and what the build settles by measurement. The numbers below
-were measured outside the package, each under the rule stated beside it, and
-are re-measured through it before the phase closes (§12.7).
+Written before the code, as the decisions of 2026-11-03, and kept as the
+build and its walkthrough settled them. The numbers of §12.1 and §12.2 were
+measured on the 2024 SLC-SOS archive outside the package, each under the rule
+stated beside it; the package itself is checked on generated air with a known
+answer (§12.4). Measuring the real campaign through the package is not part
+of this phase. It is the SLC-SOS clock alignment, done with TSARA as a tool
+outside the package, and what it measures comes back here (§12.7).
 
 ### 12.1 What a clock error costs
 
@@ -6545,8 +6548,8 @@ hole. As built, the correction drops and merges nothing: the readings it moves
 before an earlier reading of their own file are counted and warned about, then
 sorted with the rest, and the ordering and de-duplication of §9.8 treat them as
 any out-of-order readings, so one landing on an earlier reading's exact time is
-dropped as a duplicate. Whether that is right is decided on the real steps of
-§12.2 (§12.7).
+dropped as a duplicate. Whether that is right is for the real steps of §12.2
+to show (§12.7).
 
 **A clock set back.** A logger whose clock goes back records some seconds
 twice, once before the step and once after it. The table is keyed on recorded
@@ -6898,23 +6901,37 @@ is the right file, not a longer table.
 - **Applying the survey's table automatically.** A measured lag can be a
   coincidence of plumes, and a correction table is short enough to read.
 
-### 12.7 To be measured in the build
+### 12.7 What the real campaign still has to show
 
-- §12.1's table and §12.2's Picarro-log steps, re-measured through the
-  package on the 2024 SLC-SOS logs.
-- A known answer: a generated campaign exported with injected clock errors,
-  the survey recovering each, the table applied, the after-check clean. Done
-  for a constant and a step through the chain (§12.4). A drift, a fast drift
-  and a step across a logging stop are checked on hand-built streams in the
-  survey's tests, since the exporter writes constant errors only; times counted
-  by rows are the real SLC-SOS case, measured there.
+The machinery is checked on generated air with a known answer. A campaign
+exported with clock errors (a constant, a step, and errors that are not a
+whole number of seconds) is ingested without a table; the survey recovers
+each error through the chain, to the resolution, and its own table puts every
+reading on its true time with no reading dropped; surveyed again, every lag is
+zero (§12.4). A drift, a fast drift and a step across a logging stop are
+checked on hand-built streams in the survey's tests, since the exporter writes
+constant errors only.
+
+What real files do to it is measured by the SLC-SOS clock alignment of the
+2024 University of Wyoming van, done with TSARA as a tool outside the package
+(decided 2026-11-04, when that work was taken out of this phase), and comes
+back here:
+
+- §12.1's table and §12.2's row-counted times and Picarro-log steps, through
+  the package on the analyzers' own logs. Times counted by rows are the real
+  case of the signature §12.5 names.
 - What an overlap at a falling clock step does to ordering and de-duplication
   (§12.3).
 - What the Aeris log's 2 s step back in the first minutes of 11 files (§12.3)
   costs the segment that holds it.
 - The resolution real data supports (§12.4): segment-to-segment scatter and
-  the agreement of independent tiers on the 2024 SLC-SOS van, where r at the
-  peak is 0.6 to 0.97.
+  the agreement of independent tiers, where r at the peak is 0.6 to 0.97.
+- The reference clock where the van's GPS receiver left no record. After
+  2024-08-16 the van's position and weather come from a tracking feed on the
+  logging computer's clock, not the receiver's. On its last three drives
+  (2024-08-27 and 08-28) no record holds a humidity to tie a gas to any GPS
+  clock, so their clock can only be carried from a neighbouring day, with its
+  uncertainty stated.
 
 ---
 
