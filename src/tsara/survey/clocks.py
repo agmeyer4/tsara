@@ -27,11 +27,13 @@ What it does, in order
    onto its partner: its peak on whole seconds
    (:func:`tsara.survey.shifts.pooled_shift`), then the shift itself on the
    readings' own cells, to the survey's resolution
-   (:func:`tsara.survey.shifts.refined_shift`). The first tier that decides
-   sets the segment's shift; a later tier that decides too checks it, and a
-   disagreement larger than the tolerance is named. A tier whose partner is
-   undecided in the segment cannot set it, so the next tier that decides and
-   reaches the reference clock does.
+   (:func:`tsara.survey.shifts.refined_shift`), or the whole-second peak,
+   named, where the joined readings' cells line up with the others' only at
+   some steps of it. The first tier that decides sets the segment's shift; a
+   later tier that decides too checks it, and a disagreement larger than the
+   tolerance is named. A tier whose partner is undecided in the segment
+   cannot set it, so the next tier that decides and reaches the reference
+   clock does.
 3. **The chain.** The shift onto the partner plus the partner's own shift onto
    the reference clock in the same segment is the shift onto the reference
    clock. The reference clock's instrument is zero everywhere; a segment whose
@@ -121,6 +123,7 @@ FAULT_KINDS = (
     "tiers disagree",
     "outlier",
     "after-check",
+    "whole seconds",
 )
 
 #: A gap between readings at least this long, across a clock step, is named in
@@ -146,6 +149,7 @@ MEASUREMENT_COLUMNS: dict[str, str] = {
     "at_edge": "bool",
     "pairs_disagree": "bool",
     "noise_removed": "bool",
+    "refined": "bool",
     "decided": "bool",
 }
 SEGMENT_COLUMNS: dict[str, str] = {
@@ -157,6 +161,7 @@ SEGMENT_COLUMNS: dict[str, str] = {
     "shift_onto_partner_s": "float64",
     "shift_onto_reference_s": "float64",
     "noise_removed": "boolean",
+    "refined": "boolean",
     "status": "str",
 }
 FAULT_COLUMNS: dict[str, str] = {
@@ -187,13 +192,15 @@ class ClockSurvey:
         ``r`` and ``n_pairs`` (of the whole-second search), ``at_edge``,
         ``pairs_disagree``, ``noise_removed`` (the joined readings' stated
         noise was removed, :func:`~tsara.survey.shifts.refined_shift`),
-        ``decided``.
+        ``refined`` (measured to the resolution, not left at the whole-second
+        peak), ``decided``.
     segments : pandas.DataFrame
         One row per instrument and segment with readings: ``instrument``,
         ``start``, ``end``, ``tier`` (the tier that decided, NA for none),
         ``partner``, ``shift_onto_partner_s`` (onto that partner),
         ``shift_onto_reference_s`` (the chain's, the number a row carries),
-        ``noise_removed`` (the deciding tier's; NA for none), and ``status``:
+        ``noise_removed`` and ``refined`` (the deciding tier's; NA for none),
+        and ``status``:
         ``decided``, ``outlier``, ``too short`` (fewer readings than any tier
         needs), ``no tier decided``, ``at search edge``, ``pairs disagree`` or
         ``partner undecided``.
@@ -320,10 +327,14 @@ def survey_clocks(streams: Mapping[str, xr.Dataset], config: SurveyConfig) -> Cl
         outliers = _outliers(shifts, settings.tolerance_s, short)
         decided = {k: shift for k, shift in shifts.items() if k not in outliers}
         statuses = _statuses(present, shifts, outliers, measured, fewest)
-        own_faults = _tier_disagreements(measured, config, to_reference, settings) + [
-            _Fault("outlier", k, k, f"shift {shifts[k]:+g} s against neighbours")
-            for k in sorted(outliers)
-        ]
+        own_faults = (
+            _tier_disagreements(measured, config, to_reference, settings)
+            + [
+                _Fault("outlier", k, k, f"shift {shifts[k]:+g} s against neighbours")
+                for k in sorted(outliers)
+            ]
+            + _whole_seconds(chosen)
+        )
         if CLOCK_CORRECTIONS_ATTR in stream.attrs:
             own_faults.append(
                 _Fault(
@@ -446,7 +457,7 @@ def _measure(
                 tolerance_s=settings.tolerance_s,
             )
             if np.isfinite(shift.shift_s) and not shift.at_edge:
-                shift_s, at_edge, removed = refined_shift(
+                shift_s, at_edge, removed, refined = refined_shift(
                     on_cells,
                     int(edges[k]),
                     int(edges[k + 1]),
@@ -454,7 +465,13 @@ def _measure(
                     resolution_ns=settings.resolution_ns,
                     min_pairs=min_pairs,
                 )
-                shift = replace(shift, shift_s=shift_s, at_edge=at_edge, noise_removed=removed)
+                shift = replace(
+                    shift,
+                    shift_s=shift_s,
+                    at_edge=at_edge,
+                    noise_removed=removed,
+                    refined=refined,
+                )
             decided = bool(
                 np.isfinite(shift.shift_s)
                 and not shift.at_edge
@@ -864,6 +881,37 @@ def _ns(seconds: float) -> int:
     return int(round(float(seconds) * NS_PER_S))
 
 
+def _whole_seconds(chosen: Mapping[int, _Measured]) -> list[_Fault]:
+    """Name each run of decided segments whose shift is the whole-second peak, not refined.
+
+    A segment a tier decided is left unrefined only when the joined readings'
+    cells line up with the others' at only some steps of the resolution, or
+    at none (:func:`tsara.survey.shifts.refined_shift`): its shift is then
+    good to a second, not to the resolution asked for, and the reviewer is
+    told so. A segment later set aside as an outlier is named too, since it
+    was measured the same way.
+    """
+    runs: list[list[int]] = []
+    for k in sorted(chosen):
+        if chosen[k].shift.refined:
+            continue
+        if runs and k == runs[-1][-1] + 1:
+            runs[-1].append(k)
+        else:
+            runs.append([k])
+    return [
+        _Fault(
+            "whole seconds",
+            run[0],
+            run[-1],
+            f"{len(run)} segment{'s' if len(run) != 1 else ''} measured on whole seconds: "
+            "the joined readings' cells line up with the others' only at some steps of "
+            "the resolution",
+        )
+        for run in runs
+    ]
+
+
 def _undecided(
     present: Mapping[int, int], statuses: Mapping[int, str], covered: set[int]
 ) -> list[_Fault]:
@@ -916,6 +964,7 @@ def _measurement_row(name: str, m: _Measured, edges: npt.NDArray[np.int64]) -> d
         "at_edge": m.shift.at_edge,
         "pairs_disagree": m.shift.pairs_disagree,
         "noise_removed": m.shift.noise_removed,
+        "refined": m.shift.refined,
         "decided": m.decided,
     }
 
@@ -938,6 +987,7 @@ def _segment_row(
         "shift_onto_partner_s": float("nan") if m is None else m.shift.shift_s,
         "shift_onto_reference_s": composed.get(k, float("nan")),
         "noise_removed": pd.NA if m is None else m.shift.noise_removed,
+        "refined": pd.NA if m is None else m.shift.refined,
         "status": statuses[k],
     }
 

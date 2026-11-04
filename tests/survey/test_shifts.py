@@ -14,10 +14,13 @@ import pandas as pd
 import pytest
 import xarray as xr
 
+from tsara.core.support import CellBounds
 from tsara.survey.shifts import (
+    CellSeries,
     SecondsSeries,
     SegmentShift,
     TsaraSurveyError,
+    _own_keeps_its_cells,
     cell_series,
     pooled_shift,
     refined_shift,
@@ -280,7 +283,7 @@ def _cells_stream(
 
 def _refine(
     own: xr.Dataset, ref: xr.Dataset, coarse_s: float, resolution_s: float, min_pairs: int = 300
-) -> tuple[float, bool, bool]:
+) -> tuple[float, bool, bool, bool]:
     pair = (
         cell_series(own, "ch4", running_median_s=121),
         cell_series(ref, "ch4", running_median_s=121),
@@ -312,10 +315,11 @@ def test_the_shift_on_cells_is_exact_on_exact_cell_means(
     own_width, own_phase, ref_width, ref_phase = geometry
     own = _cells_stream(own_width, own_phase, shift)
     ref = _cells_stream(ref_width, ref_phase, 0.0)
-    found, at_edge, removed = _refine(own, ref, coarse_s=np.ceil(shift), resolution_s=0.05)
+    found, at_edge, removed, refined = _refine(own, ref, coarse_s=np.ceil(shift), resolution_s=0.05)
     assert found == pytest.approx(shift, abs=1e-9)
     assert not at_edge
     assert not removed
+    assert refined
 
 
 def test_a_shift_between_steps_comes_back_to_the_nearest() -> None:
@@ -333,15 +337,15 @@ def test_a_best_shift_at_either_end_of_the_window_is_flagged() -> None:
     """Looked for within two seconds of a peak 4 s from the truth, the best shift
     is the window's nearest end, and it says so."""
     own, ref = _cells_stream(1.0, 0.0, -7.3), _cells_stream(1.0, 0.5, 0.0)
-    found, at_edge, _ = _refine(own, ref, coarse_s=-3.0, resolution_s=0.1)
+    found, at_edge, _, refined = _refine(own, ref, coarse_s=-3.0, resolution_s=0.1)
     assert found == pytest.approx(-5.0)
-    assert at_edge
+    assert at_edge and refined
 
 
 def test_too_few_fully_covered_cells_give_no_shift() -> None:
     own, ref = _cells_stream(1.0, 0.0, -7.3), _cells_stream(1.0, 0.5, 0.0)
-    found, at_edge, _ = _refine(own, ref, coarse_s=-7.0, resolution_s=0.1, min_pairs=5000)
-    assert np.isnan(found) and not at_edge
+    found, at_edge, _, refined = _refine(own, ref, coarse_s=-7.0, resolution_s=0.1, min_pairs=5000)
+    assert np.isnan(found) and not at_edge and not refined
 
 
 def test_a_narrower_partner_is_joined_onto_the_wider_instruments_cells() -> None:
@@ -388,7 +392,7 @@ def test_stated_noise_is_removed_and_the_shift_stops_chasing_it() -> None:
             for sigma, errors in ((None, kept), ("declared", removed)):
                 own = _cells_stream(1.0, 0.0, shift, seed=seed, sigma=sigma, **common)
                 ref = _cells_stream(1.0, 0.0, 0.0, seed=seed, sigma=sigma, **common)
-                found, _, said = _refine(own, ref, coarse_s=np.ceil(shift), resolution_s=0.05)
+                found, _, said, _ = _refine(own, ref, coarse_s=np.ceil(shift), resolution_s=0.05)
                 assert said == (sigma is not None)
                 errors.append(found - shift)
     rms_kept = float(np.sqrt(np.mean(np.square(kept))))
@@ -411,7 +415,7 @@ def test_a_stated_sigma_larger_than_the_joined_series_spread_leaves_no_shift() -
     own = _cells_stream(1.0, 0.0, -7.3)
     ref = _cells_stream(1.0, 0.5, 0.0, noise=1.0, sigma="declared")
     ref["sigma_rand_ch4"].values[:] = 1e4
-    found, _, removed = _refine(own, ref, coarse_s=-7.0, resolution_s=0.1)
+    found, _, removed, _ = _refine(own, ref, coarse_s=-7.0, resolution_s=0.1)
     assert np.isnan(found) and removed
 
 
@@ -434,9 +438,9 @@ def test_a_cell_only_partly_covered_does_not_count() -> None:
     true = _true_seconds(ref)
     first_half = np.floor(true) % 2 == 0
     ref["ch4"].values[(true > 300) & (true < 900) & first_half] = np.nan
-    found, at_edge, _ = _refine(own, ref, coarse_s=-6.0, resolution_s=0.05)
+    found, at_edge, _, refined = _refine(own, ref, coarse_s=-6.0, resolution_s=0.05)
     assert found == pytest.approx(-6.4, abs=1e-9)
-    assert not at_edge
+    assert not at_edge and refined
 
 
 def test_readings_too_sparse_for_a_median_cover_nothing() -> None:
@@ -454,9 +458,9 @@ def test_readings_too_sparse_for_a_median_cover_nothing() -> None:
     for stream in (own, ref):
         kept = len(cell_series(stream, "ch4", running_median_s=121).cells)
         assert kept < np.isfinite(stream["ch4"].values).sum()
-    found, at_edge, _ = _refine(own, ref, coarse_s=-7.0, resolution_s=0.05)
+    found, at_edge, _, refined = _refine(own, ref, coarse_s=-7.0, resolution_s=0.05)
     assert found == pytest.approx(-7.3, abs=1e-9)
-    assert not at_edge
+    assert not at_edge and refined
 
 
 def test_the_wider_partners_cells_are_those_that_see_the_instruments_segment() -> None:
@@ -471,7 +475,7 @@ def test_the_wider_partners_cells_are_those_that_see_the_instruments_segment() -
         & (own.time < np.datetime64(T0_NS + SEGMENT_NS, "ns"))
     )
     ref = _cells_stream(2.0, 0.0, 0.0)
-    found, _, _ = _refine(own, ref, coarse_s=-60.0, resolution_s=0.1, min_pairs=890)
+    found, _, _, _ = _refine(own, ref, coarse_s=-60.0, resolution_s=0.1, min_pairs=890)
     assert found == pytest.approx(-60.3)
 
 
@@ -507,3 +511,89 @@ def test_cells_are_ordered_by_start_where_the_cadence_changes() -> None:
     assert (np.diff(series.cells.start_ns) >= 0).all()
     swapped = np.flatnonzero(series.cells.width_ns == 5_000_000_000)[0]
     assert series.cells.midpoint_ns[swapped] == T0_NS + 200_600_000_000
+
+
+# ---------------------------------------------------------------------------
+# Cells that do not tile (walkthrough 2, W2)
+# ---------------------------------------------------------------------------
+
+
+def _every_other(stream: xr.Dataset) -> xr.Dataset:
+    """Keep every other reading: 1 s cells with 1 s holes between them, which do not tile.
+
+    The shape of a slow analyzer written into 1 s rows of a merge file, with
+    a value in only some of them (the 2024 NOAA drive files).
+    """
+    return stream.isel(time=slice(None, None, 2))
+
+
+@pytest.mark.parametrize("phase", [0.0, 0.25, 0.5, 0.75])
+@pytest.mark.parametrize("gappy", ["partner", "instrument"])
+def test_on_a_width_tie_the_series_with_fewer_readings_keeps_its_cells(
+    phase: float, gappy: str
+) -> None:
+    """Measured in the walkthrough: with the gappy series joined, as the
+    partner was on every tie, the shift came back -7.00 or -7.50 s for a true
+    -7.3, or not at all, by phase, because its cells cover a moved cell only
+    where the two sets of cells line up. Joined onto the gappy series' cells
+    instead, the denser one covers them at every step and the shift is exact."""
+    own = _cells_stream(1.0, 0.0, -7.3)
+    ref = _cells_stream(1.0, phase, 0.0)
+    if gappy == "partner":
+        ref = _every_other(ref)
+    else:
+        own = _every_other(own)
+    found, at_edge, _, refined = _refine(own, ref, coarse_s=-7.0, resolution_s=0.1)
+    assert found == pytest.approx(-7.3, abs=1e-9)
+    assert refined and not at_edge
+
+
+@pytest.mark.parametrize("phase", [0.25, 0.5])
+def test_narrower_cells_with_holes_leave_the_whole_second_peak_unrefined(phase: float) -> None:
+    """A gappy series narrower than a tiling one is joined onto it, and its
+    1 s cells kept every other second never cover a 2 s cell: no step of the
+    lattice can be compared. The whole-second peak stands, and says so,
+    rather than a shift at the cells' alignment or no shift at all."""
+    own = _cells_stream(2.0, 0.0, -7.3)
+    ref = _every_other(_cells_stream(1.0, phase, 0.0))
+    found, at_edge, removed, refined = _refine(own, ref, coarse_s=-7.0, resolution_s=0.1)
+    assert (found, at_edge, removed, refined) == (-7.0, False, False, False)
+
+
+def test_cells_covered_at_only_some_steps_leave_the_peak_unrefined() -> None:
+    """The narrower series covers the wider one's cells at some steps and not
+    at others: 1 s cells kept two seconds in every three cover a 2 s cell
+    whole only where the cells line up, at 4 of the 41 steps here, all on half
+    seconds. Compared there, the shift would come out on a half second for a
+    true -7.3; fewer than half the best step's cells at some step means the
+    steps cannot be compared, and the whole-second peak stands."""
+    own = _cells_stream(2.0, 0.0, -7.3)
+    ref = _cells_stream(1.0, 0.5, 0.0)
+    ref = ref.isel(time=np.arange(ref.sizes["time"]) % 3 != 2)
+    found, _, _, refined = _refine(own, ref, coarse_s=-7.0, resolution_s=0.1)
+    assert (found, refined) == (-7.0, False)
+
+
+def _cells(seconds: np.ndarray, width_s: float = 1.0) -> CellSeries:
+    """Cells of one width starting at the given seconds after T0, with flat values."""
+    start = T0_NS + np.round(seconds * 1e9).astype(np.int64)
+    stop = start + round(width_s * 1e9)
+    return CellSeries(cells=CellBounds(start, stop), values=np.zeros(len(seconds)), sigma=None)
+
+
+def test_who_keeps_its_cells_counts_readings_where_each_sees_the_segment() -> None:
+    """The rule on hand-built cells. The segment is [100, 1100) s on the
+    instrument's clock and the whole-second peak -60 s, so the partner's
+    readings that see it are those in [40, 1040) s. The instrument has 1 s
+    cells from 0 to 2000 s (1000 in its segment); the partner the same width
+    from 40 to 1040 s only (1000 where it sees the segment, 940 in [100,
+    1100), 1000 in all). A tie in readings, so the instrument keeps its cells:
+    counting the partner over the unmoved segment, or either series over its
+    whole record, would give the other answer."""
+    own, partner = _cells(np.arange(0.0, 2001.0)), _cells(np.arange(40.0, 1040.0))
+    first, stop, coarse = T0_NS + 100 * 10**9, T0_NS + 1100 * 10**9, -60 * 10**9
+    assert _own_keeps_its_cells(own, partner, first, stop, coarse)
+    fewer = _cells(np.arange(40.0, 1040.0, 2.0))
+    assert not _own_keeps_its_cells(own, fewer, first, stop, coarse)
+    assert not _own_keeps_its_cells(own, _cells(np.arange(0.0, 2001.0), 2.0), first, stop, coarse)
+    assert _own_keeps_its_cells(_cells(np.arange(0.0, 2001.0), 2.0), own, first, stop, coarse)

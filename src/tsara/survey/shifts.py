@@ -58,7 +58,16 @@ put on the other clock by s, through the same join as every other in TSARA
 join covers fully. On air whose readings are exact cell means this is exact
 where the two sets of cells line up, and on 2 and 4 s plumes at every phase;
 on 12 s plumes the share of a joined reading lying outside the cell moves it
-by up to 0.06 s (measured, ``docs/METHODS.md`` §12.4). With noise one bias is
+by up to 0.06 s (measured, ``docs/METHODS.md`` §12.4). It needs the joined
+series to cover the target's cells at every step of the lattice, which a
+series with holes between its cells does only where the two sets of cells
+line up (1 s cells kept every other second: -7.0 or -7.5 s for a true -7.3,
+or no shift at all, by phase). So on a tie in width the series with fewer
+readings in the segment is the target, as in every pairing in TSARA
+(§11.4), and the denser one covers it. A pair whose joined cells still cover
+the target's at no step, or leave some step of the lattice with less than half
+the fully covered cells of the best one, is not refined: the tier keeps its
+whole-second peak, which needs no cells, and says so (``refined`` false). With noise one bias is
 left: averaging lowers the noise of the joined series, by an amount that
 changes with s, and r rises where it falls. When the joined readings carry a
 declared or reported random sigma, that noise is removed from the joined
@@ -107,6 +116,12 @@ _MEDIAN_MIN_READINGS = 3
 #: the true shift (measured, METHODS §12.4), so two seconds hold it; a best
 #: shift at either end means the peak was not where the whole seconds put it.
 _REFINE_NS = 2 * SECOND_NS
+
+#: A step of the lattice whose fully covered cells fall below this share of the
+#: best-covered step's means the joined cells cover the target only where the
+#: two sets of cells line up: at the misaligned steps the count is zero, while
+#: on cells that tile it varies by the few cells at a record's ends.
+_MIN_COVERED_SHARE = 0.5
 
 #: The random-sigma provenances a stream can carry that are statements about
 #: the readings rather than labels for their absence (ingest/uncertainty.py).
@@ -165,6 +180,11 @@ class SegmentShift:
         True when the shift was measured on the readings' own cells with the
         joined readings' stated noise removed, for every pair of the tier
         (:func:`refined_shift`).
+    refined : bool
+        True when the shift was measured on the readings' own cells to the
+        survey's resolution; False when it is the whole-second peak (no peak
+        to refine, a peak at the search's edge, or cells that do not line up
+        at every step of the resolution).
     """
 
     shift_s: float
@@ -173,6 +193,7 @@ class SegmentShift:
     at_edge: bool
     pairs_disagree: bool = False
     noise_removed: bool = False
+    refined: bool = False
 
 
 @dataclass(frozen=True)
@@ -444,7 +465,7 @@ def refined_shift(
     coarse_s: float,
     resolution_ns: int,
     min_pairs: int,
-) -> tuple[float, bool, bool]:
+) -> tuple[float, bool, bool, bool]:
     """Return one segment's shift measured on the readings' own cells, to a resolution.
 
     Parameters
@@ -469,22 +490,33 @@ def refined_shift(
     shift_s : float
         The shift at which the tier's pooled correlation is highest: seconds
         added to the instrument's recorded times to put it on its partner's
-        clock; NaN when no shift had enough fully covered cells.
+        clock; NaN when no shift had enough fully covered cells; ``coarse_s``
+        itself when a pair's cells do not line up at every step (``refined``
+        False: the joined cells cover the target's at only some steps, or at
+        none).
     at_edge : bool
         True when it lies at either end of the lattice, so the true shift may
         lie beyond.
     noise_removed : bool
         True when every pair's joined readings stated a random sigma, and their
         noise was removed from the joined series' variance.
+    refined : bool
+        True when the shift was measured to the resolution: False when no
+        shift had enough fully covered cells, or when some pair's joined cells
+        cover none of the target's at any step, or leave a step of the lattice
+        with less than half the fully covered cells of its best-covered step,
+        so that the steps could be compared only where the cells line up.
 
     Notes
     -----
-    In each pair the series with the narrower cells (the instrument's, on a
-    tie) is joined onto the other's cells put on its clock by s, as every
-    join in TSARA puts the narrower support onto the wider
-    (``docs/METHODS.md`` §1.3). The wider series' cells are chosen once, by
-    the whole-second peak, so every s is judged on the same cells. Pairs are
-    pooled by averaging their curves, as in :func:`pooled_shift`.
+    In each pair the series with the narrower cells is joined onto the other's
+    cells put on its clock by s, as every join in TSARA puts the narrower
+    support onto the wider (``docs/METHODS.md`` §1.3); on a tie in width the
+    series with fewer readings in the segment keeps its cells, so that the
+    denser one covers them, and on a tie in readings too the instrument's
+    does. The target's cells are chosen once, by the whole-second peak, so
+    every s is judged on the same cells. Pairs are pooled by averaging their
+    curves, as in :func:`pooled_shift`.
     """
     coarse_ns = round(coarse_s * NS_PER_S)
     lowest = -((_REFINE_NS - coarse_ns) // resolution_ns)  # ceil((coarse - 2 s) / step)
@@ -493,17 +525,24 @@ def refined_shift(
     curves = []
     removed = True
     for own, partner in pairs:
-        curve, noise = _cell_curve(own, partner, first_ns, stop_ns, coarse_ns, shifts_ns, min_pairs)
+        curve, covered, noise = _cell_curve(
+            own, partner, first_ns, stop_ns, coarse_ns, shifts_ns, min_pairs
+        )
+        if covered.max() == 0 or covered.min() < _MIN_COVERED_SHARE * covered.max():
+            # The cells line up only at some steps, or at none: comparing the
+            # steps would compare the alignment, not the air. The whole-second
+            # peak, which needs no cells, stands.
+            return coarse_s, False, False, False
         curves.append(curve)
         removed &= noise
     stacked = np.vstack(curves)
     usable = np.isfinite(stacked).any(axis=0)
     if not usable.any():
-        return float("nan"), False, removed
+        return float("nan"), False, removed, False
     pooled = np.full(len(shifts_ns), -np.inf)
     pooled[usable] = np.nanmean(stacked[:, usable], axis=0)
     best = int(np.argmax(pooled))
-    return int(shifts_ns[best]) / NS_PER_S, best in (0, len(shifts_ns) - 1), removed
+    return int(shifts_ns[best]) / NS_PER_S, best in (0, len(shifts_ns) - 1), removed, True
 
 
 def _cell_curve(
@@ -514,14 +553,17 @@ def _cell_curve(
     coarse_ns: int,
     shifts_ns: npt.NDArray[np.int64],
     min_pairs: int,
-) -> tuple[npt.NDArray[np.float64], bool]:
-    """Return r at every shift on the readings' own cells, and whether the noise was removed.
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.int64], bool]:
+    """Return r and the fully covered cells at every shift, and whether the noise was removed.
 
     ``own`` at t against ``partner`` at t + s: the partner joined onto the
     instrument's cells moved on by s, or the instrument joined onto the
-    partner's cells moved back by s, whichever has the narrower cells.
+    partner's cells moved back by s. The joined one is the one with the
+    narrower cells; on a tie in width, the one with more readings in the
+    segment, so that it covers the other's cells whether or not they tile;
+    on a tie in readings too, the partner.
     """
-    if np.median(own.cells.width_ns) >= np.median(partner.cells.width_ns):
+    if _own_keeps_its_cells(own, partner, first_ns, stop_ns, coarse_ns):
         target, joined, sign, offset = own, partner, 1, 0
     else:
         target, joined, sign, offset = partner, own, -1, coarse_ns
@@ -532,6 +574,7 @@ def _cell_curve(
     width = (stop - start).astype(np.float64)
     noise = joined.sigma is not None
     curve = np.full(len(shifts_ns), np.nan)
+    covered = np.zeros(len(shifts_ns), dtype=np.int64)
     for i, shift in enumerate(shifts_ns):
         found = overlap_pairs(joined.cells, CellBounds(start + sign * shift, stop + sign * shift))
         w = found.overlap_ns.astype(np.float64)
@@ -542,7 +585,8 @@ def _cell_curve(
         # A cell counts only when the joined readings cover all of it, so that
         # each joined value is the mean over exactly the cell it is compared with.
         full = total >= width
-        if np.count_nonzero(full) < min_pairs:
+        covered[i] = np.count_nonzero(full)
+        if covered[i] < min_pairs:
             continue
         a = x[full] - x[full].mean()
         b = weighted[full] / total[full]
@@ -558,4 +602,31 @@ def _cell_curve(
         var_a = float(np.mean(a * a))
         if var_a > 0 and var_b > 0:
             curve[i] = float(np.mean(a * b)) / np.sqrt(var_a * var_b)
-    return curve, noise
+    return curve, covered, noise
+
+
+def _own_keeps_its_cells(
+    own: CellSeries, partner: CellSeries, first_ns: int, stop_ns: int, coarse_ns: int
+) -> bool:
+    """Say whether the instrument's cells are the ones compared, the partner's joined onto them.
+
+    The wider cells keep theirs, as in every join (``docs/METHODS.md`` §1.3).
+    On a tie in width, the series with fewer readings in the segment keeps
+    its cells, so that the denser one covers them at every step whether or
+    not they tile (§11.4's tie rule); the partner's readings are counted over
+    the stretch that sees the segment, moved by the whole-second peak; on a
+    tie in readings too, the instrument's cells.
+    """
+    own_width = np.median(own.cells.width_ns)
+    partner_width = np.median(partner.cells.width_ns)
+    if own_width != partner_width:
+        return bool(own_width > partner_width)
+    return _readings_in(own, first_ns, stop_ns) <= _readings_in(
+        partner, first_ns + coarse_ns, stop_ns + coarse_ns
+    )
+
+
+def _readings_in(series: CellSeries, first_ns: int, stop_ns: int) -> int:
+    """Count the readings whose cells have their midpoint in ``[first_ns, stop_ns)``."""
+    middle = series.cells.midpoint_ns
+    return int(np.count_nonzero((middle >= first_ns) & (middle < stop_ns)))

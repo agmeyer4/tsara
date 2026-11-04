@@ -125,6 +125,7 @@ def test_a_constant_clock_error_gives_one_row_over_the_whole_record() -> None:
     assert row.reason == "clock survey: 6 segments, tier 1, shifts -5 to -5 s"
     statuses = survey.segments[survey.segments.instrument == "inst"].status.tolist()
     assert statuses == ["decided"] * 6 + ["too short"]
+    assert survey.segments[survey.segments.status == "decided"].refined.all()
     assert survey.faults.empty
     assert set(survey.measurements.columns) >= {
         "shift_onto_partner_s",
@@ -660,7 +661,7 @@ def test_a_shift_at_the_edge_of_the_cells_window_is_not_decided(
     window, the true one may lie beyond: the segment is not decided."""
     import tsara.survey.clocks as clocks
 
-    monkeypatch.setattr(clocks, "refined_shift", lambda *a, **k: (-7.0, True, False))
+    monkeypatch.setattr(clocks, "refined_shift", lambda *a, **k: (-7.0, True, False, True))
     survey = survey_clocks({"ref": _stream(), "inst": _stream(-5.0)}, _config(ONE))
     assert survey.rows == ()
     assert set(survey.segments.status) <= {"at search edge", "too short"}
@@ -858,3 +859,35 @@ def test_a_segment_agreeing_with_one_neighbour_is_no_outlier() -> None:
     )
     assert not _faults(survey, "outlier")
     assert _faults(survey, "clock step")
+
+
+# ---------------------------------------------------------------------------
+# Walkthrough 2: cells that do not line up
+# ---------------------------------------------------------------------------
+
+
+def _with_cells(stream: xr.Dataset, width_s: float) -> xr.Dataset:
+    """Give a stream explicit cells of one width, centred on its times."""
+    half = np.timedelta64(round(width_s * SECOND / 2), "ns")
+    times = stream["time"].values
+    return stream.assign(time_bnds=(("time", "nv"), np.stack([times - half, times + half], axis=1)))
+
+
+def test_cells_that_do_not_line_up_keep_whole_seconds_and_are_named() -> None:
+    """2 s cells against 1 s cells kept every other second, the shape of a slow
+    analyzer written into a merge file's 1 s rows: the narrower series' cells
+    never cover a wider one, so no shift below a second can be measured on the
+    cells. Each segment keeps its whole-second peak, the row is written from
+    them, and the run of such segments is named rather than left undecided."""
+    every_other = slice(None, None, 2)
+    ref = _with_cells(_stream().isel(time=every_other), 1.0)
+    inst = _with_cells(_stream(-5).isel(time=every_other), 2.0)
+    survey = survey_clocks({"ref": ref, "inst": inst}, _config(ONE, resolution="0.1s"))
+    (row,) = survey.rows
+    assert row.shift_ns == -5 * SECOND
+    decided = survey.segments[survey.segments.status == "decided"]
+    assert len(decided) == 6 and not decided.refined.any()
+    assert not survey.measurements.refined.any()
+    (fault,) = _faults(survey, "whole seconds")
+    assert fault["detail"].startswith("6 segments measured on whole seconds")
+    assert (fault["start"], fault["end"]) == ("2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z")

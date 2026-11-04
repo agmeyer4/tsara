@@ -6659,8 +6659,10 @@ therefore measured again on the readings' own cells
 of the resolution within 2 s of the peak, the narrower-celled series' wiggles
 (each series less its own running median, on its own readings) are averaged,
 overlap-weighted, onto the wider-celled series' cells moved by s, through
-TSARA's one join (§1.3; the narrower onto the wider, the instrument's cells on
-a tie), and r is taken over the cells the join covers fully; the cells are
+TSARA's one join (§1.3; the narrower onto the wider; on a tie in width the
+series with fewer readings in the segment keeps its cells, as in pairing
+(§11.4), and on a tie in readings too the instrument's), and r is taken over
+the cells the join covers fully; the cells are
 chosen once, by the peak, so that every s is judged on the same ones. Pairs of
 a tier pool by averaging, as above. The whole-second r, its paired seconds and
 the search-edge and disagreement rules still decide a segment; the cells give
@@ -6737,6 +6739,39 @@ five shifts): root-mean-square error 0.371 s with the noise kept, 0.085 s with
 it removed. What real data supports is another matter: on the 2024 SLC-SOS van
 r at the peak was 0.6 to 0.97, far more unshared variance than here, so the
 resolution worth asking for is measured there (§12.7).
+
+**Cells that do not tile.** Counting only cells the join covers fully needs
+the joined series to cover the target's cells at every step of the lattice.
+Cells with holes between them do so only where the two sets of cells line up:
+the shape of a slow analyzer written into a merge file's 1 s rows, a value in
+only some of them (the 2024 NOAA drive files, §9.2.3). Found in the second
+walkthrough of 2026-11-04 and measured under the rule above (exact cell means,
+no noise, true shift −7.3 s, both series 1 s cells, one kept every other
+second at phase φ; the first column measured before the fix, the second a test
+in `tests/survey/test_shifts.py`):
+
+| φ | gappy series joined (as the partner was on every tie) | gappy series keeps its cells | both tile |
+|---|---|---|---|
+| 0.00 | −7.00 | −7.30 | −7.30 |
+| 0.25 | none (segment undecided) | −7.30 | −7.30 |
+| 0.50 | −7.50 | −7.30 | −7.30 |
+| 0.75 | none (segment undecided) | −7.30 | −7.30 |
+
+So on a tie in width the series with fewer readings keeps its cells, and the
+denser one covers them at every step: every row now reads −7.30. What that
+cannot mend is a gappy series narrower than a tiling one, joined onto it by
+the first rule: 1 s cells kept every other second never cover a 2 s cell
+(no step has a fully covered cell), and kept two seconds in three they cover
+it at 4 of 41 steps, all where the cells line up (compared there, −7.8 s for a
+true −7.3). A pair whose joined cells cover the target's at no step, or leave
+some step with fewer than half the fully covered cells of the best-covered
+step (`_MIN_COVERED_SHARE`; on cells that tile the count varies only by the
+few cells at a record's ends), is not refined: the segment keeps its
+whole-second peak, which needs no cells, says so in the column `refined` of
+the measurement and segment tables, and a run of such decided segments is
+named (§12.5). A shift good to a second, named, is worth more to a reviewer
+than one at the cells' alignment presented as good to a tenth, or no shift at
+all.
 
 **Tiers.** A tier with several pairs averages their correlation curves before
 the best shift is chosen, so that weak pairs sharing a shift strengthen each
@@ -6886,7 +6921,10 @@ Each fault is reported by name with the stretch of segments behind it
 - **tiers disagree**: two tiers composing onto the reference clock further apart
   than the tolerance;
 - **outlier**: a segment set aside against two agreeing neighbours;
-- **after-check**: a stream measured but given no rows.
+- **after-check**: a stream measured but given no rows;
+- **whole seconds**: a run of decided segments whose shift is the whole-second
+  peak, because the joined readings' cells line up with the others' at only
+  some steps of the resolution, or at none (§12.4, "Cells that do not tile").
 
 A drift close to a cadence error, together with steps at the instrument's
 logging stops, is the signature of times counted by rows (§12.2): the remedy
