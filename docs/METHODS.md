@@ -3421,6 +3421,21 @@ then its header on physical line 4 needs `header_row: 2`. This follows from
 one; it fails loudly (the error lists the column names actually found), but
 the field description says so to save the round trip.
 
+**Time columns are read as text** (added with Phase 3.6), and so are the
+declared `start_column` and `stop_column`, which are parsed with the same
+format. Read as numbers, a time column has lost what its pattern needs before
+it is joined: an `hhmmss` field loses its zero padding (`000003.50`, 3.5 s
+past midnight, becomes `3.5`), and a single blank cell makes pandas read the
+whole column as floats, so a year joins as `2024.0` and no row matches the
+format. Found on the 2024 SLC-SOS van's weather logs
+(`UWTR_WX_Sprinter_*.csv`), which write the GPS receiver's time as `UTC
+hhmmss` beside separate year, month and day columns, blank until the receiver
+has a fix: read as numbers, both files of 2024-08-05 were rejected whole;
+read as text, they give 9,789 rows, losing only the 79 written before a fix,
+and their 5 s cadence runs straight through 00:00 UTC. Variables are made
+numeric later and separately, so a column that is both a time and a variable
+still reads as a number there.
+
 **Float parsing is left at pandas' default**, not `float_precision="round_trip"`.
 The default parser is not guaranteed bitwise round-trip exact — it can differ
 in the last unit in the last place — and the exact parser is available for

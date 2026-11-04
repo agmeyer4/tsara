@@ -163,6 +163,19 @@ def _read_frame(path: Path, loader: CSVLoader) -> pd.DataFrame:
     if loader.na_values:
         kwargs["na_values"] = list(loader.na_values)
 
+    # Read every column a timestamp is built from as text, never as a number.
+    # A time column parsed as a number has already lost what its pattern
+    # needs before `build_time_index` sees it: an `hhmmss` field loses its
+    # zero padding (`000003.50`, just past midnight, becomes 3.5), and a
+    # single blank cell makes pandas read a whole column as floats, so a year
+    # reads `2024.0` and no row of the file matches the declared format
+    # (METHODS.md §9.2). Variables are made numeric later, one at a time
+    # (`pd.to_numeric` in `ingest/streams.py`), so a column that is both a
+    # time and a variable still reads as a number there. A key naming a
+    # column the file lacks is ignored by pandas, so the "time column is
+    # absent" error below still comes from TSARA, in TSARA's words.
+    kwargs["dtype"] = dict.fromkeys(_time_columns(loader), str)
+
     # The C parser handles ',' , '\t' and the '\s+' whitespace-run idiom; any
     # other multi-character separator is a regex only the Python engine
     # implements. Choosing explicitly avoids pandas' silent engine fallback,
@@ -196,6 +209,31 @@ def _read_frame(path: Path, loader: CSVLoader) -> pd.DataFrame:
     if frame.empty:
         raise TsaraIngestError(f"'{path}' contains no data rows.")
     return frame
+
+
+def _time_columns(loader: CSVLoader) -> list[str]:
+    """Return the columns a timestamp or a declared cell boundary is built from.
+
+    Parameters
+    ----------
+    loader : CSVLoader
+        Parsing configuration.
+
+    Returns
+    -------
+    list of str
+        The time columns, then the support's start and stop columns when the
+        manifest names them: a boundary column is parsed with the loader's
+        own time format (:func:`tsara.ingest.timeparse.build_boundary_index`),
+        so it needs the same text the time columns do.
+    """
+    names = list(loader.time.columns)
+    names += [
+        name
+        for name in (loader.support.start_column, loader.support.stop_column)
+        if name is not None
+    ]
+    return names
 
 
 def _widened_names(path: Path, loader: CSVLoader) -> list[str] | None:
