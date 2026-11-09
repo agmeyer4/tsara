@@ -6537,8 +6537,16 @@ as recorded and counted, and a warning names the uncorrected stretches
 the stream records `tsara_clock_corrections` (every row, as its stretch,
 shift, reference clock, provenance and reason), `tsara_clock_corrections_files`,
 `tsara_reference_clock` and `tsara_clock_uncorrected_share` (the share of its
-readings no row held); an instrument with none carries none of the four, the
-reference clock's own instrument for one. A row holding none of its
+readings no row held). Under a table, the reference clock's own instrument
+records `tsara_reference_clock` as itself and a share of 0, and an instrument
+the table has no row for is warned about and records only a share of 1: it
+is left as recorded, not known to be on the reference clock, and carries no
+`tsara_clock_corrections`, so a later survey measures it rather than taking it
+for an after-check. A row with shift `0s` declares a clock right. Found in the
+second walkthrough of 2026-11-09: such an instrument was said only at INFO,
+and its stream looked exactly like the reference clock's, so leaving an
+instrument out of the table was quieter than leaving out part of one. With no
+table no stream records any of the four. A row holding none of its
 instrument's readings is logged, since the data it names may not be loaded.
 
 **A clock step inside a file.** A shift that falls from one row to the next
@@ -6641,10 +6649,28 @@ measurement, never written to a product) and its centred running median is
 removed, so that plumes, not the background, drive the correlation. The median
 is used where its window holds at least a quarter of the readings it could
 (at least three), which keeps a 1 s record at 30 readings in 121 s and lets a
-5 s weather record take part. The shift is the s in the search range
-maximizing Pearson's r between the instrument's series at t and the partner's
-at t + s, over the segment's seconds where both have a value, when there are
-at least the minimum number of them. A best shift at the edge of the search is
+5 s weather record take part. Its window is closed at both ends,
+[t − W/2, t + W/2], so it is centred at any length: pandas' own centred time
+window is open at its start, so a window of an even number of seconds held one
+second more after t than before (found in the second walkthrough of
+2026-11-09: at 120 s the wiggles of notebook 08 §3's record moved by up to
+1.76 ppb against a median written from the definition; its shift did not
+move). The shift is the s in the search range maximizing Pearson's r between
+the instrument's series at t and the partner's at t + s, over the segment's
+seconds where both have a value. The minimum number of paired seconds is
+tested once, at that peak: a pair takes part when its best-paired shift pairs
+the minimum, its r counts at every shift pairing at least half as many as that
+one (so that a shift paired over a sliver of the segment cannot win on a few
+lucky seconds), and the tier decides only if every pair taking part pairs the
+minimum at the peak; otherwise the measurement keeps the peak's r and paired
+seconds, and the segment says `too few pairs`. Found in the second
+walkthrough: tested at every shift, the minimum let a wrong shift win. In
+notebook 08 §4 with 10 min segments, a 2 s analyzer holds exactly 300 readings
+in a segment, the minimum; its partner's 12 s hole at a clock step cost the
+true shift (+11 s, r 0.992) and its neighbours one or two paired seconds, so
+the best shift still pairing all 300, +7 s at r 0.87, was decided and chained
+to 0 s against a truth of +4 s; now the segment is not decided against that
+partner and its backup tier decides it at +4 s. A best shift at the edge of the search is
 not decided, since the true one may lie beyond; measured while building, a
 true shift just beyond the search shows as its peak's shoulder at the edge,
 and one far beyond as a weak peak inside it, which the threshold refuses.
@@ -6771,14 +6797,21 @@ whole-second peak, which needs no cells, says so in the column `refined` of
 the measurement and segment tables, and a run of such decided segments is
 named (§12.5). A shift good to a second, named, is worth more to a reviewer
 than one at the cells' alignment presented as good to a tenth, or no shift at
-all.
+all. The minimum is tested on the cells as on whole seconds, once, at the best
+step: a pair covering fewer cells whole there is not refined either. Found in
+the second walkthrough: tested at every step, it let only the steps that
+cleared it compete, and on a 2 s analyzer against a 1 s partner missing one
+reading (the steps lined up with the hole cover one 2 s cell more than the
+true step does) a true −7.3 s came back as −7.0 s called refined
+(`tests/survey/test_shifts.py`).
 
 **Tiers.** A tier with several pairs averages their correlation curves before
 the best shift is chosen, so that weak pairs sharing a shift strengthen each
 other. Averaging assumes they share it: measured while building, pairs certain
 alone at −4 s and at −10 s pool to a curve peaking at −7 s with r 0.76, a
-shift neither supports. So a pair that is decided on its own and puts its best
-shift further than the tolerance from the pooled one makes the tier's **pairs
+shift neither supports. So a pair that is decided on its own (its own peak
+pairs the minimum, at r of at least the threshold) and puts its best shift
+further than the tolerance from the pooled one makes the tier's **pairs
 disagree**, and the tier undecided; a pair too weak to decide alone cannot.
 An instrument's tiers are ranked: one gas on two analyzers first (they share
 every plume and the same physics), gases emitted together next (they share
@@ -6793,11 +6826,25 @@ checks the one chosen: each tier's shift is composed onto
 the reference clock through its own partner, and shifts further apart than the
 tolerance are named.
 
-**The chain.** An instrument's shift onto its partner, plus the partner's
-shift onto the reference clock in the same segment, is its shift onto the
-reference clock; the reference clock's instrument is zero everywhere, and a segment that
-a tier decides but none of its deciding tiers can carry to the reference clock
-is undecided (`partner undecided`). One
+**The chain.** An instrument's shift onto its partner, plus the shift the
+partner's own rows apply where the segment's air lands on the partner's clock
+(the segment's midpoint moved by the shift onto the partner, then back onto
+the clock the partner's files recorded), is its shift onto the reference
+clock; the reference clock's instrument is zero everywhere, and a segment that
+a tier decides but no row of any deciding tier's partner reaches is undecided
+(`partner undecided`). Composing through the partner's rows rather than its
+segment measurements passes on the shift the partner's readings are actually
+corrected by, including where the partner's own segment was set aside as an
+outlier, bridged, or too short inside a row. Found in the second walkthrough
+of 2026-11-09: composed through the partner's measurements, an instrument tied
+to a partner with an outlier segment was left uncorrected there (592 of 5,400
+readings, notebook 08 §5's fixture with a fourth instrument tied to `odd`),
+although the partner's row corrected the partner's readings. The instrument
+now takes the partner's bet (§12.4, Outliers): if the set-aside segment was a
+coincidence of plumes both are right, and if the partner's clock really moved
+there both are wrong by the same amount, consistent with each other, and the
+partner's outlier fault names the stretch. A partner measured as an
+after-check has no rows and passes on its residuals. One
 well-measured link carries every instrument tied to it: on the 2024 SLC-SOS
 van, the Picarro log against the weather station by water, and every other
 analyzer against the Picarro log.
@@ -6814,8 +6861,8 @@ its own row with a step on either side.
 
 **Rows.** Consecutive decided segments whose shifts agree within the tolerance
 become one row; a larger jump starts a new row and is a clock step. A segment
-with readings and no decision (`no tier decided`, `at search edge`, `pairs
-disagree`, `partner undecided`) ends the row before it, so its readings stay
+with readings and no decision (`too few pairs`, `weak correlation`, `at
+search edge`, `pairs disagree`, `partner undecided`) ends the row before it, so its readings stay
 uncorrected and ingestion says so; segments with no readings do not. A segment
 holding fewer readings than any of the instrument's tiers needs paired seconds
 is `too short`: undecidable by construction, not by the evidence, it neither
@@ -6834,11 +6881,15 @@ Which segments a row covers is counted on its final span, not its segments:
 rows meeting at a step's gap inside an undecided segment correct all its
 readings, so it is not undecided (found in the walkthrough: it was named
 undecided while its readings were corrected). A segment no tier decided names
-no tier (`tier` is NA; it read 0, like a real tier). A row of three or more
-segments whose least-squares line
-through their shifts changes by more than the tolerance across the row is a
-clock drift, written with `shift_end`; otherwise the row's shift is the median
-of its segments'. The line is evaluated at the row's own start and end, which may lie
+no tier (`tier` is NA; it read 0, like a real tier).
+
+**Drift.** A row of three or more segments is a clock drift, written with `shift_end`, when the least-squares line through
+their shifts changes across the row by more than the resolution **and** by
+more than three standard errors of that change, the standard error taken from
+the segments' own scatter about the line (n − 2 degrees of freedom) and
+floored at the resolution's rounding, resolution/√12; otherwise the row's
+shift is the median of its segments'. A run holding a segment left at its
+whole-second peak is judged at a second. The line is evaluated at the row's own start and end, which may lie
 beyond its segments (a row reaching over a record's short end segments, or
 meeting its neighbour at a step's gap). Found building notebook 08: evaluated
 at the last segment's edge instead, a row reaching ten minutes further spread
@@ -6848,6 +6899,50 @@ number of seconds, so a drifting clock's shifts sit on a staircase and the line
 through them misses the rate by a few percent: 5.7 % on a clock gaining 1 s
 every 10 minutes, 1.7 % at a resolution of 0.1 s
 (`tests/survey/test_survey_clocks.py`).
+
+The rule was first the tolerance, the number that also decides a step, so a
+clock drifting by less than the tolerance across a row was written as a
+constant, wrong by up to half its change. Found in the second walkthrough of
+2026-11-09 and measured on simulated segments under this rule (10 min
+segments; each segment's shift the true shift at its midpoint plus Gaussian scatter σ,
+rounded to the resolution, as the refinement lands on the nearest step;
+tolerance 2 s; the error over the whole record; 200 records where σ > 0; the
+old rule's numbers reproduce the survey's own on notebook 08 §5's fixture),
+the largest error, old rule → a change beyond the resolution alone → the rule
+above:
+
+| record | clock | resolution | σ | largest error (s) |
+|---|---|---|---|---|
+| 1.5 h | drifting 0.5 s/h | 1 s | 0 | 0.75 → 0.34 → 0.34 |
+| 1.5 h | drifting 1 s/h | 1 s | 0 | 1.00 → 0.16 → 0.16 |
+| 1.5 h | drifting 1 s/h | 0.1 s | 0 | 0.80 → 0.01 → 0.01 |
+| 24 h | drifting 1 s/day | 1 s | 0 | 0.96 → 0.27 → 0.27 |
+| 24 h | drifting 1 s/day | 0.1 s | 0 | 0.50 → 0.00 → 0.00 |
+| 6 h | steady | 0.1 s | 0.5 s | 0.11 → 0.24 → 0.16 |
+
+On the steady clock with 0.5 s of scatter the three rules write 0.01, 0.86
+and 0.02 drift rows per record, and across a real step (−7 → −19 s) the
+resolution alone writes 1.7 per record and the rule above 0.03: a line through
+scattered segments changes a little by chance, which is what the standard
+error guards. The fourth row is a real case: on the 2024 SLC-SOS van the
+MIRO's EOL file drifted about a second a day earlier against four other
+instruments over 2024-08-08 to 08-14 (30 min segments decided at r ≥ 0.6,
+measured outside the package for the SLC-SOS alignment).
+
+What it leaves: steps are still judged between consecutive segments against
+the tolerance, so a clock changing by more than the tolerance per segment is
+written as a staircase of short rows (a `fast drift` past three steps,
+§12.5), and scatter splits a moderate drift the same way. Measured under the
+rule above: 18 s/h at 1 s resolution, 2.98 s largest error; 12 s/h with
+0.5 s of scatter over 6 h, 2.57 s over about ten rows. A merge of adjacent
+rows that no hole or logging stop separates, kept when one line leaves every
+segment within the tolerance, fixes many of these (that 12 s/h case: 0.22 s,
+one row) but turns a clock set back 3 s with no gap into a record-long drift
+and never merges a staircase of one-segment rows (the same simulation). Not
+built
+(owner, 2026-11-09): no real log measured so far drifts that fast, the fast
+drifts known come from files whose times count rows (§12.2), and the fault
+names the staircase and its remedy, a shorter segment.
 
 **Where a step goes.** A step happens where a logger stopped or its clock
 jumped, not at a segment edge. Between two rows across a step, the survey
@@ -6899,7 +6994,10 @@ a cell before the midpoint, an end label half a cell after, and `mid` and
 **After-check.** A stream that already carries clock corrections is measured
 and gets no rows (fault `after-check`): its shifts are the residuals of a table
 already applied, and every decided one should sit within about a second of
-zero. That holds however much of the stream the table corrected: a stream
+zero. The fault states them: the decided segments, the range of their
+residuals and how many lie beyond the tolerance (found in the second
+walkthrough: it said only that no rows were derived, so a reviewer had to open
+the segments table to learn whether the table had worked). That holds however much of the stream the table corrected: a stream
 corrected only up to a clock step is measured after the step too, and its shift
 there appears among the survey's segments as a residual, not as a row. One rule: rows come
 from the campaign as written, and the after-check checks them. A residual is
@@ -6940,21 +7038,25 @@ Each fault is reported by name with the stretch of segments behind it
 - **clock step**: shifts jumping by more than the tolerance between rows, with
   the longest gap in the readings across it when that is a logging stop of a
   minute or more;
-- **clock drift**: a row written with `shift_end`, with its rate in seconds per
-  hour;
+- **clock drift**: a row written with `shift_end` (§12.4, Drift), with its
+  rate in seconds per hour;
 - **fast drift**: three or more clock steps of one sign in a row, a drift
   faster than the tolerance per segment, which a shorter segment resolves;
 - **undecided**: each run of segments with readings that no row's span holds,
-  with why each was not decided;
+  with why each was not decided (`too few pairs`: no tier paired the minimum at
+  its peak, as where a tracer is missing or zero air flows; `weak correlation`:
+  one did and the air did not correlate, as on a parked van in flat air; and
+  the other statuses of §12.4, Rows);
 - **bridged**: a stretch of undecided segments a row bridges (`max_bridged`),
   with the agreeing shifts either side;
 - **tiers disagree**: two tiers composing onto the reference clock further apart
   than the tolerance;
 - **outlier**: a segment set aside against two agreeing neighbours;
-- **after-check**: a stream measured but given no rows;
+- **after-check**: a stream measured but given no rows, with its residuals;
 - **whole seconds**: a run of decided segments whose shift is the whole-second
   peak, because the joined readings' cells line up with the others' at only
-  some steps of the resolution, or at none (§12.4, "Cells that do not tile").
+  some steps of the resolution, or at none, or cover too few whole at the best
+  step (§12.4, "Cells that do not tile").
 
 A drift close to a cadence error, together with steps at the instrument's
 logging stops, is the signature of times counted by rows (§12.2): the remedy
@@ -6964,8 +7066,13 @@ is the right file, not a longer table.
 
 - **One shift per instrument, for a campaign or a drive.** It cannot follow the
   clock steps and drifts of §12.2, which happen inside drives.
-- **Correlating the series as written.** Background swings over minutes
-  dominate the correlation; with the running median removed, plumes decide.
+- **Correlating the series as written.** Background swings over minutes that
+  two instruments do not share would weigh in the correlation like plumes;
+  with the running median removed, plumes decide. On generated air, whose
+  background every instrument shares, the median changes nothing (notebook
+  08 §3: the same shift and r without it; a shared wander of 97 ppb, none;
+  of 487 ppb, a wider curve with the same peak), so its value is a claim
+  about real records, measured there (§12.7).
 - **Gases emitted together on their own.** Their shift includes the analyzers'
   different response times, and they share only some plumes. They check the
   shift; one gas on two analyzers sets it where it can.
@@ -7001,6 +7108,9 @@ back here:
   costs the segment that holds it.
 - The resolution real data supports (§12.4): segment-to-segment scatter and
   the agreement of independent tiers, where r at the peak is 0.6 to 0.97.
+  The scatter also decides whether the staircases of §12.4 (Drift) matter.
+- What the running median does on real records (§12.6), where background
+  swings two instruments do not share are expected and unmeasured.
 - The reference clock where the van's GPS receiver left no record. After
   2024-08-16 the van's position and weather come from a tracking feed on the
   logging computer's clock, not the receiver's. On its last three drives

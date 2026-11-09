@@ -35,14 +35,14 @@ search: 120s
 # sigma; each segment says whether it was.
 resolution: 0.1s
 
-# Paired seconds a shift needs before its correlation counts, and the
-# correlation at the best shift a segment needs to be decided.
+# Paired seconds a segment's best shift needs (tested at the peak, not at every
+# shift), and the correlation there that decides the segment.
 min_pairs: 300
 min_r: 0.6
 
 # Segments whose shifts agree within this become one row of the table; a larger
-# jump is a clock step, and a steady change larger than this across a row is
-# a clock drift.
+# jump is a clock step. (A row drifts when its steady change exceeds the
+# resolution and its segments' own scatter, not this.)
 tolerance: 2s
 
 # Up to how long a stretch of undecided segments a row may bridge, when the

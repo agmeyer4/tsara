@@ -138,7 +138,10 @@ class SurveyConfig(_StrictModel):
     min_pairs: int = Field(
         default=300,
         gt=0,
-        description="Minimum paired seconds in a segment for a shift to be measured at all.",
+        description=(
+            "Minimum paired seconds a segment's best shift needs, tested once at the peak "
+            "rather than at every shift, before the segment can be decided."
+        ),
     )
     min_r: float = Field(
         default=0.6,
