@@ -1107,7 +1107,7 @@ def test_a_backup_tier_whose_partner_is_undecided_cannot_decide_either() -> None
     )
     end = survey.segments[survey.segments.instrument == "end"].set_index("start")
     assert end.loc["2026-01-01T00:30:00Z", "status"] == "partner undecided"
-    assert pd.isna(end.loc["2026-01-01T00:30:00Z", "tier"])
+    assert end["tier"].isna()["2026-01-01T00:30:00Z"]
 
 
 def test_a_segment_agreeing_with_one_neighbour_is_no_outlier() -> None:

@@ -72,7 +72,7 @@ def test_a_missing_boundary_column_is_refused() -> None:
 
 def test_without_a_start_column_the_time_axis_is_the_start() -> None:
     frame = _frame()
-    frame["Stop"] = frame.index + pd.Timedelta("60s")
+    frame["Stop"] = pd.DatetimeIndex(frame.index) + pd.Timedelta("60s")
     out = attach_declared_boundaries(
         frame,
         SupportSpec(stop_column="Stop"),
@@ -86,7 +86,7 @@ def test_without_a_start_column_the_time_axis_is_the_start() -> None:
 
 def test_rows_whose_boundary_will_not_parse_are_dropped() -> None:
     frame = _frame(5)
-    frame["Stop"] = frame.index + pd.Timedelta("60s")
+    frame["Stop"] = pd.DatetimeIndex(frame.index) + pd.Timedelta("60s")
     stops: list[Any] = list(pd.DatetimeIndex(frame["Stop"]))
     stops[2] = pd.NaT
     out = attach_declared_boundaries(
@@ -121,7 +121,7 @@ def test_wholesale_boundary_loss_is_a_misparse_not_a_bad_day() -> None:
 
 def _with_bounds(frame: pd.DataFrame, start_offset: str, width: str) -> pd.DataFrame:
     out = frame.copy()
-    out[RAW_TIME_START_COLUMN] = frame.index + pd.Timedelta(start_offset)
+    out[RAW_TIME_START_COLUMN] = pd.DatetimeIndex(frame.index) + pd.Timedelta(start_offset)
     out[RAW_TIME_STOP_COLUMN] = out[RAW_TIME_START_COLUMN] + pd.Timedelta(width)
     return out
 
