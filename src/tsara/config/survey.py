@@ -149,8 +149,9 @@ class SurveyConfig(_StrictModel):
     tolerance: str = Field(
         default="2s",
         description=(
-            "Shifts agreeing within this form one row of the table; a larger jump is a "
-            "clock step, and a steady change larger than this across a row, a clock drift."
+            "Shifts agreeing within this form one row of the table; a larger jump between "
+            "consecutive segments is a clock step. (A row is a clock drift when its steady "
+            "change exceeds the resolution and its own scatter, not this.)"
         ),
     )
     running_median: str = Field(

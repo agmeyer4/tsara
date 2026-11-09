@@ -54,8 +54,9 @@ What it does, in order
    readings at all do not. Up to ``max_bridged`` of undecided segments are
    bridged instead, when the shifts either side agree and the readings run
    across without a logging stop. A row of three or more segments whose
-   least-squares line changes by more than the tolerance across it is a clock
-   drift, written with ``shift_end``.
+   least-squares line changes across it by more than the resolution, and by
+   more than three standard errors of that change, is a clock drift, written
+   with ``shift_end``.
 6. **The recorded clock.** A table is keyed on the clock each file recorded,
    while a stream's times are cell midpoints after any ``time_shift``; row
    edges are moved back by both, using the stream's own label and nominal
@@ -136,6 +137,11 @@ _LOGGING_STOP_NS = 60 * SECOND_NS
 
 #: Same-signed clock steps in a row that make a fast drift.
 _FAST_DRIFT_STEPS = 3
+
+#: How many standard errors a row's change must exceed, besides the
+#: resolution, to be written as a drift: on a steady clock measured with
+#: scatter, a line through the segments changes a little by chance.
+_DRIFT_STANDARD_ERRORS = 3.0
 
 #: The columns of the survey's three tables and their types, declared so that
 #: an empty table has the same types as a full one and a saved table reloads
@@ -770,9 +776,11 @@ def _rows(
     rows = []
     for run, (start_ns, end_ns), n_bridged in zip(runs, spans, bridged, strict=True):
         shifts = np.array([decided[k] for k in run])
-        shift_ns, shift_end_ns = _row_shift(
-            run, shifts, edges, start_ns, end_ns, settings.tolerance_s
-        )
+        # A segment left at its whole-second peak was measured to a second, so
+        # a run holding one is judged at that resolution.
+        coarse = any(not chosen[k].shift.refined for k in run)
+        resolution_s = max(settings.resolution_ns / NS_PER_S, 1.0 if coarse else 0.0)
+        shift_ns, shift_end_ns = _row_shift(run, shifts, edges, start_ns, end_ns, resolution_s)
         if shift_end_ns is not None:
             hours = (end_ns - start_ns) / NS_PER_S / SECONDS_PER_HOUR
             faults.append(
@@ -953,7 +961,7 @@ def _row_shift(
     edges: npt.NDArray[np.int64],
     start_ns: int,
     end_ns: int,
-    tolerance_s: float,
+    resolution_s: float,
 ) -> tuple[int, int | None]:
     """Return a row's shift, and its shift at the end when the row drifts.
 
@@ -963,13 +971,29 @@ def _row_shift(
     building notebook 08: evaluated at the last segment's edge instead, a row
     reaching 10 minutes further spread the same change over a longer stretch, so
     a clock drifting 6 s an hour was corrected at 5.4.
+
+    The row drifts when the line's change across it exceeds the resolution and
+    three standard errors of that change, the standard error taken from the
+    segments' own scatter about the line, floored at the resolution's rounding
+    (``resolution / sqrt(12)``). Found in the second walkthrough: the threshold
+    was the tolerance, the same number that decides a step, so a drift changing
+    by less than it across the row was written as a constant, wrong by up to
+    half the change (1.0 s at 1 s an hour over 90 minutes); judged against the
+    resolution alone, a steady clock measured with 0.5 s of scatter was given a
+    drift in most records (measured, METHODS §12.5).
     """
     if len(run) >= 3:
         mids = np.array([(edges[k] + edges[k + 1]) / 2 - start_ns for k in run], dtype=np.float64)
         slope, intercept = np.polyfit(mids, shifts, 1)
-        at_end = intercept + slope * float(end_ns - start_ns)
-        if abs(at_end - intercept) > tolerance_s:
-            return _ns(intercept), _ns(at_end)
+        span = float(end_ns - start_ns)
+        change = slope * span
+        residuals = shifts - (intercept + slope * mids)
+        scatter = max(
+            float(np.sqrt(np.sum(residuals**2) / (len(run) - 2))), resolution_s / np.sqrt(12.0)
+        )
+        standard_error = scatter * span / float(np.sqrt(np.sum((mids - mids.mean()) ** 2)))
+        if abs(change) > resolution_s and abs(change) > _DRIFT_STANDARD_ERRORS * standard_error:
+            return _ns(intercept), _ns(intercept + change)
     return _ns(float(np.median(shifts))), None
 
 

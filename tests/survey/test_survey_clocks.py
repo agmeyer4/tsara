@@ -203,6 +203,114 @@ def test_a_slow_drift_is_one_row_with_a_shift_end() -> None:
     assert drift["detail"].endswith(f", {per_hour:+.2f} s per hour")
 
 
+def test_a_drift_changing_less_than_the_tolerance_across_its_row_is_still_a_drift() -> None:
+    """Found in the second walkthrough: a drift was written only when its line
+    changed by more than the tolerance across the row, the number that also
+    decides a step, so a clock losing 1 s an hour over the hour was corrected
+    by a constant, wrong by half a second at each end. Now the change has to
+    exceed the resolution and the segments' own scatter."""
+    survey = survey_clocks(
+        {"ref": _stream(), "inst": _stream(lambda t: -(1.0 + t / 3600.0))},
+        _config(ONE, resolution="0.1s"),
+    )
+    (row,) = survey.rows
+    assert row.shift_end_ns is not None
+    hours = (row.end_ns - row.start_ns) / SECOND / 3600
+    assert (row.shift_end_ns - row.shift_ns) / SECOND / hours == pytest.approx(-1.0, abs=0.1)
+
+
+def _scattered(ratio: float, n: int = 9) -> list[float]:
+    """Segment shifts with scatter whose line changes by ``ratio`` standard errors.
+
+    The scatter is held orthogonal to the line, so it is exactly the residual
+    the drift test sees: about 0.2 s, alternating, sample standard deviation
+    (n - 2 degrees of freedom) ``s``; one standard error of the change across n
+    10-minute segments is ``s * n / sqrt(sum((k - mean)^2))``.
+    """
+    k = np.arange(n, dtype=float)
+    basis = np.stack([np.ones(n), k], axis=1)
+    alternating = 0.2 * (-1.0) ** k
+    scatter = alternating - basis @ np.linalg.lstsq(basis, alternating, rcond=None)[0]
+    s = np.sqrt(np.sum(scatter**2) / (n - 2))
+    standard_error = s * n / np.sqrt(np.sum((k - k.mean()) ** 2))
+    return list(scatter - ratio * standard_error * (k + 0.5) / n)
+
+
+@pytest.mark.parametrize(
+    ("shifts", "resolution_s", "drifts"),
+    [
+        # A steady clock measured with scatter whose line changes by 2.8 standard
+        # errors (more than the resolution): not a drift. A drift at two
+        # standard errors, or with the scatter taken over n degrees of freedom.
+        (_scattered(2.8), 0.1, False),
+        # 3.5 standard errors: a drift. Not one at four.
+        (_scattered(3.5), 0.1, True),
+        # A whole-second staircase whose line changes by 0.6 s: under a second.
+        ([-1] * 8 + [-2], 1.0, False),
+        # 0.6 s of change without scatter, measured to 0.1 s: the scatter's
+        # floor is the resolution's rounding, so it is a drift.
+        ([-0.6 * (k + 0.5) / 9 for k in range(9)], 0.1, True),
+        # 36 segments, 0.8 s of change without scatter, at 1 s: three standard
+        # errors on the rounding floor are 0.5 s, the resolution decides.
+        ([-0.8 * (k + 0.5) / 36 for k in range(36)], 1.0, False),
+        # Three segments, 1.5 s of change without scatter, at 1 s: more than the
+        # resolution, not three standard errors on the rounding floor (1.8 s).
+        ([-0.25, -0.75, -1.25], 1.0, False),
+        # A staircase changing by 1.5 s at 1 s: a drift.
+        ([-1] * 5 + [-2] * 4, 1.0, True),
+    ],
+)
+def test_a_row_drifts_when_its_change_exceeds_the_resolution_and_its_scatter(
+    shifts: list[float], resolution_s: float, drifts: bool
+) -> None:
+    """10-minute segments, the row spanning them exactly."""
+    import tsara.survey.clocks as clocks
+
+    edges = np.arange(len(shifts) + 1, dtype=np.int64) * 600 * SECOND
+    shift_ns, shift_end_ns = clocks._row_shift(
+        list(range(len(shifts))),
+        np.array(shifts, dtype=float),
+        edges,
+        0,
+        int(edges[-1]),
+        resolution_s,
+    )
+    assert (shift_end_ns is not None) == drifts
+    if not drifts:
+        assert shift_ns == round(float(np.median(shifts)) * SECOND)
+
+
+def test_a_run_holding_a_segment_on_whole_seconds_is_judged_at_a_second(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A segment left at its whole-second peak was measured to a second, so its
+    run's drift is judged at a second, whatever resolution was asked for; one
+    such segment is enough."""
+    import tsara.survey.clocks as clocks
+    from tsara.survey.shifts import refined_shift as refined
+
+    seen: list[float] = []
+    original = clocks._row_shift
+
+    def spy(*args: Any) -> tuple[int, int | None]:
+        seen.append(args[-1])
+        return original(*args)
+
+    def third_unrefined(*args: Any, **kwargs: Any) -> tuple[float, bool, bool, bool]:
+        if args[1] == T0.value + 1200 * SECOND:  # the 00:20 segment only
+            return kwargs["coarse_s"], False, False, False
+        return refined(*args, **kwargs)
+
+    monkeypatch.setattr(clocks, "_row_shift", spy)
+    stream = {"ref": _stream(), "inst": _stream(-5.0)}
+    survey_clocks(stream, _config(ONE, resolution="0.1s"))
+    assert seen == [0.1]
+    seen.clear()
+    monkeypatch.setattr(clocks, "refined_shift", third_unrefined)
+    survey_clocks(stream, _config(ONE, resolution="0.1s"))
+    assert seen == [1.0]
+
+
 def test_a_drift_faster_than_the_tolerance_per_segment_is_named() -> None:
     """3 s more late every segment: each segment its own row, and five steps of
     one sign in a row are named a fast drift."""
