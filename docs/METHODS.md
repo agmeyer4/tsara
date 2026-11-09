@@ -6472,8 +6472,14 @@ for −), each event's least-squares slope of Aeris on Picarro and its r²:
 
 On 1 s data from a moving van, a cross-instrument fit is mostly lost at a 2 s
 clock error and gone at 3 s, and the slope is biased low well before the fit
-looks bad. Clocks must be right to about a second before the ratio stage pairs
-instruments (Phase 7c).
+looks bad. Below a second the van says nothing (the Picarro writes every 2 s).
+On generated air (notebook 08 §1: two 1 s analyzers of one gas, Gaussian plumes
+of σ 4 s, the error put on the air, so it can be a fraction of a second; plumes
+of at least 5 s above 20 ppb on the first analyzer) the share of plumes fitting
+well is 99 % aligned, 94 % at 0.5 s, 52 % at 1 s and none at 2 s. So clocks
+must be right to within about half a second before the ratio stage pairs
+instruments (Phase 7c), which a shift measured to the nearest whole second
+(§12.4) leaves at worst.
 
 ### 12.2 Two layers: the right files, then the residual seconds
 
