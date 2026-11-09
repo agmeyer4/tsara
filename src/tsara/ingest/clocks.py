@@ -29,12 +29,18 @@ A reading no row holds keeps its recorded time. That is the decision of
 measure is better kept as recorded and named than dropped. The stream
 records every row for its instrument, the files, the reference clock and the
 share of readings left uncorrected (:mod:`tsara.core.naming`), and a warning
-names the uncorrected stretches. A second warning counts readings the
-correction puts before an earlier reading of their own file, which a shift
-that falls from one row to the next does; they are kept, sorted with the
-rest, and any landing on an earlier reading's exact time are then dropped as
-duplicates by the ordering that follows (§12.3). A row that holds none of its
-instrument's readings is logged, since the data it names may not be loaded.
+names the uncorrected stretches. An instrument the table has no row for at
+all, other than the one keeping the reference clock, is warned about too and
+recorded as wholly uncorrected: found in the second walkthrough, it was said
+only at INFO and its stream looked exactly like the reference clock's, so
+leaving an instrument out of the table was quieter than leaving out part of
+one. The reference clock's own instrument records that it keeps it. A second
+warning counts readings the correction puts before an earlier reading of
+their own file, which a shift that falls from one row to the next does; they
+are kept, sorted with the rest, and any landing on an earlier reading's
+exact time are then dropped as duplicates by the ordering that follows
+(§12.3). A row that holds none of its instrument's readings is logged, since
+the data it names may not be loaded.
 """
 
 from __future__ import annotations
@@ -76,10 +82,16 @@ class ClockRecord:
     rows : tuple of ClockCorrection
         The instrument's rows (:func:`corrections_for`). Empty when the
         manifest declares none for it, and then :meth:`correct` changes
-        nothing and nothing is recorded.
+        nothing.
+    reference_clock : str or None
+        The clock the manifest's table puts instruments on, None when it
+        declares no table: an instrument with no rows under a table is either
+        that clock's own, or left uncorrected and warned about.
     """
 
     rows: tuple[ClockCorrection, ...]
+    reference_clock: str | None = None
+    _unrowed: int = field(default=0, init=False, repr=False)
     _recorded: list[npt.NDArray[np.int64]] = field(default_factory=list, init=False, repr=False)
     _covered: list[npt.NDArray[np.bool_]] = field(default_factory=list, init=False, repr=False)
     _row_hits: list[int] = field(default_factory=list, init=False, repr=False)
@@ -105,6 +117,7 @@ class ClockRecord:
             file's own order. The frame itself when the instrument has no rows.
         """
         if not self.rows:
+            self._unrowed += len(frame)
             return frame
         recorded = epoch_ns(pd.DatetimeIndex(frame.index))
         shift, covered = shift_at(self.rows, recorded)
@@ -142,8 +155,30 @@ class ClockRecord:
         n = self.n_readings
         return self.n_uncorrected / n if n else float("nan")
 
+    def keeps_reference(self, instrument: str) -> bool:
+        """Say whether the instrument is the one keeping the table's reference clock."""
+        return self.reference_clock is not None and instrument == self.reference_clock
+
+    def unrowed(self, instrument: str) -> bool:
+        """Say whether a table is declared and has no row for this instrument, not its clock's."""
+        return (
+            self.reference_clock is not None
+            and not self.rows
+            and not self.keeps_reference(instrument)
+        )
+
     def report(self, instrument: str) -> None:
         """Log what the correction did: rows holding nothing, readings left or moved back."""
+        if self.unrowed(instrument):
+            logger.warning(
+                "Instrument '%s': the clock-correction table puts instruments on '%s' and has "
+                "no row for this one, so all %d of its readings keep their recorded times, "
+                "not known to be on that clock; recorded in the stream as uncorrected. A row "
+                "with shift 0s declares its clock right.",
+                instrument,
+                self.reference_clock,
+                self._unrowed,
+            )
         if not self.rows:
             return
         for row, hits in zip(self.rows, self._row_hits, strict=True):

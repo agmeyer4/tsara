@@ -34,10 +34,13 @@ What it does, in order
    tolerance is named. A tier whose partner is undecided in the segment
    cannot set it, so the next tier that decides and reaches the reference
    clock does.
-3. **The chain.** The shift onto the partner plus the partner's own shift onto
-   the reference clock in the same segment is the shift onto the reference
-   clock. The reference clock's instrument is zero everywhere; a segment whose
-   partner is undecided there is undecided.
+3. **The chain.** The shift onto the partner plus the shift the partner's own
+   rows apply, where the segment's air lands on the partner's clock, is the
+   shift onto the reference clock: through the rows, so that a partner's
+   segment set aside as an outlier, or bridged, passes on the shift its own
+   readings are corrected by. The reference clock's instrument is zero
+   everywhere; a segment no row of its partner reaches is undecided. A partner
+   measured as an after-check has no rows and passes on its residuals.
 4. **Outliers.** A decided segment differing by more than the tolerance from
    both its decided neighbours, while they agree with each other, is set
    aside: one segment against two is more likely a coincidence of plumes than
@@ -73,7 +76,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
-from tsara.core.clocks import ClockCorrection, write_clock_corrections
+from tsara.core.clocks import ClockCorrection, shift_at, write_clock_corrections
 from tsara.core.naming import (
     CLOCK_CORRECTIONS_ATTR,
     SUPPORT_LABEL_ATTR,
@@ -202,8 +205,10 @@ class ClockSurvey:
         ``noise_removed`` and ``refined`` (the deciding tier's; NA for none),
         and ``status``:
         ``decided``, ``outlier``, ``too short`` (fewer readings than any tier
-        needs), ``no tier decided``, ``at search edge``, ``pairs disagree`` or
-        ``partner undecided``.
+        needs), ``too few pairs`` (readings enough, but no tier paired enough
+        seconds at its peak), ``weak correlation`` (a tier paired enough, and
+        its peak fell below ``min_r``), ``at search edge``, ``pairs disagree``
+        or ``partner undecided``.
     rows : tuple of ClockCorrection
         The derived correction rows, provenance ``measured``.
     faults : pandas.DataFrame
@@ -253,6 +258,7 @@ class _Measured:
     k: int
     shift: SegmentShift
     decided: bool
+    min_pairs: int
 
 
 @dataclass(frozen=True)
@@ -261,6 +267,28 @@ class _Fault:
     first: int
     last: int
     detail: str
+
+
+@dataclass(frozen=True)
+class _Applied:
+    """What an instrument surveyed already puts on the reference clock, for those tied to it.
+
+    Its rows, read as ingestion would apply them (on the clock its files
+    recorded, ``offset_ns`` before the stream's times); or, for a stream
+    measured as an after-check, which gets no rows, its segments' residuals.
+    """
+
+    rows: tuple[ClockCorrection, ...]
+    offset_ns: int
+    residuals: Mapping[int, float] | None
+
+    def onto_reference(self, k: int, time_ns: float) -> float | None:
+        """Return the shift onto the reference clock at a stream time; None where none holds it."""
+        if self.residuals is not None:
+            return self.residuals.get(k)
+        recorded = np.array([round(time_ns) - self.offset_ns], dtype=np.int64)
+        shift, covered = shift_at(self.rows, recorded)
+        return float(shift[0]) / NS_PER_S if bool(covered[0]) else None
 
 
 def survey_clocks(streams: Mapping[str, xr.Dataset], config: SurveyConfig) -> ClockSurvey:
@@ -315,20 +343,20 @@ def survey_clocks(streams: Mapping[str, xr.Dataset], config: SurveyConfig) -> Cl
     segments: list[dict[str, object]] = []
     faults: list[dict[str, object]] = []
     rows: list[ClockCorrection] = []
-    to_reference: dict[str, dict[int, float]] = {}
+    applied: dict[str, _Applied] = {}
     for name in order:
         stream = streams[name]
         present = _segments_with_readings(stream, edges)
         measured = _measure(name, config, settings, edges, present, series_of, cells_of)
-        chosen = _chosen(measured, config, to_reference)
-        shifts = _compose(config, chosen, to_reference)
+        chosen, through = _chosen(measured, config, edges, applied)
+        shifts = {k: m.shift.shift_s + through[k] for k, m in chosen.items()}
         fewest = _fewest_pairs(name, config, settings)
         short = {k for k, count in present.items() if count < fewest}
         outliers = _outliers(shifts, settings.tolerance_s, short)
         decided = {k: shift for k, shift in shifts.items() if k not in outliers}
         statuses = _statuses(present, shifts, outliers, measured, fewest)
         own_faults = (
-            _tier_disagreements(measured, config, to_reference, settings)
+            _tier_disagreements(measured, config, edges, applied, settings)
             + [
                 _Fault("outlier", k, k, f"shift {shifts[k]:+g} s against neighbours")
                 for k in sorted(outliers)
@@ -336,22 +364,17 @@ def survey_clocks(streams: Mapping[str, xr.Dataset], config: SurveyConfig) -> Cl
             + _whole_seconds(chosen)
         )
         if CLOCK_CORRECTIONS_ATTR in stream.attrs:
-            own_faults.append(
-                _Fault(
-                    "after-check",
-                    0,
-                    len(edges) - 2,
-                    "the stream carries clock corrections already: measured as an "
-                    "after-check, no rows derived",
-                )
-            )
+            own_faults.append(_after_check(edges, shifts, settings.tolerance_s))
+            applied[name] = _Applied(rows=(), offset_ns=0, residuals=decided)
         else:
             new_rows, row_faults, covered = _rows(
                 name, config, settings, edges, statuses, decided, stream, chosen
             )
             rows.extend(new_rows)
             own_faults += row_faults + _undecided(present, statuses, covered)
-        to_reference[name] = decided
+            applied[name] = _Applied(
+                rows=tuple(new_rows), offset_ns=_recorded_offset_ns(stream), residuals=None
+            )
 
         measurements += [_measurement_row(name, m, edges) for m in measured]
         segments += [_segment_row(name, k, edges, chosen, shifts, statuses) for k in present]
@@ -478,42 +501,58 @@ def _measure(
                 and not shift.pairs_disagree
                 and shift.r >= settings.min_r
             )
-            measured.append(_Measured(tier_number, tier.partner, k, shift, decided))
+            measured.append(_Measured(tier_number, tier.partner, k, shift, decided, min_pairs))
     return measured
 
 
 def _chosen(
     measured: Sequence[_Measured],
     config: SurveyConfig,
-    to_reference: Mapping[str, Mapping[int, float]],
-) -> dict[int, _Measured]:
+    edges: npt.NDArray[np.int64],
+    applied: Mapping[str, _Applied],
+) -> tuple[dict[int, _Measured], dict[int, float]]:
     """Return, per segment, the first tier that decided it and reaches the reference clock.
 
-    A tier whose partner is undecided in the segment has nothing to compose
-    with, so it gives way to the next that decides: that is what a backup tier
-    is for. Found in the walkthrough: taking the first tier that decided,
-    composable or not, left a segment undecided while its backup had measured
-    the shift straight onto the reference clock.
+    Also returns, per segment, the partner's own shift onto the reference clock
+    that the chosen tier composes with (:func:`_through_partner`). A tier whose
+    partner's correction does not reach where the air lands has nothing to
+    compose with, so it gives way to the next that decides: that is what a
+    backup tier is for. Found in the walkthrough: taking the first tier that
+    decided, composable or not, left a segment undecided while its backup had
+    measured the shift straight onto the reference clock.
     """
     chosen: dict[int, _Measured] = {}
+    through: dict[int, float] = {}
     for m in sorted(measured, key=lambda m: (m.k, m.tier)):
-        reaches = m.partner == config.reference_clock or m.k in to_reference[m.partner]
-        if m.decided and reaches and m.k not in chosen:
+        if not m.decided or m.k in chosen:
+            continue
+        partner = _through_partner(m, config, edges, applied)
+        if partner is not None:
             chosen[m.k] = m
-    return chosen
+            through[m.k] = partner
+    return chosen, through
 
 
-def _compose(
+def _through_partner(
+    m: _Measured,
     config: SurveyConfig,
-    chosen: Mapping[int, _Measured],
-    to_reference: Mapping[str, Mapping[int, float]],
-) -> dict[int, float]:
-    """Return the shift onto the reference clock of each segment the chain decides."""
-    return {
-        k: m.shift.shift_s
-        + (0.0 if m.partner == config.reference_clock else to_reference[m.partner][k])
-        for k, m in chosen.items()
-    }
+    edges: npt.NDArray[np.int64],
+    applied: Mapping[str, _Applied],
+) -> float | None:
+    """Return the partner's own shift onto the reference clock, where this segment's air lands.
+
+    Zero for the instrument keeping the reference clock. For any other partner,
+    the shift its own rows apply at the segment's midpoint moved by the shift
+    measured onto it, which is where the segment's air is on the partner's
+    clock; None when no row holds that time. Found in the second walkthrough:
+    composing through the partner's segment measurement instead left every
+    instrument chained through a partner's outlier segment uncorrected there,
+    although the partner's own row corrected its readings.
+    """
+    if m.partner == config.reference_clock:
+        return 0.0
+    landing = (int(edges[m.k]) + int(edges[m.k + 1])) / 2 + m.shift.shift_s * NS_PER_S
+    return applied[m.partner].onto_reference(m.k, landing)
 
 
 def _outliers(shifts: Mapping[int, float], tolerance_s: float, short: set[int]) -> set[int]:
@@ -555,10 +594,16 @@ def _statuses(
 
     A segment holding fewer readings than any tier needs paired seconds is
     ``too short``: undecidable by construction rather than by the evidence, as
-    the slivers a record's first and last segments usually are.
+    the slivers a record's first and last segments usually are. One that no
+    tier decided says why: ``too few pairs`` when no tier paired enough seconds
+    at its peak (the tracer missing, a partner's hole, zero air), ``weak
+    correlation`` when one did and the air did not correlate (flat air, a
+    parked van). Found in the second walkthrough: the two were one status, two
+    different stories for a reviewer.
     """
     edge = {m.k for m in measured if m.shift.at_edge}
     disagree = {m.k for m in measured if m.shift.pairs_disagree}
+    paired = {m.k for m in measured if m.shift.n_pairs >= m.min_pairs}
     # Decided by a tier, but by none that reaches the reference clock.
     stranded = {m.k for m in measured if m.decided}
     statuses = {}
@@ -575,34 +620,34 @@ def _statuses(
             statuses[k] = "at search edge"
         elif k in disagree:
             statuses[k] = "pairs disagree"
+        elif k in paired:
+            statuses[k] = "weak correlation"
         else:
-            statuses[k] = "no tier decided"
+            statuses[k] = "too few pairs"
     return statuses
 
 
 def _tier_disagreements(
     measured: Sequence[_Measured],
     config: SurveyConfig,
-    to_reference: Mapping[str, Mapping[int, float]],
+    edges: npt.NDArray[np.int64],
+    applied: Mapping[str, _Applied],
     settings: _Settings,
 ) -> list[_Fault]:
     """Name each segment where two tiers put the instrument on the reference clock differently.
 
     Tiers may have different partners, so each tier's shift is composed to the
     reference clock through its own partner before they are compared; a tier
-    whose partner is undecided in the segment cannot be compared.
+    whose partner's correction does not reach the segment cannot be compared.
     """
     by_segment: dict[int, list[tuple[int, float]]] = {}
     for m in measured:
         if not m.decided:
             continue
-        if m.partner == config.reference_clock:
-            composed = m.shift.shift_s
-        elif m.k in to_reference[m.partner]:
-            composed = m.shift.shift_s + to_reference[m.partner][m.k]
-        else:
+        partner = _through_partner(m, config, edges, applied)
+        if partner is None:
             continue
-        by_segment.setdefault(m.k, []).append((m.tier, composed))
+        by_segment.setdefault(m.k, []).append((m.tier, m.shift.shift_s + partner))
     faults = []
     for k, tiers in sorted(by_segment.items()):
         shifts = [shift for _, shift in tiers]
@@ -610,6 +655,32 @@ def _tier_disagreements(
             detail = ", ".join(f"tier {tier} {shift:+g} s" for tier, shift in tiers)
             faults.append(_Fault("tiers disagree", k, k, detail + " onto the reference clock"))
     return faults
+
+
+def _after_check(
+    edges: npt.NDArray[np.int64], shifts: Mapping[int, float], tolerance_s: float
+) -> _Fault:
+    """Name a stream measured as an after-check, with the residuals that are its point.
+
+    Every decided shift of a corrected stream is a residual of the table
+    already applied, and should sit near zero. Found in the second
+    walkthrough: the fault said only that no rows were derived, so a reviewer
+    had to open the segments table to learn whether the table had worked.
+    """
+    detail = (
+        "the stream carries clock corrections already: measured as an after-check, "
+        "no rows derived; "
+    )
+    if shifts:
+        residuals = np.array(list(shifts.values()))
+        beyond = int(np.count_nonzero(np.abs(residuals) > tolerance_s))
+        detail += (
+            f"{len(residuals)} decided segment{'s' if len(residuals) != 1 else ''}, residuals "
+            f"{residuals.min():+g} to {residuals.max():+g} s, {beyond} beyond ±{tolerance_s:g} s"
+        )
+    else:
+        detail += "no segment decided"
+    return _Fault("after-check", 0, len(edges) - 2, detail)
 
 
 def _rows(
@@ -630,9 +701,10 @@ def _rows(
     last rows reach over them. Undecided segments end a row, unless up to
     ``max_bridged`` of them lie between shifts that agree and the readings run
     across them without a logging stop: then the row bridges them. Between two
-    rows across a clock step, the boundary goes where the readings have their
-    longest gap, when it is a gap and not jitter: a step happens where a logger
-    stopped or its clock jumped, not at a segment edge.
+    rows across a clock step, the boundary goes at the one gap in the readings
+    the step explains, a hole whose excess over the spacing is the jump, else a
+    single logging stop (:func:`_step_boundary`); failing that, at the segment
+    edges.
     """
     # What ends a row: readings with no decision. An outlier stays inside the
     # row around it, and a segment too short to measure is no evidence either way.
@@ -911,7 +983,8 @@ def _whole_seconds(chosen: Mapping[int, _Measured]) -> list[_Fault]:
 
     A segment a tier decided is left unrefined only when the joined readings'
     cells line up with the others' at only some steps of the resolution, or
-    at none (:func:`tsara.survey.shifts.refined_shift`): its shift is then
+    at none, or cover too few whole at the best step
+    (:func:`tsara.survey.shifts.refined_shift`): its shift is then
     good to a second, not to the resolution asked for, and the reviewer is
     told so. A segment later set aside as an outlier is named too, since it
     was measured the same way.
@@ -930,8 +1003,8 @@ def _whole_seconds(chosen: Mapping[int, _Measured]) -> list[_Fault]:
             run[0],
             run[-1],
             f"{len(run)} segment{'s' if len(run) != 1 else ''} measured on whole seconds: "
-            "the joined readings' cells line up with the others' only at some steps of "
-            "the resolution",
+            "on the readings' own cells too few are covered whole at some step of the "
+            "resolution",
         )
         for run in runs
     ]

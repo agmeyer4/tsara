@@ -34,6 +34,7 @@ from tsara.synthetic import generate
 from tsara.synthetic.export import ClockError, export_raw
 
 SECOND = 1_000_000_000
+WIDTH = "tsara_nominal_cell_width_s"
 T0 = pd.Timestamp("2026-01-01T00:00:00")
 N = 3600  # one hour of 1 s readings: six 10-minute segments
 
@@ -251,7 +252,7 @@ def test_a_segment_with_readings_but_no_decision_ends_the_row() -> None:
         "2026-01-01T00:30:00Z",
         "2026-01-01T00:40:00Z",
     )
-    assert undecided["detail"] == "1 no tier decided"
+    assert undecided["detail"] == "1 too few pairs"
 
 
 def test_a_chain_composes_and_an_undecided_partner_stops_it() -> None:
@@ -346,6 +347,20 @@ def test_row_edges_are_moved_back_to_the_clock_the_files_recorded() -> None:
     assert row.shift_ns == -5 * SECOND
 
 
+def test_a_tier_pairing_exactly_its_minimum_is_a_weak_correlation() -> None:
+    """The boundary of the two undecided statuses: a tier that pairs exactly
+    the seconds it needs, and does not correlate, is a weak correlation, not
+    too few pairs. Middle segments of a 1 s record pair all 600 seconds of a
+    10-minute segment at any shift."""
+    rng = np.random.default_rng(9)
+    unrelated = {"ch4": lambda t: rng.normal(0, 1, len(t))}
+    survey = survey_clocks(
+        {"ref": _stream(), "inst": _stream(0, variables=unrelated)}, _config(ONE, min_pairs=600)
+    )
+    middle = survey.segments[survey.segments.instrument == "inst"].iloc[1:5]
+    assert (middle.status == "weak correlation").all()
+
+
 def test_a_stream_already_corrected_is_an_after_check() -> None:
     survey = survey_clocks(
         {"ref": _stream(), "inst": _stream(0, attrs={"tsara_clock_corrections": "..."})},
@@ -353,9 +368,142 @@ def test_a_stream_already_corrected_is_an_after_check() -> None:
     )
     assert survey.rows == ()
     (check,) = _faults(survey, "after-check")
-    assert "no rows derived" in check["detail"]
+    # The residuals are the after-check's point, so its fault states them.
+    assert check["detail"].endswith(
+        "no rows derived; 6 decided segments, residuals +0 to +0 s, 0 beyond ±2 s"
+    )
     shifts = survey.segments.shift_onto_reference_s.dropna()
     assert len(shifts) == 6 and (shifts == 0).all()
+
+
+def test_an_after_check_names_residuals_beyond_the_tolerance() -> None:
+    """A table that left the stream 5 s out: the after-check says so in its fault,
+    without a reviewer opening the segments."""
+    corrected = _stream(-5, attrs={"tsara_clock_corrections": "..."})
+    survey = survey_clocks({"ref": _stream(), "inst": corrected}, _config(ONE))
+    (check,) = _faults(survey, "after-check")
+    assert check["detail"].endswith("6 decided segments, residuals -5 to -5 s, 6 beyond ±2 s")
+
+
+def test_an_after_check_with_nothing_decided_says_so() -> None:
+    flat = {"ch4": lambda t: np.zeros(len(t))}
+    survey = survey_clocks(
+        {
+            "ref": _stream(),
+            "inst": _stream(0, variables=flat, attrs={"tsara_clock_corrections": "..."}),
+        },
+        _config(ONE),
+    )
+    (check,) = _faults(survey, "after-check")
+    assert check["detail"].endswith("no rows derived; no segment decided")
+
+
+def test_a_stream_ingestion_left_uncorrected_is_surveyed_not_after_checked() -> None:
+    """An instrument a table has no row for records only its uncorrected share:
+    a survey measures it and derives its rows, rather than taking it for an
+    after-check (METHODS §12.3)."""
+    survey = survey_clocks(
+        {"ref": _stream(), "inst": _stream(-5, attrs={"tsara_clock_uncorrected_share": 1.0})},
+        _config(ONE),
+    )
+    assert [row.shift_ns for row in survey.rows] == [-5 * SECOND]
+    assert not _faults(survey, "after-check")
+
+
+def test_a_chain_composes_through_the_partners_rows_across_its_outlier() -> None:
+    """ref <- odd <- x. odd is 4 s late but one segment reads 12 s, set aside
+    against its neighbours inside one -4 s row; x is 3 s later than odd
+    throughout. Found in the second walkthrough: composed through odd's
+    segment measurements, x's segment there had no partner shift and was left
+    uncorrected, although odd's row corrected odd's readings. Composed through
+    odd's rows, x takes -3 + -4 = -7 s there too: one row, nothing undecided,
+    and x lands where odd's corrected readings land."""
+
+    def odd(t: np.ndarray) -> np.ndarray:
+        return np.where((t >= 1800) & (t < 2400), -12.0, -4.0)
+
+    config = _config(
+        {
+            "odd": [{"partner": "ref", "pairs": [["ch4", "ch4"]]}],
+            "x": [{"partner": "odd", "pairs": [["ch4", "ch4"]]}],
+        }
+    )
+    streams = {
+        "ref": _stream(),
+        "odd": _stream(odd, seed=2),
+        "x": _stream(lambda t: odd(t) - 3.0, seed=3),
+    }
+    survey = survey_clocks(streams, config)
+    assert [f["start"] for f in _faults(survey, "outlier")] == ["2026-01-01T00:30:00Z"]
+    x_rows = [row for row in survey.rows if row.instrument == "x"]
+    assert [row.shift_ns for row in x_rows] == [-7 * SECOND]
+    assert not _faults(survey, "undecided")
+    x = survey.segments[survey.segments.instrument == "x"].set_index("start")
+    assert x.loc["2026-01-01T00:30:00Z", "status"] == "decided"
+    assert x.loc["2026-01-01T00:30:00Z", "shift_onto_reference_s"] == -7.0
+
+
+def test_a_partner_drift_is_composed_where_the_air_lands_on_its_clock() -> None:
+    """ref <- a <- b. a drifts (its shift falls 6 s an hour); b is 30 s later
+    than a. b's shift onto ref in a segment is -30 s plus a's row read where
+    b's air lands on a's clock, the segment's midpoint moved by -30 s, not at
+    the midpoint itself. a's files label each reading's start, so its rows are
+    keyed half a second before its stream's times, and are read there."""
+
+    def a(t: np.ndarray) -> np.ndarray:
+        return -(1.0 + 6.0 * t / 3600)
+
+    config = _config(
+        {
+            "a": [{"partner": "ref", "pairs": [["ch4", "ch4"]]}],
+            "b": [{"partner": "a", "pairs": [["ch4", "ch4"]]}],
+        },
+        resolution="0.1s",
+        search="45s",
+    )
+    survey = survey_clocks(
+        {
+            "ref": _stream(),
+            "a": _stream(a, seed=2, attrs={"tsara_support_label": "start", WIDTH: 1.0}),
+            "b": _stream(lambda t: a(t) - 30.0, seed=3),
+        },
+        config,
+    )
+    (a_row,) = [row for row in survey.rows if row.instrument == "a"]
+    assert a_row.shift_end_ns is not None
+    b = survey.segments[(survey.segments.instrument == "b") & (survey.segments.status == "decided")]
+    for start, onto_a, onto_ref in zip(
+        b.start, b.shift_onto_partner_s, b.shift_onto_reference_s, strict=True
+    ):
+        landing = (
+            pd.Timestamp(start).tz_localize(None)
+            + pd.Timedelta("5min")
+            + pd.Timedelta(seconds=onto_a)
+        )
+        recorded = landing.value - SECOND // 2
+        fraction = (recorded - a_row.start_ns) / (a_row.end_ns - a_row.start_ns)
+        a_there = (a_row.shift_ns + (a_row.shift_end_ns - a_row.shift_ns) * fraction) / SECOND
+        assert onto_ref == pytest.approx(onto_a + a_there, abs=1e-6)
+
+
+def test_a_chain_composes_through_a_partner_measured_as_an_after_check() -> None:
+    """ref <- a <- b, a already corrected (an after-check, no rows of its own):
+    b composes through a's residuals, here 0, so b's -5 s onto a is its shift
+    onto ref, and b gets its row."""
+    survey = survey_clocks(
+        {
+            "ref": _stream(),
+            "a": _stream(0, seed=2, attrs={"tsara_clock_corrections": "..."}),
+            "b": _stream(-5, seed=3),
+        },
+        _config(
+            {
+                "a": [{"partner": "ref", "pairs": [["ch4", "ch4"]]}],
+                "b": [{"partner": "a", "pairs": [["ch4", "ch4"]]}],
+            }
+        ),
+    )
+    assert [(row.instrument, row.shift_ns) for row in survey.rows] == [("b", -5 * SECOND)]
 
 
 def test_missing_streams_are_refused() -> None:
@@ -499,7 +647,7 @@ def test_a_weak_correlation_decides_nothing() -> None:
     assert survey.rows == ()
     measured = survey.measurements.dropna(subset=["shift_onto_partner_s"])
     assert len(measured) == 6 and (measured.r < 0.6).all()
-    assert set(survey.segments.status) == {"no tier decided", "too short"}
+    assert set(survey.segments.status) == {"weak correlation", "too short"}
     # With no row at all, the whole record is named, its sliver of a last segment too.
     (undecided,) = _faults(survey, "undecided")
     assert (undecided["start"], undecided["end"]) == (

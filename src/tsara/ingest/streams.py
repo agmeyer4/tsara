@@ -494,6 +494,15 @@ def _stream_attrs(
         attrs[CLOCK_CORRECTIONS_FILES_ATTR] = ", ".join(sorted({r.source for r in clock.rows}))
         attrs[REFERENCE_CLOCK_ATTR] = clock.rows[0].reference_clock
         attrs[CLOCK_UNCORRECTED_ATTR] = clock.uncorrected_share
+    elif clock is not None and clock.keeps_reference(name):
+        # Said, so that keeping the reference clock is not mistaken for never
+        # having been corrected, which looks the same otherwise.
+        attrs[REFERENCE_CLOCK_ATTR] = name
+        attrs[CLOCK_UNCORRECTED_ATTR] = 0.0
+    elif clock is not None and clock.unrowed(name):
+        # No row and no corrections attribute: a later survey measures it
+        # and derives its rows, rather than taking it for an after-check.
+        attrs[CLOCK_UNCORRECTED_ATTR] = 1.0
     if campaign:
         attrs["campaign"] = campaign
     if instrument.description:

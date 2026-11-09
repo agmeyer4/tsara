@@ -291,7 +291,7 @@ def test_the_clock_is_corrected_before_the_cadence_is_measured(
     assert times[-1] == expected_last
 
 
-def test_a_corrected_stream_records_its_rows_and_the_rest_records_nothing(
+def test_a_corrected_stream_records_its_rows_and_the_reference_says_it_keeps_its_clock(
     tmp_path: Path, mobile_manifest_dict: dict[str, Any], caplog: pytest.LogCaptureFixture
 ) -> None:
     manifest = load_manifest(
@@ -312,10 +312,59 @@ def test_a_corrected_stream_records_its_rows_and_the_rest_records_nothing(
     assert attrs["tsara_reference_clock"] == "gps"
     # 100 of the 1000 readings (900-999 s) are past the row's end.
     assert attrs["tsara_clock_uncorrected_share"] == pytest.approx(0.1)
-    assert not any("clock" in key for key in streams["gps"].attrs)
+    # The reference clock's own instrument says it keeps it, so that it cannot
+    # be mistaken for an instrument never corrected; it gets no rows.
+    gps = {key: value for key, value in streams["gps"].attrs.items() if "clock" in key}
+    assert gps == {"tsara_reference_clock": "gps", "tsara_clock_uncorrected_share": 0.0}
     messages = [r.getMessage() for r in caplog.records]
-    assert any("'gps': no clock correction declared" in m for m in messages)
+    assert any("'gps' keeps the reference clock" in m for m in messages)
     assert any("100 of 1000 readings (10.0%) lie in no clock-correction row" in m for m in messages)
+    assert not any("has no row for this one" in m for m in messages)
+
+
+def test_an_instrument_the_table_leaves_out_is_warned_about_and_recorded_uncorrected(
+    tmp_path: Path, mobile_manifest_dict: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Found in the second walkthrough: an instrument with no row at all was
+    said only at INFO, and its stream looked exactly like the reference
+    clock's, so leaving it out of the table was quieter than leaving out part
+    of it. It is warned about, recorded as wholly uncorrected, and carries no
+    corrections attribute, so a later survey measures it rather than taking
+    it for an after-check."""
+    path = _archive(
+        tmp_path,
+        mobile_manifest_dict,
+        "picarro,2024-08-05T18:00:00Z,2024-08-05T19:00:00Z,-3s,,gps,measured,\n",
+    )
+    spec = yaml.safe_load(path.read_text(encoding="utf-8"))
+    spec["instruments"]["aeris"] = copy.deepcopy(spec["instruments"]["picarro"])
+    path.write_text(yaml.safe_dump(spec), encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest"):
+        streams = ingest_campaign(load_manifest(path))
+    aeris = {key: value for key, value in streams["aeris"].attrs.items() if "clock" in key}
+    assert aeris == {"tsara_clock_uncorrected_share": 1.0}
+    warned = [r.getMessage() for r in caplog.records if "has no row for this one" in r.getMessage()]
+    assert warned == [
+        "Instrument 'aeris': the clock-correction table puts instruments on 'gps' and has "
+        "no row for this one, so all 1000 of its readings keep their recorded times, not "
+        "known to be on that clock; recorded in the stream as uncorrected. A row with shift "
+        "0s declares its clock right."
+    ]
+    assert streams["picarro"].attrs["tsara_clock_uncorrected_share"] == 0.0
+
+
+def test_without_a_table_no_stream_records_a_clock(
+    tmp_path: Path, mobile_manifest_dict: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    path = _archive(tmp_path, mobile_manifest_dict, "")
+    spec = yaml.safe_load(path.read_text(encoding="utf-8"))
+    del spec["clock_corrections"]
+    path.write_text(yaml.safe_dump(spec), encoding="utf-8")
+    with caplog.at_level(logging.INFO, logger="tsara.ingest"):
+        streams = ingest_campaign(load_manifest(path))
+    for stream in streams.values():
+        assert not any("clock" in key for key in stream.attrs)
+    assert not any("clock" in r.getMessage() for r in caplog.records)
 
 
 def test_a_table_naming_an_undeclared_instrument_fails_before_any_file_is_read(

@@ -217,10 +217,14 @@ def ingest_campaign(
     for name in selected:
         instrument = manifest.instruments[name]
         logger.info("Ingesting instrument '%s'.", name)
-        clock = ClockRecord(corrections_for(corrections, name))
-        if corrections and not clock.rows:
+        clock = ClockRecord(
+            corrections_for(corrections, name),
+            reference_clock=corrections[0].reference_clock if corrections else None,
+        )
+        if clock.keeps_reference(name):
             logger.info(
-                "Instrument '%s': no clock correction declared; its recorded times are kept.",
+                "Instrument '%s' keeps the reference clock the correction table names; its "
+                "recorded times are kept.",
                 name,
             )
         ingested = _ingest_instrument(manifest, name, instrument, clock=clock)

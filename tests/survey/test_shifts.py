@@ -71,6 +71,18 @@ def test_a_flat_series_has_no_wiggles() -> None:
     assert np.allclose(series.values, 0.0)
 
 
+@pytest.mark.parametrize("window_s", [10, 11, 120, 121])
+def test_the_running_median_is_centred_at_any_window(window_s: int) -> None:
+    """Found in the second walkthrough: pandas' centred time window is open at
+    its start, so an even window held one second more after t than before, and
+    on a ramp the median sat half a second ahead. Closed at both ends it is
+    centred: on a ramp every wiggle away from the ends is zero."""
+    seconds = T0 + np.arange(600.0)
+    series = seconds_series(_stream(seconds, np.arange(600.0)), "ch4", running_median_s=window_s)
+    inner = series.values[window_s : 600 - window_s]
+    assert np.array_equal(inner, np.zeros(len(inner)))
+
+
 def test_a_sparse_record_still_gets_a_running_median() -> None:
     """A quarter of the window's possible readings is enough: a 5 s record
     holds 12 in a 61 s window, so 3 are needed, where a fixed 30 would leave it
@@ -167,16 +179,61 @@ def test_a_true_shift_far_beyond_the_search_finds_no_peak() -> None:
 
 
 def test_too_few_paired_seconds_measure_nothing() -> None:
+    """No shift pairs the 1001 seconds asked for: nothing is measured, and the
+    most any shift paired is reported, so a reviewer sees how far short it was."""
     shift = _shift([_pair(-5)], min_pairs=1001)
     assert np.isnan(shift.shift_s) and np.isnan(shift.r)
-    assert shift.n_pairs == 0
+    assert shift.n_pairs == 1000
 
 
 def test_a_flat_segment_measures_nothing() -> None:
+    """Enough seconds pair but nothing varies: no shift, and the seconds that
+    did pair are reported, so the survey can call it a weak correlation rather
+    than too few pairs."""
     flat = SecondsSeries(first_s=T0, values=np.zeros(1200))
     _, partner = _pair(-5)
     shift = _shift([(flat, partner)])
-    assert np.isnan(shift.shift_s)
+    assert np.isnan(shift.shift_s) and np.isnan(shift.r)
+    assert shift.n_pairs == 1000
+
+
+def test_a_hole_beside_the_true_shift_does_not_hand_the_peak_to_a_wrong_one() -> None:
+    """Found in the second walkthrough. The partner misses three seconds just
+    past the segment's end, so the true shift (+5) and its neighbours pair 997
+    to 999 of the 1000 seconds asked for, while shifts of +2 or less pair them
+    all. Tested at every shift, the minimum left only those, and +2, 3 s off at
+    r near 0.8, was decided. Tested at the peak, the true shift is the peak, it
+    pairs too few, and nothing is decided; its r and paired seconds are kept."""
+    instrument, partner = _pair(5)
+    values = partner.values.copy()
+    values[1102:1105] = np.nan  # partner seconds T0+1102..1104
+    partner = SecondsSeries(first_s=partner.first_s, values=values)
+    refused = _shift([(instrument, partner)], min_pairs=1000)
+    assert np.isnan(refused.shift_s)
+    assert refused.r == pytest.approx(1.0, abs=1e-3)
+    assert refused.n_pairs == 997
+    decided = _shift([(instrument, partner)], min_pairs=997)
+    assert decided.shift_s == 5 and decided.n_pairs == 997
+
+
+def test_a_shift_paired_over_a_sliver_does_not_count() -> None:
+    """Shifts pairing fewer than half the seconds of the best-paired one are
+    left off the curve, so a few lucky seconds cannot win. The instrument reads
+    for 300 s, the partner's record ends just after; at +180 s only 115
+    seconds pair, and they are a perfect copy (a decoy), while the true shift
+    (-5) pairs all 300 at a lesser r. Without the rule the decoy wins (+180 s,
+    r 1.0, measured). The decoy overwrites partner seconds the true shift also
+    uses, so the peak it leaves is near -5 rather than on it."""
+    instrument, partner = _pair(-5)
+    own = np.full_like(instrument.values, np.nan)
+    own[100:400] = instrument.values[100:400]
+    theirs = np.full_like(partner.values, np.nan)
+    theirs[0:395] = partner.values[0:395]
+    theirs[280:395] = own[100:215]  # pairs exactly with the instrument at +180
+    pair = (SecondsSeries(T0, own), SecondsSeries(T0, theirs))
+    shift = _shift([pair], search_s=200, min_pairs=100)
+    assert abs(shift.shift_s + 5) <= 2 and shift.n_pairs >= 150
+    assert shift.r < 1.0
 
 
 def test_a_tier_pools_its_pairs_curves() -> None:
@@ -189,6 +246,33 @@ def test_a_tier_pools_its_pairs_curves() -> None:
     assert shift.shift_s == -6
     assert shift.n_pairs == 2000
     assert shift.r == pytest.approx(1.0)
+    assert not shift.pairs_disagree
+
+
+def test_a_flat_pair_takes_part_but_moves_nothing() -> None:
+    """A pair with every second paired but nothing varying takes part (its
+    paired seconds count) and adds nothing to the pooled curve, nor to the
+    pairs' disagreement."""
+    good = _pair(-6, seed=1)
+    flat = (SecondsSeries(first_s=T0, values=np.zeros(1200)), good[1])
+    shift = _shift([good, flat])
+    assert shift.shift_s == -6 and shift.n_pairs == 2000
+    assert shift.r == pytest.approx(1.0)
+    assert not shift.pairs_disagree
+
+
+def test_a_pair_short_of_the_minimum_at_its_own_peak_does_not_make_the_pairs_disagree() -> None:
+    """A pair is decided on its own only where its own peak pairs the minimum.
+    Two pairs at -6 s and a third whose own peak (+10 s, r near 1) a partner
+    hole leaves 3 seconds short: the tier decides -6, where the third pairs
+    all its seconds, and the third cannot veto it."""
+    one, two = _pair(-6, seed=1), _pair(-6, seed=2)
+    instrument, partner = _pair(10, seed=5)
+    values = partner.values.copy()
+    values[1107:1110] = np.nan  # paired by shifts of +8 and beyond: +10 pairs 997
+    third = (instrument, SecondsSeries(first_s=partner.first_s, values=values))
+    shift = _shift([one, two, third], min_pairs=1000)
+    assert shift.shift_s == -6 and shift.n_pairs == 3000
     assert not shift.pairs_disagree
 
 
@@ -342,10 +426,35 @@ def test_a_best_shift_at_either_end_of_the_window_is_flagged() -> None:
     assert at_edge and refined
 
 
-def test_too_few_fully_covered_cells_give_no_shift() -> None:
+def test_the_minimum_on_cells_is_tested_at_the_best_step() -> None:
+    """Found in the second walkthrough. A 2 s instrument against a 1 s partner
+    missing one reading: steps lined up with the hole cover one 2 s cell more
+    than the true step (-7.3 s) does. Tested at every step, a minimum equal to
+    the best coverage left only the lined-up steps, and -7.0 came back called
+    refined; tested at the best step, the true one is the best, covers one too
+    few, and the whole-second peak stands, called unrefined. One cell less
+    asked for, and -7.3 comes back."""
+    own = _cells_stream(2.0, 0.0, -7.3)
+    ref = _cells_stream(1.0, 0.25, 0.0)
+    mid = (ref["time"].values - np.datetime64(T0_NS, "ns")) / np.timedelta64(1, "s")
+    ref = ref.isel(time=~((mid > 901) & (mid < 902)))
+    assert _refine(own, ref, coarse_s=-7.0, resolution_s=0.1, min_pairs=899) == (
+        -7.0,
+        False,
+        False,
+        False,
+    )
+    found, at_edge, _, refined = _refine(own, ref, coarse_s=-7.0, resolution_s=0.1, min_pairs=898)
+    assert found == pytest.approx(-7.3) and refined and not at_edge
+
+
+def test_too_few_fully_covered_cells_at_the_best_step_keep_the_whole_second_peak() -> None:
+    """The minimum is tested at the best step, as on whole seconds: too few
+    cells covered whole there, and the whole-second peak, which passed it,
+    stands unrefined, rather than the best of the steps that clear it."""
     own, ref = _cells_stream(1.0, 0.0, -7.3), _cells_stream(1.0, 0.5, 0.0)
     found, at_edge, _, refined = _refine(own, ref, coarse_s=-7.0, resolution_s=0.1, min_pairs=5000)
-    assert np.isnan(found) and not at_edge and not refined
+    assert found == -7.0 and not at_edge and not refined
 
 
 def test_a_narrower_partner_is_joined_onto_the_wider_instruments_cells() -> None:

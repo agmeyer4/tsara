@@ -216,10 +216,12 @@ EXCLUDED_PERIODS_FILES_ATTR = "tsara_excluded_periods_files"
 #: recorded clock, its shift (and the shift at the stretch's end, for a
 #: drift), its provenance and reason; the second names the files they came
 #: from; the third the instrument whose clock they put this one on; the last
-#: the share of the instrument's readings that no row held, which keep their
-#: recorded times. Written only for an instrument with at least one row, so
-#: an absent attribute means no correction was declared for it -- the
-#: reference clock's own instrument, for one.
+#: the share of the instrument's readings that keep their recorded times
+#: without being known to be on the reference clock. The first two are
+#: written only for an instrument with at least one row. When a manifest
+#: declares a table, the reference clock's own instrument records the third
+#: as itself and the share as 0, and an instrument the table has no row for
+#: records only the share, 1; with no table, none of the four is written.
 CLOCK_CORRECTIONS_ATTR = "tsara_clock_corrections"
 CLOCK_CORRECTIONS_FILES_ATTR = "tsara_clock_corrections_files"
 REFERENCE_CLOCK_ATTR = "tsara_reference_clock"

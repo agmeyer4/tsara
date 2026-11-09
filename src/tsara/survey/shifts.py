@@ -32,16 +32,24 @@ The shift of a segment
 ----------------------
 For every shift s in the search range, Pearson's r between the instrument's
 wiggles at t and the partner's at t + s, over the seconds of the segment where
-both have a value, if there are at least the minimum number of them. A tier
-with several pairs averages their correlation curves before the best shift is
-chosen, so that each pair counts once whatever its cadence, and weak pairs
-that share a shift strengthen each other. Averaging assumes the pairs share
-their shift; when two pairs disagree it peaks between them, at a shift neither
-supports (measured: pairs at -4 and -10 s pool to -7 s at r 0.76). So a pair
-that is decided on its own and puts its best shift further than the tolerance
-from the pooled one makes the tier's pairs disagree, and the tier undecided; a
-pair too weak to decide alone cannot. A best shift at the edge of the search
-is reported but never decided, since the true one may lie beyond.
+both have a value. A pair takes part in the segment when its best-paired shift
+pairs at least the minimum number of seconds, and its r counts at every shift
+pairing at least half as many as that one. The minimum is then tested once, at
+the peak: every pair taking part must pair that many seconds there, or the
+tier does not decide. Found in the second walkthrough: tested at every shift,
+the minimum let a wrong shift win. A 2 s analyzer's 10-minute segment holds
+exactly 300 readings; a 12 s hole in its partner left the true shift (r 0.99)
+and its neighbours 1 or 2 seconds short of 300, so the best shift that still
+paired all 300, 4 s away at r 0.87, was decided. A tier with several pairs
+averages their correlation curves before the best shift is chosen, so that
+each pair counts once whatever its cadence, and weak pairs that share a shift
+strengthen each other. Averaging assumes the pairs share their shift; when two
+pairs disagree it peaks between them, at a shift neither supports (measured:
+pairs at -4 and -10 s pool to -7 s at r 0.76). So a pair that is decided on
+its own and puts its best shift further than the tolerance from the pooled one
+makes the tier's pairs disagree, and the tier undecided; a pair too weak to
+decide alone cannot. A best shift at the edge of the search is reported but
+never decided, since the true one may lie beyond.
 
 The shift below a second
 ------------------------
@@ -67,7 +75,10 @@ readings in the segment is the target, as in every pairing in TSARA
 (§11.4), and the denser one covers it. A pair whose joined cells still cover
 the target's at no step, or leave some step of the lattice with less than half
 the fully covered cells of the best one, is not refined: the tier keeps its
-whole-second peak, which needs no cells, and says so (``refined`` false). With noise one bias is
+whole-second peak, which needs no cells, and says so (``refined`` false). The
+minimum is tested as on whole seconds, once, at the best step: a pair covering
+fewer cells whole there is not refined either, rather than the best step among
+those that clear it winning. With noise one bias is
 left: averaging lowers the noise of the joined series, by an amount that
 changes with s, and r rises where it falls. When the joined readings carry a
 declared or reported random sigma, that noise is removed from the joined
@@ -110,6 +121,17 @@ __all__ = [
 #: median is used, and the floor under it.
 _MEDIAN_FILL = 0.25
 _MEDIAN_MIN_READINGS = 3
+
+#: The fewest paired seconds (or cells covered whole) a correlation is taken
+#: over at all; the minimum the survey asks for is tested at the peak.
+_MIN_CURVE_PAIRS = 3
+
+#: A shift counts on a pair's curve when it pairs at least this share of the
+#: seconds its best-paired shift does, so that a shift paired over a sliver of
+#: the segment (a record's end, the far side of a gap) cannot win on a few
+#: lucky seconds, while a shift short of the best by a hole's few seconds
+#: still counts.
+_MIN_PAIRED_SHARE = 0.5
 
 #: How far either side of the whole-second peak the shift is looked for on the
 #: readings' own cells. The whole-second peak can sit up to about 1.4 s from
@@ -166,11 +188,14 @@ class SegmentShift:
     shift_s : float
         Seconds added to the instrument's recorded times to put it on its
         partner's clock (negative when its file shows the air later); NaN when
-        no shift had enough paired seconds.
+        the peak had too few paired seconds, or no shift could be correlated.
     r : float
-        The correlation at that shift, pooled over the tier's pairs.
+        The correlation at the peak, pooled over the tier's pairs; kept when
+        the peak had too few paired seconds, so that a reviewer sees what was
+        refused. NaN when no pair took part.
     n_pairs : int
-        Paired seconds behind it, summed over the tier's pairs.
+        Paired seconds at the peak, summed over the pairs taking part; when no
+        pair took part, the most any pair paired at any shift.
     at_edge : bool
         True when the best shift is at the edge of the search.
     pairs_disagree : bool
@@ -328,7 +353,12 @@ def _wiggles(
     """Return values less their centred running median, where the window holds enough readings.
 
     The window must hold a quarter of the readings it could at the record's
-    median spacing (at least three) before its median is used.
+    median spacing (at least three) before its median is used. It is closed at
+    both ends, ``[t - W/2, t + W/2]``, so it is centred whatever its length:
+    pandas' own centred time window is open at its start, so an even window
+    held one second more after t than before (found in the second
+    walkthrough, where a 120 s median disagreed with one written from the
+    definition).
     """
     if not len(values):
         return values
@@ -336,7 +366,7 @@ def _wiggles(
     min_periods = max(_MEDIAN_MIN_READINGS, int(_MEDIAN_FILL * running_median_s / spacing))
     median = (
         pd.Series(values, index=pd.DatetimeIndex(times_ns))
-        .rolling(f"{running_median_s}s", center=True, min_periods=min_periods)
+        .rolling(f"{running_median_s}s", center=True, min_periods=min_periods, closed="both")
         .median()
         .to_numpy()
     )
@@ -377,7 +407,8 @@ def pooled_shift(
     search_s : int
         The shift is searched in ``[-search_s, search_s]``.
     min_pairs : int
-        Paired seconds a shift needs before its correlation counts.
+        Paired seconds a pair needs at its best-paired shift to take part, and
+        at the peak for the tier to decide.
     min_r : float
         The correlation at which a pair is decided on its own.
     tolerance_s : float
@@ -387,8 +418,9 @@ def pooled_shift(
     Returns
     -------
     SegmentShift
-        The best shift; NaN shift and r when no shift of any pair had enough
-        pairs.
+        The best shift. NaN shift and r when no pair pairs enough seconds at
+        any shift, or none could be correlated (flat air); NaN shift, with the
+        peak's r and paired seconds, when the peak itself pairs too few.
     """
     shifts = np.arange(-search_s, search_s + 1)
     curves, counts = [], []
@@ -398,24 +430,41 @@ def pooled_shift(
             partner.window(first_s - search_s, stop_s + search_s),
             shifts,
             search_s,
-            min_pairs,
         )
         curves.append(curve)
         counts.append(count)
-    stacked = np.vstack(curves)
+    most = max(int(count.max()) for count in counts)
+    # A pair takes part when its best-paired shift pairs the minimum, and its r
+    # counts at every shift pairing at least half as many as that one: the
+    # minimum is not tested shift by shift, where a hole costing the true shift
+    # a second or two would hand the peak to a wrong shift that pairs them all.
+    taking_part = [
+        (np.where(count >= _MIN_PAIRED_SHARE * count.max(), curve, np.nan), count)
+        for curve, count in zip(curves, counts, strict=True)
+        if count.max() >= min_pairs
+    ]
+    if not taking_part:
+        return SegmentShift(shift_s=float("nan"), r=float("nan"), n_pairs=most, at_edge=False)
+    stacked = np.vstack([curve for curve, _ in taking_part])
     usable = np.isfinite(stacked).any(axis=0)
     if not usable.any():
-        return SegmentShift(shift_s=float("nan"), r=float("nan"), n_pairs=0, at_edge=False)
+        return SegmentShift(shift_s=float("nan"), r=float("nan"), n_pairs=most, at_edge=False)
     pooled = np.full(len(shifts), -np.inf)
     pooled[usable] = np.nanmean(stacked[:, usable], axis=0)
     best = int(np.argmax(pooled))
-    n = int(sum(count[best] for count in counts))
+    n = int(sum(count[best] for _, count in taking_part))
+    if any(count[best] < min_pairs for _, count in taking_part):
+        # The minimum, tested once, at the peak: too few here and the tier
+        # does not decide, whatever other shifts might pair.
+        return SegmentShift(shift_s=float("nan"), r=float(pooled[best]), n_pairs=n, at_edge=False)
     disagree = False
-    for curve in curves:
+    for curve, count in taking_part:
         if np.isfinite(curve).any():
             peak = int(np.nanargmax(curve))
             disagree |= bool(
-                curve[peak] >= min_r and abs(int(shifts[peak] - shifts[best])) > tolerance_s
+                curve[peak] >= min_r
+                and count[peak] >= min_pairs
+                and abs(int(shifts[peak] - shifts[best])) > tolerance_s
             )
     return SegmentShift(
         shift_s=float(shifts[best]),
@@ -431,12 +480,12 @@ def _curve(
     b: npt.NDArray[np.float64],
     shifts: npt.NDArray[np.int64],
     search_s: int,
-    min_pairs: int,
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.int64]]:
     """Return r and the paired seconds at every shift: ``a(t)`` against ``b(t + s)``.
 
     ``b`` starts ``search_s`` seconds before ``a``, so ``b(t + s)`` for the
-    segment's seconds is the slice beginning ``search_s + s`` in.
+    segment's seconds is the slice beginning ``search_s + s`` in. r is taken
+    wherever a few seconds pair; which shifts count is the caller's.
     """
     r = np.full(len(shifts), np.nan)
     count = np.zeros(len(shifts), dtype=np.int64)
@@ -447,7 +496,7 @@ def _curve(
         both = a_ok & np.isfinite(y)
         n = int(np.count_nonzero(both))
         count[i] = n
-        if n < min_pairs:
+        if n < _MIN_CURVE_PAIRS:
             continue
         x, y = a[both], y[both]
         x, y = x - x.mean(), y - y.mean()
@@ -483,17 +532,17 @@ def refined_shift(
         The lattice step: shifts are multiples of it, within two seconds of
         the peak.
     min_pairs : int
-        Fully covered cells a shift needs before its correlation counts.
+        Fully covered cells every pair needs at the best step, as paired
+        seconds are needed at the whole-second peak (:func:`pooled_shift`).
 
     Returns
     -------
     shift_s : float
         The shift at which the tier's pooled correlation is highest: seconds
         added to the instrument's recorded times to put it on its partner's
-        clock; NaN when no shift had enough fully covered cells; ``coarse_s``
-        itself when a pair's cells do not line up at every step (``refined``
-        False: the joined cells cover the target's at only some steps, or at
-        none).
+        clock; NaN when no step could be correlated; ``coarse_s`` itself when
+        a pair's cells do not line up at every step, or cover too few whole at
+        the best one (``refined`` False).
     at_edge : bool
         True when it lies at either end of the lattice, so the true shift may
         lie beyond.
@@ -502,10 +551,11 @@ def refined_shift(
         noise was removed from the joined series' variance.
     refined : bool
         True when the shift was measured to the resolution: False when no
-        shift had enough fully covered cells, or when some pair's joined cells
-        cover none of the target's at any step, or leave a step of the lattice
-        with less than half the fully covered cells of its best-covered step,
-        so that the steps could be compared only where the cells line up.
+        step could be correlated, or when some pair's joined cells cover none
+        of the target's at any step, or leave a step of the lattice with less
+        than half the fully covered cells of its best-covered step, so that the
+        steps could be compared only where the cells line up, or cover fewer
+        than ``min_pairs`` whole at the best step.
 
     Notes
     -----
@@ -523,17 +573,17 @@ def refined_shift(
     highest = (coarse_ns + _REFINE_NS) // resolution_ns
     shifts_ns = np.arange(lowest, highest + 1, dtype=np.int64) * resolution_ns
     curves = []
+    coverage: list[npt.NDArray[np.int64]] = []
     removed = True
     for own, partner in pairs:
-        curve, covered, noise = _cell_curve(
-            own, partner, first_ns, stop_ns, coarse_ns, shifts_ns, min_pairs
-        )
+        curve, covered, noise = _cell_curve(own, partner, first_ns, stop_ns, coarse_ns, shifts_ns)
         if covered.max() == 0 or covered.min() < _MIN_COVERED_SHARE * covered.max():
             # The cells line up only at some steps, or at none: comparing the
             # steps would compare the alignment, not the air. The whole-second
             # peak, which needs no cells, stands.
             return coarse_s, False, False, False
         curves.append(curve)
+        coverage.append(covered)
         removed &= noise
     stacked = np.vstack(curves)
     usable = np.isfinite(stacked).any(axis=0)
@@ -542,6 +592,12 @@ def refined_shift(
     pooled = np.full(len(shifts_ns), -np.inf)
     pooled[usable] = np.nanmean(stacked[:, usable], axis=0)
     best = int(np.argmax(pooled))
+    if any(covered[best] < min_pairs for covered in coverage):
+        # The minimum, tested at the best step as at the whole-second peak:
+        # tested at every step, a step a hole left a cell or two short could
+        # never win, and the best of the rest would. The whole-second peak,
+        # which passed it, stands.
+        return coarse_s, False, False, False
     return int(shifts_ns[best]) / NS_PER_S, best in (0, len(shifts_ns) - 1), removed, True
 
 
@@ -552,7 +608,6 @@ def _cell_curve(
     stop_ns: int,
     coarse_ns: int,
     shifts_ns: npt.NDArray[np.int64],
-    min_pairs: int,
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.int64], bool]:
     """Return r and the fully covered cells at every shift, and whether the noise was removed.
 
@@ -586,7 +641,7 @@ def _cell_curve(
         # each joined value is the mean over exactly the cell it is compared with.
         full = total >= width
         covered[i] = np.count_nonzero(full)
-        if covered[i] < min_pairs:
+        if covered[i] < _MIN_CURVE_PAIRS:
             continue
         a = x[full] - x[full].mean()
         b = weighted[full] / total[full]
