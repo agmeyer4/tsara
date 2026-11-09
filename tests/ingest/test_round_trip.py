@@ -22,6 +22,7 @@ in that shape noticed one. The tests below that pass ``raw_units`` and
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -43,10 +44,12 @@ from tsara.ingest import ingest_campaign, load_streams, save_streams
 from tsara.synthetic import generate
 from tsara.synthetic.background import TsaraSyntheticError
 from tsara.synthetic.export import (
+    EXPORT_CLOCK_CORRECTIONS,
     EXPORT_MANIFEST,
     EXPORT_RAW_DIR,
     START_COLUMN,
     STOP_COLUMN,
+    ClockError,
     RawUnits,
     export_raw,
 )
@@ -1009,3 +1012,158 @@ def test_a_declared_period_masks_exactly_the_readings_inside_it(tmp_path: Path) 
         assert np.isnan(got).tolist() == inside.tolist(), (name, variable)
         truth = generated.streams[name][variable].values
         np.testing.assert_allclose(got[~inside], truth[~inside], rtol=RTOL)
+
+
+# ---------------------------------------------------------------------------
+# Clock errors through the whole path (docs/METHODS.md §12.3)
+# ---------------------------------------------------------------------------
+
+#: The analyzer's clock reads 3 s behind for the first 8 minutes (shift +3 s)
+#: and 5 s ahead from the tenth on (-5 s); the two minutes between are written
+#: as they are, so the round trip checks that uncorrected readings are left
+#: alone as well as that the others are put right.
+CLOCK_ERRORS = {
+    "analyzer": [
+        ClockError("2026-01-01T00:00:00Z", "2026-01-01T00:08:00Z", "3s"),
+        ClockError("2026-01-01T00:10:00Z", "2026-01-01T00:30:00Z", "-5s"),
+    ]
+}
+
+
+def _assert_times_and_cells_are_truth(generated: Any, ingested: Any) -> None:
+    for name in generated.streams:
+        np.testing.assert_array_equal(
+            ingested[name][TIME_COORD].values, generated.streams[name][TIME_COORD].values
+        )
+        np.testing.assert_array_equal(
+            ingested[name][TIME_BOUNDS_VAR].values.astype("datetime64[ns]"),
+            generated.streams[name][TIME_BOUNDS_VAR].values.astype("datetime64[ns]"),
+        )
+
+
+def test_clock_errors_are_corrected_exactly(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    generated = generate(_config())
+    manifest_path = export_raw(generated, tmp_path / "export", clock_errors=CLOCK_ERRORS)
+    written = pd.read_csv(tmp_path / "export" / EXPORT_RAW_DIR / "analyzer.csv")
+    truth = generated.streams["analyzer"][TIME_COORD].values.astype("datetime64[ns]")
+    # The archive really is wrong: 3 s early in the first stretch.
+    assert pd.Timestamp(written[TIME_COORD].iloc[0]) == pd.Timestamp(truth[0]) - pd.Timedelta("3s")
+
+    with caplog.at_level(logging.WARNING, logger="tsara.ingest.clocks"):
+        ingested = ingest_campaign(load_manifest(manifest_path))
+    _assert_times_and_cells_are_truth(generated, ingested)
+    np.testing.assert_allclose(
+        ingested["analyzer"]["ch4"].values, generated.streams["analyzer"]["ch4"].values, rtol=RTOL
+    )
+    attrs = ingested["analyzer"].attrs
+    assert attrs["tsara_reference_clock"] == "met"
+    assert attrs["tsara_clock_corrections_files"] == EXPORT_CLOCK_CORRECTIONS
+    assert attrs["tsara_clock_corrections"].count("onto met (declared") == 2
+    # 2 s readings: minutes 8 to 10 hold 60 of the 600.
+    assert attrs["tsara_clock_uncorrected_share"] == pytest.approx(0.1)
+    assert "60 of 600 readings (10.0%) lie in no clock-correction row" in caplog.text
+
+
+def test_clock_errors_on_several_files_with_reported_cells_round_trip(tmp_path: Path) -> None:
+    """Corrected per file, and the boundary columns a file states move with
+    their readings: a correction that shifted only the time column would
+    leave every reported cell where the wrong clock put it."""
+    generated = generate(_config())
+    manifest_path = export_raw(
+        generated,
+        tmp_path / "export",
+        support_declaration="reported",
+        split={"analyzer": (1, 1)},
+        clock_errors=CLOCK_ERRORS,
+    )
+    ingested = ingest_campaign(load_manifest(manifest_path))
+    _assert_times_and_cells_are_truth(generated, ingested)
+
+
+def test_clock_errors_in_an_archive_written_in_local_time_round_trip(tmp_path: Path) -> None:
+    """The table is written on UTC instants of the recorded clock, and the
+    file in local time: the reader converts first, then the table applies."""
+    generated = generate(_config())
+    manifest_path = export_raw(
+        generated, tmp_path / "export", timezone="America/Denver", clock_errors=CLOCK_ERRORS
+    )
+    _assert_times_and_cells_are_truth(generated, ingest_campaign(load_manifest(manifest_path)))
+
+
+def test_clock_errors_and_a_time_shift_compose(tmp_path: Path) -> None:
+    """time_shift is added on top of the table's shift, never instead of it."""
+    generated = generate(_config())
+    manifest_path = export_raw(
+        generated, tmp_path / "export", time_shift={"analyzer": "-4s"}, clock_errors=CLOCK_ERRORS
+    )
+    ingested = ingest_campaign(load_manifest(manifest_path))
+    _assert_times_and_cells_are_truth(generated, ingested)
+    assert ingested["analyzer"].attrs["tsara_time_shift"] == "-4s"
+
+
+def test_the_exported_table_travels_with_its_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generated = generate(_config())
+    export_raw(generated, tmp_path / "export", clock_errors=CLOCK_ERRORS)
+    moved = tmp_path / "elsewhere"
+    (tmp_path / "export").rename(moved)
+    monkeypatch.chdir(tmp_path)
+    ingested = ingest_campaign(load_manifest(moved / EXPORT_MANIFEST))
+    _assert_times_and_cells_are_truth(generated, ingested)
+
+
+@pytest.mark.parametrize(
+    ("errors", "match"),
+    [
+        # A later shift 2 s larger than an earlier one (the clock set back 2 s),
+        # with only 1 s between: the recorded stretches overlap, which the
+        # table refuses.
+        (
+            [
+                ClockError("2026-01-01T00:00:00Z", "2026-01-01T00:05:00Z", "-3s"),
+                ClockError("2026-01-01T00:05:01Z", "2026-01-01T00:10:00Z", "-1s"),
+            ],
+            "overlap once recorded",
+        ),
+        # Running 5 s fast up to minute 5 puts the readings just after it,
+        # written as they are, inside the row's recorded stretch.
+        (
+            [ClockError("2026-01-01T00:00:00Z", "2026-01-01T00:05:00Z", "-5s")],
+            "would be recorded inside the stretch of a correction row",
+        ),
+        ([ClockError("2026-01-01T00:00:00", "2026-01-01T00:05:00Z", "-1s")], "with an offset or Z"),
+        ([ClockError("2026-01-01T00:05:00Z", "2026-01-01T00:05:00Z", "-1s")], "end is not after"),
+    ],
+)
+def test_clock_errors_that_cannot_be_written_are_refused(
+    tmp_path: Path, errors: list[ClockError], match: str
+) -> None:
+    with pytest.raises(TsaraSyntheticError, match=match):
+        export_raw(generate(_config()), tmp_path / "export", clock_errors={"analyzer": errors})
+
+
+def test_the_reference_clock_must_be_a_stream_free_of_clock_errors(tmp_path: Path) -> None:
+    generated = generate(_config())
+    with pytest.raises(TsaraSyntheticError, match="has clock errors of its own"):
+        export_raw(generated, tmp_path / "a", clock_errors=CLOCK_ERRORS, reference_clock="analyzer")
+    with pytest.raises(TsaraSyntheticError, match="is not a stream of this dataset"):
+        export_raw(generated, tmp_path / "b", clock_errors=CLOCK_ERRORS, reference_clock="gps")
+    both = {
+        **CLOCK_ERRORS,
+        "met": [ClockError("2026-01-01T00:00:00Z", "2026-01-01T00:30:00Z", "1s")],
+    }
+    with pytest.raises(TsaraSyntheticError, match="none can keep the reference clock"):
+        export_raw(generated, tmp_path / "c", clock_errors=both)
+    with pytest.raises(TsaraSyntheticError, match="Cannot export"):
+        export_raw(generated, tmp_path / "d", clock_errors={"nope": CLOCK_ERRORS["analyzer"]})
+
+
+def test_a_named_reference_clock_is_written_into_the_table(tmp_path: Path) -> None:
+    generated = generate(_config())
+    export_raw(generated, tmp_path / "export", clock_errors=CLOCK_ERRORS, reference_clock="met")
+    table = pd.read_csv(tmp_path / "export" / EXPORT_CLOCK_CORRECTIONS)
+    assert table["reference_clock"].tolist() == ["met", "met"]
+    assert table["shift"].tolist() == ["3000000000ns", "-5000000000ns"]

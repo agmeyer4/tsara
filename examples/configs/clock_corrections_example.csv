@@ -1,0 +1,4 @@
+instrument,start,end,shift,shift_end,reference_clock,provenance,reason
+picarro,2025-04-14T16:00:00Z,2025-04-14T21:00:00Z,-3s,,gps,measured,the clock survey: 10 decided 30 min segments
+picarro,2025-04-16T15:00:00Z,2025-04-16T23:00:00Z,-12s,-9s,gps,measured,a clock drift across the drive
+voc_spec,2025-04-14T16:00:00Z,2025-04-14T21:00:00Z,8s,,gps,declared,"inlet 8 s shorter than the Picarro's, from the van's plumbing notes"

@@ -41,7 +41,7 @@ with the coverage flags. Three opt-in gates need data or time that CI does not
 have:
 
 ```bash
-TSARA_NOTEBOOKS=1 pytest tests/test_notebooks.py    # executes notebooks 04, 05, 06 and 07
+TSARA_NOTEBOOKS=1 pytest tests/test_notebooks.py    # executes notebooks 04, 05, 06, 07 and 08
                                                     # (about a minute each)
 TSARA_ARCHIVE=/path/to/Data pytest tests/test_notebooks.py tests/events/test_candidates_real_drive.py
                                                     # executes notebooks 04b, 05b and 06b

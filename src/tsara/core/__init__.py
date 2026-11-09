@@ -56,6 +56,9 @@ circular
     dispersion, and vector averaging onto cells.
 bundle
     The on-disk bundle convention shared by every stage that saves itself.
+clocks
+    The clock-correction table: one file format, read by ingestion and
+    written by the clock survey, and the shift a row gives at a recorded time.
 
 Public API
 ----------

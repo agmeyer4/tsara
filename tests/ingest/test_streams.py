@@ -528,7 +528,7 @@ def _resolved(**overrides: Any) -> ResolvedSupport:
 def _bounded_frame() -> pd.DataFrame:
     frame = _frame()
     frame[RAW_TIME_START_COLUMN] = frame.index
-    frame[RAW_TIME_STOP_COLUMN] = frame.index + pd.Timedelta("2s")
+    frame[RAW_TIME_STOP_COLUMN] = pd.DatetimeIndex(frame.index) + pd.Timedelta("2s")
     return frame
 
 

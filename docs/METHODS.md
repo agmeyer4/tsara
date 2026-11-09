@@ -44,6 +44,12 @@ attributes and this document, because each was once used for several:
 | **rolling** | the operation: a statistic over a window centred on each reading, moved along the record (`rolling_quantile`; Phase 7's fits over windows) | a stage or a product. The stage that computes baselines and enhancements is `baseline` (`tsara.baseline`); its product is the **baseline state**, saved under `baseline/` in a bundle. Both were named `rolling` until Phase 5 merged; no bundle under the old name exists outside that branch, so none is migrated |
 | **borrowed** | the share of a joined value resting on air outside its own cell (`borrowed_<name>`, `tsara_borrowed_share`, §11.2.4) | an uncertainty; it is a magnitude, and no threshold on it separates a blend from jitter |
 | **averaged / straddled / narrowed / copied** | what a join did to the readings behind a column (`tsara_support_transform`, §11.2.4): wholly inside their cells; lying across a boundary; wider than a cell they fill; at least twice as wide, which is refused unless asked for by name | |
+| **shift** | the one signed clock number: a duration added to every timestamp and both cell boundaries of a reading, corrected = recorded + shift, so a file that shows the air 7 s late takes −7 s. `time_shift` for a whole instrument, a correction table's `shift` for a stretch of one (§10.7, §12.3), and what the clock survey measures (§12.4), which writes the number it measures | a **lag**, which the survey reported until 2026-11-04 (positive for the later file, minus the shift; one number for both was decided in the Phase-3.6 walkthrough); not an `offset`, which is a unit conversion's additive term. "Lag" remains only where it is not a clock number: the generator's delay between species (`inter_species_lag`) and the lag-one autocorrelation |
+| **reference clock** | the clock a correction puts instruments on, named by the instrument that keeps it (§12.3) | "reference" alone, which is a ratio's denominator gas (`reference_species`) |
+| **tracer pair** | a variable on each of two instruments expected to show the same plumes: one gas on two analyzers, or gases emitted together; what the clock survey correlates, ranked in **tiers**, the first that decides a segment setting its shift (§12.4) | |
+| **segment** | a contiguous run of a record. The clock survey cuts records into segments of a set length and measures one shift on each (§12.4) | a record (§6.8) or an event |
+| **clock step**, **clock drift** | a shift that jumps between segments by more than the survey's tolerance, and one that changes steadily across a stretch (§12.5) | the background's drift (`drift_per_day`, §8.3) |
+| **survey** | `tsara.survey`: the measurement step before the pipeline, which measures what a manifest can declare but files do not state and writes a table a person reviews; clocks are its first measurement (§12) | a stage of the pipeline: nothing it writes is applied until a manifest names it |
 | **shared** | a reading that formed more than one row of a product, so those rows share its error (`tsara_shared_readings`, the sharing warnings, §11.4.1) | the support label: a straddled reading is shared only when both cells it lies across are rows of the product, which a sparse partner's are not |
 
 Bundles written before these names were settled are read and respelled on load
@@ -243,8 +249,9 @@ choice, and the export writer are decided when the export is built.
 `AnalysisConfig.output_grid` is optional since Phase 5: a run that never
 exports a table declares none, and the validator that once compared it with
 the shortest baseline window, a grid the baseline never rolls over, is gone,
-replaced by the count of §6.4. Nothing yet names a *segment*, a contiguous run of a record such as one drive, though per-drive
-cells, per-drive export and Phase 8's segment-wise filtering all need one.
+replaced by the count of §6.4. The word *segment* means a contiguous run of a record, such as one drive. The clock survey of §12 is
+its first user, cutting records into segments of a set length; per-drive cells, per-drive export and
+Phase 8's segment-wise filtering will need it too.
 
 ### 1.5 Circular statistics for angular variables
 
@@ -2707,10 +2714,9 @@ v1:
   registered algorithm name, these can be added without touching the
   pipeline.
 - **Drive-path-aware plume deconvolution** for mobile platforms.
-- **Clock-offset estimation by cross-correlation.** `InstrumentConfig.time_shift`
-  (§10.7) lets a manifest *declare* an offset; deriving one by correlating a
-  species against a trusted reference is a registered estimator waiting to be
-  written. The 2026 campaign's own alignment stage does exactly this.
+- **Clock-shift estimation by cross-correlation.** No longer deferred: decided
+  and built on 2026-11-03 as Phase 3.6, the clock survey and the correction
+  table of §12.
 - **Decorrelation-timescale estimation.** τ is what every $N_{\mathrm{eff}}$
   correction needs (§3.4) and what no file declares: `UncertaintySpec.
   decorrelation_timescale` lets a manifest *state* one, but establishing it for
@@ -3414,6 +3420,21 @@ then its header on physical line 4 needs `header_row: 2`. This follows from
 one; it fails loudly (the error lists the column names actually found), but
 the field description says so to save the round trip.
 
+**Time columns are read as text** (added with Phase 3.6), and so are the
+declared `start_column` and `stop_column`, which are parsed with the same
+format. Read as numbers, a time column has lost what its pattern needs before
+it is joined: an `hhmmss` field loses its zero padding (`000003.50`, 3.5 s
+past midnight, becomes `3.5`), and a single blank cell makes pandas read the
+whole column as floats, so a year joins as `2024.0` and no row matches the
+format. Found on the 2024 SLC-SOS van's weather logs
+(`UWTR_WX_Sprinter_*.csv`), which write the GPS receiver's time as `UTC
+hhmmss` beside separate year, month and day columns, blank until the receiver
+has a fix: read as numbers, both files of 2024-08-05 were rejected whole;
+read as text, they give 9,789 rows, losing only the 79 written before a fix,
+and their 5 s cadence runs straight through 00:00 UTC. Variables are made
+numeric later and separately, so a column that is both a time and a variable
+still reads as a number there.
+
 **Float parsing is left at pandas' default**, not `float_precision="round_trip"`.
 The default parser is not guaranteed bitwise round-trip exact — it can differ
 in the last unit in the last place — and the exact parser is available for
@@ -4050,6 +4071,15 @@ against hand-written expectations.
 Only observable variables are exported; the `truth_`-prefixed answer key
 stays behind, and a test asserts no exported header contains it.
 
+**Clock errors** (Phase 3.6) are injected the same way: `export_raw`'s
+`clock_errors` writes stretches of an instrument's files on a wrong clock and
+the correction table that undoes them (§12.3), leaving the readings between
+stretches as they are, so the round trip checks that ingestion corrects the
+first and leaves the second alone, across several files, with reported cells,
+in local time and beside a `time_shift`. The exporter refuses an archive no
+table can describe: stretches whose recorded spans would overlap, or a reading
+from outside every stretch that would be recorded inside one.
+
 **A second mutation round, on temporal support**, was run in Phase 3.5 and is
 recorded in §10.9. It scored three of five and reached five of five after two
 fixes — one of which was the same defect this section describes, in a new
@@ -4476,24 +4506,25 @@ there — and two kinds of entry were not:
   TSARA invented. The list is now taken before they are attached, so it
   describes the file rather than the reader.
 
-### 10.7 Clock offset is not support
+### 10.7 A clock error is not support
 
-Support says what interval a value describes. **Offset** says how the
+Support says what interval a value describes. A **clock error** says how the
 instrument's clock relates to air-at-inlet time. They are separate concepts
-and are kept apart deliberately, because on real data the offset is the larger
-error: the 2026 campaign's own alignment stage applies whole-second lags of
-1–6 s between analyzers, a −9 s inlet lag, and logger clock drift of up to
+and are kept apart deliberately, because on real data the clock error is the
+larger error: the 2026 campaign's own alignment stage applies whole-second shifts of
+1–6 s between analyzers, a 9 s inlet delay, and logger clock drift of up to
 13.6 s, while label ambiguity on 1 s data is at most 0.5 s.
 
 `InstrumentConfig.time_shift` is a signed duration **added** to every
-timestamp and to both cell boundaries, so a shift moves a cell without
-resizing it. A logger running 5 s fast takes `-5s`; a 9 s inlet lag also takes
-`-9s`. It defaults to nothing applied, which is right for an archive already
+timestamp and to both cell boundaries (corrected = recorded + shift), so a
+shift moves a cell without resizing it. A logger running 5 s fast takes `-5s`;
+a 9 s inlet delay also takes `-9s`. It defaults to nothing applied, which is right for an archive already
 corrected upstream, and the applied value is written to `tsara_time_shift` so
 a double correction is visible rather than silent — the one failure mode
 internal consistency cannot reveal, since both corrections are individually
-right. Estimating a shift by cross-correlation is a future registered
-estimator, not this field.
+right. Correcting a stretch of an instrument rather than all of it, and
+measuring the correction from the data, are §12's: a correction table applied
+at ingestion, and the clock survey that writes one.
 
 ### 10.8 Uncertainty at a support
 
@@ -4965,7 +4996,7 @@ perfectly regular 2 s record offset from a 1 s grid by 0.3 s or 0.5 s wholly
 contains only one 1 s cell, so it passed, and each of its readings fed two or
 three rows — while the same record exactly in phase was refused. No stream in
 the permitted archive reached it (the 2 s Wyoming Picarro sits exactly on
-whole seconds, and every 2026 lag correction is a whole number of seconds),
+whole seconds, and every 2026 clock correction is a whole number of seconds),
 but a fractional `time_shift` would have. The walkthrough replaced it with a
 sum: a reading is replicated when the time it shares with the target cells
 adds up to twice the widest cell it touches. Twice a width is twice a width
@@ -6404,6 +6435,694 @@ period but not its phase (`phase_offset_s`, the same exact test pairing applies
 to a partner half a cell from its clock, §11.4). It is a warning rather than a
 refusal because blending is sometimes unavoidable, and which instrument a grid
 should be in phase with is the user's choice, not TSARA's.
+
+---
+
+## 12. Clocks **[decided and built 2026-11-03 — Phase 3.6]**
+
+§10 settled *what interval* of air a value describes. This section settles
+*when*: how one instrument's clock relates to another's, how that is measured,
+and how a correction is declared and applied. §10.7 already keeps the two
+apart: a clock error is not support, and on real data it is the larger error.
+
+Written before the code, as the decisions of 2026-11-03, and kept as the
+build and its walkthrough settled them. The numbers of §12.1 and §12.2 were
+measured on the 2024 SLC-SOS archive outside the package, each under the rule
+stated beside it; the package itself is checked on generated air with a known
+answer (§12.4). Measuring the real campaign through the package is not part
+of this phase. It is the SLC-SOS clock alignment, done with TSARA as a tool
+outside the package, and what it measures comes back here (§12.7).
+
+### 12.1 What a clock error costs
+
+Two analyzers of one gas on one van: the 2024 SLC-SOS Aeris and Picarro, each
+read from its own log, over the 2024-08-05 drive (18:47–21:47 UTC). Both are
+put on whole seconds (each timestamp floored, the first reading of each second
+kept) and each has its centred 121 s running median removed. The Picarro is
+moved by its measured 1 s, so that zero is the aligned state. The events are
+the runs of at least 5 consecutive Picarro readings, no two more than 3 s
+apart, above 30 ppb: 26 of them. For each imposed error, written as the shift
+it would take to undo it (the Aeris read that many seconds early for +, late
+for −), each event's least-squares slope of Aeris on Picarro and its r²:
+
+| shift left uncorrected (s) | 0 | +1 / −1 | +2 / −2 | +3 / −3 | −5 |
+|---|---|---|---|---|---|
+| median slope | 0.835 | 0.790 / 0.774 | 0.686 / 0.626 | 0.511 / 0.449 | 0.204 |
+| events with r² ≥ 0.8 | 69 % | 50 % / 31 % | 4 % / 12 % | 0 % / 4 % | 4 % |
+
+On 1 s data from a moving van, a cross-instrument fit is mostly lost at a 2 s
+clock error and gone at 3 s, and the slope is biased low well before the fit
+looks bad. Below a second the van says nothing (the Picarro writes every 2 s).
+On generated air (notebook 08 §1: two 1 s analyzers of one gas, Gaussian plumes
+of σ 4 s, the error put on the air, so it can be a fraction of a second; plumes
+of at least 5 s above 20 ppb on the first analyzer) the share of plumes fitting
+well is 99 % aligned, 94 % at 0.5 s, 52 % at 1 s and none at 2 s. So clocks
+must be right to within about half a second before the ratio stage pairs
+instruments (Phase 7c), which a shift measured to the nearest whole second
+(§12.4) leaves at worst.
+
+### 12.2 Two layers: the right files, then the residual seconds
+
+Some archives write times that no correction can repair. Measured on the 2024
+SLC-SOS archive, by matching rows by value to the analyzers' own logs: 27 of
+the 28 Aeris ICARTT files stamp each row exactly 1 s after the last, while the
+analyzer logs every 0.993 s (median), so their times run ahead by roughly 11–13 s
+an hour; every Picarro ICARTT stamps 2 s a row, exact until the analyzer stops
+logging and early by the stop's length afterwards. The error grows inside a
+file and jumps at every erased stop, and what would undo it (which rows came
+after which stop) is not in the file. So a correction comes in two layers:
+
+1. **Read the right files.** Where an instrument's own log exists, the
+   manifest reads the log. That removes errors of minutes to hours with
+   nothing estimated, and it is a manifest's job, not a correction's.
+2. **Correct the residual seconds.** Even the right files disagree by seconds:
+   inlets, response times, and a logger's own steps (the same Picarro log
+   reads about 21 s early against the van's GPS-timed weather station on
+   2024-08-04, and steps by about 10 s in the afternoon of 2024-08-20). These
+   are measured by the survey (§12.4), written to a table a person reviews
+   (§12.3), and applied at ingestion.
+
+The survey still runs on files of the first kind; it names what it sees there
+(§12.5) rather than fitting it.
+
+### 12.3 The correction table **[built 2026-11-03 — stage 1]**
+
+A manifest names one or more CSV files of corrections
+(`Manifest.clock_corrections`, read the way `exclude_periods` is, §9.4), one
+row per stretch of one instrument:
+
+| column | meaning |
+|---|---|
+| `instrument` | the instrument the row corrects; required |
+| `start`, `end` | the stretch it covers, [start, end), on the instrument's own recorded clock, each with an explicit UTC offset or `Z` |
+| `shift` | a signed duration added to every timestamp and to both cell boundaries in the stretch, corrected = recorded + shift, the sign rule of `time_shift` (§10.7): a logger running 5 s fast, whose file shows the air 5 s late, takes −5 s |
+| `shift_end` | optional: the shift at `end`, the shift then running linearly from `shift` to it across the stretch (a clock drift); absent, the shift is constant |
+| `reference_clock` | the clock the shift puts the instrument on, named by an instrument |
+| `provenance` | `measured` (written by the survey) or `declared` (written by a person) |
+| `reason` | free text |
+
+Refused when read, as excluded periods are: a timestamp without an offset; a
+shift without a unit (a bare `10` could be seconds or nanoseconds); an end not
+after its start; a provenance other than the two; a column the format does not
+know; an empty file; a file listed twice; an instrument or reference clock the
+manifest does not declare. And three things the rows say together: two rows of
+one instrument that overlap, since a reading in both would have two shifts; a
+row putting an instrument on its own clock; and **more than one reference clock
+across the table**, since a campaign is corrected onto one clock, and streams
+put onto two would each line up with their own reference while sitting apart
+from each other by whatever separates the two clocks. The format lives in
+`tsara.core.clocks`, because ingestion reads it and the survey writes it, and
+stages never import each other.
+
+**Applied per file, right after the file is read and before its cadence is
+measured**, so that cadence and cells are built on corrected times (§10.5);
+`time_shift` is then added on top, unchanged. Each reading is shifted by the
+row whose stretch holds its recorded time. A reading that no row holds is left
+as recorded and counted, and a warning names the uncorrected stretches
+(decided: warn and label, not refuse). For an instrument with at least one row
+the stream records `tsara_clock_corrections` (every row, as its stretch,
+shift, reference clock, provenance and reason), `tsara_clock_corrections_files`,
+`tsara_reference_clock` and `tsara_clock_uncorrected_share` (the share of its
+readings no row held). Under a table, the reference clock's own instrument
+records `tsara_reference_clock` as itself and a share of 0, and an instrument
+the table has no row for is warned about and records only a share of 1: it
+is left as recorded, not known to be on the reference clock, and carries no
+`tsara_clock_corrections`, so a later survey measures it rather than taking it
+for an after-check. A row with shift `0s` declares a clock right. Found in the
+second walkthrough of 2026-11-09: such an instrument was said only at INFO,
+and its stream looked exactly like the reference clock's, so leaving an
+instrument out of the table was quieter than leaving out part of one. With no
+table no stream records any of the four. A row holding none of its
+instrument's readings is logged, since the data it names may not be loaded.
+
+**A clock step inside a file.** A shift that falls from one row to the next
+puts later readings before earlier ones (an overlap); one that rises leaves a
+hole. As built, the correction drops and merges nothing: the readings it moves
+before an earlier reading of their own file are counted and warned about, then
+sorted with the rest, and the ordering and de-duplication of §9.8 treat them as
+any out-of-order readings, so one landing on an earlier reading's exact time is
+dropped as a duplicate. Whether that is right is for the real steps of §12.2
+to show (§12.7).
+
+**A clock set back.** A logger whose clock goes back records some seconds
+twice, once before the step and once after it. The table is keyed on recorded
+time, so both readings of such a second take the shift of the row holding it,
+which is wrong for one of them whenever a row's edge falls inside the repeated
+stretch. This is a stated limit, not handled, because the sources this phase
+corrects hardly have it. Measured on the 2024 SLC-SOS sources, every file read
+in the order it was written: a step back is a row recorded earlier than the
+row before it in the same file; the rows it makes ambiguous are those, on
+either side of it, recorded between the time after the step and the latest
+time before it; a row is a reading when any of its values is not the missing
+code.
+
+| source | files | rows | steps back | ambiguous readings |
+|---|---|---|---|---|
+| Picarro log (`User_Sync.dat`) | 567 | 1,013,534 | 0 | 0 |
+| Aeris log (`.txt`) | 56 | 1,666,270 | 11 | 43 |
+| weather station log (`UWTR_WX_Sprinter_*.csv`), GPS receiver's clock / logging computer's | 24 | 314,336 / 317,881 | 0 / 0 | 0 |
+| tracking feed (`.xlsx`; the four `DataJson`/`DataKML` files of 08-27 and 08-28 are another format, not read) | 9 | 124,913 | 20 | none: no recorded time occurs twice |
+| MIRO, CAPS and ROZE ICARTT | 21, 41, 41 | 6,085,034 | 0 | 0 |
+| PTR ICARTT | 43 | 1,800,370 | 14 | 0 |
+
+Only the Aeris's clock goes back: once in each of 11 of its 56 files, 4 s to
+12.5 min after the file's first reading (all but one within 3 min), by 2.0 s
+against its steady 0.993 s cadence (a step of −1.006 to −1.007 s), which puts
+3 or 4 readings inside the repeated second, 43 in all. Those readings are the
+limit's whole cost on these sources. The readings before such a step sit 2 s
+apart from the rest of their file on its own clock, which is a clock step in
+the first minutes of a file, finer than a segment (§12.4) can see. The PTR's 14
+steps (12 of 1 to 3 s, one of 3,599 s and one of 1,076 s, all in stationary
+files) lie inside stretches where every row is the missing code, so no reading
+is ambiguous. The feed's 20, in its 2024-08-22 and 08-23 files and up to
+12.2 h long, are rows written in chunks out of time order: no recorded time
+occurs twice, and sorted they form one record. Across files, consecutive files
+of one source overlap once, two CAPS files sharing 2 s on 2024-08-04. The
+correction runs on each file's rows in the order written, before any sort, so
+a key on (file, row) instead of recorded time could separate the two copies if
+a campaign ever needs it.
+
+### 12.4 The survey: measuring shifts from tracer pairs **[built 2026-11-03 — stages 2 and 3; walkthrough stages A1 and A2]**
+
+`tsara.survey` measures, before the pipeline, what a manifest can declare but
+files do not state; clocks are its first measurement (`tsara.survey.clocks`,
+`survey_clocks`). It reads streams ingested without a correction table, never
+changes one, and returns its measurements, the rows of a correction table
+(provenance `measured`) and the faults it found. **It is never applied by
+itself**: `ClockSurvey.write_table` writes the rows for a person to review and
+name in the manifest.
+
+What it measures is a **shift**, the correction table's own number: the
+seconds to add to one file's times so that it puts the same air at the time
+another file does, corrected = recorded + shift. A file that shows the air 7 s
+after its partner's needs −7 s; one that shows it 4 s before, +4 s. Its size
+is the difference between the two clocks plus the difference between the two
+instruments' inlet and response times. Putting the instruments' readings of
+one puff of air at one time needs exactly that sum, which is why the survey
+does not try to separate its parts. Composed onto the reference clock, it is
+the shift a row carries. The survey reported the opposite number, a lag
+positive for the later file, until the Phase-3.6 walkthrough of 2026-11-04
+made every clock number in TSARA a shift, so that the answer key, the
+survey's measurements and the table carry one number with one sign.
+
+**Settings** (`SurveyConfig`, a YAML of its own read by `load_survey`, since
+the survey runs before the pipeline and not inside it): the reference clock;
+for each instrument an ordered list of tiers, each naming a partner and one or
+more tracer pairs (`[variable here, variable on the partner]`), optionally
+with its own `min_pairs`; the segment length (default 30 min, tunable); the
+search range (default ±120 s, shorter than a segment); the minimum paired
+seconds (default 300); the decision threshold (default r ≥ 0.6); the tolerance
+(default 2 s); the running median's window (default 121 s); the
+**resolution** the shift is measured to (default 1 s, at most 1 s); and
+`max_bridged`, how long a stretch of undecided segments a row may bridge
+(default 0 s, never; see Rows). The search and the running median are read
+as whole seconds, so a fraction is refused rather than cut off (measured: a
+search of `20.7s` ran as 20, and `500ms` as a search of no width, every
+segment at its edge). A tier needing more paired seconds than a segment holds
+is refused, since it could never decide (measured: a 3 min segment with 200
+pairs needed came out `too short` everywhere and wrote nothing). Every chain
+of partners must reach the reference clock without a loop, and the reference
+clock's instrument has no tiers; both are refused at load.
+
+**Segments.** One grid for every instrument: whole multiples of the segment
+length from the epoch, so that segment k of an instrument and of its partner
+are the same stretch of time. An instrument is measured on the segments where
+it has readings.
+
+**One segment.** Each tracer variable is put on whole seconds (each timestamp
+floored, the first reading of each second kept: a step inside the
+measurement, never written to a product) and its centred running median is
+removed, so that plumes, not the background, drive the correlation. The median
+is used where its window holds at least a quarter of the readings it could
+(at least three), which keeps a 1 s record at 30 readings in 121 s and lets a
+5 s weather record take part. Its window is closed at both ends,
+[t − W/2, t + W/2], so it is centred at any length: pandas' own centred time
+window is open at its start, so a window of an even number of seconds held one
+second more after t than before (found in the second walkthrough of
+2026-11-09: at 120 s the wiggles of notebook 08 §3's record moved by up to
+1.76 ppb against a median written from the definition; its shift did not
+move). The shift is the s in the search range maximizing Pearson's r between
+the instrument's series at t and the partner's at t + s, over the segment's
+seconds where both have a value. The minimum number of paired seconds is
+tested once, at that peak: a pair takes part when its best-paired shift pairs
+the minimum, its r counts at every shift pairing at least half as many as that
+one (so that a shift paired over a sliver of the segment cannot win on a few
+lucky seconds), and the tier decides only if every pair taking part pairs the
+minimum at the peak; otherwise the measurement keeps the peak's r and paired
+seconds, and the segment says `too few pairs`. Found in the second
+walkthrough: tested at every shift, the minimum let a wrong shift win. In
+notebook 08 §4 with 10 min segments, a 2 s analyzer holds exactly 300 readings
+in a segment, the minimum; its partner's 12 s hole at a clock step cost the
+true shift (+11 s, r 0.992) and its neighbours one or two paired seconds, so
+the best shift still pairing all 300, +7 s at r 0.87, was decided and chained
+to 0 s against a truth of +4 s; now the segment is not decided against that
+partner and its backup tier decides it at +4 s. A best shift at the edge of the search is
+not decided, since the true one may lie beyond; measured while building, a
+true shift just beyond the search shows as its peak's shoulder at the edge,
+and one far beyond as a weak peak inside it, which the threshold refuses.
+
+**The shift to a resolution.** Whole seconds throw away where each reading
+sits inside its second, so the search above can only find the peak, and finds
+it to one side: a clock 7.7 s late (a shift of −7.7 s) peaks at −7, so the
+leftover error is one-sided, between 0 and 1 s, which on 4 s plumes is the
+difference between most plumes fitting and half of them (§12.1). The shift is
+therefore measured again on the readings' own cells
+(`tsara.survey.shifts.refined_shift`): for every s on a lattice of multiples
+of the resolution within 2 s of the peak, the narrower-celled series' wiggles
+(each series less its own running median, on its own readings) are averaged,
+overlap-weighted, onto the wider-celled series' cells moved by s, through
+TSARA's one join (§1.3; the narrower onto the wider; on a tie in width the
+series with fewer readings in the segment keeps its cells, as in pairing
+(§11.4), and on a tie in readings too the instrument's), and r is taken over
+the cells the join covers fully; the cells are
+chosen once, by the peak, so that every s is judged on the same ones. Pairs of
+a tier pool by averaging, as above. The whole-second r, its paired seconds and
+the search-edge and disagreement rules still decide a segment; the cells give
+its shift, and a best shift at either end of the 2 s window is not decided. Measured on generated air, under this rule:
+30 min segments with 40 Gaussian plumes each (amplitudes lognormal(3, 0.5)
+ppb; σ 2, 4 or 12 s) on a 5 ppb sine of 20 min period; every reading the
+exact mean of that air over its own cell (an erf integral), with white noise
+of 0, 1 or 3 ppb; the instrument written 7.0 to 7.9 s late (shifts −7.0 to
+−7.9 s) in steps of 0.1 s; three geometries, two 1 s analyzers whose cells
+line up in true time, two half a cell apart, and a 0.993 s analyzer against a
+2 s one; shifts in 0.01 s steps.
+First the candidates, each written out from its definition (four draws of the
+air), without noise:
+
+| method | error without noise |
+|---|---|
+| whole seconds, as the peak gives them (as first built) | 0.5 s off on average, always to one side; up to 1.4 s |
+| whole seconds, rounded half up | up to 1.0 s |
+| a parabola through r at the whole-second peak | 0.1 to 1.0 s, by geometry |
+| **r on the readings' own cells** | **up to 0.02 s** |
+| the covariance (the cross-correlation of the two step functions) | 0.5 s, half a cell apart |
+| the median of plume centroids | 0.0 to 0.7 s, by window |
+
+Whole seconds cannot be exact, since the information is gone before the
+correlation is taken; and rounding a midpoint is ill-posed besides, since a
+1 s cell starting on a whole second has its midpoint on .5 (numpy rounds .5 to
+even). The covariance is piecewise linear in s with its corners where cells
+align, so it can only peak there. Then the method chosen, re-run through the
+package (`refined_shift` after the package's own whole-second search, 300 cells
+at least, six draws by ten shifts): the root-mean-square error over the 2, 4 and
+12 s plumes, and in brackets the largest error, in seconds:
+
+| geometry | noise | noise kept | stated noise removed | stated sigma 1.5 times too large |
+|---|---|---|---|---|
+| two 1 s, lined up | none | 0 (0) | | |
+| | 1 ppb | 0.15–0.37 (0.40) | 0.02–0.09 (0.15) | 0 (0) |
+| | 3 ppb | 0.40–0.49 (0.53) | 0.10–0.45 (0.93) | 0–0.41 (1.0) |
+| two 1 s, half a cell apart | none | 0–0.011 (0.02) | | |
+| | 1 ppb | 0.014–0.026 (0.05) | 0.020–0.081 (0.14) | 0.04–0.50 (0.50) |
+| | 3 ppb | 0.016–0.41 (1.0) | 0.07–0.49 (0.94) | 0.50 (0.50) |
+| 0.993 s against 2 s | none | 0–0.028 (0.06) | | |
+| | 1 ppb | 0.016–0.061 (0.13) | the same | the same |
+| | 3 ppb | 0.08–0.27 (0.45) | 0.08–0.26 (0.45) | 0.08–0.25 (0.45) |
+
+Without noise the shift on the readings' own cells is exact where the cells line
+up, since each joined value is then exactly the other's reading; elsewhere a
+joined reading is the mean of a cell reaching past the one it is joined onto
+(the borrowed share, §11.2.4), which costs nothing on 2 and 4 s plumes and up
+to 0.02 s (half a cell apart) and 0.06 s (0.993 s on 2 s) on 12 s plumes,
+whose peaks are flat. The cell model allows a shift below a second; how far
+below depends on the plumes. **The noise term.** With noise, averaging lowers
+the joined series' noise by an amount that changes with s (two readings
+averaged half and half have half the noise variance of one), and r rises where
+the noise falls. Where the cells line up at the true shift that pulls the
+measured one off it, toward the half-cell blends either side; half a cell
+apart it happens to pull toward the true shift; 0.993 s cells on 2 s cells
+average two or three readings at every s and barely move. When the joined readings carry a random
+sigma that the manifest declares or the files report (§2.4) for every one of
+them, each cell's noise variance, Σ w²σ² / (Σ w)² over its overlap weights w,
+is taken out of the joined series' variance before r is formed (the classical
+correction for attenuation), and the measurement and the segment say so
+(`noise_removed`). That trades a bias that depends on the geometry, sometimes
+helpfully, for none: where the cells line up it takes the root-mean-square
+error at 1 ppb from 0.15–0.37 s to 0.02–0.09 s; half a cell apart it costs a
+little (0.014–0.026 s becomes 0.020–0.081 s). It is never taken out with a
+sigma the survey estimates itself, because a wrong sigma moves the shift (the
+last column; its perfect score where the cells line up is the over-correction
+pushing toward alignment, which is where the true shift is there); a
+first-difference estimate read these readings' noise 1.04 to 1.29 times too
+high. At 3 ppb on 12 s plumes every variant scatters by up to a second: the
+peak is too flat for the noise. Monte Carlo in `tests/survey/test_shifts.py`
+(two 1 s analyzers lined up in true time, 12 s plumes, 1 ppb, three draws by
+five shifts): root-mean-square error 0.371 s with the noise kept, 0.085 s with
+it removed. What real data supports is another matter: on the 2024 SLC-SOS van
+r at the peak was 0.6 to 0.97, far more unshared variance than here, so the
+resolution worth asking for is measured there (§12.7).
+
+**Cells that do not tile.** Counting only cells the join covers fully needs
+the joined series to cover the target's cells at every step of the lattice.
+Cells with holes between them do so only where the two sets of cells line up:
+the shape of a slow analyzer written into a merge file's 1 s rows, a value in
+only some of them (the 2024 NOAA drive files, §9.2.3). Found in the second
+walkthrough of 2026-11-04 and measured under the rule above (exact cell means,
+no noise, true shift −7.3 s, both series 1 s cells, one kept every other
+second at phase φ; the first column measured before the fix, the second a test
+in `tests/survey/test_shifts.py`):
+
+| φ | gappy series joined (as the partner was on every tie) | gappy series keeps its cells | both tile |
+|---|---|---|---|
+| 0.00 | −7.00 | −7.30 | −7.30 |
+| 0.25 | none (segment undecided) | −7.30 | −7.30 |
+| 0.50 | −7.50 | −7.30 | −7.30 |
+| 0.75 | none (segment undecided) | −7.30 | −7.30 |
+
+So on a tie in width the series with fewer readings keeps its cells, and the
+denser one covers them at every step: every row now reads −7.30. What that
+cannot mend is a gappy series narrower than a tiling one, joined onto it by
+the first rule: 1 s cells kept every other second never cover a 2 s cell
+(no step has a fully covered cell), and kept two seconds in three they cover
+it at 4 of 41 steps, all where the cells line up (compared there, −7.8 s for a
+true −7.3). A pair whose joined cells cover the target's at no step, or leave
+some step with fewer than half the fully covered cells of the best-covered
+step (`_MIN_COVERED_SHARE`; on cells that tile the count varies only by the
+few cells at a record's ends), is not refined: the segment keeps its
+whole-second peak, which needs no cells, says so in the column `refined` of
+the measurement and segment tables, and a run of such decided segments is
+named (§12.5). A shift good to a second, named, is worth more to a reviewer
+than one at the cells' alignment presented as good to a tenth, or no shift at
+all. The minimum is tested on the cells as on whole seconds, once, at the best
+step: a pair covering fewer cells whole there is not refined either. Found in
+the second walkthrough: tested at every step, it let only the steps that
+cleared it compete, and on a 2 s analyzer against a 1 s partner missing one
+reading (the steps lined up with the hole cover one 2 s cell more than the
+true step does) a true −7.3 s came back as −7.0 s called refined
+(`tests/survey/test_shifts.py`).
+
+**Tiers.** A tier with several pairs averages their correlation curves before
+the best shift is chosen, so that weak pairs sharing a shift strengthen each
+other. Averaging assumes they share it: measured while building, pairs certain
+alone at −4 s and at −10 s pool to a curve peaking at −7 s with r 0.76, a
+shift neither supports. So a pair that is decided on its own (its own peak
+pairs the minimum, at r of at least the threshold) and puts its best shift
+further than the tolerance from the pooled one makes the tier's **pairs
+disagree**, and the tier undecided; a pair too weak to decide alone cannot.
+An instrument's tiers are ranked: one gas on two analyzers first (they share
+every plume and the same physics), gases emitted together next (they share
+only some plumes, and their shift also carries the difference in the analyzers'
+response times), a backup last. The first tier that decides a segment and
+reaches the reference clock sets its shift: a tier whose partner is undecided in
+that segment has nothing to compose with and gives way to the next. Found in
+the walkthrough: taking the first tier that decided, whether or not it reached
+the reference clock, left a segment undecided while its backup had measured
+the shift straight onto the reference clock. A later tier that decides too
+checks the one chosen: each tier's shift is composed onto
+the reference clock through its own partner, and shifts further apart than the
+tolerance are named.
+
+**The chain.** An instrument's shift onto its partner, plus the shift the
+partner's own rows apply where the segment's air lands on the partner's clock
+(the segment's midpoint moved by the shift onto the partner, then back onto
+the clock the partner's files recorded), is its shift onto the reference
+clock; the reference clock's instrument is zero everywhere, and a segment that
+a tier decides but no row of any deciding tier's partner reaches is undecided
+(`partner undecided`). Composing through the partner's rows rather than its
+segment measurements passes on the shift the partner's readings are actually
+corrected by, including where the partner's own segment was set aside as an
+outlier, bridged, or too short inside a row. Found in the second walkthrough
+of 2026-11-09: composed through the partner's measurements, an instrument tied
+to a partner with an outlier segment was left uncorrected there (592 of 5,400
+readings, notebook 08 §5's fixture with a fourth instrument tied to `odd`),
+although the partner's row corrected the partner's readings. The instrument
+now takes the partner's bet (§12.4, Outliers): if the set-aside segment was a
+coincidence of plumes both are right, and if the partner's clock really moved
+there both are wrong by the same amount, consistent with each other, and the
+partner's outlier fault names the stretch. A partner measured as an
+after-check has no rows and passes on its residuals. One
+well-measured link carries every instrument tied to it: on the 2024 SLC-SOS
+van, the Picarro log against the weather station by water, and every other
+analyzer against the Picarro log.
+
+**Outliers.** A decided segment whose shift differs by more than the tolerance
+from both its decided neighbours, while they agree with each other, is set
+aside: one segment against two is more likely a coincidence of plumes than two
+clock steps in a row. It stays inside the row around it. Its neighbours are
+the adjacent segments, reached past segments too short to measure but not past
+a segment with no readings. Found in the walkthrough: taking the nearest
+decided segments however far away set aside a stretch between two logging
+stops hours apart, where the clock may really have been elsewhere; now it is
+its own row with a step on either side.
+
+**Rows.** Consecutive decided segments whose shifts agree within the tolerance
+become one row; a larger jump starts a new row and is a clock step. A segment
+with readings and no decision (`too few pairs`, `weak correlation`, `at
+search edge`, `pairs disagree`, `partner undecided`) ends the row before it, so its readings stay
+uncorrected and ingestion says so; segments with no readings do not. A segment
+holding fewer readings than any of the instrument's tiers needs paired seconds
+is `too short`: undecidable by construction, not by the evidence, it neither
+ends a row nor counts as undecided, and the first and last rows reach over the
+too-short segments at the record's ends, the slivers a record's first and last
+segments usually are. **Bridging.** Up to `max_bridged` of undecided segments
+between two decided ones are bridged into one row instead, when the two shifts
+agree within the tolerance and the instrument's readings run from the segment
+before to the segment after without a logging stop (a gap of a minute or
+more): a logging stop is where a clock steps unseen (§12.2), and a shift that
+agrees on both sides of an unbroken record is the evidence that it did not.
+The bridge is named, and the row's reason counts the segments it bridged. At
+the default of 0 s nothing is bridged; a van whose tracers go quiet in mid-drive
+(zero air, a calibration, a parked stretch without plumes) may want some.
+Which segments a row covers is counted on its final span, not its segments:
+rows meeting at a step's gap inside an undecided segment correct all its
+readings, so it is not undecided (found in the walkthrough: it was named
+undecided while its readings were corrected). A segment no tier decided names
+no tier (`tier` is NA; it read 0, like a real tier).
+
+**Drift.** A row of three or more segments is a clock drift, written with `shift_end`, when the least-squares line through
+their shifts changes across the row by more than the resolution **and** by
+more than three standard errors of that change, the standard error taken from
+the segments' own scatter about the line (n − 2 degrees of freedom) and
+floored at the resolution's rounding, resolution/√12; otherwise the row's
+shift is the median of its segments'. A run holding a segment left at its
+whole-second peak is judged at a second. The line is evaluated at the row's own start and end, which may lie
+beyond its segments (a row reaching over a record's short end segments, or
+meeting its neighbour at a step's gap). Found building notebook 08: evaluated
+at the last segment's edge instead, a row reaching ten minutes further spread
+the same change over a longer stretch, so a clock drifting 6 s an hour was
+corrected at 5.4. At the default resolution a segment's shift is a whole
+number of seconds, so a drifting clock's shifts sit on a staircase and the line
+through them misses the rate by a few percent: 5.7 % on a clock gaining 1 s
+every 10 minutes, 1.7 % at a resolution of 0.1 s
+(`tests/survey/test_survey_clocks.py`).
+
+The rule was first the tolerance, the number that also decides a step, so a
+clock drifting by less than the tolerance across a row was written as a
+constant, wrong by up to half its change. Found in the second walkthrough of
+2026-11-09 and measured on simulated segments under this rule (10 min
+segments; each segment's shift the true shift at its midpoint plus Gaussian scatter σ,
+rounded to the resolution, as the refinement lands on the nearest step;
+tolerance 2 s; the error over the whole record; 200 records where σ > 0; the
+old rule's numbers reproduce the survey's own on notebook 08 §5's fixture),
+the largest error, old rule → a change beyond the resolution alone → the rule
+above:
+
+| record | clock | resolution | σ | largest error (s) |
+|---|---|---|---|---|
+| 1.5 h | drifting 0.5 s/h | 1 s | 0 | 0.75 → 0.34 → 0.34 |
+| 1.5 h | drifting 1 s/h | 1 s | 0 | 1.00 → 0.16 → 0.16 |
+| 1.5 h | drifting 1 s/h | 0.1 s | 0 | 0.80 → 0.01 → 0.01 |
+| 24 h | drifting 1 s/day | 1 s | 0 | 0.96 → 0.27 → 0.27 |
+| 24 h | drifting 1 s/day | 0.1 s | 0 | 0.50 → 0.00 → 0.00 |
+| 6 h | steady | 0.1 s | 0.5 s | 0.11 → 0.24 → 0.16 |
+
+On the steady clock with 0.5 s of scatter the three rules write 0.01, 0.86
+and 0.02 drift rows per record, and across a real step (−7 → −19 s) the
+resolution alone writes 1.7 per record and the rule above 0.03: a line through
+scattered segments changes a little by chance, which is what the standard
+error guards. The fourth row is a real case: on the 2024 SLC-SOS van the
+MIRO's EOL file drifted about a second a day earlier against four other
+instruments over 2024-08-08 to 08-14 (30 min segments decided at r ≥ 0.6,
+measured outside the package for the SLC-SOS alignment).
+
+What it leaves: steps are still judged between consecutive segments against
+the tolerance, so a clock changing by more than the tolerance per segment is
+written as a staircase of short rows (a `fast drift` past three steps,
+§12.5), and scatter splits a moderate drift the same way. Measured under the
+rule above: 18 s/h at 1 s resolution, 2.98 s largest error; 12 s/h with
+0.5 s of scatter over 6 h, 2.57 s over about ten rows. A merge of adjacent
+rows that no hole or logging stop separates, kept when one line leaves every
+segment within the tolerance, fixes many of these (that 12 s/h case: 0.22 s,
+one row) but turns a clock set back 3 s with no gap into a record-long drift
+and never merges a staircase of one-segment rows (the same simulation). Not
+built
+(owner, 2026-11-09): no real log measured so far drifts that fast, the fast
+drifts known come from files whose times count rows (§12.2), and the fault
+names the staircase and its remedy, a shorter segment.
+
+**Where a step goes.** A step happens where a logger stopped or its clock
+jumped, not at a segment edge. Between two rows across a step, the survey
+looks at the instrument's readings from the last decided segment before the
+step to the first after it, across any undecided segments between, for the
+one gap the step explains. First the hole a clock leaves when it jumps
+forward (its shift falling by J): a gap longer than twice the readings'
+median spacing whose excess over that spacing is J within the tolerance. A
+clock set back leaves no hole, and no gap can match it. Failing a hole, a
+logging stop (a minute or more), where clocks step (§12.2). The rows meet at
+the reading after that gap when it is the only one of its kind; when there is
+none, or more than one (two logging stops, two gaps the size of the jump),
+they meet at the segment edges, leaving any undecided segment between them
+undecided and named. Measured on the known answer below, this puts a step exactly where
+the exported clock error stepped; at the segment edge, readings between the
+edge and the step took the wrong shift, landed on earlier readings' times and
+were dropped as duplicates. Found in the second walkthrough of 2026-11-04: the
+rule was first the longest gap of any kind, which a dropout inside an
+undecided stretch can be. Measured on 1 s plume streams with 10 min segments,
+the tracer missing for 30 min and the clock stepping 10 s in the middle
+(readings shifted 10 s wrong in that stretch, before → after the fix):
+
+| case | before | after |
+|---|---|---|
+| clock jumps forward, no dropout | 0, at the step | 0, at the step |
+| clock set back, no dropout | 0, at the edges, named undecided | the same |
+| clock set back, a 5 s dropout elsewhere | **695**, at the dropout, not named | 0, at the edges, named undecided |
+| clock jumps forward, a 30 s dropout elsewhere | **670**, at the dropout, not named | 0, at the step |
+| clock set back at a 90 s logging stop | 0, at the stop | the same |
+
+The last three, on one hour of readings with the tracer missing for 20 min,
+are tests in `tests/survey/test_survey_clocks.py` (395 and 370 readings wrong
+before the fix, 0 after); the first two were tested already. So are the
+rule's limits: two logging stops leave a clock set back at the edges; a
+forward jump's hole places it before a logging stop elsewhere does; two gaps
+the size of the jump leave it at the edges, a logging stop being no
+tiebreak; a hole is measured beyond the readings' own spacing (on a record of
+one reading every 5 s a 10 s jump leaves a 15 s gap); and one dropped reading
+(a 2 s gap on 1 s readings) places nothing, though its 1 s excess is within
+the tolerance of a 3 s jump whose own hole fell inside a dropout.
+
+**The recorded clock.** A table is keyed on the clock each file recorded (§12.3),
+while a stream's times are cell midpoints after any `time_shift`. Row edges are
+moved back by both, using the stream's own `tsara_time_shift`,
+`tsara_support_label` and `tsara_nominal_cell_width_s`: a start label sits half
+a cell before the midpoint, an end label half a cell after, and `mid` and
+`unknown` (centred when assumed) on it.
+
+**After-check.** A stream that already carries clock corrections is measured
+and gets no rows (fault `after-check`): its shifts are the residuals of a table
+already applied, and every decided one should sit within about a second of
+zero. The fault states them: the decided segments, the range of their
+residuals and how many lie beyond the tolerance (found in the second
+walkthrough: it said only that no rows were derived, so a reviewer had to open
+the segments table to learn whether the table had worked). That holds however much of the stream the table corrected: a stream
+corrected only up to a clock step is measured after the step too, and its shift
+there appears among the survey's segments as a residual, not as a row. One rule: rows come
+from the campaign as written, and the after-check checks them. A residual is
+mended in the table, by hand or by surveying the uncorrected streams again. A
+second table cannot be laid over the first, since two rows of one instrument
+may not overlap across all the tables a manifest names (§12.3).
+
+**The table written, and the survey saved.** `write_clock_corrections`
+(`tsara.core.clocks`) checks the rows as a table first, so that a file it writes
+is one ingestion accepts, and writes each shift as exact decimal seconds
+(`-10.5s`), since a person reads it. It refuses to write no rows.
+`save_clock_survey` writes a bundle's `survey/` directory: the table as
+`clock_corrections.csv` (absent when no row was derived, and a stale one
+removed), the three tables behind it as Parquet with declared column types, and
+the settings as a survey YAML; `load_clock_survey` reads it back exactly, each
+row through the reader ingestion uses.
+
+**Checked on a known answer.** Three methane analyzers on generated plumes,
+exported with clock errors (one 7 s fast, then 19 s fast from the second
+hour, shifts −7 s and −19 s; one 4 s slow, +4 s, measured only against the
+first) and ingested without a
+table: the survey finds both through the chain, puts the step at the reading
+it happened at, and its own table, applied at ingestion, puts every reading of
+every instrument on its true time to the nanosecond with no reading dropped;
+surveyed again, every decided shift is zero
+(`tests/survey/test_survey_clocks.py`). The same loop with clock errors that
+are not whole seconds (shifts −7.3 s, then −19.6 s; +4.25 s), every reading the
+mean of noise-free air over its cell, at a resolution of 0.05 s: the survey
+gives each shift back exactly, through the chain, and its table puts every
+reading on its true time. At a resolution of a second a clock 7.7 s late is
+written as −8 s, not the −7 s the whole-second peak gave.
+
+### 12.5 What the survey names instead of fitting **[built 2026-11-03 — stage 2; `bridged`, walkthrough stage A2]**
+
+Each fault is reported by name with the stretch of segments behind it
+(`ClockSurvey.faults`, the kinds in `tsara.survey.FAULT_KINDS`):
+
+- **clock step**: shifts jumping by more than the tolerance between rows, with
+  the longest gap in the readings across it when that is a logging stop of a
+  minute or more;
+- **clock drift**: a row written with `shift_end` (§12.4, Drift), with its
+  rate in seconds per hour;
+- **fast drift**: three or more clock steps of one sign in a row, a drift
+  faster than the tolerance per segment, which a shorter segment resolves;
+- **undecided**: each run of segments with readings that no row's span holds,
+  with why each was not decided (`too few pairs`: no tier paired the minimum at
+  its peak, as where a tracer is missing or zero air flows; `weak correlation`:
+  one did and the air did not correlate, as on a parked van in flat air; and
+  the other statuses of §12.4, Rows);
+- **bridged**: a stretch of undecided segments a row bridges (`max_bridged`),
+  with the agreeing shifts either side;
+- **tiers disagree**: two tiers composing onto the reference clock further apart
+  than the tolerance;
+- **outlier**: a segment set aside against two agreeing neighbours;
+- **after-check**: a stream measured but given no rows, with its residuals;
+- **whole seconds**: a run of decided segments whose shift is the whole-second
+  peak, because the joined readings' cells line up with the others' at only
+  some steps of the resolution, or at none, or cover too few whole at the best
+  step (§12.4, "Cells that do not tile").
+
+A drift close to a cadence error, together with steps at the instrument's
+logging stops, is the signature of times counted by rows (§12.2): the remedy
+is the right file, not a longer table.
+
+### 12.6 Alternatives not taken
+
+- **One shift per instrument, for a campaign or a drive.** It cannot follow the
+  clock steps and drifts of §12.2, which happen inside drives.
+- **Correlating the series as written.** Background swings over minutes that
+  two instruments do not share would weigh in the correlation like plumes;
+  with the running median removed, plumes decide. On generated air, whose
+  background every instrument shares, the median changes nothing (notebook
+  08 §3: the same shift and r without it; a shared wander of 97 ppb, none;
+  of 487 ppb, a wider curve with the same peak), so its value is a claim
+  about real records, measured there (§12.7).
+- **Gases emitted together on their own.** Their shift includes the analyzers'
+  different response times, and they share only some plumes. They check the
+  shift; one gas on two analyzers sets it where it can.
+- **Matching single peaks, or warping one series onto another.** One matched
+  peak can pair plumes that are not the same air, and nothing inside the match
+  can tell. A segment's shift rests on every plume in it, and a tier below checks
+  it.
+- **Applying the survey's table automatically.** A measured shift can be a
+  coincidence of plumes, and a correction table is short enough to read.
+
+### 12.7 What the real campaign still has to show
+
+The machinery is checked on generated air with a known answer. A campaign
+exported with clock errors (a constant, a step, and errors that are not a
+whole number of seconds) is ingested without a table; the survey recovers
+each shift through the chain, to the resolution, and its own table puts every
+reading on its true time with no reading dropped; surveyed again, every shift
+is zero (§12.4). A drift, a fast drift and a step across a logging stop are
+checked on hand-built streams in the survey's tests, since the exporter writes
+constant errors only.
+
+What real files do to it is measured by the SLC-SOS clock alignment of the
+2024 University of Wyoming van, done with TSARA as a tool outside the package
+(decided 2026-11-04, when that work was taken out of this phase), and comes
+back here:
+
+- §12.1's table and §12.2's row-counted times and Picarro-log steps, through
+  the package on the analyzers' own logs. Times counted by rows are the real
+  case of the signature §12.5 names.
+- What an overlap at a falling clock step does to ordering and de-duplication
+  (§12.3).
+- What the Aeris log's 2 s step back in the first minutes of 11 files (§12.3)
+  costs the segment that holds it.
+- The resolution real data supports (§12.4): segment-to-segment scatter and
+  the agreement of independent tiers, where r at the peak is 0.6 to 0.97.
+  The scatter also decides whether the staircases of §12.4 (Drift) matter.
+- What the running median does on real records (§12.6), where background
+  swings two instruments do not share are expected and unmeasured.
+- The reference clock where the van's GPS receiver left no record. After
+  2024-08-16 the van's position and weather come from a tracking feed on the
+  logging computer's clock, not the receiver's. On its last three drives
+  (2024-08-27 and 08-28) no record holds a humidity to tie a gas to any GPS
+  clock, so their clock can only be carried from a neighbouring day, with its
+  uncertainty stated.
 
 ---
 

@@ -18,9 +18,10 @@ from typing import TYPE_CHECKING, get_args
 import pytest
 from pydantic import BaseModel
 
-from tsara import load_analysis, load_manifest, load_synthetic
+from tsara import load_analysis, load_manifest, load_survey, load_synthetic
 from tsara.config import analysis as analysis_schema
 from tsara.config import manifest as manifest_schema
+from tsara.config import survey as survey_schema
 from tsara.config.synthetic import SyntheticConfig
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -35,6 +36,7 @@ _LOADERS: dict[str, Callable[[Path], object]] = {
     "manifest_": load_manifest,
     "analysis_": load_analysis,
     "synthetic_": load_synthetic,
+    "survey_": load_survey,
 }
 
 
@@ -103,6 +105,7 @@ EXEMPT_FIELDS: dict[str, str] = {
 SCHEMA_ROOTS: dict[str, tuple[type[BaseModel], str]] = {
     "manifest": (manifest_schema.Manifest, "manifest_*.yaml"),
     "analysis": (analysis_schema.AnalysisConfig, "analysis_*.yaml"),
+    "survey": (survey_schema.SurveyConfig, "survey_*.yaml"),
 }
 
 

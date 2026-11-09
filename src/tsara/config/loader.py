@@ -14,7 +14,7 @@ unique keys, but PyYAML's ``safe_load`` keeps whichever value came last and
 says nothing, so a variable pasted twice under one instrument would have
 silently lost its first definition.
 
-Four entry points:
+Five entry points:
 
 * :func:`load_manifest` — a YAML file containing a manifest.
 * :func:`load_analysis` — a YAML file containing analysis settings.
@@ -24,6 +24,8 @@ Four entry points:
   regression reference species must actually be a declared gas).
 * :func:`load_synthetic` — a YAML file describing a synthetic dataset to
   manufacture (Phase 2).
+* :func:`load_survey` — a YAML file of survey settings: what to measure
+  before the pipeline, such as each instrument's clock (Phase 3.6).
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from yaml.constructor import ConstructorError
 from tsara.config.analysis import AnalysisConfig, FromFieldMethod
 from tsara.config.base import StrictModel as _StrictModel
 from tsara.config.manifest import Manifest
+from tsara.config.survey import SurveyConfig
 from tsara.config.synthetic import SyntheticConfig
 from tsara.core.exceptions import TsaraConfigError
 
@@ -492,6 +495,30 @@ def load_synthetic(path: str | Path) -> SyntheticConfig:
     return config
 
 
+def load_survey(path: str | Path) -> SurveyConfig:
+    """Load and validate a survey-settings YAML file.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        Path to the survey YAML.
+
+    Returns
+    -------
+    SurveyConfig
+        Frozen, validated survey settings.
+
+    Raises
+    ------
+    TsaraConfigError
+        If the file is missing, is not valid YAML, or fails validation.
+    """
+    path = Path(path)
+    config: SurveyConfig = _validate(SurveyConfig, read_yaml(path), path)
+    logger.info("Loaded survey settings from %s", path)
+    return config
+
+
 def _validate(model_cls: type[_ModelT], data: dict[str, Any], path: Path) -> _ModelT:
     """Run Pydantic validation, re-raising with the file path attached.
 
@@ -508,10 +535,11 @@ def _validate(model_cls: type[_ModelT], data: dict[str, Any], path: Path) -> _Mo
 def _resolve_base_path(manifest: Manifest, anchor: Path) -> Manifest:
     """Resolve the manifest's relative paths against the manifest file's directory.
 
-    ``base_path`` and every ``exclude_periods`` file. Rationale: a manifest
-    checked into a project repo should be able to say ``base_path: ../data``
-    and ``exclude_periods: calibrations.csv`` and work for every collaborator
-    regardless of their working directory when they launch TSARA. Absolute
+    ``base_path`` and every ``exclude_periods`` and ``clock_corrections``
+    file. Rationale: a manifest checked into a project repo should be able to
+    say ``base_path: ../data`` and ``exclude_periods: calibrations.csv`` and work
+    for every collaborator regardless of their working directory when they
+    launch TSARA. Absolute
     paths pass through untouched. Configs are frozen, so this returns a *new*
     Manifest rather than mutating.
     """
@@ -520,12 +548,13 @@ def _resolve_base_path(manifest: Manifest, anchor: Path) -> Manifest:
         resolved = (anchor / manifest.base_path).resolve()
         logger.debug("Resolved relative base_path %s -> %s", manifest.base_path, resolved)
         updates["base_path"] = resolved
-    periods = tuple(
-        path if path.is_absolute() else (anchor / path).resolve()
-        for path in manifest.exclude_periods
-    )
-    if periods != manifest.exclude_periods:
-        updates["exclude_periods"] = periods
+    for name in ("exclude_periods", "clock_corrections"):
+        listed: tuple[Path, ...] = getattr(manifest, name)
+        resolved_files = tuple(
+            path if path.is_absolute() else (anchor / path).resolve() for path in listed
+        )
+        if resolved_files != listed:
+            updates[name] = resolved_files
     if not updates:
         return manifest
     return manifest.model_copy(update=updates)

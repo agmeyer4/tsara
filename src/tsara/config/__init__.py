@@ -15,6 +15,10 @@ synthetic
     *What fake reality to manufacture*: an atmosphere, its sources and the
     instruments sampling it, with every ground truth stated. A schema like
     the other two, consumed by :mod:`tsara.synthetic`.
+survey
+    *What to measure before the pipeline*: the clock survey's reference
+    clock, tracer pairs in tiers, and segment, search and decision settings.
+    A schema consumed by :mod:`tsara.survey`.
 loader
     YAML → validated config objects, with readable error reporting and
     manifest-relative path resolution.

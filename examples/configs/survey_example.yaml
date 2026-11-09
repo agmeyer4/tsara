@@ -1,0 +1,84 @@
+# Survey settings: what to measure before the pipeline (docs/METHODS.md §12).
+#
+# The clock survey reads a campaign ingested WITHOUT a correction table,
+# measures the shift that puts each instrument's files on a partner's clock,
+# segment by segment, chains every instrument to one reference clock, and
+# writes the rows of a correction table. A shift is seconds added to a
+# recorded time (corrected = recorded + shift): a file showing the air 7 s
+# late needs -7 s. Nothing it writes is applied until a person has read the
+# table and named it in the manifest's clock_corrections.
+#
+#   from tsara import load_manifest, load_survey
+#   from tsara.ingest import ingest_campaign
+#   from tsara.survey import survey_clocks
+#   survey = survey_clocks(ingest_campaign(load_manifest("manifest.yaml")),
+#                          load_survey("survey_example.yaml"))
+#   survey.write_table("clock_corrections.csv")   # review, then name it
+
+# The instrument whose clock every other is put on. It has no tiers: here a
+# GPS-timed weather station, whose receiver keeps UTC.
+reference_clock: airmar
+
+# One shift is measured per segment of this length, on a grid shared by every
+# instrument. Shorter segments follow a clock that changes faster; longer
+# ones hold more plumes each. Tune it to the campaign.
+segment: 30min
+
+# How far either way a shift is searched for. A best shift at the edge of the
+# search is never decided, since the true one may lie beyond. Whole seconds.
+search: 120s
+
+# The step the shift is measured to, at most a second. The search above finds
+# the peak on whole seconds; the shift is then measured on the readings' own
+# cells at multiples of this. Below a second, a joined analyzer's noise is
+# removed only when its manifest declares (or its files report) a random
+# sigma; each segment says whether it was.
+resolution: 0.1s
+
+# Paired seconds a segment's best shift needs (tested at the peak, not at every
+# shift), and the correlation there that decides the segment.
+min_pairs: 300
+min_r: 0.6
+
+# Segments whose shifts agree within this become one row of the table; a larger
+# jump is a clock step. (A row drifts when its steady change exceeds the
+# resolution and its segments' own scatter, not this.)
+tolerance: 2s
+
+# Up to how long a stretch of undecided segments a row may bridge, when the
+# shifts on either side agree within the tolerance and the readings run across
+# it without a logging stop (a gap of a minute or more). The default, 0s,
+# never bridges; a van whose tracers go quiet for a while in mid-drive (zero
+# air, a calibration, a parked stretch without plumes) may want a little.
+max_bridged: 30min
+
+# The centred running median removed from every series first, so that plumes
+# rather than the background's slow swings decide the correlation.
+running_median: 121s
+
+# For each instrument, its tiers in order. A tier names the partner it is
+# measured against and its tracer pairs: [variable here, variable on the
+# partner], expected to show the same plumes. The first tier that decides a
+# segment sets its shift; the others check it. Every chain of partners must end
+# at the reference clock.
+tracers:
+  picarro:
+    - partner: airmar
+      pairs: [[h2o, rh]]          # water against relative humidity
+      min_pairs: 100              # the weather station logs every 5 s
+  aeris:
+    - partner: picarro
+      pairs: [[ch4, ch4]]         # one gas on two analyzers first ...
+    - partner: picarro
+      pairs: [[h2o, h2o]]         # ... then a backup
+  miro:
+    - partner: picarro
+      pairs: [[ch4, ch4], [co, co]]   # two pairs in one tier are pooled
+  caps:
+    - partner: miro
+      pairs: [[nox, nox]]
+    - partner: picarro
+      pairs: [[nox, co2]]         # gases emitted together, when the MIRO is off
+  ptr:
+    - partner: picarro
+      pairs: [[aromatics, co]]

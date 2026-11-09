@@ -25,6 +25,7 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 2 | Synthetic data generator with ground-truth plumes *and* ground-truth error | ✅ done |
 | 3 | Ingestion (reader registry, CSV / ICARTT / Parquet, crawler, QA/QC, units, uncertainty) | ✅ done |
 | 3.5 | Temporal support: every value carries the interval of air it describes | ✅ done |
+| 3.6 | Clocks: a correction table applied at ingestion, and a survey that measures it from tracer pairs | ✅ done |
 | 4 | Alignment & pairing (one joining operation, error propagation, circular stats, output grid) | ✅ done |
 | 4.5 | One atmosphere, realized once and sampled by every instrument; a variable's `field` | ✅ done |
 | 4.6 | How support may be changed at all: one per-pair rule, a record on every column of what the join did, the borrowed share | ✅ done |
@@ -258,7 +259,13 @@ disagreements rather than picking a winner. (`METHODS.md` §9.2)
 rules per variable, plus `exclude_periods`: files listing the stretches a
 campaign knows to leave out, such as calibrations and a known-bad hour, each
 with its scope and reason. Readings inside them are masked, never deleted,
-and counted like any rule. (`METHODS.md` §9.4)
+and counted like any rule. (`METHODS.md` §9.4) Clocks are declared the same
+way: `clock_corrections` names files of shifts, one row per stretch of one
+instrument, that put every instrument on one reference clock; each file's
+times are corrected as it is read, and a reading no row holds keeps its time
+and is counted. The clock survey (`tsara.survey`) measures such a table from
+the data, segment by segment from tracer pairs, for a person to review before
+it is named. (`METHODS.md` §12)
 
 **A value is not an instant.** Most real archives publish intervals: a
 1-minute mean, a canister fill, a sample whose timestamp is a start time by
@@ -408,6 +415,16 @@ without being run, and none needs any real data:
   definition, the tree that links a blip's candidates across windows, height
   against agreement as evidence on the answer key, and what the ratio stage
   receives. Same shape as 05.
+- [`08_clocks_walkthrough.ipynb`](examples/notebooks/08_clocks_walkthrough.ipynb)
+  — clocks: what a few seconds' error costs a per-plume fit between two
+  analyzers of one gas; an archive written on wrong clocks and the correction
+  table that puts it right as each file is read (and the readings a missing
+  row leaves alone, counted); one segment's shift from shared plumes against a
+  loop written from the definition; the survey on a whole campaign, the chain
+  through a partner to the reference clock and a step placed where it
+  happened; a drifting clock, an outlier and an undecided stretch, named; and
+  the loop closed, the survey's own table applied and the campaign surveyed
+  again. Same shape as 05.
 
 Three companions run on the real campaign archive instead, and are therefore
 committed **without** outputs:
@@ -444,7 +461,7 @@ pytest --cov=tsara --cov-branch     # suite; the 100% line+branch floor fails th
 TSARA_ARCHIVE=/path/to/Data TSARA_NOTEBOOKS=1 pytest tests/test_notebooks.py \
     tests/events/test_candidates_real_drive.py
                             # opt-in: executes notebooks 04b, 05b and 06b (against
-                            # the archive) and 04, 05, 06 and 07, and requires every
+                            # the archive) and 04 to 08, and requires every
                             # check and ledger row to hold; re-measures METHODS
                             # §6.8's real drive
 TSARA_SLOW=1 pytest tests/events/test_methods_tables.py tests/events/test_candidate_tables.py

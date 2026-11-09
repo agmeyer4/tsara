@@ -55,7 +55,7 @@ import numpy as np
 import pandas as pd
 
 from tsara.core.naming import RAW_TIME_START_COLUMN, RAW_TIME_STOP_COLUMN
-from tsara.core.timebase import epoch_ns, timestamp_epoch_ns
+from tsara.core.timebase import epoch_ns, iso_utc, timestamp_epoch_ns
 from tsara.ingest.base import TsaraIngestError
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -127,7 +127,7 @@ class ExcludedPeriod:
 
     def describe(self) -> str:
         """One line for messages and attributes: span, scope and reason."""
-        text = f"{_iso(self.start_ns)}/{_iso(self.end_ns)}"
+        text = f"{iso_utc(self.start_ns)}/{iso_utc(self.end_ns)}"
         if self.instrument is not None:
             text += f" {self.instrument}"
             if self.variable is not None:
@@ -328,8 +328,3 @@ def period_mask(frame: pd.DataFrame, periods: Sequence[ExcludedPeriod]) -> npt.N
 def describe_periods(periods: Iterable[ExcludedPeriod]) -> str:
     """One string naming every period, for a stream attribute."""
     return "; ".join(period.describe() for period in periods)
-
-
-def _iso(ns: int) -> str:
-    """Spell epoch nanoseconds as an ISO 8601 UTC timestamp."""
-    return pd.Timestamp(ns, unit="ns").isoformat() + "Z"

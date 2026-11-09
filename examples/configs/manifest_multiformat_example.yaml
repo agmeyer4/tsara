@@ -115,9 +115,10 @@ instruments:
     description: Methane/ethane analyzer, instrument-aligned stage stored as parquet.
     # A property of the INSTRUMENT, not of its files: how its clock relates to
     # true air-at-inlet time. Added to every timestamp and to both cell
-    # boundaries, so cells move without changing width. Here the logger ran
-    # 4 s fast. Leave it out (the default) when the archive is already
-    # lag-corrected upstream, which is the usual case -- the value applied is
+    # boundaries (corrected = recorded + shift), so cells move without
+    # changing width. Here the logger ran 4 s fast. Leave it out (the default)
+    # when the archive is already time-corrected upstream, which is the usual
+    # case -- the value applied is
     # recorded in the stream attributes so a double correction is visible.
     time_shift: -4s
     loader:

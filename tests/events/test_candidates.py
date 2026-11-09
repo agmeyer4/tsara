@@ -249,7 +249,7 @@ def test_windows_do_not_mix_and_the_parent_is_the_candidate_of_the_seeds_parent(
     assert linked.loc["long", "candidate_id"] == "van.ch4/w600s/c0"
     table = event_candidates(catalog, states_of(exits=(1.0,))).set_index("candidate_id")
     assert table.loc["van.ch4/w120s/c0", "parent_candidate_id"] == "van.ch4/w600s/c0"
-    assert pd.isna(table.loc["van.ch4/w600s/c0", "parent_candidate_id"])
+    assert table["parent_candidate_id"].isna()["van.ch4/w600s/c0"]
 
 
 def test_candidates_are_numbered_in_time_order_and_spelled_from_their_window() -> None:
@@ -286,7 +286,7 @@ def test_a_triggered_variable_takes_its_triggers_candidates() -> None:
     )
     catalog.loc[1, ["instrument", "species", "trigger_event_id"]] = ["can", "benzene", "trigger"]
     linked = link_candidates(catalog).set_index("event_id")
-    assert linked.loc["canister", "candidate_id"] == linked.loc["trigger", "candidate_id"]
+    assert linked["candidate_id"]["canister"] == linked["candidate_id"]["trigger"]
     table = event_candidates(catalog, states_of(exits=(1.0,)))
     assert table["species"].tolist() == ["ch4"]
 

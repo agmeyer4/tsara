@@ -226,8 +226,8 @@ def test_an_event_links_to_the_nearest_longer_window_holding_its_peak_skipping_e
     assert linked.loc["blip", "parent_duration_s"] == 150.0
     assert linked.loc["spike", "parent_event_id"] == "broad"
     assert linked.loc["mid", "parent_event_id"] == "broad"
-    assert pd.isna(linked.loc["broad", "parent_event_id"])
-    assert np.isnan(linked.loc["broad", "parent_duration_s"])
+    assert linked["parent_event_id"].isna()["broad"]
+    assert linked["parent_duration_s"].isna()["broad"]
 
 
 def test_an_interval_holds_a_peak_from_its_start_up_to_its_end() -> None:
@@ -240,7 +240,7 @@ def test_an_interval_holds_a_peak_from_its_start_up_to_its_end() -> None:
     )
     linked = link_parents(catalog).set_index("event_id")
     assert linked.loc["at_start", "parent_event_id"] == "parent"
-    assert pd.isna(linked.loc["at_end", "parent_event_id"])
+    assert linked["parent_event_id"].isna()["at_end"]
 
 
 def test_trees_do_not_cross_quantiles_and_a_peakless_event_has_no_parent() -> None:
@@ -252,8 +252,8 @@ def test_trees_do_not_cross_quantiles_and_a_peakless_event_has_no_parent() -> No
         ]
     )
     linked = link_parents(catalog).set_index("event_id")
-    assert pd.isna(linked.loc["other_q", "parent_event_id"])
-    assert pd.isna(linked.loc["no_peak", "parent_event_id"])
+    assert linked["parent_event_id"].isna()["other_q"]
+    assert linked["parent_event_id"].isna()["no_peak"]
 
 
 def test_the_links_do_not_depend_on_the_callers_index() -> None:

@@ -99,6 +99,7 @@ from tsara.synthetic.background import TsaraSyntheticError
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Mapping, Sequence
 
+    import numpy.typing as npt
     import xarray as xr
 
     from tsara.config.synthetic import SyntheticConfig
@@ -107,6 +108,8 @@ if TYPE_CHECKING:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "ClockError",
+    "EXPORT_CLOCK_CORRECTIONS",
     "EXPORT_MANIFEST",
     "EXPORT_RAW_DIR",
     "RawUnits",
@@ -137,6 +140,9 @@ EXPORT_MANIFEST = "manifest.yaml"
 #: Subdirectory holding the generated raw files.
 EXPORT_RAW_DIR = "raw"
 
+#: Correction table written beside the manifest when clock errors are exported.
+EXPORT_CLOCK_CORRECTIONS = "clock_corrections.csv"
+
 
 @dataclass(frozen=True)
 class RawUnits:
@@ -164,6 +170,49 @@ class RawUnits:
     offset: float = 0.0
 
 
+@dataclass(frozen=True)
+class ClockError:
+    """A clock error to write into one instrument's exported files, given by its correction.
+
+    From ``start`` to ``end`` of true time, the instrument's clock is wrong by
+    whatever ``shift`` corrects: the files receive each reading's time less the
+    shift, so that ``recorded + shift`` is the truth again, and the correction
+    table written beside the manifest holds the same shift, keyed on the
+    recorded clock as a real table is (``docs/METHODS.md`` §12.3). The answer
+    key, the table and the clock survey therefore all carry one number. Same
+    shape as ``time_shift``: write the archive wrong, declare the fix, check
+    that the answer comes back right -- for a stretch rather than a whole
+    instrument.
+
+    Attributes
+    ----------
+    start, end : str
+        The stretch of true time, ISO 8601 with an explicit offset or ``Z``.
+    shift : str
+        A signed duration with its unit (``"-4s"``, ``"2.5s"``): the seconds
+        that, added to the recorded times, put them back on the truth. A clock
+        running 4 s fast, whose files show the air 4 s late, is ``"-4s"``.
+    """
+
+    start: str
+    end: str
+    shift: str
+
+
+@dataclass(frozen=True)
+class _ClockPiece:
+    """A :class:`ClockError` in nanoseconds, with the recorded stretch it becomes."""
+
+    start_ns: int
+    end_ns: int
+    clock_shift_ns: int
+    #: Where the stretch lands on the recorded clock: the true stretch, less
+    #: the declared time_shift, less the clock's shift. This is what the
+    #: table's row holds, because the table is keyed on recorded time.
+    recorded_start_ns: int
+    recorded_end_ns: int
+
+
 def export_raw(
     dataset: SyntheticDataset,
     path: str | Path,
@@ -175,6 +224,8 @@ def export_raw(
     timezone: str = "UTC",
     split: Mapping[str, Sequence[int]] | None = None,
     zero_width_cells: Mapping[str, int] | None = None,
+    clock_errors: Mapping[str, Sequence[ClockError]] | None = None,
+    reference_clock: str | None = None,
 ) -> Path:
     """Write a synthetic dataset as raw CSV files with a matching manifest.
 
@@ -251,6 +302,20 @@ def export_raw(
         the timezone from cell-boundary parsing changed nothing any test
         could see. Set it to a real zone and a boundary parsed on the wrong
         convention lands hours from the start it belongs to.
+    clock_errors : Mapping of str to sequence of ClockError, optional
+        Stretches in which an instrument's clock runs wrong, keyed by
+        instrument name, each given by the shift that corrects it. The files
+        receive the wrong times and
+        :data:`EXPORT_CLOCK_CORRECTIONS` the rows that undo them, named by the
+        manifest's ``clock_corrections``; readings outside every stretch are
+        written as they are, so ingestion must also leave them alone and
+        count them as uncorrected. Refused when a stretch's recorded span would
+        overlap another's, or would hold a reading from outside every stretch,
+        since ingestion would then shift that reading by a row that is not its
+        own.
+    reference_clock : str, optional
+        The instrument whose clock the correction rows name. Defaults to the
+        first stream without clock errors; it may not have any itself.
 
     Returns
     -------
@@ -263,8 +328,9 @@ def export_raw(
     TsaraSyntheticError
         If ``path`` exists and is not a directory, if ``raw_units`` or
         ``qaqc_bounds`` names a variable no instrument writes, if
-        ``time_shift`` names an unknown instrument, or if a variable collides
-        with a boundary column name this exporter needs to write.
+        ``time_shift`` names an unknown instrument, if a variable collides
+        with a boundary column name this exporter needs to write, or if the
+        clock errors cannot be written consistently (see ``clock_errors``).
     """
     root = Path(path)
     if root.exists() and not root.is_dir():
@@ -279,12 +345,20 @@ def export_raw(
     shifts = dict(time_shift or {})
     strides = {name: tuple(v) for name, v in (split or {}).items()}
     degenerate = dict(zero_width_cells or {})
+    errors = {name: tuple(v) for name, v in (clock_errors or {}).items()}
     _check_species_exist(dataset.config, scales, bounds)
     _check_instruments_exist(dataset, shifts)
+    _check_instruments_exist(dataset, errors)
     _check_instruments_exist(dataset, strides)
     _check_instruments_exist(dataset, degenerate)
     if support_declaration == "reported":
         _check_boundary_columns_are_free(dataset)
+
+    pieces = {
+        name: _clock_pieces(name, errors[name], shift_ns=_shift_ns(shifts.get(name)))
+        for name in errors
+    }
+    reference = _reference_clock(dataset, errors, reference_clock) if errors else None
 
     raw_dir = root / EXPORT_RAW_DIR
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -306,7 +380,10 @@ def export_raw(
                 shift_ns=_shift_ns(shifts.get(name)),
                 timezone=timezone,
                 n_zero_width=n_zero,
+                clock_pieces=pieces.get(name, ()),
             )
+    if reference is not None:
+        _write_clock_corrections(root / EXPORT_CLOCK_CORRECTIONS, pieces, reference)
 
     manifest = _build_manifest(
         dataset.config,
@@ -316,6 +393,7 @@ def export_raw(
         shifts,
         timezone,
         set(strides),
+        clock_corrections=reference is not None,
     )
     manifest_path = root / EXPORT_MANIFEST
     manifest_path.write_text(
@@ -391,6 +469,71 @@ def _check_boundary_columns_are_free(dataset: SyntheticDataset) -> None:
         )
 
 
+def _clock_pieces(
+    name: str, errors: Sequence[ClockError], *, shift_ns: int
+) -> tuple[_ClockPiece, ...]:
+    """Read one instrument's clock errors, refusing stretches that would overlap once recorded."""
+    import pandas as pd
+
+    from tsara.core.timebase import timestamp_epoch_ns
+
+    pieces: list[_ClockPiece] = []
+    for error in errors:
+        start, end = pd.Timestamp(error.start), pd.Timestamp(error.end)
+        if start.tz is None or end.tz is None:
+            raise TsaraSyntheticError(
+                f"Clock error {error} for '{name}': give start and end with an offset or Z."
+            )
+        start_ns, end_ns = timestamp_epoch_ns(start), timestamp_epoch_ns(end)
+        if end_ns <= start_ns:
+            raise TsaraSyntheticError(f"Clock error {error} for '{name}': end is not after start.")
+        clock_shift_ns = int(pd.Timedelta(error.shift).value)
+        pieces.append(
+            _ClockPiece(
+                start_ns=start_ns,
+                end_ns=end_ns,
+                clock_shift_ns=clock_shift_ns,
+                recorded_start_ns=start_ns - shift_ns - clock_shift_ns,
+                recorded_end_ns=end_ns - shift_ns - clock_shift_ns,
+            )
+        )
+    ordered = sorted(pieces, key=lambda piece: piece.recorded_start_ns)
+    for before, after in zip(ordered, ordered[1:], strict=False):
+        if after.recorded_start_ns < before.recorded_end_ns:
+            # The table would hold two overlapping rows, which ingestion
+            # refuses: a reading in both would have two shifts.
+            raise TsaraSyntheticError(
+                f"Clock errors for '{name}' overlap once recorded: a later shift larger "
+                "than an earlier one (a clock set back) needs a gap between them at least "
+                "as long as the difference."
+            )
+    return tuple(pieces)
+
+
+def _reference_clock(
+    dataset: SyntheticDataset, errors: Mapping[str, object], requested: str | None
+) -> str:
+    """Return the instrument the correction rows name as the reference clock."""
+    if requested is None:
+        free = [name for name in dataset.streams if name not in errors]
+        if not free:
+            raise TsaraSyntheticError(
+                "Every stream has clock errors, so none can keep the reference clock."
+            )
+        return free[0]
+    if requested not in dataset.streams:
+        raise TsaraSyntheticError(
+            f"Reference clock '{requested}' is not a stream of this dataset: "
+            f"{sorted(dataset.streams)}."
+        )
+    if requested in errors:
+        raise TsaraSyntheticError(
+            f"Reference clock '{requested}' has clock errors of its own; an instrument "
+            "cannot be corrected onto its own clock."
+        )
+    return requested
+
+
 def _reported_sigma_columns(config: SyntheticConfig, stream: str) -> dict[str, str]:
     """Map each variable of one stream to the sigma column it publishes, if any.
 
@@ -457,6 +600,7 @@ def _write_csv(
     shift_ns: int,
     timezone: str,
     n_zero_width: int = 0,
+    clock_pieces: Sequence[_ClockPiece] = (),
 ) -> None:
     """Write one observable stream as a CSV with an ISO 8601 time column.
 
@@ -471,6 +615,12 @@ def _write_csv(
     cells = stream[TIME_BOUNDS_VAR].values.astype("datetime64[ns]").astype(np.int64)
     midpoints = stream[TIME_COORD].values.astype("datetime64[ns]").astype(np.int64)
     stamps = {"start": cells[:, 0], "end": cells[:, 1]}.get(label, midpoints)
+    # What each written time is moved back by: the declared time_shift, plus
+    # the clock shift of the stretch the reading's label time falls in. One
+    # value per row, applied to the time column and both boundary columns, so a
+    # wrong clock moves a cell without resizing it.
+    moved_ns = shift_ns + _clock_shift_ns(stamps, clock_pieces)
+    _check_clock_pieces(stamps - moved_ns, stamps, clock_pieces, target)
 
     # Bounds dropped before `to_dataframe`: a two-dimensional coordinate turns
     # the frame into a (time, nv) MultiIndex and every row would appear twice.
@@ -502,7 +652,7 @@ def _write_csv(
         # information in the nanosecond digits, and strftime truncates at µs.
         # The shift is applied here so it reaches the boundary columns too --
         # a clock offset moves a cell, it does not resize it.
-        moved = pd.DatetimeIndex((values - shift_ns).astype("datetime64[ns]"))
+        moved = pd.DatetimeIndex((values - moved_ns).astype("datetime64[ns]"))
         if timezone != "UTC":
             # Written naive in local time, exactly as a logger that knows
             # nothing about UTC would write it; the manifest declares the zone.
@@ -523,6 +673,71 @@ def _write_csv(
             frame.insert(0, START_COLUMN, _iso(cells[:, 0]))
     frame.insert(0, TIME_COORD, _iso(stamps))
     frame.to_csv(target, index=False)
+
+
+def _clock_shift_ns(
+    stamps: npt.NDArray[np.int64], pieces: Sequence[_ClockPiece]
+) -> npt.NDArray[np.int64]:
+    """Return the shift correcting each reading's clock: its stretch's, else zero."""
+    shift = np.zeros(stamps.shape, dtype=np.int64)
+    for piece in pieces:
+        shift[(stamps >= piece.start_ns) & (stamps < piece.end_ns)] = piece.clock_shift_ns
+    return shift
+
+
+def _check_clock_pieces(
+    recorded: npt.NDArray[np.int64],
+    stamps: npt.NDArray[np.int64],
+    pieces: Sequence[_ClockPiece],
+    target: Path,
+) -> None:
+    """Refuse a reading outside every stretch that would be written inside a stretch's row.
+
+    Ingestion looks a reading up by its recorded time. A reading written
+    unchanged, but at a recorded time some row holds, would be shifted by that
+    row: an archive no table can describe, so the harness refuses to write it.
+    """
+    if not pieces:
+        return
+    outside = np.ones(stamps.shape, dtype=bool)
+    for piece in pieces:
+        outside &= (stamps < piece.start_ns) | (stamps >= piece.end_ns)
+    for piece in pieces:
+        caught = (
+            outside & (recorded >= piece.recorded_start_ns) & (recorded < piece.recorded_end_ns)
+        )
+        if caught.any():
+            raise TsaraSyntheticError(
+                f"Writing '{target.name}': {int(caught.sum())} reading(s) outside every clock "
+                "error would be recorded inside the stretch of a correction row, which would "
+                "then shift them. Leave a gap at least as long as the shift between a "
+                "stretch's edge and the readings outside it."
+            )
+
+
+def _write_clock_corrections(
+    path: Path, pieces: Mapping[str, Sequence[_ClockPiece]], reference: str
+) -> None:
+    """Write the correction table that undoes every exported clock error."""
+    import pandas as pd
+
+    from tsara.core.timebase import iso_utc
+
+    rows = [
+        {
+            "instrument": name,
+            "start": iso_utc(piece.recorded_start_ns),
+            "end": iso_utc(piece.recorded_end_ns),
+            # In nanoseconds, so that the shift read back is the one declared exactly.
+            "shift": f"{piece.clock_shift_ns}ns",
+            "reference_clock": reference,
+            "provenance": "declared",
+            "reason": "exported clock error",
+        }
+        for name, own in pieces.items()
+        for piece in own
+    ]
+    pd.DataFrame(rows).to_csv(path, index=False)
 
 
 def _label_of(config: SyntheticConfig, name: str) -> str:
@@ -557,6 +772,8 @@ def _build_manifest(
     shifts: Mapping[str, str],
     timezone: str,
     split_instruments: set[str],
+    *,
+    clock_corrections: bool = False,
 ) -> Manifest:
     """Build the manifest that describes the files just written."""
     instruments: dict[str, Any] = {}
@@ -693,6 +910,8 @@ def _build_manifest(
             "base_path": EXPORT_RAW_DIR,
             "platform": platform,
             "instruments": instruments,
+            # Beside the manifest, which is where the loader resolves it.
+            "clock_corrections": [EXPORT_CLOCK_CORRECTIONS] if clock_corrections else [],
         }
     )
 

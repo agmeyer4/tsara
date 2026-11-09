@@ -36,6 +36,10 @@ Shape of the subpackage
     The periods a manifest declares to leave out (calibrations, known-bad
     stretches), read from the files it names and checked against it; the
     masking runs with the other QA/QC rules.
+``clocks``
+    The clock corrections a manifest declares, checked against it and
+    applied to each file as it is read, before its cells are built; the
+    table's format lives in :mod:`tsara.core.clocks`.
 ``timeparse``
     Shared across readers: where time lives in a file, and how it reaches
     UTC exactly once at nanosecond resolution.

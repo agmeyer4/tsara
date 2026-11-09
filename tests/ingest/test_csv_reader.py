@@ -21,6 +21,7 @@ import pandas as pd
 import pytest
 
 from tsara.config.manifest import CSVLoader, ICARTTLoader
+from tsara.core.naming import RAW_TIME_START_COLUMN, RAW_TIME_STOP_COLUMN
 from tsara.ingest.base import TIME_INDEX_NAME, TsaraIngestError
 from tsara.ingest.csv_reader import read_csv
 
@@ -169,6 +170,82 @@ def test_missing_half_of_a_split_timestamp_becomes_nat(tmp_path: Path) -> None:
         path, _loader(time={"columns": ["DATE", "TIME"], "format": "%Y-%m-%d %H:%M:%S"})
     )
     assert len(table.frame) == 1
+
+
+#: The SLC-SOS van's weather logger: the GPS receiver's time as an `hhmmss`
+#: number beside separate year, month and day columns (METHODS.md §9.2).
+_HHMMSS = {"columns": ["Y", "M", "D", "hms"], "format": "%Y %m %d %H%M%S.%f"}
+
+
+def test_a_numeric_time_field_keeps_its_zero_padding(tmp_path: Path) -> None:
+    """Read as a number, `000003.50` becomes 3.5 and no longer fits `%H%M%S`.
+
+    The second row is 3.5 s past midnight UTC: the row a numeric read loses.
+    """
+    path = _write(
+        tmp_path,
+        "Y,M,D,hms,rh\n2024,08,05,235958.50,30\n2024,08,06,000003.50,31\n",
+    )
+    table = read_csv(path, _loader(time=_HHMMSS))
+    assert list(table.frame.index) == [
+        pd.Timestamp("2024-08-05 23:59:58.5"),
+        pd.Timestamp("2024-08-06 00:00:03.5"),
+    ]
+    assert table.frame["rh"].tolist() == [30, 31]
+
+
+def test_a_blank_time_cell_does_not_turn_the_time_columns_into_floats(
+    tmp_path: Path,
+) -> None:
+    """One row with no time (a receiver without a fix yet) costs that row only.
+
+    Read as numbers, the blank makes pandas read each time column as floats,
+    so the year joins as `2024.0` and no row of the file parses at all.
+    """
+    path = _write(
+        tmp_path,
+        "Y,M,D,hms,rh\n,,,,29\n2024,08,05,173251.90,30\n2024,08,05,173256.90,31\n",
+    )
+    table = read_csv(path, _loader(time=_HHMMSS))
+    assert list(table.frame.index) == [
+        pd.Timestamp("2024-08-05 17:32:51.9"),
+        pd.Timestamp("2024-08-05 17:32:56.9"),
+    ]
+
+
+def test_declared_boundary_columns_are_read_as_text_too(tmp_path: Path) -> None:
+    """Start and stop columns are parsed with the loader's own time format.
+
+    Each has one blank cell, which costs that row only; read as numbers, the
+    blank would turn its whole column into floats and no row would get a cell.
+    """
+    path = _write(
+        tmp_path,
+        "t,a,b,ch4\n"
+        "20240805173250,20240805173245,20240805173255,1900\n"
+        "20240805173300,,20240805173305,1901\n"
+        "20240805173310,20240805173305,,1902\n"
+        "20240805173320,20240805173315,20240805173325,1903\n"
+        "20240805173330,20240805173325,20240805173335,1904\n",
+    )
+    table = read_csv(
+        path,
+        _loader(
+            time={"column": "t", "format": "%Y%m%d%H%M%S"},
+            support={"start_column": "a", "stop_column": "b"},
+        ),
+    )
+    assert table.frame["ch4"].tolist() == [1900, 1903, 1904]
+    assert table.frame[RAW_TIME_START_COLUMN].tolist() == [
+        pd.Timestamp("2024-08-05 17:32:45"),
+        pd.Timestamp("2024-08-05 17:33:15"),
+        pd.Timestamp("2024-08-05 17:33:25"),
+    ]
+    assert table.frame[RAW_TIME_STOP_COLUMN].tolist() == [
+        pd.Timestamp("2024-08-05 17:32:55"),
+        pd.Timestamp("2024-08-05 17:33:25"),
+        pd.Timestamp("2024-08-05 17:33:35"),
+    ]
 
 
 def test_time_columns_remain_as_columns(tmp_path: Path) -> None:

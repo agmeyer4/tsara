@@ -24,6 +24,7 @@ from tsara.config.loader import (
     load_analysis,
     load_config,
     load_manifest,
+    load_survey,
     load_synthetic,
 )
 from tsara.config.manifest import Manifest
@@ -44,6 +45,7 @@ __all__ = [
     "load_analysis",
     "load_config",
     "load_manifest",
+    "load_survey",
     "load_synthetic",
     "setup_logging",
 ]

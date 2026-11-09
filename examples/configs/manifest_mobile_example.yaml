@@ -28,6 +28,18 @@ base_path: ../data/raw
 # accepted too.
 exclude_periods: excluded_periods_example.csv
 
+# Clock corrections, also declared in a file: each row a stretch of one
+# instrument on its own recorded clock, and the shift that puts it on one
+# reference clock (here the GPS, whose receiver keeps UTC). A shift is added to
+# the recorded times like time_shift, so a logger running 3 s fast takes -3s;
+# shift_end, when given, makes it a drift, running linearly across the
+# stretch. Usually written by the clock survey (provenance: measured) and
+# reviewed before it is named here; a person may write rows too (declared).
+# Applied to each file as it is read, before its cells are built. A reading no
+# row holds keeps its recorded time, and the stream says how many did
+# (METHODS.md §12.3).
+clock_corrections: clock_corrections_example.csv
+
 # --- Platform -----------------------------------------------------------
 # kind=mobile means coordinates come from a GPS instrument's timeseries.
 # The instrument and variable names below must exist in `instruments:`,
