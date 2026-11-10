@@ -264,8 +264,10 @@ way: `clock_corrections` names files of shifts, one row per stretch of one
 instrument, that put every instrument on one reference clock; each file's
 times are corrected as it is read, and a reading no row holds keeps its time
 and is counted. The clock survey (`tsara.survey`) measures such a table from
-the data, segment by segment from tracer pairs, for a person to review before
-it is named. (`METHODS.md` §12)
+the data, segment by segment from tracer pairs (one gas on two analyzers,
+gases emitted together, or a pair that moves in opposite directions, such as
+ozone dipping where NO rises), for a person to review before it is named.
+(`METHODS.md` §12)
 
 **A value is not an instant.** Most real archives publish intervals: a
 1-minute mean, a canister fill, a sample whose timestamp is a start time by

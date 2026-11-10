@@ -58,9 +58,12 @@ running_median: 121s
 
 # For each instrument, its tiers in order. A tier names the partner it is
 # measured against and its tracer pairs: [variable here, variable on the
-# partner], expected to show the same plumes. The first tier that decides a
-# segment sets its shift; the others check it. Every chain of partners must end
-# at the reference clock.
+# partner], expected to show the same plumes. A third item, negative, marks a
+# pair expected to move in opposite directions; its r is taken with one series
+# turned upside down, so on every tier a higher r is a better match. A tier may
+# set its own min_r (and min_pairs), overriding the survey's. The first tier
+# that decides a segment sets its shift; the others check it. Every chain of
+# partners must end at the reference clock.
 tracers:
   picarro:
     - partner: airmar
@@ -78,7 +81,14 @@ tracers:
     - partner: miro
       pairs: [[nox, nox]]
     - partner: picarro
-      pairs: [[nox, co2]]         # gases emitted together, when the MIRO is off
+      pairs: [[nox, co2]]         # gases emitted together, when the MIRO is off;
+      min_r: 0.4                  #   they share fewer plumes, so a lower threshold
+  roze:
+    - partner: miro
+      pairs: [[o3, o3]]           # one gas on two analyzers first ...
+    - partner: caps
+      pairs: [[o3, nox, negative]]   # ... then ozone dipping where NO titrates it
   ptr:
     - partner: picarro
       pairs: [[aromatics, co]]
+      min_r: 0.4
