@@ -427,6 +427,127 @@ def test_pairs_that_disagree_leave_the_segment_undecided() -> None:
     assert survey.measurements.pairs_disagree.any()
 
 
+# ---------------------------------------------------------------------------
+# Pairs that move in opposite directions, and a tier's own threshold
+# ---------------------------------------------------------------------------
+
+#: Ozone where a plume of NO titrates it: a dip wherever the shared plumes rise.
+DIP = {"o3": lambda t: 40.0 - 0.5 * TRUTH[t.astype(int)]}
+
+#: Noise loud enough that a tracer reads r 0.38 to 0.70 across the six
+#: segments (measured): a pair of gases emitted together, not one gas twice.
+WEAK = np.random.default_rng(7).normal(0, 15, N + 100)
+
+
+def _status(survey: ClockSurvey, instrument: str = "inst") -> list[str]:
+    return list(survey.segments[survey.segments.instrument == instrument].status)
+
+
+def test_a_pair_declared_negative_finds_a_dip_at_its_shift() -> None:
+    """Read 7 s late (-7 s). Measured on the dip turned upside down, every
+    segment decides, and r reads as high as any matching pair's."""
+    config = _config({"inst": [{"partner": "ref", "pairs": [["o3", "ch4", "negative"]]}]})
+    survey = survey_clocks({"ref": _stream(), "inst": _stream(-7, variables=DIP)}, config)
+    (row,) = survey.rows
+    assert row.shift_ns == -7 * SECOND
+    decided = survey.measurements[survey.measurements.decided]
+    assert len(decided) == 6 and (decided.r > 0.98).all()
+
+
+def test_the_same_dip_declared_positive_decides_nothing() -> None:
+    """Undeclared, the dip correlates at -1 where it matches, and nowhere well:
+    r stays below 0.3 (measured) at shifts scattered over the search, and no
+    segment is decided at any of them."""
+    config = _config({"inst": [{"partner": "ref", "pairs": [["o3", "ch4"]]}]})
+    survey = survey_clocks({"ref": _stream(), "inst": _stream(-7, variables=DIP)}, config)
+    assert survey.rows == ()
+    assert not survey.measurements.decided.any()
+    assert survey.measurements.r.max() < 0.6
+    assert set(_status(survey)) <= {"weak correlation", "at search edge", "too short"}
+
+
+def test_a_tier_pools_a_positive_and_a_negative_pair() -> None:
+    """A rising pair and a dipping one at one shift pool to it; a dip read 6 s
+    later than the rest makes the tier's pairs disagree."""
+    tiers = {"inst": [{"partner": "ref", "pairs": [["co", "ch4"], ["o3", "ch4", "negative"]]}]}
+    both = {"co": lambda t: TRUTH[t.astype(int)], **DIP}
+    agree = survey_clocks({"ref": _stream(), "inst": _stream(-4, variables=both)}, _config(tiers))
+    assert [row.shift_ns for row in agree.rows] == [-4 * SECOND]
+    late = {
+        "co": lambda t: TRUTH[t.astype(int)],
+        "o3": lambda t: 40.0 - 0.5 * TRUTH[np.clip(t - 6, 0, None).astype(int)],
+    }
+    split = survey_clocks({"ref": _stream(), "inst": _stream(-4, variables=late)}, _config(tiers))
+    assert split.rows == ()
+    assert "pairs disagree" in _status(split)
+
+
+def test_a_tier_may_set_its_own_threshold() -> None:
+    """A weak tracer reaches the survey's 0.6 in one segment of six; with its
+    tier's own threshold of 0.35 every segment decides, and one row results."""
+    weak = {"w": lambda t: TRUTH[t.astype(int)] + WEAK[t.astype(int)]}
+    streams = {"ref": _stream(), "inst": _stream(-4, variables=weak)}
+    tier: dict[str, Any] = {"partner": "ref", "pairs": [["w", "ch4"]]}
+    survey_wide = survey_clocks(streams, _config({"inst": [tier]}))
+    assert _status(survey_wide).count("decided") == 1
+    own = survey_clocks(streams, _config({"inst": [{**tier, "min_r": 0.35}]}))
+    assert _status(own).count("decided") == 6
+    assert [row.shift_ns for row in own.rows] == [-4 * SECOND]
+
+
+def test_a_tiers_own_threshold_decides_which_pairs_may_disagree() -> None:
+    """Two strong pairs at -4 s and a weak one read 10 s later still. A pair
+    vetoes the tier only when it is decided on its own, at the tier's
+    threshold: at 0.6 the weak pair gets there in one segment (r 0.74), at 0.35
+    in five (all but the one where it reads 0.32)."""
+    three = {
+        "ch4": lambda t: TRUTH[t.astype(int)],
+        "co": lambda t: TRUTH[t.astype(int)],
+        "w": lambda t: TRUTH[np.clip(t - 10, 0, None).astype(int)] + WEAK[t.astype(int)],
+    }
+    streams = {"ref": _stream(), "inst": _stream(-4, variables=three)}
+    pairs = [["ch4", "ch4"], ["co", "ch4"], ["w", "ch4"]]
+    tier: dict[str, Any] = {"partner": "ref", "pairs": pairs}
+    survey_wide = survey_clocks(streams, _config({"inst": [tier]}))
+    assert _status(survey_wide).count("pairs disagree") == 1
+    own = survey_clocks(streams, _config({"inst": [{**tier, "min_r": 0.35}]}))
+    assert _status(own).count("pairs disagree") == 5
+
+
+def test_a_chain_through_a_dip_lands_every_reading_on_its_true_time() -> None:
+    """ref <- caps <- roze, as on the 2024 SLC-SOS van before its MIRO arrived:
+    caps 4 s early (+4 s) on NOx, roze tied to caps only by its ozone dip, 7 s
+    late and then 19 s from true second 1800. Every roze reading, moved by the
+    row holding its recorded time, lands exactly on its true second."""
+
+    def roze_shift(t: np.ndarray) -> np.ndarray:
+        return np.where(t < 1800, -7.0, -19.0)
+
+    nox = {"nox": lambda t: TRUTH[t.astype(int)]}
+    streams = {
+        "ref": _stream(variables=nox),
+        "caps": _stream(4.0, seed=2, variables=nox),
+        "roze": _stream(roze_shift, seed=3, variables=DIP),
+    }
+    config = _config(
+        {
+            "caps": [{"partner": "ref", "pairs": [["nox", "nox"]]}],
+            "roze": [{"partner": "caps", "pairs": [["o3", "nox", "negative"]]}],
+        }
+    )
+    survey = survey_clocks(streams, config)
+    rows = [row for row in survey.rows if row.instrument == "roze"]
+    assert [row.shift_ns for row in rows] == [-7 * SECOND, -19 * SECOND]
+    true_s = np.arange(N, dtype=float)
+    recorded = true_s - roze_shift(true_s)
+    recorded_ns = T0.value + np.round(recorded * SECOND).astype(np.int64)
+    corrected = np.full(N, np.nan)
+    for row in rows:
+        inside = (recorded_ns >= row.start_ns) & (recorded_ns < row.end_ns)
+        corrected[inside] = recorded[inside] + row.shift_ns / SECOND
+    assert np.array_equal(corrected, true_s)
+
+
 def test_a_shift_beyond_the_search_is_not_decided_and_writes_no_table(tmp_path: Path) -> None:
     survey = survey_clocks({"ref": _stream(), "inst": _stream(-32)}, _config(ONE))
     assert survey.rows == ()

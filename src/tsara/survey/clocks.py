@@ -29,7 +29,11 @@ What it does, in order
    readings' own cells, to the survey's resolution
    (:func:`tsara.survey.shifts.refined_shift`), or the whole-second peak,
    named, where the joined readings' cells line up with the others' only at
-   some steps of it. The first tier that decides sets the segment's shift; a
+   some steps of it. A pair expected to move in opposite directions (ozone
+   dipping where a plume of NO titrates it) is compared with the instrument's
+   series turned upside down, so its r, like every other's, is higher for a
+   better match; a tier may set its own threshold. The first tier that
+   decides sets the segment's shift; a
    later tier that decides too checks it, and a disagreement larger than the
    tolerance is named. A tier whose partner is undecided in the segment
    cannot set it, so the next tier that decides and reaches the reference
@@ -72,7 +76,7 @@ import logging
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import numpy as np
 import pandas as pd
@@ -198,7 +202,9 @@ class ClockSurvey:
         ``tier`` (from 1), ``partner``, ``start``, ``end``,
         ``shift_onto_partner_s`` (seconds added to the instrument's recorded
         times to put it on its partner's clock, to the survey's resolution),
-        ``r`` and ``n_pairs`` (of the whole-second search), ``at_edge``,
+        ``r`` and ``n_pairs`` (of the whole-second search; for a pair declared
+        ``negative``, r is taken on the instrument's series turned upside down,
+        so it is higher for a better match on every tier), ``at_edge``,
         ``pairs_disagree``, ``noise_removed`` (the joined readings' stated
         noise was removed, :func:`~tsara.survey.shifts.refined_shift`),
         ``refined`` (measured to the resolution, not left at the whole-second
@@ -213,7 +219,7 @@ class ClockSurvey:
         ``decided``, ``outlier``, ``too short`` (fewer readings than any tier
         needs), ``too few pairs`` (readings enough, but no tier paired enough
         seconds at its peak), ``weak correlation`` (a tier paired enough, and
-        its peak fell below ``min_r``), ``at search edge``, ``pairs disagree``
+        its peak fell below its ``min_r``), ``at search edge``, ``pairs disagree``
         or ``partner undecided``.
     rows : tuple of ClockCorrection
         The derived correction rows, provenance ``measured``.
@@ -467,13 +473,20 @@ def _measure(
     """
     measured = []
     for tier_number, tier in enumerate(config.tracers[name], start=1):
+        # A pair expected to move in opposite directions is compared with the
+        # instrument's wiggles turned upside down, which reverses the sign of r
+        # at every shift; everything after reads it like any other pair, so r
+        # is higher for a better match on every tier.
         pairs = [
-            (series_of(name, own), series_of(tier.partner, theirs)) for own, theirs in tier.pairs
+            (_oriented(series_of(name, own), correlation), series_of(tier.partner, theirs))
+            for own, theirs, correlation in tier.pairs
         ]
         on_cells = [
-            (cells_of(name, own), cells_of(tier.partner, theirs)) for own, theirs in tier.pairs
+            (_oriented(cells_of(name, own), correlation), cells_of(tier.partner, theirs))
+            for own, theirs, correlation in tier.pairs
         ]
         min_pairs = tier.min_pairs or settings.min_pairs
+        min_r = settings.min_r if tier.min_r is None else tier.min_r
         for k in present:
             first_s, stop_s = int(edges[k] // SECOND_NS), int(edges[k + 1] // SECOND_NS)
             shift = pooled_shift(
@@ -482,7 +495,7 @@ def _measure(
                 stop_s,
                 search_s=settings.search_s,
                 min_pairs=min_pairs,
-                min_r=settings.min_r,
+                min_r=min_r,
                 tolerance_s=settings.tolerance_s,
             )
             if np.isfinite(shift.shift_s) and not shift.at_edge:
@@ -505,10 +518,22 @@ def _measure(
                 np.isfinite(shift.shift_s)
                 and not shift.at_edge
                 and not shift.pairs_disagree
-                and shift.r >= settings.min_r
+                and shift.r >= min_r
             )
             measured.append(_Measured(tier_number, tier.partner, k, shift, decided, min_pairs))
     return measured
+
+
+_Series = TypeVar("_Series", SecondsSeries, CellSeries)
+
+
+def _oriented(series: _Series, correlation: str) -> _Series:
+    """Return a tracer series as it is compared.
+
+    Turned upside down when its pair is expected to move in opposite directions
+    (``negative``); as it is otherwise.
+    """
+    return series.negated() if correlation == "negative" else series
 
 
 def _chosen(

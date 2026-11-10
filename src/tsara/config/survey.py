@@ -24,6 +24,13 @@ The clock settings, in one picture::
           pairs: [[ch4, ch4]]        # one gas on two analyzers first ...
         - partner: picarro
           pairs: [[h2o, h2o]]        # ... then a backup
+      caps:
+        - partner: picarro
+          pairs: [[nox, co2]]        # gases emitted together share fewer plumes,
+          min_r: 0.4                 #   so this tier has its own threshold
+      roze:
+        - partner: caps
+          pairs: [[o3, nox, negative]]   # ozone dips where a plume of NO titrates it
 
 Every instrument's partners must lead, through the others, to the reference
 clock, so that its shift composes onto it; the reference clock's own instrument
@@ -32,7 +39,7 @@ has no tiers.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 
@@ -44,8 +51,18 @@ from tsara.core.timebase import SECOND_NS
 
 __all__ = ["SurveyConfig", "TracerTier"]
 
-#: One tracer pair: a variable on the surveyed instrument, then one on its partner.
-_TracerPair = Annotated[tuple[str, str], Field(description="(variable here, variable on partner)")]
+#: The correlation a tracer pair is expected to show: ``positive`` when its two
+#: variables rise in the same plumes, ``negative`` when one dips where the other
+#: rises (ozone, where a plume of NO titrates it).
+_Correlation = Literal["positive", "negative"]
+
+#: One tracer pair: a variable on the surveyed instrument, one on its partner,
+#: and the correlation expected between them. Written as two items (positive)
+#: or three; always held as three.
+_TracerPair = Annotated[
+    tuple[str, str, _Correlation],
+    Field(description="(variable here, variable on partner, positive or negative)"),
+]
 
 
 class TracerTier(_StrictModel):
@@ -65,7 +82,9 @@ class TracerTier(_StrictModel):
         min_length=1,
         description=(
             "Tracer pairs, each [variable on this instrument, variable on the partner], "
-            "expected to show the same plumes."
+            "expected to show the same plumes. A third item, 'negative', marks a pair "
+            "expected to move in opposite directions (ozone dipping where NO rises); "
+            "'positive' is the default and may be written too."
         ),
     )
     min_pairs: int | None = Field(
@@ -76,6 +95,16 @@ class TracerTier(_StrictModel):
             "for a partner reporting every few seconds, which pairs fewer seconds."
         ),
     )
+    min_r: float | None = Field(
+        default=None,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "The correlation at the best shift this tier needs to decide a segment, "
+            "overriding the survey's; for gases emitted together, which share fewer "
+            "plumes than one gas on two analyzers."
+        ),
+    )
 
     @field_validator("partner")
     @classmethod
@@ -83,12 +112,37 @@ class TracerTier(_StrictModel):
         _validate_name(value, field="TracerTier.partner")
         return value
 
+    @field_validator("pairs", mode="before")
+    @classmethod
+    def _two_items_mean_positive(cls, value: object) -> object:
+        """Read a pair of two items as positive, and say what a pair may hold."""
+        if not isinstance(value, list | tuple):
+            return value
+        pairs: list[object] = []
+        for pair in value:
+            if isinstance(pair, list | tuple):
+                if len(pair) == 2:
+                    pair = (*pair, "positive")
+                elif len(pair) != 3:
+                    raise ValueError(
+                        f"TracerTier.pairs: {list(pair)} is not a tracer pair; write "
+                        "[variable here, variable on the partner], with 'negative' as a "
+                        "third item for a pair expected to move in opposite directions."
+                    )
+                elif pair[2] not in ("positive", "negative"):
+                    raise ValueError(
+                        f"TracerTier.pairs: {list(pair)} ends in {pair[2]!r}; the third "
+                        "item is the correlation expected, 'positive' or 'negative'."
+                    )
+            pairs.append(pair)
+        return pairs
+
     @field_validator("pairs")
     @classmethod
     def _variables_are_names(
-        cls, value: tuple[tuple[str, str], ...]
-    ) -> tuple[tuple[str, str], ...]:
-        for own, theirs in value:
+        cls, value: tuple[tuple[str, str, str], ...]
+    ) -> tuple[tuple[str, str, str], ...]:
+        for own, theirs, _ in value:
             _validate_name(own, field="TracerTier.pairs")
             _validate_name(theirs, field="TracerTier.pairs")
         return value

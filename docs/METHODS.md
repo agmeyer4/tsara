@@ -6602,7 +6602,7 @@ correction runs on each file's rows in the order written, before any sort, so
 a key on (file, row) instead of recorded time could separate the two copies if
 a campaign ever needs it.
 
-### 12.4 The survey: measuring shifts from tracer pairs **[built 2026-11-03 — stages 2 and 3; walkthrough stages A1 and A2]**
+### 12.4 The survey: measuring shifts from tracer pairs **[built 2026-11-03 — stages 2 and 3; walkthrough stages A1 and A2; negative pairs and a tier's own threshold 2026-11-09]**
 
 `tsara.survey` measures, before the pipeline, what a manifest can declare but
 files do not state; clocks are its first measurement (`tsara.survey.clocks`,
@@ -6628,8 +6628,9 @@ survey's measurements and the table carry one number with one sign.
 **Settings** (`SurveyConfig`, a YAML of its own read by `load_survey`, since
 the survey runs before the pipeline and not inside it): the reference clock;
 for each instrument an ordered list of tiers, each naming a partner and one or
-more tracer pairs (`[variable here, variable on the partner]`), optionally
-with its own `min_pairs`; the segment length (default 30 min, tunable); the
+more tracer pairs (`[variable here, variable on the partner]`, with an optional
+third item, `negative`, for a pair expected to move in opposite directions),
+optionally with its own `min_pairs` and `min_r` (see Tiers); the segment length (default 30 min, tunable); the
 search range (default ±120 s, shorter than a segment); the minimum paired
 seconds (default 300); the decision threshold (default r ≥ 0.6); the tolerance
 (default 2 s); the running median's window (default 121 s); the
@@ -6831,6 +6832,45 @@ the shift straight onto the reference clock. A later tier that decides too
 checks the one chosen: each tier's shift is composed onto
 the reference clock through its own partner, and shifts further apart than the
 tolerance are named.
+
+**Pairs that move in opposite directions.** Some tracers
+share plumes by moving apart: ozone falls where a plume of NO titrates it
+(O₃ + NO → NO₂), so an ozone analyzer and a NOx analyzer correlate at −1 where
+they match. A pair declared `negative` is compared with the instrument's
+wiggles turned upside down (each value times −1), which reverses the sign of r
+at every shift; the pooling, the minimum paired seconds, the threshold, the
+disagreement rule and the refinement on cells then read it like any other
+pair, so in the survey's tables r is higher for a better match on every tier.
+It ranks with gases emitted together: its shift also carries the two
+analyzers' response times. Declared positive, such a dip decides nothing: on
+1 s plumes read 7 s late, its r stays below 0.3, at shifts scattered over the
+search; declared negative, every segment decides at −7 s with r above 0.98
+(`tests/survey/test_survey_clocks.py`), and on exact cell means the shift
+comes back exactly at a resolution of 0.05 s (`tests/survey/test_shifts.py`).
+On the 2024 SLC-SOS van it is the ozone analyzer's only tie before its MIRO
+arrived on 2024-08-08: ozone against the CAPS's NOx, the sign reversed,
+reaches r ≥ 0.6 in 36 of the 40 thirty-minute segments of the first eight
+drives (2024-08-01 to 08-06). Measured outside the package for the SLC-SOS
+alignment, under this rule: each series on whole seconds less its centred
+121 s running median, Pearson r over a search of ±120 s with at least 300
+paired seconds, a best shift at the search's edge not counted.
+
+**A tier's own threshold.** A tier may set its own
+`min_r`, overriding the survey's, as it may its own `min_pairs`. Gases emitted
+together share fewer plumes than one gas on two analyzers, and their r at the
+true shift is lower. On the same van and under the same rule, the CAPS's NOx
+against the Picarro's CO₂ reaches r ≥ 0.6 in 9 of those 40 drive segments and
+r ≥ 0.4 in 27; the PTR's aromatics against the Picarro's CO, in 36 and 77 of
+the 137 drive segments where both were measured. The tier's threshold is used
+wherever the survey's would be: to decide a segment, and to say which of the
+tier's pairs is decided on its own and so may make the pairs disagree
+(`tests/survey/test_survey_clocks.py`: a weak pair read 10 s later than two
+strong ones vetoes one segment of six at 0.6, five at 0.35). A lower threshold
+lets more coincidences of plumes through. The guards against them are the
+rest of this section (the search's edge, pairs that disagree, outliers, tiers
+that disagree) and the after-check; whether they are enough is measured on the
+SLC-SOS van (§12.7) before a margin rule is added (the SLC-SOS alignment's own
+code required a tracer's best r to beat every r more than 10 s away by 0.05).
 
 **The chain.** An instrument's shift onto its partner, plus the shift the
 partner's own rows apply where the segment's air lands on the partner's clock
@@ -7117,6 +7157,9 @@ back here:
   The scatter also decides whether the staircases of §12.4 (Drift) matter.
 - What the running median does on real records (§12.6), where background
   swings two instruments do not share are expected and unmeasured.
+- Whether decisions at a tier's own, lower threshold (§12.4, A tier's own
+  threshold) scatter more than those of one gas on two analyzers, which
+  decides whether a margin rule is needed.
 - The reference clock where the van's GPS receiver left no record. After
   2024-08-16 the van's position and weather come from a tracking feed on the
   logging computer's clock, not the receiver's. On its last three drives

@@ -89,7 +89,7 @@ sigma the survey estimates itself, since a wrong one moves the shift (§12.4).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -170,6 +170,15 @@ class SecondsSeries:
     first_s: int
     values: npt.NDArray[np.float64]
 
+    def negated(self) -> SecondsSeries:
+        """Return the series turned upside down, every wiggle times -1.
+
+        Compared with its partner, a series turned upside down gives the same
+        correlation with its sign reversed at every shift: how a pair expected
+        to move in opposite directions is measured (``docs/METHODS.md`` §12.4).
+        """
+        return replace(self, values=-self.values)
+
     def window(self, first_s: int, stop_s: int) -> npt.NDArray[np.float64]:
         """Return the values for seconds ``[first_s, stop_s)``, NaN outside the record."""
         out = np.full(stop_s - first_s, np.nan)
@@ -240,6 +249,14 @@ class CellSeries:
     cells: CellBounds
     values: npt.NDArray[np.float64]
     sigma: npt.NDArray[np.float64] | None
+
+    def negated(self) -> CellSeries:
+        """Return the series turned upside down, every wiggle times -1.
+
+        Its cells and sigma are unchanged, since a sigma is a size, not a
+        direction; as :meth:`SecondsSeries.negated`.
+        """
+        return replace(self, values=-self.values)
 
 
 def seconds_series(stream: xr.Dataset, variable: str, *, running_median_s: int) -> SecondsSeries:

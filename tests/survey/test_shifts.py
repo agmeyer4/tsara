@@ -236,6 +236,21 @@ def test_a_shift_paired_over_a_sliver_does_not_count() -> None:
     assert shift.r < 1.0
 
 
+def test_a_series_turned_upside_down_finds_a_dip_at_its_shift() -> None:
+    """A dip where the partner rises (ozone where NO titrates it) correlates
+    at -1 at the true shift: as it stands no shift decides, and turned upside
+    down it gives the shift back with r +1 (``docs/METHODS.md`` §12.4)."""
+    instrument, partner = _pair(-5)
+    dip = SecondsSeries(first_s=instrument.first_s, values=40.0 - 0.5 * instrument.values)
+    turned = dip.negated()
+    assert turned.first_s == dip.first_s
+    assert np.array_equal(turned.values, -dip.values)
+    found = _shift([(turned, partner)])
+    assert found.shift_s == -5 and found.r == pytest.approx(1.0)
+    as_written = _shift([(dip, partner)])
+    assert as_written.r < 0.6
+
+
 def test_a_tier_pools_its_pairs_curves() -> None:
     """Two pairs agreeing on -6 s pool to -6 s with their paired seconds summed;
     a pair with no data in the segment does not move the pooled curve."""
@@ -462,6 +477,37 @@ def test_a_narrower_partner_is_joined_onto_the_wider_instruments_cells() -> None
     way round from the pair's order, and the shift keeps its sign."""
     own, ref = _cells_stream(2.0, 0.0, -6.4), _cells_stream(0.993, 0.37, 0.0)
     assert _refine(own, ref, coarse_s=-6.0, resolution_s=0.1)[0] == pytest.approx(-6.4)
+
+
+@pytest.mark.parametrize("shift", [-7.3, -7.65, 4.25])
+def test_a_series_turned_upside_down_gives_the_shift_on_cells_exactly(shift: float) -> None:
+    """The same dip on exact cell means, half a cell from its partner, at a
+    shift between steps: turned upside down, the shift comes back exactly; left
+    as it is, the best step is at the end of the window, so never decided."""
+    own = _cells_stream(1.0, 0.0, shift)
+    own["ch4"] = 40.0 - 0.5 * own["ch4"]
+    dip = cell_series(own, "ch4", running_median_s=121)
+    partner = cell_series(_cells_stream(1.0, 0.5, 0.0), "ch4", running_median_s=121)
+    common: dict[str, Any] = {
+        "coarse_s": float(np.ceil(shift)),
+        "resolution_ns": 50_000_000,
+        "min_pairs": 300,
+    }
+    found, at_edge, _, refined = refined_shift(
+        [(dip.negated(), partner)], T0_NS, T0_NS + SEGMENT_NS, **common
+    )
+    assert found == pytest.approx(shift, abs=1e-9)
+    assert refined and not at_edge
+    assert refined_shift([(dip, partner)], T0_NS, T0_NS + SEGMENT_NS, **common)[1]
+
+
+def test_a_series_turned_upside_down_keeps_its_cells_and_sigma() -> None:
+    """A sigma is a size, not a direction."""
+    stream = _cells_stream(1.0, 0.0, 0.0, noise=1.0, sigma="declared")
+    series = cell_series(stream, "ch4", running_median_s=121)
+    turned = series.negated()
+    assert turned.cells is series.cells and turned.sigma is series.sigma
+    assert np.array_equal(turned.values, -series.values)
 
 
 def test_cell_series_takes_stated_sigma_only() -> None:

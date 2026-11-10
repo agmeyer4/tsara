@@ -42,9 +42,32 @@ def test_a_minimal_config_takes_the_defaults() -> None:
     assert (config.min_r, config.tolerance, config.running_median) == (0.6, "2s", "121s")
     assert config.resolution == "1s"
     assert config.max_bridged == "0s"
-    assert config.tracers["picarro"][0].pairs == (("h2o", "rh"),)
+    assert config.tracers["picarro"][0].pairs == (("h2o", "rh", "positive"),)
     assert config.tracers["picarro"][0].min_pairs == 100
     assert config.tracers["aeris"][0].min_pairs is None
+    assert config.tracers["aeris"][0].min_r is None
+
+
+def test_a_pair_may_say_it_moves_in_opposite_directions() -> None:
+    """Two items mean positive; a third says which. A tier may set its own
+    threshold. Both survive being saved and read back, as the survey's
+    bundle does."""
+    tier = {
+        "partner": "airmar",
+        "pairs": [["o3", "nox", "negative"], ["o3", "no"], ["o3", "no2", "positive"]],
+        "min_r": 0.4,
+    }
+    config = SurveyConfig.model_validate(_spec(tracers={"roze": [tier]}))
+    (read,) = config.tracers["roze"]
+    assert read.pairs == (
+        ("o3", "nox", "negative"),
+        ("o3", "no", "positive"),
+        ("o3", "no2", "positive"),
+    )
+    assert read.min_r == 0.4
+    dumped = config.model_dump(mode="json")
+    assert dumped["tracers"]["roze"][0]["pairs"][1] == ["o3", "no", "positive"]
+    assert SurveyConfig.model_validate(yaml.safe_load(yaml.safe_dump(dumped))) == config
 
 
 def test_a_segment_holding_exactly_the_paired_seconds_a_tier_needs_is_allowed() -> None:
@@ -100,6 +123,25 @@ def test_the_composition_order_puts_every_partner_first() -> None:
         ({"tracers": {"aeris": []}}, "has no tiers"),
         ({"tracers": {"aeris": [{"partner": "airmar", "pairs": []}]}}, "at least 1 item"),
         ({"tracers": {"aeris": [{"partner": "airmar", "pairs": [["ch4"]]}]}}, "pairs"),
+        # Neither a list of pairs nor a pair: left to the schema, which says so.
+        ({"tracers": {"aeris": [{"partner": "airmar", "pairs": "ch4"}]}}, "valid tuple"),
+        ({"tracers": {"aeris": [{"partner": "airmar", "pairs": ["ch4"]}]}}, "valid tuple"),
+        (
+            {"tracers": {"aeris": [{"partner": "airmar", "pairs": [["ch4", "ch4", "anti"]]}]}},
+            r"ends in 'anti'; the third item is the correlation expected",
+        ),
+        (
+            {"tracers": {"aeris": [{"partner": "airmar", "pairs": [["a", "b", "negative", "c"]]}]}},
+            r"\['a', 'b', 'negative', 'c'\] is not a tracer pair",
+        ),
+        (
+            {"tracers": {"aeris": [{"partner": "airmar", "pairs": [["a", "b"]], "min_r": 0.0}]}},
+            "greater than 0",
+        ),
+        (
+            {"tracers": {"aeris": [{"partner": "airmar", "pairs": [["a", "b"]], "min_r": 1.5}]}},
+            "less than or equal to 1",
+        ),
         (
             {
                 "tracers": {
