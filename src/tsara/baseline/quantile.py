@@ -124,8 +124,9 @@ class RollingQuantile:
     carried : numpy.ndarray or None
         ``(windows, quantiles)``: the per-reading number handed in as
         ``carry``, sorted with the values and read at the same positions --
-        the reading's systematic sigma at the quantile (§6.7). ``None`` when
-        nothing was carried.
+        the reading's systematic sigma at the quantile (§6.7).
+        ``(windows, quantiles, k)`` when ``carry`` held ``k`` numbers per
+        reading. ``None`` when nothing was carried.
     """
 
     values: npt.NDArray[np.float64]
@@ -166,8 +167,11 @@ def rolling_quantile(
         One number per reading to carry through the sort and read at the same
         positions as the value: the reading's systematic sigma, which a
         quantile that falls between two readings inherits by the same
-        interpolation (§6.7). ``nan`` where the reading is masked is fine;
-        a masked reading takes no part.
+        interpolation (§6.7). Shaped ``(readings, k)`` to carry ``k``
+        numbers at once, as the opening's second pass does (the first pass's
+        sigma and the reading's systematic sigma, :mod:`tsara.baseline.opening`).
+        ``nan`` where the reading is masked is fine; a masked reading takes
+        no part.
     block_elements : int, optional
         The element budget per block, :data:`MAX_BLOCK_ELEMENTS` by default.
         Exposed so a test can force many small blocks; not a configuration.
@@ -180,8 +184,9 @@ def rolling_quantile(
     Raises
     ------
     TsaraBaselineError
-        If ``values`` is not one per reading, a quantile is outside [0, 1], a
-        window has no width, or the budget is not positive.
+        If ``values`` is not one per reading, ``carry`` is not one row per
+        reading, a quantile is outside [0, 1], a window has no width, or the
+        budget is not positive.
     """
     q = _quantiles(quantiles)
     v = np.asarray(values, dtype=np.float64)
@@ -193,11 +198,23 @@ def rolling_quantile(
     if block_elements < 1:
         raise TsaraBaselineError(f"block_elements must be positive, got {block_elements}.")
     carried_values = None if carry is None else np.asarray(carry, dtype=np.float64)
-    if carried_values is not None and carried_values.shape != v.shape:
+    if carried_values is not None and (
+        carried_values.ndim not in (1, 2) or carried_values.shape[0] != v.size
+    ):
         raise TsaraBaselineError(
             f"carry has shape {carried_values.shape} but there are {v.size} reading(s); "
-            "it is one number per reading."
+            "it is one number per reading, or one row of numbers per reading."
         )
+    # Carried numbers are handled as columns, one or several; the result keeps
+    # the shape it was handed, so a single carried number comes back as a
+    # (windows, quantiles) array exactly as before.
+    columns = (
+        None
+        if carried_values is None
+        else carried_values[:, None]
+        if carried_values.ndim == 1
+        else carried_values
+    )
     n_windows = len(windows)
     out_values = np.full((n_windows, q.size), np.nan, dtype=np.float64)
     out_sigma = np.full((n_windows, q.size), np.nan, dtype=np.float64)
@@ -206,10 +223,22 @@ def rolling_quantile(
     n_effective = np.full(n_windows, np.nan, dtype=np.float64)
     too_wide = np.zeros(n_windows, dtype=np.bool_)
     out_carried = (
-        None if carried_values is None else np.full((n_windows, q.size), np.nan, dtype=np.float64)
+        None
+        if columns is None
+        else np.full((n_windows, q.size, columns.shape[1]), np.nan, dtype=np.float64)
     )
     result = RollingQuantile(
-        out_values, out_sigma, n_readings, coverage, n_effective, too_wide, out_carried
+        out_values,
+        out_sigma,
+        n_readings,
+        coverage,
+        n_effective,
+        too_wide,
+        None
+        if out_carried is None or carried_values is None
+        else out_carried[:, :, 0]
+        if carried_values.ndim == 1
+        else out_carried,
     )
     if n_windows == 0 or len(readings) == 0:
         return result
@@ -265,8 +294,8 @@ def rolling_quantile(
         sorted_weights = np.take_along_axis(weight, order, axis=1)
         sorted_carry = (
             None
-            if carried_values is None or out_carried is None
-            else np.take_along_axis(carried_values[index], order, axis=1)
+            if columns is None or out_carried is None
+            else np.take_along_axis(columns[index], order[:, :, None], axis=1)
         )
         # The total is the last cumulative sum, not the pairwise `weight_sum`
         # above: the reference form divides by its own last cumulative sum,
@@ -291,10 +320,15 @@ def rolling_quantile(
             )
             out_sigma[rows, column] = np.where(has, (high - low) / 2, np.nan)
             if sorted_carry is not None and out_carried is not None:
-                # The carried number at the same bracket and fraction as the value.
-                out_carried[rows, column] = np.where(
-                    has, _interpolate_rows(positions, sorted_carry, count, quantile), np.nan
-                )
+                # Each carried number at the same bracket and fraction as the value.
+                for carried_column in range(sorted_carry.shape[2]):
+                    out_carried[rows, column, carried_column] = np.where(
+                        has,
+                        _interpolate_rows(
+                            positions, sorted_carry[:, :, carried_column], count, quantile
+                        ),
+                        np.nan,
+                    )
     return result
 
 

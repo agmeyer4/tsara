@@ -25,9 +25,14 @@ from tsara.baseline.methods import _METHODS
 from tsara.config.analysis import BaselineMethod
 
 
-def test_the_three_configured_methods_are_registered() -> None:
-    """The schema's discriminator and the registry name the same three methods."""
-    assert available_baseline_methods() == ("constant", "from_field", "rolling_quantile")
+def test_the_four_configured_methods_are_registered() -> None:
+    """The schema's discriminator and the registry name the same four methods."""
+    assert available_baseline_methods() == (
+        "constant",
+        "from_field",
+        "rolling_opening",
+        "rolling_quantile",
+    )
     adapter: TypeAdapter[Any] = TypeAdapter(BaselineMethod)
     for name in available_baseline_methods():
         entry: dict[str, object] = {"method": name}

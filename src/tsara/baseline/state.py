@@ -204,6 +204,7 @@ def baseline_state(
             values=np.asarray(stream[variable].values, dtype=np.float64),
             windows_ns=windows_ns,
             quantiles=quantiles,
+            min_readings=minimum,
             method=baseline.method_for(instrument, variable),
             provided=None if provided is None else provided.get(variable),
             block_elements=block_elements,

@@ -18,10 +18,16 @@ Shape of the subpackage
     reference form and the block form that evaluates a whole record, with
     the count and width qualifiers every window records (§6.4) and the
     order-statistic uncertainty of the quantile (§6.7).
+``opening``
+    The rolling quantile opened (§6.5): the low quantile of each window, then
+    a high one of those over each window -- their (1 - q)-quantile or their
+    highest -- so that a ramp is followed and a plume shorter than
+    (1 - q) x window is left whole; with the first pass's qualifiers and the sigmas of
+    the window the result rests on.
 ``methods``
     The baseline methods, registered by name (§6.5): the rolling quantile
-    of the variable's own readings, another instrument's baseline of the
-    same field handed in as a joined product, and a constant.
+    of the variable's own readings, the same opened, another instrument's
+    baseline of the same field handed in as a joined product, and a constant.
 ``state``
     The product: the rules of §6.3 and §6.4 applied to what a method found,
     the enhancement formed unclipped with its uncertainties (§6.7), and what
@@ -45,6 +51,7 @@ from tsara.baseline.methods import (
     get_baseline_method,
     register_baseline_method,
 )
+from tsara.baseline.opening import RollingOpening, rolling_opening
 from tsara.baseline.quantile import (
     MAX_BLOCK_ELEMENTS,
     RollingQuantile,
@@ -59,6 +66,7 @@ __all__ = [
     "BaselineResult",
     "BaselineStates",
     "MAX_BLOCK_ELEMENTS",
+    "RollingOpening",
     "RollingQuantile",
     "TsaraBaselineError",
     "available_baseline_methods",
@@ -68,6 +76,7 @@ __all__ = [
     "get_baseline_method",
     "load_state",
     "register_baseline_method",
+    "rolling_opening",
     "rolling_quantile",
     "save_state",
     "weighted_quantile",

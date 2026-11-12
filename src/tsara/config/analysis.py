@@ -217,6 +217,47 @@ class RollingQuantileMethod(_StrictModel):
     method: Literal["rolling_quantile"] = "rolling_quantile"
 
 
+#: How the opening's second pass reads the first pass's values over a window
+#: (METHODS.md §6.5): ``rank`` takes their (1 - q)-quantile, ``max`` the
+#: highest. The quantile of the first pass names both.
+Dilation = Literal["rank", "max"]
+
+
+class RollingOpeningMethod(_StrictModel):
+    """The rolling quantile, opened: a low quantile, then a high one of those.
+
+    Two passes of the one weighted quantile over the same windows (METHODS.md
+    §6.5). The first is the rolling quantile itself: at every reading, the
+    q-quantile of the readings in the window centred on it, blank where the
+    window fails the count or width rule. The second takes, at every reading,
+    a high value of those first-pass values over its window: their
+    (1 - q)-quantile (``rank``) or the highest (``max``). The windows holding a
+    reading are those centred within half a window of it, so the baseline is
+    a high one of the low quantiles of every window that contains the
+    reading.
+
+    It is a greyscale morphological opening with a flat window, the minimum
+    and maximum replaced by quantiles. A plume shorter than (1 - q) x window
+    is left whole as enhancement, and anything slower is taken into the
+    baseline. A single centred quantile instead sits (0.5 - q) x window x
+    slope below any steady ramp, rising and falling alike, so a ramp stands
+    as enhancement. On a straight ramp without noise ``rank`` lies on the
+    line, and ``max`` sits q x window x slope above it.
+    """
+
+    method: Literal["rolling_opening"] = "rolling_opening"
+    dilation: Dilation = Field(
+        default="rank",
+        description=(
+            "How the second pass reads the first pass's quantiles over each window: "
+            "'rank' takes their (1 - q)-quantile, 'max' the highest (the form of the "
+            "forward/backward baseline, METHODS.md §6.5). The two nearly agree at q = 0.01 "
+            "and part as q grows: on a ramp 'max' sits q x window x slope above the "
+            "background, 'rank' on it."
+        ),
+    )
+
+
 class FromFieldMethod(_StrictModel):
     """Another instrument's baseline of the same field, joined onto this one's cells.
 
@@ -272,7 +313,8 @@ class ConstantMethod(_StrictModel):
 #: and platforms. Every name here is a registered method in
 #: :mod:`tsara.baseline` and has a section in METHODS.md §6.5.
 BaselineMethod = Annotated[
-    RollingQuantileMethod | FromFieldMethod | ConstantMethod, Field(discriminator="method")
+    RollingQuantileMethod | RollingOpeningMethod | FromFieldMethod | ConstantMethod,
+    Field(discriminator="method"),
 ]
 
 
@@ -372,7 +414,7 @@ class BaselineConfig(_StrictModel):
 
         Returns
         -------
-        RollingQuantileMethod or FromFieldMethod or ConstantMethod
+        RollingQuantileMethod or RollingOpeningMethod or FromFieldMethod or ConstantMethod
             The configured method, or :class:`RollingQuantileMethod` when
             ``methods`` does not name this variable.
         """

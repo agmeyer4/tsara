@@ -68,8 +68,15 @@ baseline:
   # examples/configs/manifest_multiformat_example.yaml, and are checked
   # against the manifest when the two configs are combined (load_config).
   methods:
+    # The Picarro's methane opened (§6.5): each window's low quantile, then the
+    # (1 - q)-quantile of those over the window (dilation: rank), so that a
+    # steady ramp is followed rather than left standing as enhancement, and a
+    # plume shorter than (1 - q) x window is left whole. dilation: max takes the
+    # highest instead, the form of the forward/backward baseline.
+    picarro.ch4: {method: rolling_opening, dilation: rank}
     # The Picarro's methane baseline, joined onto the Aeris's cells: both
-    # declare field ch4, and one atmosphere has one methane background.
+    # declare field ch4, and one atmosphere has one methane background. An
+    # opened baseline may be adopted like any other.
     aeris.ch4_aeris: {method: from_field, instrument: picarro}
     # A canister fills every nine minutes and cannot see a background at
     # minutes; at zero the enhancement is the concentration (§6.1).

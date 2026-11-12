@@ -31,6 +31,7 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 4.6 | How support may be changed at all: one per-pair rule, a record on every column of what the join did, the borrowed share | ✅ done |
 | 5 | The baseline state: a baseline and an enhancement at every reading, per stream on its own cells, a window × quantile sweep, three baseline methods, uncertainties for both | ✅ done |
 | 6 | Events: plume-free air described per record, two-threshold events at every sweep point, triggers for sparse instruments, a catalog spelled like the answer key, the parent–child tree | ✅ done |
+| 6.5 | A baseline that follows a ramp: the rolling quantile opened (`rolling_opening`, `dilation: rank \| max`) | 🚧 in progress |
 | 7a | Line fits: York's errors-in-both-variables line and least squares, through many groups of points at once | ✅ done |
 | 7b | Events grouped across the sweep into candidates, scored against the answer key | ✅ done |
 | 7c | A ratio per candidate, the plateau test, combined uncertainty, the stability cube | planned |
@@ -290,8 +291,12 @@ of the analysis configuration it read.
 rolling low quantile over a window of length *w* follows everything slower than
 *w* and leaves what is shorter standing as enhancement, so the window and the
 quantile are sweep dimensions of the baseline state rather than settings to get
-right. Each reading in a window counts in proportion to the share of its cell
-inside it, a window holding fewer readings than the quantile can use is blank
+right. A baseline can also be **opened** (`rolling_opening`): the same low
+quantile, then a high one of those over each window (their (1 − q)-quantile, or
+the highest), so that a steady ramp is followed rather than left standing as
+enhancement while a plume shorter than the window (strictly, than 1 − q
+windows) stays whole. Each reading in
+a window counts in proportion to the share of its cell inside it, a window holding fewer readings than the quantile can use is blank
 with the reason recorded, and a baseline carries no CF cell method, because a
 statistic over a window stated at a cell inside it has two supports; the
 attributes say what it is instead. An instrument too sparse to see a background

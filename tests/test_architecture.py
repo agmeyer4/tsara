@@ -230,6 +230,7 @@ UNREFERENCED: dict[str, str] = {
         "Reached by name through the baseline-method registry "
         "(@register_baseline_method), as read_icartt is through the reader registry."
     ),
+    "baseline_by_rolling_opening": "Reached by name through the baseline-method registry.",
     "baseline_from_field": "Reached by name through the baseline-method registry.",
     "baseline_by_constant": "Reached by name through the baseline-method registry.",
     "propagate_systematic": (

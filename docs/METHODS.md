@@ -36,6 +36,7 @@ attributes and this document, because each was once used for several:
 | **provenance** | where a number or a fact came from: `declared`, `reported`, `inferred`, `assumed`, `empirical` … (`uncertainty_provenance`, `tsara_support_label_provenance`) | |
 | **field** | the physical quantity a variable measures (§1.6) | |
 | **baseline at window w** | the low quantile of a variable over a window of length w around a reading; always stated with its window (§6.1) | "the baseline" or "the true background": what is baseline at one window is signal at another |
+| **opening** | the baseline `rolling_opening` computes (§6.5): at each reading, a high one of the low quantiles of every window of length w that contains it. Its **first pass** is the rolling quantile; its **second pass**, the **dilation**, takes the (1 − q)-quantile of those (`rank`) or the highest (`max`). A greyscale morphological opening with the minimum and maximum replaced by quantiles | an opening in the algebraic sense: with q > 0, applying it twice changes it, and it can sit above some readings |
 | **clean level**, **clean spread** | the events stage's description of plume-free air at one sweep point over one record: the most common enhancement, and 1.4826 × the median distance below it (§6.8). The events stage's thresholds are multiples of the clean spread | a measurement uncertainty or the instrument's noise: the clean spread includes the background's wobble at the window's scale. Not `scale` or `offset`, which are a unit conversion's |
 | **plume** | an enhancement in the air from an emission: what the generator injects and the events stage (`tsara.events`) looks for. No stage yet reports one: whether events are a plume is judged across the sweep (Phase 7) | an interval the stage reported, which is an *event* |
 | **event** | an interval the events stage reported on one variable at one sweep point (`event_id`): what one sweep point sees, not a verdict: one plume, part of one, several merged, or a chance crossing, which is why the expected chance rate is recorded (§6.8) | a plume, or a source. The stage that reports events is `events` (`tsara.events`), named for its product as `baseline` is; its product is the **event state** and the **event catalog**, saved under `events/` in a bundle. It was named `plumes` until the Phase-6 walkthrough; no bundle under the old name exists outside that branch, so none is migrated |
@@ -1585,6 +1586,11 @@ until a sweep needs it.
 - **`rolling_quantile`.** The weighted low quantile of §6.3 over each window,
   blank with the reason recorded wherever a window holds too few readings
   (§6.4).
+- **`rolling_opening`.** The rolling quantile opened: the same low quantile,
+  blank under the same rules, then at each reading a high one of those over
+  its window, so that a steady ramp is followed rather than left standing as
+  enhancement (below, *The opening*). `dilation: rank | max` chooses the
+  second pass; `rank` by default.
 - **`from_field`.** The baseline of a dense instrument measuring the same
   `field` (§1.6), at the same window and quantile, joined onto this
   instrument's cells. The atmosphere has one benzene background, and a PTR-MS
@@ -1623,6 +1629,78 @@ configuration refuses one that measures no variable of the same field, that
 names the variable's own instrument, or whose own baseline for that field is
 `from_field` (a chain would make the record of where a baseline came from name
 the wrong instrument).
+
+**The opening, `rolling_opening` (decided and built 2026-11-12, roadmap
+item 6.5).** Two passes of the weighted quantile of §6.3, over the windows
+centred on the readings:
+
+1. **First pass.** At every reading *j*, the rolling quantile *Q*(*j*): the
+   *q*-quantile of the readings in the window of length *w* centred on it,
+   exactly as `rolling_quantile` computes it. A window that fails the count
+   rule (§6.4) or the width rule (§6.3) is blank **here, before the second
+   pass**, so that a window too thin to place its quantile cannot lend its
+   value to its neighbours (a test plants exactly that: a dense record ending
+   in a three-reading plume, whose thin end windows hold only plume).
+2. **Second pass, the dilation.** At every reading *t*, the same weighted
+   quantile again, of the first-pass values *Q*(*j*) at the readings whose
+   cells overlap *t*'s window, each weighted by that overlap as a reading is
+   in the first pass: their (1 − *q*)-quantile (`rank`) or the highest
+   (`max`). *t*'s own value is always among them; where it is blank, so is
+   the result.
+
+A window centred on *j* contains *t* when *j* lies within half a window of
+*t*, so the second pass gathers the low quantiles of every window that
+contains *t* (to within the half cell by which a reading at the window's edge
+overlaps it): the opening is a high one of the low quantiles of all windows
+of length *w* that contain the reading. With `max` and *q* → 0 it is the
+textbook greyscale opening by a flat window of length *w* (erosion the
+minimum, dilation the maximum), which a pencil-checkable test confirms. With
+*q* > 0 the name is borrowed: applying it twice changes it, and it can sit
+above some readings, which is harmless since enhancements are never clipped
+(§6.7).
+
+*Why.* A centred low quantile sits (1/2 − *q*)·*w*·*s* below a steady ramp
+of slope *s*, rising and falling alike, so a ramp longer than the noise can
+hide stands as enhancement and becomes events (§6.1). On a straight ramp
+without noise, with whole cells and an odd number of them in the window
+(tested exactly): the first pass sits (1/2 − *q*)·*w*·*s* below the line;
+`rank` reads the mirrored position and lands back on it; `max` reads the far
+end of the window and lands (*q*·*w* − half a cell)·*s* above it, which is the
+continuous *q*·*w*·*s* to within half a cell. A plume shorter than
+(1 − *q*)·*w* is left whole, since every window that contains a reading of it
+holds more than a share *q* of air outside it, so no first-pass value there
+rises into the plume; anything wider is taken into the baseline, as the
+rolling quantile takes it too, so the window still sets the scale between
+signal and background (§6.1).
+
+*The forward/backward baseline is the `max` form.* That construction takes
+a one-sided *q*-quantile over the window ahead, *L*(*t*) over [*t*, *t* + *w*],
+and over the window behind, *R*(*t*) over [*t* − *w*, *t*]; then the highest
+*L* over the window behind and the highest *R* over the window ahead. A window
+[*u*, *u* + *w*] contains *t* exactly when *u* lies in [*t* − *w*, *t*], so both
+lines are the highest low quantile among the windows that contain *t*, reached
+from opposite sides: they equal each other and the centred `max` opening,
+except within one window of a record's ends, where the truncated one-sided
+windows differ. (Measured with a plain numpy implementation of the three,
+rule: a generated 3 h record on a regular 1 s clock, *w* = 10 min, *q* =
+0.05, each window holding the readings at whole seconds within it, truncated
+at the ends: the three lines agree to 0 ppb away from the ends, and differ on
+14 % of the readings within 10 min of them, by up to 2.9 ppb.)
+
+*Which second pass.* `rank` is the default because it is the one that
+restores a straight ramp. `max` sits *q*·*w*·*s* above a ramp, which pushes
+clean air on the ramp below its baseline. Against the lag it removes,
+(1/2 − *q*)·*w*·*s*, that overshoot is *q*/(1/2 − *q*): 1/49 at *q* = 0.01,
+where the two forms nearly agree, 1/9 at 0.05 and the whole lag again at
+0.25.
+
+*Cost.* The first pass reads every quantile from one sort per window; the
+second sorts a different set of values for each quantile, so an opening costs
+about 1 + (number of quantiles) times the sorts of a rolling quantile.
+Measured (rule: 200 000 readings, 1 s cells 2 or 3 s apart, three quantiles
+0.01, 0.05, 0.10 under the count rule, one call per window, best of two on
+one CPU): 4.2 s at 2 min, 19.3 s at 10 min and 118 s at 60 min per species,
+3.4–3.7 times `rolling_quantile`'s.
 
 **Why a sparse instrument needs options.** Fills of the iWAS canister in a
 window centred on each fill, over all 261 fills of the ten 2024 drive days,
@@ -1690,9 +1768,9 @@ direction is refused):
 | `x`, `sigma_rand_x`, `sigma_sys_x` | (time) | the reading and its declared sigmas, copied, so the file stands alone |
 | `baseline_x` | (time, window, quantile) | the baseline; `nan` where blank |
 | `enhancement_x` | (time, window, quantile) | `x` − baseline, never clipped |
-| `n_readings_window_x`, `coverage_window_x` | (time, window) | the window's contributing count and covered share (§6.4); `rolling_quantile` only, since a constant has no window and an adopted baseline's windows are the donor's |
-| `sigma_rand_baseline_x` | (time, window, quantile) | Woodruff (§6.7), `empirical`; for `from_field`, the donor's, joined |
-| `sigma_sys_baseline_x` | (time, window, quantile) | the reading's systematic sigma at the quantile position; for `from_field`, the donor's, joined |
+| `n_readings_window_x`, `coverage_window_x` | (time, window) | the window's contributing count and covered share (§6.4); `rolling_quantile` and `rolling_opening` (the window centred on the reading, which the count and width rules read), since a constant has no window and an adopted baseline's windows are the donor's |
+| `sigma_rand_baseline_x` | (time, window, quantile) | Woodruff (§6.7), `empirical`; for an opening, the Woodruff interval of the window it rests on; for `from_field`, the donor's, joined |
+| `sigma_sys_baseline_x` | (time, window, quantile) | the reading's systematic sigma at the quantile position; for an opening, carried through both passes; for `from_field`, the donor's, joined |
 | `sigma_rand_enhancement_x`, `sigma_sys_enhancement_x` | (time, window, quantile) | under the rules of §6.7; written only when the reading has the component, and when it does not, `enhancement_x` says so in `uncertainty_provenance_random` / `uncertainty_provenance_systematic` |
 
 The window companions are companions by the existing `n_readings_` and
@@ -1708,7 +1786,8 @@ The baseline's attributes, in place of a cell method: `tsara_baseline_method`
 per sweep point, window-major, the share of readings at which that point is
 blank for either reason), `tsara_baseline_too_wide_fraction` (per window, the
 share of readings whose window held a reading at least `COPY_RATIO` times as
-wide, §6.3); a `from_field` baseline adds `tsara_baseline_from` (the donor
+wide, §6.3); an opening adds `tsara_baseline_dilation` (`rank` or `max`, its
+second pass); a `from_field` baseline adds `tsara_baseline_from` (the donor
 instrument) and carries the join's own record of what it did to the donor's
 support (§11.2.4); a `constant` adds `tsara_baseline_value`. The sampling
 sigma carries `tsara_sigma_assumption`, naming Woodruff's exchangeability
@@ -1782,6 +1861,16 @@ thirteenth of the true scatter. It is therefore a **floor** on the sampling
 error, labelled as such (`empirical`, with the assumption named in the
 attribute), and not the spread of the baseline; that spread, across windows
 and quantiles, is the sweep's and is read in Phase 7's stability cube.
+
+**An opening's sampling sigma** (§6.5, built 2026-11-12) is the Woodruff
+interval of the window whose first-pass value it took (`max`), or the
+interpolation between two windows' (`rank`): each window's interval rides
+through the second sort and is read at the same positions, as a reading's
+systematic sigma rides through the first (tested bitwise against a
+reference written one reading at a time). It is the same floor, and it does
+not count the choice the second pass made among overlapping windows. An
+opening is a value of the instrument's own readings, so its enhancement's
+systematic sigma follows the same-instrument rule below.
 
 **The enhancement's uncertainty (built with the baseline state, `baseline.state`; each figure names its rule in `tsara_sigma_rule`).**
 Its random component is the reading's and the baseline's in quadrature,
@@ -1862,7 +1951,7 @@ unchanged, since nothing there used NOy's sigma). The
 NOy-LIF trio are the only per-point uncertainty columns in the 2024 ICARTT
 archive, so no file there reports a precision.
 Its systematic component depends on where the baseline came from. For a
-`rolling_quantile` baseline of the same instrument, an error common to
+`rolling_quantile` or `rolling_opening` baseline of the same instrument, an error common to
 reading and baseline is either an offset, which cancels exactly in the
 difference, or a gain, which scales it: with reading = (1 + *g*)·true + *o*
 and the same *g*, *o* in the baseline, Δ_measured = (1 + *g*)·Δ_true, so

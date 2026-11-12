@@ -376,9 +376,34 @@ def test_a_window_holding_one_reading_has_that_value_and_no_spread() -> None:
     assert (got.sigma[lone] == 0.0).all()
 
 
-def test_a_carried_number_of_the_wrong_shape_is_refused() -> None:
+@pytest.mark.parametrize("shape", [(4,), (4, 2), (5, 2, 1)])
+def test_a_carried_number_of_the_wrong_shape_is_refused(shape: tuple[int, ...]) -> None:
     readings = cells(0.0, 1.0, 5)
     with pytest.raises(TsaraBaselineError, match="carry has shape"):
         rolling_quantile(
-            readings, np.arange(5.0), window_cells(readings, 10 * SECOND), [0.5], carry=np.ones(4)
+            readings,
+            np.arange(5.0),
+            window_cells(readings, 10 * SECOND),
+            [0.5],
+            carry=np.ones(shape),
         )
+
+
+def test_several_carried_numbers_are_each_what_one_alone_gives() -> None:
+    """A row of numbers per reading rides the same sort: column by column, bitwise, what
+    carrying each alone gives, and the value and its sigma are untouched by carrying."""
+    readings, values = jittered_record(n=800, seed=4)
+    windows = window_cells(readings, 120 * SECOND)
+    rng = np.random.default_rng(9)
+    first, second = rng.uniform(0, 1, values.size), rng.uniform(5, 6, values.size)
+    both = rolling_quantile(
+        readings, values, windows, [0.05, 0.5], carry=np.stack([first, second], axis=1)
+    )
+    alone = [
+        rolling_quantile(readings, values, windows, [0.05, 0.5], carry=c) for c in (first, second)
+    ]
+    assert both.carried is not None and both.carried.shape == (len(windows), 2, 2)
+    for column, one in enumerate(alone):
+        assert one.carried is not None and one.carried.shape == (len(windows), 2)
+        assert same(both.carried[:, :, column], one.carried)
+        assert same(both.values, one.values) and same(both.sigma, one.sigma)

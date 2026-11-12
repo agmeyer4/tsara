@@ -19,6 +19,7 @@ from tsara.baseline import (
     TsaraBaselineError,
     baseline_state,
     baseline_states,
+    rolling_opening,
     rolling_quantile,
     window_cells,
 )
@@ -695,6 +696,89 @@ def test_a_constant_baseline_makes_the_enhancement_the_concentration(drive: xr.D
             np.isfinite(got)
         ],
     )
+
+
+@pytest.mark.parametrize("dilation", ["rank", "max"])
+def test_an_opened_baseline_is_the_opening_with_the_rolling_quantile_s_record(
+    drive: xr.Dataset, dilation: str
+) -> None:
+    """The state applies the same rules to an opening and writes the same columns, plus the
+    second pass it took; the enhancement's sigmas follow the same-instrument rules (§6.7)."""
+    opened = baseline_state(
+        drive,
+        instrument="van",
+        baseline=config(methods={"van.ch4": {"method": "rolling_opening", "dilation": dilation}}),
+        variables=["ch4"],
+    )
+    plain = baseline_state(drive, instrument="van", baseline=config(), variables=["ch4"])
+    readings = stream_cells(drive, "van")
+    for w, window_ns in enumerate((120 * SECOND, 600 * SECOND)):
+        want = rolling_opening(
+            readings,
+            drive["ch4"].values,
+            window_ns,
+            [0.05, 0.5],
+            dilation=dilation,  # type: ignore[arg-type]
+            min_readings=[20, 2],
+            carry=drive["sigma_sys_ch4"].values,
+        )
+        assert np.array_equal(opened["baseline_ch4"].values[:, w, :], want.values, equal_nan=True)
+        assert np.array_equal(
+            opened["sigma_rand_baseline_ch4"].values[:, w, :], want.sigma, equal_nan=True
+        )
+        assert want.carried is not None
+        assert np.array_equal(
+            opened["sigma_sys_baseline_ch4"].values[:, w, :], want.carried, equal_nan=True
+        )
+    base = opened["baseline_ch4"]
+    assert base.attrs["tsara_baseline_method"] == "rolling_opening"
+    assert base.attrs["tsara_baseline_dilation"] == dilation
+    # The window qualifiers are the rolling quantile's, so blank where it is blank.
+    for name in ("n_readings_window_ch4", "coverage_window_ch4"):
+        assert np.array_equal(opened[name].values, plain[name].values)
+    assert np.array_equal(np.isnan(base.values), np.isnan(plain["baseline_ch4"].values))
+    assert np.array_equal(
+        opened["enhancement_ch4"].values,
+        drive["ch4"].values[:, None, None] - base.values,
+        equal_nan=True,
+    )
+    rule = opened["sigma_sys_enhancement_ch4"].attrs["tsara_sigma_rule"]
+    assert rule == plain["sigma_sys_enhancement_ch4"].attrs["tsara_sigma_rule"]
+    # The maximum is never below the rolling quantile it opens, since the reading's own window
+    # is among those it reads; the rank form can be, wherever the reading's own window is among
+    # the highest few of its neighbours, and on this record it is.
+    finite = np.isfinite(base.values)
+    below = base.values[finite] < plain["baseline_ch4"].values[finite]
+    assert (not below.any()) if dilation == "max" else below.any()
+
+
+def test_an_opening_is_handed_the_count_rule_and_applies_it_between_its_passes() -> None:
+    """The state hands every method the configured count rule. Applied only after the method,
+    as it is for a rolling quantile, it would blank the thin windows themselves and leave
+    their value spread over the neighbours: a dense record ending in a three-reading plume,
+    whose thin end windows hold only plume, must keep its neighbours on clean air."""
+    starts = np.concatenate([np.arange(40), [43]]).astype(np.int64) * SECOND
+    bounds = CellBounds(start_ns=starts, stop_ns=starts + SECOND)
+    values = np.zeros(41)
+    values[37:] = 100.0
+    state = baseline_state(
+        make_stream(bounds, {"ch4": values}),
+        instrument="van",
+        baseline=BaselineConfig.model_validate(
+            {
+                "windows": ["9s"],
+                "quantiles": [0.05],
+                "min_readings": 6,
+                "methods": {"van.ch4": {"method": "rolling_opening", "dilation": "max"}},
+            }
+        ),
+        variables=["ch4"],
+    )
+    thin = state["n_readings_window_ch4"].values[:, 0] < 6
+    base = state["baseline_ch4"].values[:, 0, 0]
+    assert thin.any() and (~thin).any()
+    assert np.isnan(base[thin]).all()
+    assert (base[~thin] < 1.0).all()
 
 
 def sparse_and_dense() -> tuple[xr.Dataset, xr.Dataset]:

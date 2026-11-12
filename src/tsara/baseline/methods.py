@@ -6,13 +6,18 @@ choice rather than a rule (§6.5). Each choice is a *method*: a function that
 takes one variable's readings, the sweep, and the configuration entry that
 chose it, and returns the baseline at every reading for every point of the
 sweep, with whatever qualifiers and uncertainties that method can honestly
-give. Three ship:
+give. Four ship:
 
 ``rolling_quantile``
     The weighted low quantile of the variable's own readings over each
     window (§6.3), the default; with the window's count and coverage, the
     width flag, Woodruff's sigma, and the reading's systematic sigma read at
     the quantile position (§6.7).
+``rolling_opening``
+    The rolling quantile opened (:mod:`tsara.baseline.opening`): the same
+    low quantile, blank under the same rules, then a high one of those over
+    each window, the (1 - q)-quantile or the highest; with the same
+    qualifiers, and the sigmas of the window the result rests on.
 ``from_field``
     Another instrument's baseline of the same field, joined onto this
     variable's cells by :func:`tsara.align.bin_streams_onto_cells` and
@@ -30,7 +35,7 @@ string in a config file is one kind of thing throughout TSARA; a new method
 is a decorated function, not a dispatch table to edit; and a group with a
 baseline of its own can register it from its own code and use a stock
 TSARA. The schema's ``method`` discriminator and this registry name the
-same three methods, and the state refuses a configuration naming one the
+same four methods, and the state refuses a configuration naming one the
 registry lacks, listing what is registered.
 """
 
@@ -42,9 +47,15 @@ from typing import TYPE_CHECKING, Protocol, TypeVar
 
 import numpy as np
 
+from tsara.baseline.opening import rolling_opening
 from tsara.baseline.quantile import rolling_quantile
 from tsara.baseline.windows import TsaraBaselineError, window_cells
-from tsara.config.analysis import BaselineMethod, ConstantMethod, FromFieldMethod
+from tsara.config.analysis import (
+    BaselineMethod,
+    ConstantMethod,
+    FromFieldMethod,
+    RollingOpeningMethod,
+)
 from tsara.core.naming import (
     BASELINE_PREFIX,
     JOIN_RECORD_ATTRS,
@@ -63,9 +74,13 @@ if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt
     import xarray as xr
 
+    from tsara.baseline.opening import RollingOpening
+    from tsara.baseline.quantile import RollingQuantile
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "BASELINE_DILATION_ATTR",
     "BASELINE_FROM_ATTR",
     "BASELINE_VALUE_ATTR",
     "BaselineMethodFunction",
@@ -73,6 +88,7 @@ __all__ = [
     "BaselineResult",
     "available_baseline_methods",
     "baseline_by_constant",
+    "baseline_by_rolling_opening",
     "baseline_by_rolling_quantile",
     "baseline_from_field",
     "get_baseline_method",
@@ -80,8 +96,10 @@ __all__ = [
 ]
 
 
-#: Attrs a method writes on the baseline it made: which instrument a
-#: ``from_field`` baseline was adopted from, and what a ``constant`` is.
+#: Attrs a method writes on the baseline it made: which second pass an opening
+#: took, which instrument a ``from_field`` baseline was adopted from, and what
+#: a ``constant`` is.
+BASELINE_DILATION_ATTR = "tsara_baseline_dilation"
 BASELINE_FROM_ATTR = "tsara_baseline_from"
 BASELINE_VALUE_ATTR = "tsara_baseline_value"
 
@@ -106,7 +124,12 @@ class BaselineRequest:
         order.
     quantiles : tuple of float
         Every quantile of the sweep, in the configuration's order.
-    method : RollingQuantileMethod or FromFieldMethod or ConstantMethod
+    min_readings : tuple of int
+        For each quantile, the readings a window must hold (§6.4). The state
+        applies the rule to what a method returns; a method that spreads a
+        window's value to its neighbours, as the opening does, applies it
+        first, so that a thin window's value spreads nowhere.
+    method : BaselineMethod
         The configuration entry that chose this method.
     provided : xarray.Dataset or None
         For ``from_field``: the donor's baseline joined onto these cells.
@@ -121,6 +144,7 @@ class BaselineRequest:
     values: npt.NDArray[np.float64]
     windows_ns: tuple[int, ...]
     quantiles: tuple[float, ...]
+    min_readings: tuple[int, ...]
     method: BaselineMethod
     provided: xr.Dataset | None
     block_elements: int
@@ -144,7 +168,8 @@ class BaselineResult:
         The baseline's own random (sampling) one-sigma, §6.7.
     sigma_sys : numpy.ndarray or None
         The baseline's systematic one-sigma: the reading's, at the quantile,
-        for a rolling quantile; the donor's, joined, for ``from_field``.
+        for a rolling quantile or an opening; the donor's, joined, for
+        ``from_field``.
     n_readings, coverage : numpy.ndarray or None
         Over ``(readings, windows)``: the window's contributing count and
         its covered share (§6.4).
@@ -291,7 +316,7 @@ def get_baseline_method(name: str) -> BaselineMethodFunction:
 
 
 # ---------------------------------------------------------------------------
-# The three methods
+# The four methods
 # ---------------------------------------------------------------------------
 
 
@@ -316,6 +341,73 @@ def baseline_by_rolling_quantile(request: BaselineRequest, /) -> BaselineResult:
         With every qualifier: count, coverage, width flag, both sigmas (the
         systematic one only when the reading has one).
     """
+    return _window_by_window(
+        request,
+        lambda window_ns, carry: rolling_quantile(
+            request.readings,
+            request.values,
+            window_cells(request.readings, window_ns),
+            request.quantiles,
+            carry=carry,
+            block_elements=request.block_elements,
+        ),
+        attrs={},
+    )
+
+
+@register_baseline_method("rolling_opening")
+def baseline_by_rolling_opening(request: BaselineRequest, /) -> BaselineResult:
+    """Return the rolling quantile opened: a low quantile, then a high one of those.
+
+    At every window of the sweep, :func:`~tsara.baseline.opening.rolling_opening`:
+    the rolling quantile, blank under the count and width rules, then at every
+    reading the (1 - q)-quantile (``rank``) or the highest (``max``) of those
+    values over its window (§6.5). The reading's systematic sigma rides through
+    both sorts, as it rides through the rolling quantile's one.
+
+    Parameters
+    ----------
+    request : BaselineRequest
+        The variable, the sweep, the count rule and the method's ``dilation``.
+
+    Returns
+    -------
+    BaselineResult
+        With the rolling quantile's qualifiers, read off the window centred on
+        each reading, the sigmas of the window the opening rests on, and the
+        second pass named in ``tsara_baseline_dilation``.
+    """
+    method = request.method
+    assert isinstance(method, RollingOpeningMethod)  # the registry name guarantees it
+    return _window_by_window(
+        request,
+        lambda window_ns, carry: rolling_opening(
+            request.readings,
+            request.values,
+            window_ns,
+            request.quantiles,
+            dilation=method.dilation,
+            min_readings=request.min_readings,
+            carry=carry,
+            block_elements=request.block_elements,
+        ),
+        attrs={BASELINE_DILATION_ATTR: method.dilation},
+    )
+
+
+def _window_by_window(
+    request: BaselineRequest,
+    roll: Callable[[int, npt.NDArray[np.float64] | None], RollingQuantile | RollingOpening],
+    *,
+    attrs: dict[str, object],
+) -> BaselineResult:
+    """Run a rolling engine at every window of the sweep and gather a result.
+
+    ``roll(window_ns, carry)`` returns every quantile at one window, with the
+    window's qualifiers; the reading's systematic sigma, when the stream has
+    one, is handed in as ``carry`` so that the baseline's systematic sigma is
+    that of the readings defining it (§6.7).
+    """
     n = request.values.size
     n_windows, n_quantiles = len(request.windows_ns), len(request.quantiles)
     baseline = np.full((n, n_windows, n_quantiles), np.nan)
@@ -331,14 +423,7 @@ def baseline_by_rolling_quantile(request: BaselineRequest, /) -> BaselineResult:
     )
     sigma_sys = None if carry is None else np.full((n, n_windows, n_quantiles), np.nan)
     for index, window_ns in enumerate(request.windows_ns):
-        rolled = rolling_quantile(
-            request.readings,
-            request.values,
-            window_cells(request.readings, window_ns),
-            request.quantiles,
-            carry=carry,
-            block_elements=request.block_elements,
-        )
+        rolled = roll(window_ns, carry)
         baseline[:, index, :] = rolled.values
         sigma_rand[:, index, :] = rolled.sigma
         n_readings[:, index] = rolled.n_readings
@@ -354,7 +439,7 @@ def baseline_by_rolling_quantile(request: BaselineRequest, /) -> BaselineResult:
         coverage=coverage,
         too_wide=too_wide,
         same_instrument=True,
-        attrs={},
+        attrs=attrs,
     )
 
 
