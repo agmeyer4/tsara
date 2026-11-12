@@ -1692,7 +1692,10 @@ restores a straight ramp. `max` sits *q*·*w*·*s* above a ramp, which pushes
 clean air on the ramp below its baseline. Against the lag it removes,
 (1/2 − *q*)·*w*·*s*, that overshoot is *q*/(1/2 − *q*): 1/49 at *q* = 0.01,
 where the two forms nearly agree, 1/9 at 0.05 and the whole lag again at
-0.25.
+0.25. Measured, the choice is a trade between sensitivity and robustness
+(below): `rank` keeps the clean spread near the noise and finds more, `max`
+spreads it and is harder to fool on records that mix long flat stretches
+with ramps at the window's scale.
 
 *Cost.* The first pass reads every quantile from one sort per window; the
 second sorts a different set of values for each quantile, so an opening costs
@@ -1701,6 +1704,144 @@ Measured (rule: 200 000 readings, 1 s cells 2 or 3 s apart, three quantiles
 0.01, 0.05, 0.10 under the count rule, one call per window, best of two on
 one CPU): 4.2 s at 2 min, 19.3 s at 10 min and 118 s at 60 min per species,
 3.4–3.7 times `rolling_quantile`'s.
+
+*Measured (2026-11-12, roadmap item 6.5).* The numbers below come from a
+scratch prototype built from the package's own weighted engine before the
+method existed; its baselines are bit-for-bit `rolling_opening`'s on every
+record named here (rule: `baseline_state` with each method against the
+prototype at 2, 10 and 60 min and *q* 0.01, 0.05, 0.10, 0.25; 282 arrays over
+30 generated records and every piece of both archives below, none differing),
+and the events stage is unchanged, so every count is the package's.
+
+A ramp (rule: white noise of σ = 0.7 ppb on a straight line, 1 s cells, a 3 h
+record, *w* = 10 min, the middle third scored; the median over three seeds of
+each seed's median of baseline minus line, in σ):
+
+| slope (ppb/min) | rolling quantile, *q* 0.05 | `rank` 0.01 | `rank` 0.05 | `rank` 0.25 | `max` 0.01 | `max` 0.05 | `max` 0.25 |
+|---|---|---|---|---|---|---|---|
+| 0 | −1.61 | −2.18 | −1.55 | −0.63 | −2.18 | −1.53 | −0.60 |
+| 0.2 | −2.10 | −1.52 | −0.82 | −0.17 | −1.49 | −0.67 | +0.54 |
+| 1 | −6.60 | −0.80 | −0.17 | +0.02 | −0.65 | +0.54 | +3.59 |
+| 5 | −32.12 | −0.17 | +0.02 | +0.02 | +0.55 | +3.59 | +17.88 |
+
+On flat air every low quantile sits below the air by construction (*z_q*·σ
+for the first pass); what the ramp adds is the rolling quantile's lag, which
+both openings remove, and `max`'s overshoot, which `rank` does not have. The
+`rank` form's error is bounded by its flat-air offset at every slope; that
+offset still depends on slope (−1.55σ flat, −0.17σ at 1 ppb/min at *q*
+0.05), since a window's low quantile is a noise dip on flat air and nearly
+the line itself on a ramp much steeper than the noise.
+
+Generated air (rule: one 1 s analyzer of methane, white noise σ = 0.7 ppb;
+notebook 06's landfill recipe, 6 h, seeds 1–5, with a landfill 0.6 an hour of
+σ 8 min and median 60 ppb and blips 10 an hour of median 120 ppb; *dense*,
+the same with 1.5 landfills and 40 blips an hour, seeds 1–3; the recipe at
+3 h, seed 5; *ramps*, 3 h with a landfill an hour of σ 6 min, 5 blips an hour
+and a 15 ppb cycle of 4 h, seeds 39, 1, 2; *cycle*, the recipe on that cycle,
+seeds 1–3; *weak plumes in wander*, Gaussian plumes of σ 20 s, 6 an hour,
+peaks lognormal of median 5 ppb on a random walk of 30 ppb a day, 12 h,
+seeds 1–3; *no plumes*, 6 h, seeds 1–5; *q* = 0.05, entry 3, exit 1, every
+other events setting the default; means over seeds). The share of plume-free
+readings (true enhancement under 0.07 ppb) inside an event, and on the
+plume-free records the events an hour:
+
+| record | 2 min: rolling q / `rank` / `max` | 10 min | 60 min |
+|---|---|---|---|
+| landfill | 2 / 3 / 0 % | 7 / 2 / 0 % | 1 / 4 / 2 % |
+| dense | 3 / 83 / 1 % | 0 / 27 / 0 % | 0 / 0 / 0 % |
+| 3 h | 25 / 98 / 29 % | 0 / 98 / 0 % | 3 / 1 / 2 % |
+| ramps | 1 / 67 / 35 % | 13 / 68 / 0 % | 41 / 59 / 53 % |
+| cycle | 1 / 33 / 21 % | 1 / 39 / 4 % | 53 / 37 / 36 % |
+| weak plumes in wander | 6 / 8 / 1 % | 18 / 15 / 12 % | 15 / 29 / 16 % |
+| no plumes (events an hour) | 6.7 / 5.4 / 6.9 | 6.1 / 6.4 / 3.0 | 6.6 / 8.5 / 9.4 |
+
+and what each finds, on the same records:
+
+| | 2 min: rolling q / `rank` / `max` | 10 min | 60 min |
+|---|---|---|---|
+| landfill readings (not a blip's) inside an event | 67 / 1 / 0 % | 92 / 18 / 17 % | 94 / 87 / 85 % |
+| a blip's event, median length (landfill) | 101 / 85 / 83 s | 178 / 106 / 88 s | 181 / 159 / 156 s |
+| weak plumes of 3–5σ found, in wander | 98 / 94 / 84 % | 94 / 92 / 90 % | 28 / 73 / 42 % |
+| clean spread ÷ σ, landfill | 1.11 / 1.23 / 1.42 | 1.00 / 1.28 / 2.19 | 1.08 / 1.17 / 1.33 |
+| clean spread ÷ σ, dense | 1.22 / 0.86 / 1.79 | 1.28 / 1.27 / 4.09 | 1.51 / 2.80 / 4.47 |
+
+Blips of 10σ and more are found by every baseline at every window, and
+weak plumes on flat air at 3σ and more likewise. Both openings stop calling a
+broad plume's flanks events at the short windows, which is what they are for,
+and shorten the event around a blip (at 10 min, 106 and 88 s against 178 s),
+since the flank beneath it is no longer enhancement. Where they differ is the records that
+mix long flat stretches with ramps or broad plumes at the window's scale
+(dense, 3 h, ramps, cycle): the clean level is one number per record, flat
+air and ramps sit at different offsets under `rank` (above), the half-sample
+mode settles on the ramps' readings, and flat air reads high and becomes
+events. `max` is harder to fool there because its clean spread is wider
+(up to 4.5σ), which costs it sensitivity: weak plumes in wander at 60 min
+42 % against `rank`'s 73 %.
+
+Real air (rule: the Wyoming van's Aeris ultra460, 2026-02-03..12, TSARA
+ingestion, the excluded periods of R1's draft file, the parked nights left
+out; and the NOAA ARC suite's Aeris 313 over all 19 days of 2024-07-16..08-04,
+`Valve` 0 and methane 1500–100000 ppb; records split at gaps over 2 h and cut
+into pieces of at most 80 000 readings; entry 3, exit 1; a *single-source fit*
+is a methane event of peak *z* ≥ 5 whose York fit of ethane on methane,
+*n* ≥ 5 and converged, passes the 99 % MSWD gate, with σ 2.1 / 0.27 ppb on the
+van and 1.04 / 0.18 ppb on the ARC and *r* = 0; spread is the readings-weighted
+mean of the records' clean spreads; the 1 s precision from quiet first
+differences is 1.50 ppb on the van and 1.04 on the ARC):
+
+| | window | clean spread (ppb): rolling q / `rank` / `max` | readings in events over 5 min | single-source fits |
+|---|---|---|---|---|
+| van, *q* 0.05 | 2 min | 2.90 / 2.39 / 3.51 | 8.6 / 4.6 / 0.7 % | 1 760 / 2 278 / 2 186 |
+| | 10 min | 3.67 / 3.17 / 5.11 | 36 / 20 / 14 % | 1 078 / 1 489 / 1 375 |
+| | 60 min | 10.90 / 7.24 / 12.03 | 49 / 41 / 34 % | 628 / 812 / 801 |
+| ARC, *q* 0.05 | 2 min | 1.88 / 1.45 / 2.37 | 3.2 / 0.9 / 0.0 % | 2 590 / 4 266 / 2 379 |
+| | 10 min | 3.12 / 2.15 / 3.99 | 36 / 18 / 13 % | 760 / 1 768 / 878 |
+| | 60 min | 6.07 / 3.58 / 7.40 | 49 / 43 / 35 % | 295 / 541 / 321 |
+| van, *q* 0.01 | 2 min | 2.78 / 2.07 / 2.93 | 19 / 21 / 8.4 % | 1 408 / 1 563 / 1 755 |
+| | 10 min | 6.53 / 3.04 / 3.60 | 38 / 31 / 27 % | 859 / 1 172 / 1 157 |
+| | 60 min | 16.45 / 8.95 / 9.60 | 49 / 45 / 43 % | 538 / 685 / 665 |
+| ARC, *q* 0.01 | 2 min | 1.99 / 1.49 / 1.91 | 6.5 / 13.5 / 0.7 % | 2 106 / 2 468 / 2 827 |
+| | 10 min | 3.03 / 1.75 / 2.43 | 41 / 27 / 21 % | 658 / 1 907 / 1 342 |
+| | 60 min | 6.01 / 2.81 / 4.13 | 49 / 48 / 45 % | 273 / 614 / 421 |
+
+On real air the `rank` form's narrower spread is the stronger effect. It has
+the narrowest spread at every window and quantile on both archives, and at
+*q* 0.05 the most single-source fits at every window. At the published
+construction's *q* 0.01 the two openings come closer: `max` finds more at
+2 min on both archives, `rank` more at 10 and 60 min on the ARC, and on the
+van they are within 3 % at 10 and 60 min. Either opening finds more than the
+rolling quantile at every window, quantile and archive but one (`max` at
+2 min, *q* 0.05, on the ARC). The ethane/methane ratio of the van's
+parked-night burps is 0.047–0.048 under every baseline.
+
+*Rejected: smoothing before the first pass* (measured with the prototype on
+the same records; owner's doubt, 2026-11-12, that it would add a constant of
+its own). A running **median** of the readings before the quantile makes
+readings equal their own baseline (enhancements exactly 0 at 36–419 readings
+a record), and the clean level's half-sample mode snaps onto that spike: level
+0.000, spread 0.85–0.89 of the noise, chance events on records without plumes
+at 2 min from 6.7 to 20–36 an hour. A running **mean** over ⌈1/*q*⌉ readings
+makes no ties, keeps `rank`'s offset within 0.3σ from flat air to a steep
+ramp at every *q*, and fixes the mixed records on generated air (plume-free readings in events at most 8 % on
+every record at *q* 0.05–0.25), is insensitive between 10 and 60 s, and breaks
+as it nears the window (120 s at a 2 min window: spread 3.2 times the noise).
+On real air it rises early before every lasting step: on the van at 2 min the
+spread goes from 2.39 to 4.31 ppb and readings more than 3 spreads below the
+level from 1.2 to 5.0 %. Neither is built.
+
+*Not carried over from the forward/backward construction:* the maximum of
+its two one-sided lines (the two differ only within one window of a record's
+end, where TSARA's windows hold what they hold, §6.3), and a smoothing after
+the second pass (a Blackman window in the published construction), which
+beside a sharp front moves the baseline both ways (rule: 1 s
+cells, a 40 ppb box plume of 900 s on flat air without noise, both openings at
+*w* = 301 s and *q* = 0.05, the opened baseline convolved with a normalised
+Blackman window of 901 readings; baseline minus truth, averaged over the 300 s
+before the plume and over its first 300 s): 7.7–8.7 ppb above the air before
+the front and 6.8–7.7 ppb below the plume after it. Without it `rank` is within
+0.03 ppb on both sides, and `max` sits 1.9 ppb above the air before the front:
+within about *q*·*w* of it, a window containing the reading is almost all
+plume, and the maximum takes that window's value.
 
 **Why a sparse instrument needs options.** Fills of the iWAS canister in a
 window centred on each fill, over all 261 fills of the ten 2024 drive days,
@@ -2185,6 +2326,46 @@ spread is unbiased on plume-free air, as the closed form says it must be
 declared `quantization`, else the smallest positive gap between the record's
 distinct *readings*, not its enhancements, since a baseline lying between two
 steps moves an enhancement off the grid.
+
+**An opened baseline puts the clean level on 0, and that is left alone**
+(measured and decided 2026-11-12, building `rolling_opening`, §6.5). The
+half-sample mode narrows until a few values remain, so a spike of
+enhancements at or within a hair of 0 captures it. An opening makes such
+spikes: its second pass returns a first-pass value, which on a regular clock
+often equals a reading, so every flat stretch of the baseline holds the
+readings it came from, within an order-statistic spacing (about 0.01 ppb at
+0.7 ppb noise); held copies (§9.2.3) put readings exactly on their baseline
+for any method. On real air (rule: TSARA ingestion of the 2024-07-30 NOAA ARC
+suite file, 1 s rows, methane with range 1500–100000 ppb and `Valve` 0; both
+openings at 2/10/60 min and *q* 0.01/0.05/0.10/0.25; events at entry 3, exit 1;
+the level per record) the level is exactly 0 in every record at 2 and 10 min
+for both openings on the Picarro G2401 (53.4 % held copies), in 25–100 % of
+records at *q* ≥ 0.05 on the Aeris (0.2 % held), and rarely for the rolling
+quantile. On the G2401 the smooth mode (a Gaussian kernel of bandwidth 0.1
+clean spreads over the record's enhancements between their 2nd and 60th
+percentiles) is itself 0.00–0.09 ppb, since held copies make a real spike;
+and the share of readings in events moves by at most 1 point on the G2401 and
+6 on the Aeris under any floor below. Two floors were measured, each stopping
+the narrowing once the half held is narrower than *h* and taking the median
+of what is left: (A) *h* = *c* × a reading's noise from the median absolute
+first difference of the record's enhancements, (B) *h* = *c* × the stock
+description's own clean spread. On generated air (rule: the 26 records of the
+opening's measurement suite and the advisor record's four seeds, §6.5; the
+three baselines; entry 3, exit 1; 300 cases of window × quantile × record per
+baseline) the stock level puts 12.2 / 7.8 / 19.5 % of plume-free readings in
+events (rolling quantile / `max` / `rank`), floor A at *c* = 1 11.1 / 5.5 /
+14.2 % (134 of the 900 cases better by 5 points or more, 21 worse), at *c* = 3
+10.1 / 5.2 / 9.8 % (165 better, 22 worse, the worst 49 points), floor B at
+*c* = 1 11.2 / 5.8 / 15.6 % (127 better, 28 worse); the chance rate on
+plume-free records falls (60 min: 7–9 an hour stock, 4–5 floored), weak-plume
+recall does not move, and the worst cases (`rank` on records mixing long flat
+stretches with ramps at the window's scale, §6.5) stay near 100 %. Neither is
+adopted: A does nothing on held copies, whose first differences are 0, and B
+lifts the `max` opening's 2 min level on the real Aeris to 0.93 ppb against a
+smooth mode of 0.22; each trades losses for gains on generated air at every
+constant, and each adds a constant that real air does not settle, for a
+change of a few points in what is reported as an event. Recorded as an open
+question for Phase 7, whose judgement across the sweep may make it moot.
 
 **Records.** The clean level and spread are computed per **record**: a
 stream is split where consecutive finite readings are more than a gap apart
