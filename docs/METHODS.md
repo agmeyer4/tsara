@@ -1673,6 +1673,26 @@ rises into the plume; anything wider is taken into the baseline, as the
 rolling quantile takes it too, so the window still sets the scale between
 signal and background (§6.1).
 
+*Where short plumes crowd a window* (measured 2026-11-16, building notebook
+05's section on the opening). A short plume is left whole only while it is
+alone in its windows: blips that together fill more than a share 1 − *q* of a
+window lift that window's first-pass value, and the second pass hands the
+value to every reading the window contains, so the baseline rises into a flat
+step a window wide. The rolling quantile lifts with the same crowd, but only
+at the readings whose own window it fills. Inside the step the blips lose
+part of their enhancement, and the clean readings at its edges fall below the
+baseline. Measured (rule: notebook 05 §2's record at its defaults, one 1 s
+analyzer of methane with white noise of σ = 0.7 ppb, 6 h, seed 11, a landfill
+0.6 an hour of σ 8 min and median 60 ppb, and blips 10 an hour, exponentially
+modified Gaussians of σ 6 s and τ 12 s with median 120 ppb; *w* = 2 min,
+*q* = 0.05; the line a baseline should follow there is the true background
+plus the landfill's air, rebuilt from the answer key): the baseline sits more
+than 3σ above that line at 0.91 % of the 21 600 readings under the rolling
+quantile, 6.21 % under `rank` and 6.91 % under `max`, and at least 99.87 % of
+those readings are in a blip's air (true enhancement less the landfill's
+above 0.1σ); readings fall more than 3σ below the baseline at none, 6 and 155
+of them.
+
 *The forward/backward baseline is the `max` form.* That construction takes
 a one-sided *q*-quantile over the window ahead, *L*(*t*) over [*t*, *t* + *w*],
 and over the window behind, *R*(*t*) over [*t* − *w*, *t*]; then the highest
