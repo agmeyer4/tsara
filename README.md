@@ -434,6 +434,15 @@ without being run, and none needs any real data:
   happened; a drifting clock, an outlier and an undecided stretch, named; and
   the loop closed, the survey's own table applied and the campaign surveyed
   again. Same shape as 05.
+- [`09_ratio_fits_walkthrough.ipynb`](examples/notebooks/09_ratio_fits_walkthrough.ipynb)
+  — the ratio stage's fits, on air of two sources at known ratios: a
+  candidate's members and the points each holds, against loops written from
+  the definition; two instruments on one pair clock, every sweep point paired
+  as if alone; one member's York line and least squares, and every number
+  stored beside them; the slope's σ widened for errors that persist, by Monte
+  Carlo; the gates as thresholds on stored numbers, and the plateau's trade;
+  and what the widened σ does not hold, the baseline's error across a member.
+  Same shape as 05.
 
 Three companions run on the real campaign archive instead, and are therefore
 committed **without** outputs:
