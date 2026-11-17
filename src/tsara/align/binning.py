@@ -141,6 +141,7 @@ __all__ = [
     "SIGMA_AT_SUPPORT_ATTR",
     "SupportTransform",
     "bin_streams_onto_cells",
+    "output_names",
 ]
 
 
@@ -280,7 +281,7 @@ def bin_streams_onto_cells(
             "than being binned on their own."
         )
     # 2. Decide each output column's name (suffixed only on a collision).
-    names = _output_names(selection)
+    names = output_names(selection)
     # 3. Each instrument's cells, their overlaps with the target and the
     # reading-to-cell width ratio of every overlap, found ONCE per instrument
     # rather than once per variable: all three depend only on the cells, and a
@@ -360,15 +361,27 @@ def bin_streams_onto_cells(
 # ---------------------------------------------------------------------------
 
 
-def _output_names(selection: Sequence[tuple[str, str]]) -> dict[tuple[str, str], str]:
-    """Return the column name for each selected variable.
+def output_names(selection: Sequence[tuple[str, str]]) -> dict[tuple[str, str], str]:
+    """Return the column name each selected variable takes in a joined product.
 
     A canonical name is kept as it is when only one selected stream carries
     it, which is the ordinary case and keeps a joined product readable. When
     two streams carry the same name — a campaign comparing two analyzers —
     both are suffixed with their instrument rather than one silently winning.
     The spelling therefore depends on the *selection*, which is why every
-    column also records the instrument it came from in an attribute.
+    column also records the instrument it came from in an attribute. Public
+    so that pairing, which selects more than its two species when asked to
+    carry others, finds its columns by this rule rather than a copy of it.
+
+    Parameters
+    ----------
+    selection : sequence of (str, str)
+        The selected ``(instrument, variable)`` pairs, as resolved.
+
+    Returns
+    -------
+    dict of (str, str) to str
+        Each selected variable's column name.
     """
     # First pass: which instruments claim each canonical name.
     claimed: dict[str, list[str]] = {}

@@ -1254,7 +1254,9 @@ afterwards (§5.3).
 **Pairs.** The numerator's and the reference's enhancements are put onto one
 **pair clock** by pairing's rule (§1.3, §11.4: the wider-supported member's
 cells, a tie going to the member with fewer readings), through the join, every
-version of the baseline sweep at once (§11.2). A cell of the pair clock
+version of the baseline sweep at once (§11.2), each sweep point paired as if
+alone (built in 7c1's second stage, §11.4 "Swept members"). The readings
+themselves are carried beside them (`carry=`), for their sigma. A cell of the pair clock
 belongs to a member when its midpoint lies in the member's interval, start ≤
 midpoint < end: the rule a triggered variable's readings already follow
 (§6.8), and on one instrument exactly the event index (to be verified in the
@@ -5873,6 +5875,42 @@ naming the borrowed share and a coarser period to pass — the same exact test
 the grid applies to its own cells (§11.9.1), through one function
 (`phase_offset_s`). A caller who supplied the cells is not warned twice.
 
+**Swept members, and variables carried beside a pair** (built 2026-11-17,
+7c1's second stage, for the ratio stage, §5.2). An enhancement carries the
+baseline's sweep, one version per (window, quantile) point (§6.2), and the
+binner already averages every version at once (§11.2). Pairing asks its pair
+rule of each version: a row is a pair *at a sweep point* when both members
+hold a value there and both are covered at least `min_coverage`; a row is
+kept when it is a pair at one point or more; and at a point where a kept row
+is not a pair, both members' values are blanked, so every finite value is
+half of a real pair at its own point, as an unswept pair's always was (a
+blanked value's companions keep what the binner found). Both members must
+carry the same sweep dimensions, since a pair compares one point of each;
+the clock rule's count of measured values reads a swept member as measured
+where any version is, so one pair of instruments keeps one clock whichever of
+their variables are paired. The counts are per sweep point:
+`tsara_pairing_pairs_per_sweep_point`, and each member's `tsara_n_readings`
+and `tsara_shared_readings` the most any one point holds, as the binner
+records a column's readings. **Checked against the unswept path**, which the
+rest of this section verified: on the baseline states of a 1 s and a 2 s
+analyzer half a second apart (at 2 and 10 min, q 0.01 and 0.05; one sweep
+point blank, the others differing in which rows are pairs), on the clock
+rule's cells, on a 10 s period and on one instrument, every value and
+companion at every sweep point is bit for bit what pairing that point alone
+gives, and so are its pair and reading counts
+(`tests/align/test_pairing_sweep.py`); and an unswept pair is unchanged,
+eight products of the earlier pairing tests' shapes `identical` to the code
+before the change, attributes included.
+
+`carry=` names more variables, of either instrument or any other, put on the
+same cells by the same join and kept on the surviving rows; they never
+decide which rows survive, and their own blank values stay blank. It exists
+for the ratio stage's weights, which are the readings' own random sigma
+rather than the enhancement's (§4.3): the readings are carried beside their
+enhancements, so each pair holds both. One join over the clock's cells serves
+all of them; a join over a subset of those cells can differ in the last
+digit, so a carried column is the join pairing ran, not a fresh one.
+
 **Same-instrument species skip the binning entirely.** Several gases retrieved
 from one spectrum already share a clock, and that is the commonest pair there
 is. The fast path is not merely an optimization: averaging a cell onto itself
@@ -5922,6 +5960,7 @@ product is the output grid (§11.7). Its attributes:
 | `tsara_pairing_min_coverage` | the guard applied (`PairingConfig.min_coverage`) |
 | `tsara_pairing_cells_considered` | candidate cells before dropping |
 | `tsara_pairing_cells_dropped` | how many produced no usable pair |
+| `tsara_pairing_pairs_per_sweep_point` | swept members only: the pairs at each sweep point, in the product's order of sweep dimensions with the last varying fastest (below) |
 
 and per variable:
 
@@ -5930,8 +5969,8 @@ and per variable:
 | `tsara_instrument` | which stream this species came from |
 | `tsara_binned` | 1 if averaged onto the clock, 0 if already on it |
 | `tsara_sigma_at_support` | how a declared σ was moved onto its own cells, `unscaled` when it could not be, or `unchanged` when nothing was moved, which a systematic σ never is |
-| `tsara_n_readings` | distinct readings of this species behind the surviving pairs (§11.2.4, §11.4.1) |
-| `tsara_shared_readings` | distinct readings of this species that formed more than one surviving pair, so that neighbouring pairs share their error; 0 for a species on the clock, by construction (§11.4.1) |
+| `tsara_n_readings` | distinct readings of this species behind the surviving pairs (§11.2.4, §11.4.1); for a swept member, the most any one sweep point draws on |
+| `tsara_shared_readings` | distinct readings of this species that formed more than one surviving pair, so that neighbouring pairs share their error; 0 for a species on the clock, by construction (§11.4.1); for a swept member, the most at any one sweep point |
 
 and on each propagated σ companion, `tsara_propagation_form`: the registered
 form that produced *that* number, or `independent` when no decorrelation

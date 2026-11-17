@@ -100,6 +100,29 @@ remedy is named only when that count is not zero, and the remedy is
 ``target=``: both members on a common clock five to ten times coarser, where
 the naive standard error is honest again at no cost in real scatter. Modelling
 the correlation from the overlap weights belongs to the regression.
+
+Swept members, and variables carried beside a pair
+--------------------------------------------------
+The ratio stage pairs enhancements, and an enhancement carries the baseline's
+sweep: ``(time, baseline_window, baseline_quantile)``, one version per sweep
+point (``docs/METHODS.md`` §6.2, §5.2). The binner already averages every
+version at once; what pairing adds is the pair rule, asked of each version:
+a row is a pair *at a sweep point* when both members hold a value there and
+both are covered at least ``min_coverage``. A row is kept when it is a pair at
+one sweep point or more, and at a sweep point where it is not, both members'
+values are blanked, so that every finite value in the product is half of a
+real pair at its own sweep point, as with unswept members it always was. The
+counts are per sweep point too, and each member records the most any one
+point holds, as the binner does for a column's readings. Both members must
+carry the same sweep dimensions: a pair compares one sweep point of each, and
+a member without the dimension has no version to compare.
+
+The weights a fit uses are the readings' own random sigma, not the
+enhancement's (§4.3), so the readings must reach the pair cells too. They are
+*carried*: ``carry=`` names more variables, of either instrument or any other,
+that are put on the same cells by the same join and kept on the surviving
+rows. A carried variable never decides which rows survive, and its own blank
+values stay blank.
 """
 
 from __future__ import annotations
@@ -115,6 +138,7 @@ from pydantic import ValidationError
 from tsara.align.binning import (
     FinerSupport,
     bin_streams_onto_cells,
+    output_names,
 )
 from tsara.align.cells import phase_offset_s, readings_behind, shared_readings
 from tsara.align.grid import grid_cells
@@ -130,7 +154,7 @@ from tsara.core.naming import (
 from tsara.core.support import CellBounds, median_width_s, stream_cells, targets_overlap
 
 if TYPE_CHECKING:  # pragma: no cover
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     import xarray as xr
 
@@ -150,6 +174,9 @@ PAIRING_CANDIDATE_ATTR = "tsara_pairing_cells_considered"
 #: pair, so that neighbouring pairs share an error (§11.4.1). Zero for a
 #: member on the clock, by construction.
 SHARED_READINGS_ATTR = "tsara_shared_readings"
+#: Swept members only: the pairs at each sweep point, in the order of the
+#: product's sweep dimensions with the last varying fastest (§5.2).
+PAIRS_PER_SWEEP_POINT_ATTR = "tsara_pairing_pairs_per_sweep_point"
 #: What ``tsara_pairing_clock`` and :attr:`PairedSpecies.clock` say when the
 #: caller supplied the cells rather than letting the clock rule choose.
 EXPLICIT_CLOCK = "explicit"
@@ -174,7 +201,9 @@ class PairedSpecies:
         tie the one with fewer measured values -- or ``'explicit'`` when the
         caller supplied ``target=`` and both species were averaged onto it.
     n_pairs : int
-        How many pairs survived.
+        How many pairs survived: for swept members, how many rows are a pair
+        at one sweep point or more (each point's count is in the product's
+        ``tsara_pairing_pairs_per_sweep_point``).
     y_readings, x_readings : int
         How many distinct readings of each species stand behind those pairs.
         Fewer readings than pairs means some reading appears in more than one
@@ -183,7 +212,10 @@ class PairedSpecies:
         since readings shared between neighbouring pairs lower the
         independent information without lowering the count (§11.4.1). How
         many readings were shared that way is counted separately, in each
-        species' ``tsara_shared_readings`` attribute.
+        species' ``tsara_shared_readings`` attribute. For swept members, the
+        most any one sweep point draws on.
+    carried : tuple of str
+        The columns of the variables named in ``carry=``, in that order.
     """
 
     dataset: xr.Dataset
@@ -193,6 +225,7 @@ class PairedSpecies:
     n_pairs: int
     y_readings: int
     x_readings: int
+    carried: tuple[str, ...] = ()
 
     def __len__(self) -> int:
         """Return the number of surviving pairs."""
@@ -204,6 +237,7 @@ def pair_species(
     y: VariableRef,
     x: VariableRef,
     *,
+    carry: Sequence[VariableRef] = (),
     interval: tuple[pd.Timestamp, pd.Timestamp] | None = None,
     target: CellBounds | str | None = None,
     min_coverage: float = 0.0,
@@ -218,7 +252,15 @@ def pair_species(
         A campaign's native-rate streams.
     y, x : str or tuple of (str, str)
         The two species. A bare canonical name is looked up across the
-        streams and must be unambiguous; a tuple names the instrument.
+        streams and must be unambiguous; a tuple names the instrument. Either
+        may carry sweep dimensions (an enhancement from a baseline state),
+        and then both must carry the same ones: a row is a pair at each sweep
+        point where both hold a value.
+    carry : sequence of str or tuple of (str, str), optional
+        More variables put on the same cells and kept on the surviving rows,
+        such as the readings whose own sigma weighs a fit (METHODS §4.3). They
+        never decide which rows survive. Their columns are named in
+        :attr:`PairedSpecies.carried`.
     interval : tuple of pandas.Timestamp, optional
         Restrict pairing to cells overlapping this window, such as an
         event's interval from the event catalog. ``None`` pairs the whole
@@ -256,8 +298,10 @@ def pair_species(
     ------
     TsaraAlignError
         If a species cannot be resolved, a stream has no cells, the interval
-        selects nothing, no cell holds a real measurement of both species, or
-        a partner reading would be copied across clock cells.
+        selects nothing, no cell holds a real measurement of both species, a
+        partner reading would be copied across clock cells, the two members
+        carry different sweep dimensions, or a carried variable is a member
+        or is named twice.
     """
     # Resolve both references, refusing a species paired with itself.
     if not streams:
@@ -269,6 +313,27 @@ def pair_species(
             f"Cannot pair '{y_variable}' on '{y_instrument}' with itself; a ratio of "
             "a species to itself is 1 by construction."
         )
+    # A pair compares one sweep point of each member, so both must have the same
+    # points; the binner then checks that their coordinates agree.
+    y_sweep = _sweep_of(streams[y_instrument], y_variable)
+    x_sweep = _sweep_of(streams[x_instrument], x_variable)
+    if y_sweep != x_sweep:
+        raise TsaraAlignError(
+            f"'{y_instrument}.{y_variable}' carries sweep dimensions {dict(y_sweep)} and "
+            f"'{x_instrument}.{x_variable}' {dict(x_sweep)}; a pair compares one sweep point "
+            "of each member, so both must carry the same ones."
+        )
+    members = [(y_instrument, y_variable), (x_instrument, x_variable)]
+    carried = [resolve_variable(streams, reference) for reference in carry]
+    for reference in carried:
+        if reference in members:
+            raise TsaraAlignError(
+                f"'{reference[0]}.{reference[1]}' is a member of the pair and cannot also "
+                "be carried beside it."
+            )
+    if len(set(carried)) != len(carried):
+        raise TsaraAlignError(f"carry names a variable twice: {carried}.")
+    selection = [*members, *carried]
 
     # Decision 1, which cells: the clock rule and the target it selects, or
     # the cells the caller asked for.
@@ -280,12 +345,7 @@ def pair_species(
         )
         cells = y_cells if clock == y_instrument else x_cells
     else:
-        cells, clock, reason = _explicit_target(
-            streams,
-            target,
-            [(y_instrument, y_variable), (x_instrument, x_variable)],
-            finer_support,
-        )
+        cells, clock, reason = _explicit_target(streams, target, members, finer_support)
     target = cells
 
     # Decision 2, which stretch: optionally only the clock cells overlapping a window.
@@ -297,29 +357,33 @@ def pair_species(
             )
     n_considered = len(target)
 
-    # The one operation: both species onto the chosen cells.
+    # The one operation: both species, and anything carried, onto the chosen cells.
     joined = bin_streams_onto_cells(
         streams,
         target,
-        [(y_instrument, y_variable), (x_instrument, x_variable)],
+        selection,
         propagation_form=propagation_form,
         finer_support=finer_support,
     )
     # The binner names a column after its variable, suffixing with the
-    # instrument only when two selected streams claim the same name -- which
-    # for a pair means one species compared across two analyzers.
-    collides = y_variable == x_variable
-    y_name = f"{y_variable}_{y_instrument}" if collides else y_variable
-    x_name = f"{x_variable}_{x_instrument}" if collides else x_variable
+    # instrument only when two selected streams claim the same name -- for a
+    # pair, one species compared across two analyzers -- and pairing finds its
+    # columns by that same rule rather than a copy of it.
+    names = output_names(selection)
+    y_name, x_name = names[members[0]], names[members[1]]
 
     # Decision 3, which rows survive: both species measured, and each cell
-    # covered at least `min_coverage` by each species' contributing data.
-    surviving = np.flatnonzero(
-        np.isfinite(joined[y_name].values)
-        & np.isfinite(joined[x_name].values)
-        & (joined[coverage_name(y_name)].values >= min_coverage)
-        & (joined[coverage_name(x_name)].values >= min_coverage)
+    # covered at least `min_coverage` by each species' contributing data --
+    # asked of every sweep point when the members carry a sweep, and a row
+    # kept when it is a pair at one point or more.
+    paired = (
+        _finite(joined[y_name])
+        & _finite(joined[x_name])
+        & (joined[coverage_name(y_name)] >= min_coverage)
+        & (joined[coverage_name(x_name)] >= min_coverage)
     )
+    sweep = [str(dim) for dim in paired.dims if dim != TIME_COORD]
+    surviving = np.flatnonzero((paired.any(dim=sweep) if sweep else paired).values)
     if surviving.size == 0:
         raise TsaraAlignError(
             f"'{y_name}' and '{x_name}' produced no usable pairs over {n_considered} "
@@ -335,16 +399,29 @@ def pair_species(
     # binner had nothing to say.
     already_said = {
         name: not targets_overlap(target)
-        and int(np.count_nonzero(np.isfinite(joined[name].values)))
-        > int(joined[name].attrs[READINGS_ATTR])
+        and _most_finite_rows(joined, name) > int(joined[name].attrs[READINGS_ATTR])
         for name in (y_name, x_name)
     }
     dataset = joined.isel({TIME_COORD: surviving})
-    # Count the readings behind the surviving pairs, per species, and warn when
-    # fewer readings than pairs means some reading sits in more than one pair.
+    kept_pairs = paired.isel({TIME_COORD: surviving})
+    if sweep:
+        # A kept row that is no pair at some sweep point holds neither member
+        # there, so that every finite value is half of a real pair at its point.
+        for name in (y_name, x_name):
+            dataset[name] = dataset[name].where(kept_pairs)
+    # Count the readings behind the surviving pairs, per species and per sweep
+    # point, and warn when fewer readings than pairs means some reading sits in
+    # more than one pair.
     kept = CellBounds(start_ns=target.start_ns[surviving], stop_ns=target.stop_ns[surviving])
-    y_readings = _readings_behind(dataset, y_name, streams[y_instrument], y_variable, y_cells, kept)
-    x_readings = _readings_behind(dataset, x_name, streams[x_instrument], x_variable, x_cells, kept)
+    counts = _counts_per_sweep_point(
+        dataset,
+        kept_pairs,
+        sweep,
+        streams,
+        ((y_name, y_instrument, y_variable, y_cells), (x_name, x_instrument, x_variable, x_cells)),
+        kept,
+    )
+    y_readings, x_readings = int(counts[:, 1].max()), int(counts[:, 2].max())
     # The same attribute the binner wrote, now counted behind the rows that
     # survived: one name, one meaning, on every product.
     dataset[y_name].attrs[READINGS_ATTR] = y_readings
@@ -354,8 +431,7 @@ def pair_species(
     # a cell off (every reading in two pairs) from a sparse one (pairs cells
     # apart, no reading in two), which the borrowed share and the readings
     # count cannot tell apart (§11.4.1).
-    y_shared = _shared_readings(dataset, y_name, streams[y_instrument], y_variable, y_cells, kept)
-    x_shared = _shared_readings(dataset, x_name, streams[x_instrument], x_variable, x_cells, kept)
+    y_shared, x_shared = int(counts[:, 3].max()), int(counts[:, 4].max())
     dataset[y_name].attrs[SHARED_READINGS_ATTR] = y_shared
     dataset[x_name].attrs[SHARED_READINGS_ATTR] = x_shared
     if clock != EXPLICIT_CLOCK:
@@ -365,21 +441,26 @@ def pair_species(
         _warn_if_a_partner_blends(
             dataset, (y_name, y_cells, y_shared), (x_name, x_cells, x_shared), target
         )
-    if min(y_readings, x_readings) < surviving.size:
-        sparse_name, sparse_count = (
-            (y_name, y_readings) if y_readings <= x_readings else (x_name, x_readings)
-        )
-    if min(y_readings, x_readings) < surviving.size and not already_said[sparse_name]:
+    # The first sweep point (the only one, unswept) at which pairs outnumber
+    # the readings of one member: there a reading is in more than one pair.
+    # One warning names one point; the counts at the others are the same
+    # question asked of other baselines.
+    short = np.flatnonzero(np.minimum(counts[:, 1], counts[:, 2]) < counts[:, 0])
+    if short.size:
+        n_pairs_there, y_there, x_there = (int(value) for value in counts[short[0], :3])
+        sparse_name, sparse_count = (y_name, y_there) if y_there <= x_there else (x_name, x_there)
+    if short.size and not already_said[sparse_name]:
         logger.warning(
-            "%d pairs of %s vs %s rest on only %d distinct readings of %s, so some "
+            "%d pairs of %s vs %s rest on only %d distinct readings of %s%s, so some "
             "readings appear in more than one pair. A fit that treats the pairs as "
             "independent will count those readings' errors more than once and "
             "understate its uncertainty (METHODS §11.4.1).",
-            surviving.size,
+            n_pairs_there,
             y_name,
             x_name,
             sparse_count,
             sparse_name,
+            f" at sweep point {int(short[0])} (of {len(counts)})" if sweep else "",
         )
     # Record every decision made, so the product explains itself.
     dataset.attrs.update(
@@ -392,6 +473,8 @@ def pair_species(
             PAIRING_DROPPED_ATTR: int(n_considered - surviving.size),
         }
     )
+    if sweep:
+        dataset.attrs[PAIRS_PER_SWEEP_POINT_ATTR] = [int(n) for n in counts[:, 0]]
     logger.info(
         "Paired %s vs %s on '%s' (%s): %d of %d candidate cells kept.",
         y_name,
@@ -409,6 +492,7 @@ def pair_species(
         n_pairs=int(surviving.size),
         y_readings=y_readings,
         x_readings=x_readings,
+        carried=tuple(names[reference] for reference in carried),
     )
 
 
@@ -474,9 +558,12 @@ def _measured_where_records_overlap(
     span_stop = min(int(cells.stop_ns.max()) for _, _, cells in members)
     counts = []
     for stream, variable, cells in members:
-        # Cells inside the shared span that hold a value.
+        # Cells inside the shared span that hold a value -- at any sweep point
+        # of a swept member, so that one pair of instruments keeps one clock
+        # whichever variables of theirs are paired.
         inside = (cells.stop_ns > span_start) & (cells.start_ns < span_stop)
-        finite = np.isfinite(np.asarray(stream[variable].values, dtype=np.float64))
+        values = np.asarray(stream[variable].transpose(TIME_COORD, ...).values, dtype=np.float64)
+        finite = np.isfinite(values.reshape(len(values), -1)).any(axis=1)
         counts.append(int(np.count_nonzero(inside & finite)))
     return counts[0], counts[1]
 
@@ -532,6 +619,67 @@ def _restrict(cells: CellBounds, interval: tuple[pd.Timestamp, pd.Timestamp]) ->
     # kept, never clipped: a clipped cell would describe a different interval.
     keep = np.flatnonzero((cells.stop_ns > start) & (cells.start_ns < stop))
     return CellBounds(start_ns=cells.start_ns[keep], stop_ns=cells.stop_ns[keep])
+
+
+def _finite(array: xr.DataArray) -> xr.DataArray:
+    """Return where an array holds a finite value, keeping its dimensions and coordinates."""
+    return array.copy(data=np.isfinite(np.asarray(array.values, dtype=np.float64)))
+
+
+def _sweep_of(stream: xr.Dataset, variable: str) -> tuple[tuple[str, int], ...]:
+    """Return a variable's sweep dimensions and their sizes, in its own order."""
+    array = stream[variable]
+    return tuple((str(dim), int(array.sizes[dim])) for dim in array.dims if dim != TIME_COORD)
+
+
+def _most_finite_rows(joined: xr.Dataset, column: str) -> int:
+    """Return the most rows any one sweep point of a column holds a value in.
+
+    The rows a value occupies, counted as the binner counts a column's
+    readings: per version, the largest. Unswept, simply the finite rows.
+    """
+    values = np.asarray(joined[column].transpose(TIME_COORD, ...).values, dtype=np.float64)
+    return int(np.isfinite(values.reshape(len(values), -1)).sum(axis=0).max())
+
+
+def _counts_per_sweep_point(
+    dataset: xr.Dataset,
+    paired: xr.DataArray,
+    sweep: Sequence[str],
+    streams: Mapping[str, xr.Dataset],
+    members: tuple[tuple[str, str, str, CellBounds], tuple[str, str, str, CellBounds]],
+    kept: CellBounds,
+) -> np.ndarray:
+    """Return, per sweep point, the pairs and the readings behind them.
+
+    One row per sweep point, in the product's order with the last dimension
+    varying fastest (one row in all, unswept): the pairs there, then each
+    member's distinct readings behind them, then each member's readings that
+    formed more than one of them. At a sweep point the pairs are the kept
+    rows that are a pair *there*, and each member is read at that point of its
+    own sweep, so every count is the one an unswept pairing of that sweep
+    point alone would give (tested).
+    """
+    shape = tuple(int(paired.sizes[dim]) for dim in sweep)
+    points = [dict(zip(sweep, index, strict=True)) for index in np.ndindex(*shape)]
+    is_pair = np.asarray(paired.transpose(TIME_COORD, *sweep).values).reshape(len(kept), -1)
+    counts = np.zeros((len(points), 5), dtype=np.int64)
+    for column, point in enumerate(points):
+        rows = np.flatnonzero(is_pair[:, column])
+        counts[column, 0] = rows.size
+        # A point with no pair asks the questions of no cells, and both answer 0.
+        cells = CellBounds(start_ns=kept.start_ns[rows], stop_ns=kept.stop_ns[rows])
+        for offset, (name, instrument, variable, readings) in enumerate(members):
+            # The member at this point of its sweep, so that a reading blank
+            # here (its baseline window failed) is not counted here.
+            stream = streams[instrument].isel(point) if point else streams[instrument]
+            counts[column, 1 + offset] = _readings_behind(
+                dataset, name, stream, variable, readings, cells
+            )
+            counts[column, 3 + offset] = _shared_readings(
+                dataset, name, stream, variable, readings, cells
+            )
+    return counts
 
 
 def _readings_behind(
