@@ -359,35 +359,98 @@ def _ramp_with_noise(n: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
     return x, 0.05 * x + rng.normal(0, 0.05, n)
 
 
-def test_the_persistence_factor_uses_the_longer_declared_time() -> None:
+def reference_factors(
+    x: np.ndarray, weight: np.ndarray, seconds: np.ndarray, tau_s: float
+) -> tuple[float, float]:
+    """The persistence factor and the expected MSWD, by a plain double loop (METHODS §5.4).
+
+    P^2 = sum_ij v_i v_j rho_ij / sum_i v_i^2, v_i = sqrt(w_i) (x_i - xbar_w);
+    E = (n - sum_ij s_i s_j rho_ij / sum_i w_i - P^2) / (n - 2), s_i = sqrt(w_i);
+    rho_ij = exp(-|t_i - t_j| / tau). Points with a non-finite x are left out.
+    """
+    keep = np.isfinite(x)
+    x, weight, seconds = x[keep], weight[keep], seconds[keep]
+    n = x.size
+    mean = float(np.sum(weight * x) / np.sum(weight))
+    v = [math.sqrt(weight[i]) * (x[i] - mean) for i in range(n)]
+    s = [math.sqrt(weight[i]) for i in range(n)]
+    vrv = srs = 0.0
+    for i in range(n):
+        for j in range(n):
+            rho = math.exp(-abs(seconds[i] - seconds[j]) / tau_s)
+            vrv += v[i] * v[j] * rho
+            srs += s[i] * s[j] * rho
+    persistence = math.sqrt(vrv / sum(value * value for value in v))
+    return persistence, (n - srs / float(np.sum(weight)) - persistence**2) / (n - 2)
+
+
+def test_the_factors_use_the_longer_declared_time() -> None:
+    """Equal sigmas: York's weights are equal too, so both rows share both factors."""
     x, y = _ramp_with_noise(40, 1)
     catalog = pd.DataFrame([event_row("e3", "c0", (0, 40))])
     table = fit(make_pairs(x, y, tau=("2s", "5s")), catalog)
-    expected = math.sqrt(40 / float(n_effective(40, 1.0, 5.0)[0]))
-    np.testing.assert_allclose(table["persistence_factor"], expected, rtol=1e-12)
+    persistence, expected = reference_factors(x, np.ones(40), np.arange(40) + 0.5, 5.0)
+    np.testing.assert_allclose(table["persistence_factor"], persistence, rtol=1e-12)
+    np.testing.assert_allclose(table["mswd_expected"], expected, rtol=1e-12)
     assert table["tau_s"].tolist() == [5.0, 5.0]
     # One declared is that one.
     assert fit(make_pairs(x, y, tau=("2s", None)), catalog)["tau_s"].tolist() == [2.0, 2.0]
 
 
-def test_the_persistence_factor_reads_the_pair_clocks_spacing() -> None:
-    """On 2 s cells, five seconds of persistence span fewer cells than on 1 s."""
+def test_the_factors_read_the_pair_cells_own_times() -> None:
+    """On 2 s cells, and across a hole: the correlation of two points is that of their times.
+
+    Cells 10-14 hold no reference value, so the points either side of the hole
+    are 12 s apart, not 2: the median spacing would not see it.
+    """
     x, y = _ramp_with_noise(40, 5)
+    x[10:15] = np.nan
     catalog = pd.DataFrame([event_row("e3", "c0", (0, 80))])
     table = fit(make_pairs(x, y, tau=("5s", None), width_s=2), catalog)
-    expected = math.sqrt(40 / float(n_effective(40, 2.0, 5.0)[0]))
-    np.testing.assert_allclose(table["persistence_factor"], expected, rtol=1e-12)
+    persistence, expected = reference_factors(x, np.ones(40), 2.0 * np.arange(40) + 1.0, 5.0)
+    np.testing.assert_allclose(table["persistence_factor"], persistence, rtol=1e-12)
+    np.testing.assert_allclose(table["mswd_expected"], expected, rtol=1e-12)
 
 
-def test_with_no_declared_time_the_factor_is_one_and_the_time_blank() -> None:
+def test_york_weighs_each_point_by_its_own_sigma_at_its_slope() -> None:
+    """Unequal sigmas: York's factors are its weights', least squares' the equal weights'."""
+    x, y = _ramp_with_noise(60, 6)
+    rng = np.random.default_rng(60)
+    sigma_x, sigma_y = rng.uniform(0.3, 2.0, 60), rng.uniform(0.02, 0.2, 60)
+    table = fit(
+        make_pairs(x, y, sigma_x=sigma_x, sigma_y=sigma_y, tau=("3s", "3s")),
+        pd.DataFrame([event_row("e3", "c0", (0, 60))]),
+    )
+    ols_row, york_row = table.iloc[0], table.iloc[1]
+    seconds = np.arange(60) + 0.5
+    weight = 1.0 / (sigma_y**2 + york_row["slope"] ** 2 * sigma_x**2)
+    persistence, expected = reference_factors(x, weight, seconds, 3.0)
+    assert york_row["persistence_factor"] == pytest.approx(persistence, rel=1e-12)
+    assert york_row["mswd_expected"] == pytest.approx(expected, rel=1e-12)
+    persistence, expected = reference_factors(x, np.ones(60), seconds, 3.0)
+    assert ols_row["persistence_factor"] == pytest.approx(persistence, rel=1e-12)
+    assert ols_row["mswd_expected"] == pytest.approx(expected, rel=1e-12)
+
+
+def test_with_no_declared_time_the_factors_are_one_and_the_time_blank() -> None:
     x, y = _ramp_with_noise(40, 2)
     table = fit(make_pairs(x, y), pd.DataFrame([event_row("e3", "c0", (0, 40))]))
     assert table["persistence_factor"].tolist() == [1.0, 1.0]
+    assert table["mswd_expected"].tolist() == [1.0, 1.0]
     assert table["tau_s"].isna().all()
+    ols_row, york_row = table.iloc[0], table.iloc[1]
+    assert ols_row["slope_sigma_widened"] == ols_row["slope_sigma"]
+    assert york_row["slope_sigma_widened"] == pytest.approx(
+        york_row["slope_sigma"] * math.sqrt(max(1.0, york_row["mswd"])), rel=1e-12
+    )
 
 
-def test_york_is_widened_by_the_birge_factor_and_least_squares_is_not() -> None:
-    """Declared sigmas a third of the scatter give MSWD near 9: York's sigma triples."""
+def test_york_is_widened_by_the_birge_factor_and_least_squares_by_its_scatter() -> None:
+    """Declared sigmas a third of the scatter give an MSWD near 9: York's sigma triples.
+
+    York: sigma x P x sqrt(max(1, MSWD / E)). Least squares' sigma comes from
+    the scatter, which persistence shrinks by E: sigma x P / sqrt(E).
+    """
     x, y = _ramp_with_noise(200, 3)
     table = fit(
         make_pairs(x, y, sigma_x=0.7 / 3, sigma_y=0.05 / 3, tau=("3s", None)),
@@ -395,43 +458,100 @@ def test_york_is_widened_by_the_birge_factor_and_least_squares_is_not() -> None:
     )
     ols_row, york_row = table.iloc[0], table.iloc[1]
     assert york_row["mswd"] > 4
-    assert york_row["birge_factor"] == pytest.approx(math.sqrt(york_row["mswd"]), rel=1e-12)
+    assert 0 < york_row["mswd_expected"] < 1
+    assert york_row["birge_factor"] == pytest.approx(
+        math.sqrt(york_row["mswd"] / york_row["mswd_expected"]), rel=1e-12
+    )
     assert york_row["slope_sigma_widened"] == pytest.approx(
         york_row["slope_sigma"] * york_row["persistence_factor"] * york_row["birge_factor"],
         rel=1e-12,
     )
+    assert math.isnan(ols_row["birge_factor"])
     assert ols_row["slope_sigma_widened"] == pytest.approx(
-        ols_row["slope_sigma"] * ols_row["persistence_factor"], rel=1e-12
+        ols_row["slope_sigma"]
+        * ols_row["persistence_factor"]
+        / math.sqrt(ols_row["mswd_expected"]),
+        rel=1e-12,
     )
 
 
-def test_an_mswd_below_one_never_narrows() -> None:
+@pytest.mark.parametrize("tau", [None, "3s"])
+def test_an_mswd_below_its_expectation_never_narrows(tau: str | None) -> None:
     x, y = _ramp_with_noise(200, 4)
     table = fit(
-        make_pairs(x, y, sigma_x=2.1, sigma_y=0.15), pd.DataFrame([event_row("e3", "c0", (0, 200))])
+        make_pairs(x, y, sigma_x=2.1, sigma_y=0.15, tau=(tau, None)),
+        pd.DataFrame([event_row("e3", "c0", (0, 200))]),
     )
-    assert table.iloc[1]["mswd"] < 1
-    assert table.iloc[1]["birge_factor"] == 1.0
+    york_row = table.iloc[1]
+    assert york_row["mswd"] < york_row["mswd_expected"]
+    assert york_row["birge_factor"] == 1.0
 
 
-def test_widening_by_the_declared_time_makes_yorks_sigma_honest_on_persistent_errors() -> None:
-    """Monte Carlo, METHODS §4.5 Table 7's case, drawn from the textbook AR(1).
+def test_two_points_leave_no_degree_of_freedom_to_expect_an_mswd_on() -> None:
+    x, y = _ramp_with_noise(10, 8)
+    table = fit(make_pairs(x, y, tau=("3s", None)), pd.DataFrame([event_row("e3", "c0", (0, 2))]))
+    assert table["n"].tolist() == [2, 2]
+    assert table["mswd_expected"].isna().all()
+    assert table["slope_sigma_widened"].isna().all()
 
-    A 60-reading plume, true dmethane 60 exp(-t^2 / (2 * 10^2)) ppb, dethane
-    0.05 of it; noise 3 ppb and 0.3 ppb with lag-one correlation 0.7 on both
-    (tau = -1 s / ln 0.7 = 2.8 s), declared exactly; 800 plumes, one member
-    each, in one record. Table 7 measured the spread of York's slopes 2.26x its
-    sigma as it comes and 0.97x widened; the stage must reproduce both.
+
+def test_without_a_declared_sigma_york_has_no_factors_to_widen_by() -> None:
+    pairs = make_pairs(np.arange(10.0), 0.5 * np.arange(10.0), sigma_x=None, tau=("3s", None))
+    with _quiet():
+        table = fit(pairs, pd.DataFrame([event_row("e3", "c0", (0, 10))]))
+    york_row = table.iloc[1]
+    assert york_row["status"] == "MISSING_SIGMA"
+    assert math.isnan(york_row["persistence_factor"])
+    assert math.isnan(york_row["mswd_expected"])
+    assert math.isnan(york_row["birge_factor"])
+    assert math.isnan(york_row["slope_sigma_widened"])
+    assert np.isfinite(table.iloc[0]["slope_sigma_widened"])  # least squares weighs nothing
+
+
+@pytest.mark.parametrize("n_members", [1, 2])
+def test_noise_lingering_longer_than_a_member_moves_its_intercept_not_its_slope(
+    n_members: int,
+) -> None:
+    """A decorrelation time far beyond the member: the factors tend to their limits.
+
+    Noise constant over a member lifts all its points alike, which the
+    intercept absorbs: the persistence factor falls as tau^(-1/2) and the
+    scatter the line leaves (E) as 1/tau. Every lag within a member is summed
+    (one member: the lags run out; two: no pair a lag apart is in one member).
     """
-    rng = np.random.default_rng(20261117)
-    n_events, length, gap, rho = 800, 60, 20, 0.7
-    t = np.arange(length) - length / 2
-    truth = 60.0 * np.exp(-(t**2) / (2 * 10.0**2))
+    x, y = _ramp_with_noise(30, 7)
+    cells = np.concatenate([x, np.full(5, np.nan), x])[: 30 + (35 if n_members == 2 else 0)]
+    values = np.concatenate([y, np.full(5, np.nan), y])[: cells.size]
+    catalog = pd.DataFrame(
+        [event_row(f"e{k}", f"c{k}", (35 * k, 35 * k + 30)) for k in range(n_members)]
+    )
+    table = fit(make_pairs(cells, values, tau=("100000s", None)), catalog)
+    persistence, expected = reference_factors(x, np.ones(30), np.arange(30) + 0.5, 100000.0)
+    np.testing.assert_allclose(table["persistence_factor"], persistence, rtol=1e-9)
+    np.testing.assert_allclose(table["mswd_expected"], expected, rtol=1e-6)
+    assert (table["persistence_factor"] < 0.05).all()
+    assert (table["mswd_expected"] < 1e-4).all()
 
-    def ar1(scale: float) -> np.ndarray:
+
+def _persistent_plumes(
+    rho: float, width: float, length: int, scale: float, n_events: int, seed: int
+) -> pd.DataFrame:
+    """Fit ``n_events`` copies of one plume whose noise persists (Monte Carlo, §5.4).
+
+    True dmethane 60 exp(-t^2 / (2 width^2)) ppb over ``length`` 1 s cells,
+    dethane 0.05 of it; noise 3 and 0.3 ppb with lag-one correlation ``rho``
+    on both (tau = -1 s / ln rho), drawn from the textbook AR(1) and declared
+    as ``scale`` times the truth; one member each, 20 s apart, in one record.
+    """
+    rng = np.random.default_rng(seed)
+    gap = 20
+    t = np.arange(length) - length / 2
+    truth = 60.0 * np.exp(-(t**2) / (2 * width**2))
+
+    def ar1(sd: float) -> np.ndarray:
         noise = np.empty((n_events, length))
-        noise[:, 0] = rng.normal(0, scale, n_events)
-        innovations = rng.normal(0, scale * math.sqrt(1 - rho**2), (n_events, length))
+        noise[:, 0] = rng.normal(0, sd, n_events)
+        innovations = rng.normal(0, sd * math.sqrt(1 - rho**2), (n_events, length))
         for k in range(1, length):
             noise[:, k] = rho * noise[:, k - 1] + innovations[:, k]
         return noise
@@ -442,20 +562,67 @@ def test_widening_by_the_declared_time_makes_yorks_sigma_honest_on_persistent_er
     inside = (np.arange(n_events)[:, None] * block + np.arange(length)).ravel()
     dx[inside] = (truth + ar1(3.0)).ravel()
     dy[inside] = (0.05 * truth + ar1(0.3)).ravel()
-    tau = f"{-1.0 / math.log(rho):.6f}s"
-    pairs = make_pairs(dx, dy, sigma_x=3.0, sigma_y=0.3, tau=(tau, tau))
+    tau = f"{-1.0 / math.log(rho):.9f}s"
+    pairs = make_pairs(dx, dy, sigma_x=3.0 * scale, sigma_y=0.3 * scale, tau=(tau, tau))
     catalog = pd.DataFrame(
         [event_row(f"e{k}", f"c{k}", (k * block, k * block + length)) for k in range(n_events)]
     )
-    table = fit(pairs, catalog, methods=("york",))
+    table = fit(pairs, catalog)
     assert (table["status"] == "OK").all()
-    spread = 1.4826 * np.median(np.abs(table["slope"] - np.median(table["slope"])))
-    as_it_comes = spread / np.median(table["slope_sigma"])
-    widened = spread / np.median(table["slope_sigma_widened"])
-    assert 1.9 < as_it_comes < 2.6
-    assert 0.85 < widened < 1.1
-    inside_2sigma = np.abs(table["slope"] - 0.05) <= 2 * table["slope_sigma_widened"]
-    assert 0.92 < inside_2sigma.mean() < 0.99
+    return table
+
+
+def _spread_over_sigma(table: pd.DataFrame, method: str, column: str) -> float:
+    rows = table[table["method"] == method]
+    return float(np.std(rows["slope"], ddof=1) / np.median(rows[column]))
+
+
+def test_widening_by_the_declared_time_makes_yorks_sigma_honest_on_persistent_errors() -> None:
+    """Monte Carlo, METHODS §4.5 Table 7's case: rho 0.7 (tau 2.8 s), a 10 s plume, 60 cells.
+
+    York's slopes spread 2.2x its sigma as it comes; widened, the sigma is
+    honest, and least squares' too (its slope is diluted, its sigma is not).
+    """
+    table = _persistent_plumes(0.7, 10.0, 60, 1.0, 800, 20261117)
+    assert 1.9 < _spread_over_sigma(table, "york", "slope_sigma") < 2.6
+    assert 0.9 < _spread_over_sigma(table, "york", "slope_sigma_widened") < 1.1
+    assert 0.9 < _spread_over_sigma(table, "ols", "slope_sigma_widened") < 1.1
+    york_rows = table[table["method"] == "york"]
+    inside = np.abs(york_rows["slope"] - 0.05) <= 2 * york_rows["slope_sigma_widened"]
+    assert 0.93 < inside.mean() < 0.98
+
+
+def test_a_slope_is_widened_by_its_own_factor_not_the_means() -> None:
+    """rho 0.9 (tau 9.5 s) on a 5 s plume: the mean's sqrt(N / N_eff) would widen 1.75x too far.
+
+    Measured through the stage before the repair: the slopes spread 0.57 of
+    York's sigma widened by the mean's factor; by the slope's own, 0.97.
+    """
+    table = _persistent_plumes(0.9, 5.0, 40, 1.0, 800, 20261118)
+    assert 0.9 < _spread_over_sigma(table, "york", "slope_sigma_widened") < 1.1
+    york_rows = table[table["method"] == "york"]
+    mean_factor = np.sqrt(40 / n_effective(40, 1.0, -1.0 / math.log(0.9)))
+    assert 1.6 < float(mean_factor[0]) / np.median(york_rows["persistence_factor"]) < 1.9
+
+
+def test_birge_reads_the_mswd_against_what_persistence_makes_it_expect() -> None:
+    """rho 0.9, the noise declared at half: a raw-MSWD Birge factor under-widens.
+
+    Persistence makes a single source's MSWD read low (E about 0.6 here), so
+    an understated sigma shows only partly in the MSWD: widened on the raw
+    MSWD, York's sigma promises a third less spread than the slopes have; on
+    MSWD / E, within the scatter of an MSWD on few effective points.
+    """
+    table = _persistent_plumes(0.9, 10.0, 60, 0.5, 800, 20261119)
+    york_rows = table[table["method"] == "york"]
+    assert 0.5 < np.median(york_rows["mswd_expected"]) < 0.75
+    assert 0.9 < _spread_over_sigma(table, "york", "slope_sigma_widened") < 1.2
+    on_raw = (
+        york_rows["slope_sigma"]
+        * york_rows["persistence_factor"]
+        * np.sqrt(np.fmax(1.0, york_rows["mswd"]))
+    )
+    assert np.std(york_rows["slope"], ddof=1) / np.median(on_raw) > 1.25
 
 
 # ---------------------------------------------------------------------------

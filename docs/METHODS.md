@@ -1111,7 +1111,8 @@ What the tables say, each a question for 7c rather than for the line:
    7c's to choose. Table 7 measures two of them, both from the declared τ
    through TSARA's own N_eff (§3.4): widening σ_b by √(N / N_eff) over the
    event is honest at τ up to 2.8 s on 1 s readings and errs on the safe side
-   at 9.5 s (0.73); fitting on means of 10–15 s comes within 12 % at every τ
+   at 9.5 s (0.73; the stage now uses the slope's own factor, which is honest
+   there too, §5.4); fitting on means of 10–15 s comes within 12 % at every τ
    in the table, while 5 s means stay 15–41 % too tight. The means are the
    less robust of the two: on a plume four times as long (240 readings, width
    40 s) at τ 9.5 s, 10 s means are 1.46× too tight while the widening stays
@@ -1288,7 +1289,8 @@ the member's lowest entry and naming its `candidate_id`; the member's window,
 quantile, exit, interval and peak time; the line and its statistics as the
 estimator returns them (§4: slope, intercept, their sigmas, r², points used,
 rows dropped, iterations, status by name); the gate numbers of §5.3; the
-factors of §5.4 and the widened sigma; the largest borrowed share; and the
+factors of §5.4 (persistence, the expected MSWD, Birge) and the widened
+sigma; the largest borrowed share; and the
 provenance of each axis's sigma (`none` where no sigma was carried). Every
 candidate is fitted, gated or not. A member whose interval holds no pair
 cell's midpoint holds no line (`TOO_FEW_POINTS`, n 0). A reference whose
@@ -1372,38 +1374,86 @@ at 1–1.5 cover 0.63 (their errors' robust spread 1.99× the widened σ), 49 at
 10 and above). Below about 1.5 a fit is clearly worse; from 2 up what limits
 coverage is the baseline's error (§5.4), not the signal. **Decided:** 2 stays.
 
-### 5.4 σ_b, widened **[decided 2026-11-17 — 7c1]**
+### 5.4 σ_b, widened **[decided 2026-11-17 — 7c1; both factors made the slope's own 2026-11-18]**
 
-$$\sigma_{b,\text{w}} = \sigma_b \sqrt{N / N_\text{eff}}\,\sqrt{\max(1,\ \text{MSWD})}$$
+York's σ_b is a promise: fit the same air again with fresh noise, and the
+slope moves by about σ_b. It holds when the declared noise is the right size
+and each reading's noise is independent of the next. Two factors repair the
+two assumptions:
 
-- **√(N / N_eff)** accounts for readings whose errors persist, which the MSWD
-  cannot see (Table 4). N_eff is from the declared decorrelation time through
-  `tsara.core.propagation.n_effective` (§3.4) on the pairs' cells, with the
-  longer of the two axes' τ (the safe side). Table 7: honest up to τ 2.8 s on
-  1 s readings and on the safe side at 9.5 s. With τ undeclared the factor is
-  1 and the fit says so; the Aeris pair's τ is at most 0.6 s (CLAUDE.md,
-  DECIDED 2026-10-22), so the factor is about 1 there.
-- **√max(1, MSWD)**, the Birge scale factor, widens σ_b when the scatter is
-  larger than the declared noise explains and never narrows it (Table 3).
-  Plain √MSWD would also narrow a σ_b whose noise was declared generously,
-  the unsafe direction; with either, only the ratio of the two axes'
-  precisions then matters, and that ratio still moves the slope (Table 6).
+$$\sigma_{b,\text{w}} = \sigma_b\, P\, \sqrt{\max(1,\ \text{MSWD} / E)} \quad\text{(York)}, \qquad \sigma_{b,\text{w}} = \sigma_b\, P / \sqrt{E} \quad\text{(least squares)}$$
 
-Both factors and the unwidened σ_b are recorded beside the widened one; least
-squares' σ_b comes from the scatter already, so it takes the persistence
-factor only. The spacing is the pair clock's median, the fit's points treated
-as an AR(1) at that spacing. **Measured through the stage** (built 2026-11-17;
-rule: Table 7's plume and noise, 2,000 plumes per row, one member each, σ's
-and τ declared exactly, `~/.cache/tsara-walkthrough/scripts/p7c1/mc_widening.py`,
-800 plumes of the middle row pinned in `tests/ratios/test_fits.py`): the
-slopes' spread ÷ York's σ as it comes is 1.71, 2.14 and 2.77 at ρ 0.5, 0.7
-and 0.9 (2σ coverage 0.76, 0.65, 0.53), and ÷ the widened σ 0.98, 0.91 and
-0.69 (0.96, 0.96, 0.99). With the persistence factor alone the ratios are
-1.00, 0.92 and 0.69: the Birge factor, above 1 on 34, 25 and 11 % of fits,
-barely moves the median, and the rows differ from Table 7's 1.01, 0.97 and
-0.73 by the draws. Not yet accounted for: Table 5's 1.2× where the signal is good; 7c2's Monte Carlo
-(§5.5) measures whether σ_method carries it, and resampling is the next step
-if it does not.
+- **P, the persistence factor**, for readings whose errors persist, which the
+  MSWD cannot see (Table 4). With the errors of two points correlated as
+  ρ_ij = exp(−|t_i − t_j| / τ), t the pair cells' midpoints and τ the longer
+  of the two axes' declared decorrelation times (the safe side), a slope
+  fitted with weights w varies by P = √(vᵀRv / vᵀv) more than σ_b says, where
+  v_i = √w_i (x_i − x̄_w): York's weights at its final slope,
+  1 / (σ_y² + b² σ_x²), or equal weights for least squares. This is the
+  slope's own factor (linearized, exact for weights that do not depend on the
+  slope). A mean's √(N / N_eff) (§3.4), which the stage used until
+  2026-11-18, exceeds it: noise lingering across much of a member lifts its
+  points together, which moves the intercept, not the slope (on a 5 s plume
+  at τ 9.5 s, 1.75× too far). The cells' own times are used, so a hole in a
+  member counts for the time it spans.
+- **E, the MSWD a single source is expected to read** under that
+  persistence: E = (n − sᵀRs / Σw − P²) / (n − 2), s_i = √w_i, the trace of
+  R left after the line's intercept and slope are fitted, per degree of
+  freedom. It is below 1, because a line absorbs part of an error that
+  changes slowly: 0.86 at τ 2.8 s on Table 7's plume, 0.62 at 9.5 s. Stored
+  as `mswd_expected`; 1 with τ undeclared, blank below three points.
+- **√max(1, MSWD / E)**, the Birge scale factor, widens σ_b when the scatter
+  is larger than the declared noise explains, read against what persistence
+  makes it expect, and never narrows (Table 3). Read against the raw MSWD,
+  as until 2026-11-18, it under-widens a σ declared too small when the
+  errors persist, since the scatter it reads has shrunk by E. With it, only
+  the ratio of the two axes' precisions matters, and that ratio still moves
+  the slope (Table 6).
+- **Least squares** has no declared noise to scale: its σ_b comes from the
+  scatter, which persistence shrinks by the same E, so it is widened by
+  P / √E.
+
+With τ undeclared, P = E = 1 and the fit says so (`tau_s` blank); the Aeris
+pair's τ, measured on zero air, is at most 0.6 s, so both are about 1 there.
+P, E, the Birge factor and the unwidened σ_b are stored beside the widened
+one. **For 7c2's one-source gate** (§5.3): under persistence a single
+source's MSWD centres on E, not 1, so the gate should read MSWD / E.
+
+**Measured through the stage** (2026-11-18; rule: one Gaussian plume, peak
+60 ppb methane, width W, read once a second over L s, ethane 0.05 of it;
+AR(1) noise of sd 3 and 0.3 ppb with lag-one correlation ρ on both, τ =
+−1 s / ln ρ declared on both enhancements; σ's declared at the truth or at
+half; 2,000 plumes per row, 20 s apart in one record, one member each; three
+rows are pinned at 800 plumes in `tests/ratios/test_fits.py`). Each cell is
+the slopes' spread ÷ the median widened σ (1 is honest):
+
+| plume | ρ (τ) | York, σ declared right | York, at half | least squares | E |
+|---|---|---|---|---|---|
+| W 10 s, L 60 s | 0 | 1.00 | 1.03 | 1.00 | 1.00 |
+| | 0.5 (1.4 s) | 0.99 | 1.04 | 1.01 | 0.94 |
+| | 0.7 (2.8 s) | 0.99 | 1.05 | 1.03 | 0.86 |
+| | 0.9 (9.5 s) | 0.99 | 1.10 | 1.09 | 0.62 |
+| W 5 s, L 40 s | 0 | 1.00 | 1.04 | 1.02 | 1.00 |
+| | 0.5 | 1.00 | 1.05 | 1.03 | 0.91 |
+| | 0.7 | 0.99 | 1.06 | 1.04 | 0.80 |
+| | 0.9 | 0.97 | 1.11 | 1.09 | 0.54 |
+| W 30 s, L 120 s | 0 | 1.00 | 1.02 | 1.00 | 1.00 |
+| | 0.5 | 0.99 | 1.02 | 0.99 | 0.97 |
+| | 0.7 | 0.99 | 1.03 | 1.00 | 0.93 |
+| | 0.9 | 0.97 | 1.05 | 1.03 | 0.76 |
+
+With the noise declared right, York's widened σ is honest in every row.
+Declared at half, it is up to 11 % too narrow where few effective points make
+the MSWD itself scatter (ρ 0.9 on the short plumes), and least squares, whose
+σ is that same kind of estimate from the scatter, is too. Least squares' σ is
+honest but its slope is diluted (§4.1): the truth falls inside its ±2σ in as
+few as 87 % of fits on the 30 s plume at ρ 0. The factors used until
+2026-11-18 (the mean's √(N / N_eff), the Birge factor on the raw MSWD), under
+the same rule: 0.57–0.88 at ρ 0.9 with the noise declared right, 0.90–0.99 at
+ρ 0.7; with it declared at half, 0.86–1.05, near 1 only because the two
+errors cancelled. Not yet accounted for: Table 5's 1.2× where the signal is
+good; 7c2's Monte Carlo (§5.5) measures whether σ_method carries it, and
+resampling is the next step if it does not.
 
 **What the widened σ does not hold: the baseline's error across a member**
 (measured 2026-11-17, 7c1's fourth stage, on the generated chain of §5.3;

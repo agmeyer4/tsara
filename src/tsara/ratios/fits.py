@@ -42,14 +42,18 @@ to use it is the sweep's to show (§5.3).
 
 The slope's sigma widened (§5.4)
 --------------------------------
-York's sigma times sqrt(N / N_eff), for readings whose errors persist (the
-MSWD cannot see them), times sqrt(max(1, MSWD)), the Birge scale factor,
-which widens an understated sigma and never narrows a generous one. N_eff is
-``tsara.core.propagation.n_effective`` over the fit's points at the pair
-clock's median spacing, with the longer of the two enhancements' declared
-decorrelation times; with none declared the factor is 1 and ``tau_s`` is
-blank. Least squares' sigma already comes from the scatter, so it takes the
-persistence factor only. Every factor is stored beside the widened sigma.
+For readings whose errors persist, correlated as exp(-dt / tau) with the
+longer of the two enhancements' declared decorrelation times, at the pair
+cells' own times: York's sigma times the **persistence factor**, the slope's
+own (sqrt(v'Rv / v'v), v each point's weighted distance from the mean of x,
+which the MSWD cannot see), times the **Birge factor** sqrt(max(1, MSWD / E)),
+E the MSWD a single source is expected to read under that persistence
+(``mswd_expected``, below 1, since the line absorbs part of a slow error). The
+Birge factor widens an understated sigma and never narrows a generous one.
+Least squares' sigma comes from the scatter, which persistence shrinks by the
+same E, so it is widened by the persistence factor over sqrt(E). With no
+decorrelation time declared, both factors and E are 1 and ``tau_s`` is blank.
+Every factor is stored beside the widened sigma.
 
 Weights and support
 -------------------
@@ -78,10 +82,15 @@ from tsara.core.naming import (
     borrowed_name,
     sigma_rand_name,
 )
-from tsara.core.propagation import n_effective
 from tsara.core.support import stream_cells
 from tsara.core.timebase import NS_PER_S
-from tsara.ratios.estimators import FitStatus, LineFitter, TsaraRatioError, get_line_fit
+from tsara.ratios.estimators import (
+    FitStatus,
+    LineFit,
+    LineFitter,
+    TsaraRatioError,
+    get_line_fit,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt
@@ -126,6 +135,7 @@ FIT_COLUMNS: tuple[str, ...] = (
     "plateau_dof",
     "tau_s",
     "persistence_factor",
+    "mswd_expected",
     "birge_factor",
     "slope_sigma_widened",
     "borrowed_max",
@@ -169,6 +179,7 @@ _FIT_DTYPES: dict[str, str] = {
             "plateau_mswd",
             "tau_s",
             "persistence_factor",
+            "mswd_expected",
             "birge_factor",
             "slope_sigma_widened",
             "borrowed_max",
@@ -287,14 +298,12 @@ def member_fits(
     plateau = _plateau(members, pairs, midpoints, deltas, (sigma_x, sigma_y), dict(fitters))
     signal = _signal(x, y, sx, rows.group, n_members)
     tau_s = _tau(pairs, columns)
-    spacing_s = float(np.median(np.diff(midpoints))) / NS_PER_S if midpoints.size > 1 else np.nan
     borrowed = _borrowed(pairs, columns, rows, x, y, n_members)
     frames = []
     for position, (method, fit) in enumerate(fits.items()):
-        persistence = _persistence(fit.n, spacing_s, tau_s)
-        is_york = method == "york"
-        birge = np.sqrt(np.fmax(1.0, fit.mswd)) if is_york else np.full(n_members, np.nan)
-        widened = fit.slope_sigma * persistence * (birge if is_york else 1.0)
+        persistence, expected, birge, widened = _widening(
+            fit, method == "york", (x, y, sx, sy), rows, midpoints, tau_s
+        )
         mswd = york.mswd if york is not None else np.full(n_members, np.nan)
         dof = (york.n if york is not None else fit.n) - 2
         frames.append(
@@ -333,6 +342,7 @@ def member_fits(
                     "plateau_dof": plateau[2],
                     "tau_s": tau_s,
                     "persistence_factor": persistence,
+                    "mswd_expected": expected,
                     "birge_factor": birge,
                     "slope_sigma_widened": widened,
                     "borrowed_max": borrowed,
@@ -581,14 +591,118 @@ def _borrowed(
     return np.where(np.isfinite(largest), largest, np.nan)
 
 
-def _persistence(
-    n: npt.NDArray[np.int64], spacing_s: float, tau_s: float
-) -> npt.NDArray[np.float64]:
-    """Return sqrt(N / N_eff) for each fit's N points (§5.4); 1 with no decorrelation time."""
-    points = np.maximum(np.asarray(n, dtype=np.float64), 1.0)
-    if not np.isfinite(tau_s) or not np.isfinite(spacing_s):
-        return np.ones_like(points)
-    return np.sqrt(points / n_effective(points, spacing_s, tau_s))
+def _widening(
+    fit: LineFit,
+    is_york: bool,
+    points: tuple[
+        npt.NDArray[np.float64],
+        npt.NDArray[np.float64],
+        npt.NDArray[np.float64] | None,
+        npt.NDArray[np.float64] | None,
+    ],
+    rows: _Rows,
+    midpoints: npt.NDArray[np.int64],
+    tau_s: float,
+) -> tuple[
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+]:
+    """Return each fit's persistence factor, expected MSWD, Birge factor and widened sigma (§5.4).
+
+    Under errors that persist, correlated as exp(-|t_i - t_j| / tau) between
+    points i and j, the slope of a line fitted with weights w varies more than
+    its sigma says, by the factor P = sqrt(v'Rv / v'v), where v is each
+    point's sqrt(w) times its x's distance from the weighted mean of x, and R
+    those correlations: the slope's own factor, not the mean's
+    sqrt(N / N_eff), which a slope exceeds (noise lingering across a plume
+    lifts all its points, and moves the intercept, not the slope). The same
+    persistence makes the scatter about the line smaller than the declared
+    noise explains, by E = (n - s'Rs / s's - P^2) / (n - 2), s = sqrt(w): the
+    trace of R left after the fit, per degree of freedom, and the MSWD a
+    single source is expected to read. So York's sigma is widened by P and by
+    sqrt(max(1, MSWD / E)), and least squares', which comes from the scatter,
+    by P / sqrt(E). With no decorrelation time declared, P and E are 1.
+    York's weights are its own at its final slope, 1 / (sigma_y^2 + b^2
+    sigma_x^2); least squares' are equal.
+    """
+    x, y, sigma_x, sigma_y = points
+    n_groups = fit.n.size
+    birge = np.sqrt(np.fmax(1.0, fit.mswd)) if is_york else np.full(n_groups, np.nan)
+    if not np.isfinite(tau_s):
+        ones = np.ones(n_groups)
+        return ones, ones, birge, fit.slope_sigma * (birge if is_york else 1.0)
+    if not is_york:
+        weight = np.ones_like(x)
+    elif sigma_x is None or sigma_y is None:
+        weight = np.full_like(x, np.nan)  # York could not weigh, and fitted nothing
+    else:
+        b = fit.slope[rows.group]
+        with np.errstate(invalid="ignore"):
+            weight = 1.0 / (sigma_y**2 + b * b * sigma_x**2)
+    used = np.isfinite(x) & np.isfinite(y) & np.isfinite(weight)
+    weight = np.where(used, weight, 0.0)
+    group = rows.group
+    sum_w = np.bincount(group, weights=weight, minlength=n_groups)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean_x = (
+            np.bincount(group, weights=weight * np.where(used, x, 0.0), minlength=n_groups) / sum_w
+        )
+    s = np.sqrt(weight)
+    v = np.where(used, s * (x - mean_x[group]), 0.0)
+    seconds = midpoints[rows.cell].astype(np.float64) / NS_PER_S
+    s_rs, v_rv = _correlated_sums((s, v), group, seconds, tau_s, n_groups)
+    v_v = np.bincount(group, weights=v * v, minlength=n_groups)
+    count = np.bincount(group, weights=used.astype(np.float64), minlength=n_groups)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        persistence = np.sqrt(v_rv / v_v)
+        expected = (count - s_rs / sum_w - persistence**2) / (count - 2)
+        # Two points leave no degree of freedom to expect a scatter on.
+        expected = np.where((count > 2) & (expected > 0), expected, np.nan)
+        if is_york:
+            ratio = fit.mswd / expected
+            birge = np.where(np.isfinite(ratio), np.sqrt(np.fmax(1.0, ratio)), np.nan)
+            widened = fit.slope_sigma * persistence * birge
+        else:
+            widened = fit.slope_sigma * persistence / np.sqrt(expected)
+    return persistence, expected, birge, widened
+
+
+#: Below this correlation, a lag adds nothing a float can hold beside the
+#: lag-0 sum: exp(-27.6) is 1e-12.
+_NEGLIGIBLE_CORRELATION = 1e-12
+
+
+def _correlated_sums(
+    arrays: tuple[npt.NDArray[np.float64], ...],
+    group: npt.NDArray[np.intp],
+    seconds: npt.NDArray[np.float64],
+    tau_s: float,
+    n_groups: int,
+) -> tuple[npt.NDArray[np.float64], ...]:
+    """Return per group, for each array a, the sum over i, j of a_i a_j exp(-|t_i - t_j| / tau).
+
+    A group's rows are consecutive and in time order (``_rows``), so the sum
+    runs over lags in rows, both directions at once, until no pair a lag apart
+    within one group is correlated beyond :data:`_NEGLIGIBLE_CORRELATION`.
+    """
+    totals = [
+        np.bincount(group, weights=a * a, minlength=n_groups).astype(np.float64) for a in arrays
+    ]
+    for lag in range(1, group.size):
+        same = group[lag:] == group[:-lag]
+        if not same.any():
+            break
+        correlation = np.exp(-(seconds[lag:][same] - seconds[:-lag][same]) / tau_s)
+        if correlation.max() < _NEGLIGIBLE_CORRELATION:
+            break
+        g = group[lag:][same]
+        for total, a in zip(totals, arrays, strict=True):
+            total += 2.0 * np.bincount(
+                g, weights=correlation * a[lag:][same] * a[:-lag][same], minlength=n_groups
+            )
+    return tuple(totals)
 
 
 def _table(frames: list[pd.DataFrame]) -> pd.DataFrame:
