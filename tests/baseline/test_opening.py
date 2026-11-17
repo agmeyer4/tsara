@@ -10,6 +10,8 @@ METHODS §6.5, under their rules.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 import pytest
 
@@ -22,6 +24,9 @@ from tsara.baseline import (
 )
 from tsara.core.support import CellBounds, overlap_pairs
 from tsara.core.timebase import SECOND_NS as SECOND
+
+if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Callable
 
 
 def cells(width_s: float, n: int, step_s: float | None = None) -> CellBounds:
@@ -61,9 +66,10 @@ def reference(
 
     The first pass is the rolling quantile, whose own reference is in
     ``test_quantile.py``. The second pass is written out here: for each
-    reading, the first pass's values at the readings whose cells overlap its
-    window, weighted by that overlap, sorted, the Hazen position of each, and
-    the value (and each carried number) interpolated at 1 - q or at the top.
+    reading whose own window passes the rules, the first pass's values at the
+    readings with a value whose cells overlap its window, weighted by that
+    overlap, sorted, the Hazen position of each, and the value (and each
+    carried number) interpolated at 1 - q or at the top.
     """
     windows = window_cells(readings, window_ns)
     first = rolling_quantile(readings, values, windows, quantiles, carry=carry)
@@ -73,10 +79,11 @@ def reference(
     out, sigma, carried = (np.full((n, k), np.nan) for _ in range(3))
     for column, q in enumerate(quantiles):
         blank = (first.n_readings < min_readings[column]) | first.too_wide
-        low = np.where(blank, np.nan, first.values[:, column])
+        own = np.where(blank, np.nan, first.values[:, column])
+        low = np.where(np.isfinite(values), own, np.nan)  # only readings lend a value
         wanted = 1.0 if dilation == "max" else 1.0 - q
         for t in range(n):
-            if not np.isfinite(low[t]):
+            if not np.isfinite(own[t]):
                 continue
             here = pairs.target_index == t
             j = pairs.reading_index[here]
@@ -278,6 +285,112 @@ def test_a_reading_too_wide_for_the_window_takes_no_part_in_the_second_pass() ->
 
 
 # ---------------------------------------------------------------------------
+# Masked readings: kept as rows or left out, the same opening
+# ---------------------------------------------------------------------------
+
+
+def _masked_stretch() -> tuple[CellBounds, np.ndarray, np.ndarray]:
+    """1 s readings with noise, a 30 s plume of 50 ending where 200 s are masked, as an
+    excluded period is: masked rows kept, never deleted."""
+    rng = np.random.default_rng(0)
+    values = rng.normal(0.0, 0.7, 1200)
+    values[570:600] += 50.0
+    masked = np.zeros(values.size, dtype=bool)
+    masked[600:800] = True
+    return cells(1.0, values.size), np.where(masked, np.nan, values), ~masked
+
+
+def _interleaved() -> tuple[CellBounds, np.ndarray, np.ndarray]:
+    """A reading every 2 s written into 1 s rows, every other row empty, as a merge file
+    holds a slower analyzer; a ramp and plumes so the windows differ."""
+    rng = np.random.default_rng(1)
+    t = np.arange(3600.0)
+    values = 0.02 * t + rng.normal(0.0, 0.7, t.size)
+    for centre in rng.uniform(0, t[-1], 12):
+        values += 30 * np.exp(-0.5 * ((t - centre) / 15) ** 2)
+    kept = np.arange(t.size) % 2 == 0
+    return cells(1.0, t.size), np.where(kept, values, np.nan), kept
+
+
+@pytest.mark.parametrize("dilation", ["rank", "max"])
+@pytest.mark.parametrize("record", [_masked_stretch, _interleaved])
+def test_a_masked_reading_lends_nothing_so_rows_kept_or_left_out_agree(
+    dilation: str, record: Callable[[], tuple[CellBounds, np.ndarray, np.ndarray]]
+) -> None:
+    """A row whose reading is masked is not a reading. If its window took part in the second
+    pass, a masked stretch kept as rows would add windows centred where nothing was measured,
+    holding only the stretch's last few readings: the 30 s plume before the stretch, shorter
+    than (1 - q) windows, would be taken into the baseline (it was, at 48.9 against -0.9), and
+    a slower analyzer's empty rows would move the baseline by up to 1.2 ppb (2026-11-16 audit).
+    """
+    readings, values, kept = record()
+    window, quantile, minimum = 120 * SECOND, [0.05], [20]
+    as_rows = rolling_opening(
+        readings,
+        values,
+        window,
+        quantile,
+        dilation=dilation,  # type: ignore[arg-type]
+        min_readings=minimum,
+    )
+    index = np.flatnonzero(kept)
+    left_out = rolling_opening(
+        CellBounds(start_ns=readings.start_ns[index], stop_ns=readings.stop_ns[index]),
+        values[index],
+        window,
+        quantile,
+        dilation=dilation,  # type: ignore[arg-type]
+        min_readings=minimum,
+    )
+    assert np.isfinite(left_out.values).mean() > 0.9
+    assert np.array_equal(as_rows.values[index], left_out.values, equal_nan=True)
+    assert np.array_equal(as_rows.sigma[index], left_out.sigma, equal_nan=True)
+    if record is _masked_stretch:
+        plume = (index >= 570) & (index < 600)
+        assert (left_out.values[plume, 0] < 3.0).all()
+
+
+def test_a_masked_reading_too_wide_for_the_window_lends_nothing() -> None:
+    """A masked reading does not count in its own window, so the width rule never flags it;
+    lending nothing, it cannot spread its window's value across its wide cell either: the
+    readings up to 24, whose windows never meet the masked one's, stay on clean air."""
+    starts = (np.arange(30) * SECOND).astype(np.int64)
+    stops = starts + SECOND
+    stops[15] = starts[15] + 25 * SECOND  # ten times the window, and masked
+    readings = CellBounds(start_ns=starts, stop_ns=stops)
+    values = np.zeros(30)
+    values[15] = np.nan
+    values[26:29] = 50.0  # the only readings in the masked row's own window
+    window = int(2.5 * SECOND)
+    first = rolling_quantile(readings, values, window_cells(readings, window), [0.25])
+    assert not first.too_wide[15] and first.values[15, 0] == 50.0
+    for dilation in ("rank", "max"):
+        got = rolling_opening(
+            readings,
+            values,
+            window,
+            [0.25],
+            dilation=dilation,
+            min_readings=[1],
+        )
+        assert (got.values[np.r_[0:15, 16:25], 0] == 0.0).all(), dilation
+
+
+def test_a_masked_row_keeps_its_own_baseline_where_its_own_window_passes() -> None:
+    """As the rolling quantile does: inside a short masked stretch the window still holds
+    enough readings and the row has a baseline from the windows of the readings around it;
+    deep inside a long one it does not."""
+    values = np.zeros(200)
+    values[50] = np.nan  # one masked reading
+    values[60:] = np.nan  # and a stretch far longer than the window
+    readings = cells(1.0, values.size)
+    got = rolling_opening(readings, values, 9 * SECOND, [0.1], dilation="rank", min_readings=[5])
+    assert got.values[50, 0] == 0.0
+    assert np.isfinite(got.values[:60, 0]).all()
+    assert np.isnan(got.values[70:, 0]).all()
+
+
+# ---------------------------------------------------------------------------
 # Bookkeeping
 # ---------------------------------------------------------------------------
 
@@ -317,3 +430,15 @@ def test_bad_arguments_are_refused_by_name() -> None:
         rolling_opening(
             readings, np.zeros(10), 5 * SECOND, [0.1], dilation="max", min_readings=[1, 2]
         )
+    # The engine takes several carried columns; the opening takes one, and adds its own.
+    for shape in ((10, 1), (10, 2)):
+        with pytest.raises(TsaraBaselineError, match="carry has 2 dimensions"):
+            rolling_opening(
+                readings,
+                np.zeros(10),
+                5 * SECOND,
+                [0.1],
+                dilation="max",
+                min_readings=[1],
+                carry=np.zeros(shape),
+            )

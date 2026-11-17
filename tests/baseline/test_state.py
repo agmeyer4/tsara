@@ -744,12 +744,16 @@ def test_an_opened_baseline_is_the_opening_with_the_rolling_quantile_s_record(
     )
     rule = opened["sigma_sys_enhancement_ch4"].attrs["tsara_sigma_rule"]
     assert rule == plain["sigma_sys_enhancement_ch4"].attrs["tsara_sigma_rule"]
-    # The maximum is never below the rolling quantile it opens, since the reading's own window
-    # is among those it reads; the rank form can be, wherever the reading's own window is among
-    # the highest few of its neighbours, and on this record it is.
-    finite = np.isfinite(base.values)
+    # At a reading, the maximum is never below the rolling quantile it opens, since the reading's
+    # own window is among those it reads; the rank form can be, wherever the reading's own window
+    # is among the highest few of its neighbours, and on this record it is. A masked row's own
+    # window is not read (a masked reading lends nothing), so there the maximum can be below.
+    reading = np.isfinite(drive["ch4"].values)[:, None, None]
+    finite = np.isfinite(base.values) & reading
     below = base.values[finite] < plain["baseline_ch4"].values[finite]
     assert (not below.any()) if dilation == "max" else below.any()
+    masked = np.isfinite(base.values) & ~reading
+    assert masked.any() and (base.values[masked] < plain["baseline_ch4"].values[masked]).any()
 
 
 def test_an_opening_is_handed_the_count_rule_and_applies_it_between_its_passes() -> None:

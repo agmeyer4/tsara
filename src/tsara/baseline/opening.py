@@ -13,9 +13,11 @@ windows centred on the readings themselves:
 2. **Second pass.** At every reading, the same weighted quantile again, of
    the first pass's values at the readings in its window, at 1 - q
    (``rank``) or at 1, the highest (``max``). Each first-pass value counts, as
-   each reading did, in proportion to the share of its reading's cell inside
-   the window. The reading's own value is always among them; where it is
-   blank, so is the result.
+   each reading did, by the overlap of its reading's cell with the window. A
+   masked reading lends no value, since it is not a reading: the result at a
+   reading is then the same whether masked readings are kept as rows or left
+   out. The reading's own window decides whether there is a result: where its
+   first-pass value is blank, so is the opening.
 
 A window centred on reading *j* contains the reading at *t* when *j* lies
 within half a window of *t*, and those are the readings the second pass
@@ -39,10 +41,14 @@ enhancement. Every window containing *t* sees the ramp; the one whose low
 end sits highest is the one reaching furthest up it. On a straight ramp
 without noise, ``max`` sits q x window x slope above the line, and ``rank``
 lies on it: the first pass shifts the line down by (1/2 - q) x window x slope,
-the second up by the same. A plume shorter than (1 - q) x window is left
-whole, since every window containing a reading of it holds more than a share
-q of air outside it; anything wider is taken into the baseline, as the
-rolling quantile also does.
+the second up by the same. A plume shorter than (1 - q) x window (to within
+half a reading) is left whole while it is alone in its windows, since every
+window containing a reading of it then holds more than a share q of clean
+air; anything wider is taken into the baseline, as the rolling quantile also
+does. Short plumes that together fill more than a share 1 - q of a window
+are taken in like one wide plume, and the step they make spans them under
+``rank`` and overhangs them by up to about q x window on each side under
+``max`` (§6.5, "Where short plumes crowd a window").
 
 Uncertainty (§6.7)
 ------------------
@@ -158,7 +164,8 @@ def rolling_opening(
         value to count (§6.4); applied before the second pass.
     carry : array-like, optional
         One number per reading to carry through both passes: the reading's
-        systematic sigma (§6.7).
+        systematic sigma (§6.7). One-dimensional; the second pass carries the
+        first pass's sigma beside it.
     block_elements : int, optional
         The rolling engine's per-block budget; not a configuration.
 
@@ -170,8 +177,9 @@ def rolling_opening(
     Raises
     ------
     TsaraBaselineError
-        If ``dilation`` is not ``rank`` or ``max``, or ``min_readings`` is not
-        one count per quantile; and whatever the rolling engine refuses.
+        If ``dilation`` is not ``rank`` or ``max``, ``min_readings`` is not
+        one count per quantile, or ``carry`` is not one-dimensional; and
+        whatever the rolling engine refuses.
     """
     if dilation not in _DILATIONS:
         raise TsaraBaselineError(f"The opening's second pass is 'rank' or 'max', not {dilation!r}.")
@@ -180,6 +188,11 @@ def rolling_opening(
         raise TsaraBaselineError(
             f"min_readings holds {len(min_readings)} count(s) for {len(q)} quantile(s); "
             "the count rule gives one per quantile."
+        )
+    if carry is not None and np.ndim(carry) != 1:
+        raise TsaraBaselineError(
+            f"carry has {np.ndim(carry)} dimensions; the opening carries one number per "
+            "reading (its systematic sigma) and adds the first pass's sigma beside it."
         )
     windows = window_cells(readings, window_ns)
     # 1. The first pass: the rolling quantile, with the reading's systematic
@@ -192,7 +205,16 @@ def rolling_opening(
     # part in the second pass, as a masked reading takes none in the first.
     count = first.n_readings[:, None] < np.asarray(min_readings, dtype=np.int64)[None, :]
     blank = count | first.too_wide[:, None]
-    lows = np.where(blank, np.nan, first.values)
+    own_lows = np.where(blank, np.nan, first.values)
+    # A row whose reading is masked is not a reading, so its window is not one
+    # of the windows the second pass gathers. Kept, a masked stretch stored as
+    # rows would add windows centred where nothing was measured: beside the
+    # stretch they hold only its last few readings, and pass the count rule
+    # with them, so an opening would depend on whether masked readings are kept
+    # as rows or left out. The masked row's own baseline is still given wherever
+    # its own window passes the rules, as the rolling quantile gives one.
+    masked = ~np.isfinite(np.asarray(values, dtype=np.float64))
+    lows = np.where(masked[:, None], np.nan, own_lows)
     n, n_quantiles = lows.shape
     opened = np.full((n, n_quantiles), np.nan, dtype=np.float64)
     sigma = np.full((n, n_quantiles), np.nan, dtype=np.float64)
@@ -216,7 +238,7 @@ def rolling_opening(
         # A reading whose own window is blank has no opening: the windows that
         # contain it may hold values, but the rule speaks for the reading's
         # own window, as it does for a rolling quantile.
-        own = np.isfinite(lows[:, column])
+        own = np.isfinite(own_lows[:, column])
         opened[:, column] = np.where(own, second.values[:, 0], np.nan)
         sigma[:, column] = np.where(own, second.carried[:, 0, 0], np.nan)
         if carried is not None:
