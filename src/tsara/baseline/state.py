@@ -178,7 +178,8 @@ def baseline_state(
         ``baseline_window`` (seconds) and ``baseline_quantile`` as further
         dimensions; per variable ``x`` the reading and its sigmas copied,
         ``baseline_x``, ``enhancement_x``, their sigma companions, and for a
-        rolling quantile ``n_readings_window_x`` and ``coverage_window_x``.
+        rolling quantile or an opening ``n_readings_window_x`` and
+        ``coverage_window_x``.
         Nothing here is a noise scale: plume detection's thresholds are
         multiples of the events stage's own clean spread (§6.8).
 
@@ -204,6 +205,7 @@ def baseline_state(
             values=np.asarray(stream[variable].values, dtype=np.float64),
             windows_ns=windows_ns,
             quantiles=quantiles,
+            min_readings=minimum,
             method=baseline.method_for(instrument, variable),
             provided=None if provided is None else provided.get(variable),
             block_elements=block_elements,

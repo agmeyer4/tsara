@@ -68,9 +68,20 @@ baseline:
   # examples/configs/manifest_multiformat_example.yaml, and are checked
   # against the manifest when the two configs are combined (load_config).
   methods:
-    # The Picarro's methane baseline, joined onto the Aeris's cells: both
-    # declare field ch4, and one atmosphere has one methane background.
-    aeris.ch4_aeris: {method: from_field, instrument: picarro}
+    # The Aeris's methane opened (§6.5): each window's low quantile, then the
+    # (1 - q)-quantile of those over the window (dilation: rank), so that a
+    # steady ramp is followed rather than left standing as enhancement, while
+    # a plume shorter than (1 - q) x window, alone in its windows, is left
+    # whole. dilation: max takes the highest instead, the form of the
+    # forward/backward baseline.
+    aeris.ch4_aeris: {method: rolling_opening, dilation: rank}
+    # The Aeris's methane baseline, averaged onto the Picarro's minute cells:
+    # both declare field ch4, and one atmosphere has one methane background.
+    # A baseline is adopted from the denser instrument: the 1 s Aeris's onto
+    # 60 s means is an average, while the Picarro's onto 1 s cells would copy
+    # one minute's value across sixty, which the join refuses (§11.2.4). An
+    # opened baseline may be adopted like any other.
+    picarro.ch4: {method: from_field, instrument: aeris}
     # A canister fills every nine minutes and cannot see a background at
     # minutes; at zero the enhancement is the concentration (§6.1).
     voc_pfp.toluene: {method: constant, value: 0.0}

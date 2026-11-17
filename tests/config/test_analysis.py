@@ -16,6 +16,7 @@ from tsara.config.analysis import (
     EventsConfig,
     FromFieldMethod,
     OutputGridConfig,
+    RollingOpeningMethod,
     RollingQuantileMethod,
 )
 
@@ -432,11 +433,22 @@ def test_baseline_methods_dispatch_on_the_method_key(analysis_dict: dict[str, An
         "iwas.benzene": {"method": "from_field", "instrument": "ptr"},
         "iwas.toluene": {"method": "constant", "value": 0.0},
         "ptr.benzene": {"method": "rolling_quantile"},
+        "ptr.toluene": {"method": "rolling_opening", "dilation": "max"},
     }
     config = AnalysisConfig.model_validate(full)
     assert config.baseline.method_for("iwas", "benzene") == FromFieldMethod(instrument="ptr")
     assert config.baseline.method_for("iwas", "toluene") == ConstantMethod(value=0.0)
     assert config.baseline.method_for("ptr", "benzene") == RollingQuantileMethod()
+    assert config.baseline.method_for("ptr", "toluene") == RollingOpeningMethod(dilation="max")
+
+
+def test_an_opening_takes_the_rank_second_pass_unless_told_otherwise() -> None:
+    """``rank`` by default; ``max`` on request; anything else refused naming the two."""
+    assert _baseline({"a.b": {"method": "rolling_opening"}}).method_for(
+        "a", "b"
+    ) == RollingOpeningMethod(dilation="rank")
+    with pytest.raises(ValidationError, match="'rank' or 'max'"):
+        _baseline({"a.b": {"method": "rolling_opening", "dilation": "min"}})
 
 
 def test_a_variable_not_named_in_methods_uses_the_rolling_quantile() -> None:
