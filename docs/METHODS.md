@@ -74,7 +74,7 @@ The pipeline defers any change of clock to the last possible moment:
 | Stage | Clock used | Support (§10) |
 |---|---|---|
 | QA/QC, unit conversion | native | unchanged; both are pointwise |
-| Baseline, enhancement Δ — the continuous baseline state | native (time-based windows), per stream (§6.2) | windows are durations, so cells of any width fit; each reading is weighted by the share of its cell inside the window (§6.3) |
+| Baseline, enhancement Δ — the continuous baseline state | native (time-based windows), per stream (§6.2) | windows are durations, so cells of any width fit; each reading is weighted by its overlap with the window, the length of its cell inside it (§6.3) |
 | Plume detection | native → events are time **intervals** | an event runs from its first reading's cell start to its last reading's cell stop, with the share its cells cover recorded; the smallest event is one reading (§6.8) |
 | Ratio regression | **pairing clock** (§1.3), per event/window | the **wider-supported** stream's cells, with its partner averaged onto them by overlap |
 | Receptor-model (PMF) export | a **cell set** chosen for it (§1.4) | one join onto those cells |
@@ -490,7 +490,7 @@ noise scale, provenance carried and no floor, since a declared figure is not
 an estimate; otherwise the configured estimator runs over the configured
 window, and the result is `empirical`. The estimator ran through the rolling
 engine of §6.3 at *q* = 0.5, so its window membership is the join's: a
-sample enters a window in proportion to the share of its cell inside it.
+sample enters a window in proportion to its overlap with it.
 For `diff_mad` a sample is the absolute difference of two consecutive
 finite readings, on the cell between their midpoints, divided by √2 and
 scaled by 1.4826. **A difference across a dropout is dropped**: two readings
@@ -1401,8 +1401,9 @@ kept per version.
 ### 6.3 Which readings belong to a window **[decided 2026-09-24, built 2026-09-28 — Phase 5]**
 
 Windows are durations, centred on each reading. **A reading contributes in
-proportion to the share of its own cell lying inside the window**, which is the
-interval model and the weight every join already uses, so the baseline is a
+proportion to its overlap with the window**, the length of its own cell lying
+inside it (not the fraction of the cell, which would count a 20 s canister
+fill wholly inside a window the same as a 10 s one), which is the interval model and the weight every join already uses, so the baseline is a
 weighted quantile. The width rule of every join holds here too: a reading at
 least `COPY_RATIO` = 2 times as wide as the window is not stood on it
 (§11.2.4). When readings abut, the count of §6.4 refuses those windows
@@ -1645,8 +1646,16 @@ centred on the readings:
    quantile again, of the first-pass values *Q*(*j*) at the readings whose
    cells overlap *t*'s window, each weighted by that overlap as a reading is
    in the first pass: their (1 − *q*)-quantile (`rank`) or the highest
-   (`max`). *t*'s own value is always among them; where it is blank, so is
-   the result.
+   (`max`). **A masked reading lends no value**, since it is not a reading:
+   kept as rows, a masked stretch would add windows centred where nothing was
+   measured, which beside it hold only its last few readings and pass the
+   count rule with them, so the opening would depend on whether masked
+   readings are kept as rows or left out (found in the 2026-11-16 audit: a
+   30 s plume ending where 200 s were masked was taken into the baseline; a
+   test now holds the two forms equal). *t*'s own window decides whether there
+   is a result: where its first-pass value is blank, so is the opening. A
+   masked reading's own baseline is still given wherever its window passes
+   the rules, as the rolling quantile gives one.
 
 A window centred on *j* contains *t* when *j* lies within half a window of
 *t*, so the second pass gathers the low quantiles of every window that
@@ -1656,8 +1665,8 @@ of length *w* that contain the reading. With `max` and *q* → 0 it is the
 textbook greyscale opening by a flat window of length *w* (erosion the
 minimum, dilation the maximum), which a pencil-checkable test confirms. With
 *q* > 0 the name is borrowed: applying it twice changes it, and it can sit
-above some readings, which is harmless since enhancements are never clipped
-(§6.7).
+above some readings, whose enhancements are then negative and kept, since
+enhancements are never clipped (§6.7; how many, below).
 
 *Why.* A centred low quantile sits (1/2 − *q*)·*w*·*s* below a steady ramp
 of slope *s*, rising and falling alike, so a ramp longer than the noise can
@@ -1667,21 +1676,29 @@ without noise, with whole cells and an odd number of them in the window
 `rank` reads the mirrored position and lands back on it; `max` reads the far
 end of the window and lands (*q*·*w* − half a cell)·*s* above it, which is the
 continuous *q*·*w*·*s* to within half a cell. A plume shorter than
-(1 − *q*)·*w* is left whole, since every window that contains a reading of it
-holds more than a share *q* of air outside it, so no first-pass value there
-rises into the plume; anything wider is taken into the baseline, as the
+(1 − *q*)·*w* (to within half a reading, under Hazen's positions) is left
+whole while it is alone in its windows, since every window that contains a
+reading of it then holds more than a share *q* of clean air, so no first-pass
+value there rises into the plume; anything wider is taken into the baseline, as the
 rolling quantile takes it too, so the window still sets the scale between
 signal and background (§6.1).
 
 *Where short plumes crowd a window* (measured 2026-11-16, building notebook
 05's section on the opening). A short plume is left whole only while it is
 alone in its windows: blips that together fill more than a share 1 − *q* of a
-window lift that window's first-pass value, and the second pass hands the
-value to every reading the window contains, so the baseline rises into a flat
-step a window wide. The rolling quantile lifts with the same crowd, but only
-at the readings whose own window it fills. Inside the step the blips lose
-part of their enhancement, and the clean readings at its edges fall below the
-baseline. Measured (rule: notebook 05 §2's record at its defaults, one 1 s
+window lift that window's first-pass value, and the second pass hands it on,
+so the baseline rises into a flat step under the crowd. The rolling quantile
+lifts with the same crowd, but only at the readings whose own window it
+fills. The two second passes shape the step differently. `max` hands a
+lifted value to every reading its window contains, so its step overhangs the
+crowd by up to *q*·*w* on each side, and the clean readings in the overhang
+fall below the baseline; `rank` takes a lifted value only where more than a
+share *q* of the windows containing a reading are lifted, so its step spans
+the crowd and little more. On a block (rule: 10 ppb on zero, 1 s cells,
+*w* = 100 s, *q* 0.05, 0.10 and 0.25, blocks of 97–120 s, wider than
+(1 − *q*)·*w* so that the first pass rises), `rank`'s step is the block
+exactly and `max`'s the block and *q*·*w* more on each side. Under either,
+the blips inside the step lose part of their enhancement. Measured (rule: notebook 05 §2's record at its defaults, one 1 s
 analyzer of methane with white noise of σ = 0.7 ppb, 6 h, seed 11, a landfill
 0.6 an hour of σ 8 min and median 60 ppb, and blips 10 an hour, exponentially
 modified Gaussians of σ 6 s and τ 12 s with median 120 ppb; *w* = 2 min,
@@ -1691,7 +1708,11 @@ than 3σ above that line at 0.91 % of the 21 600 readings under the rolling
 quantile, 6.21 % under `rank` and 6.91 % under `max`, and at least 99.87 % of
 those readings are in a blip's air (true enhancement less the landfill's
 above 0.1σ); readings fall more than 3σ below the baseline at none, 6 and 155
-of them.
+of them. The lifted readings form 18 runs under `rank` and 19 under `max`,
+every `rank` run inside a `max` run, the `max` run reaching a median 6 s
+before it (*q*·*w* = 6 s) and 3 s after, where the blips' tails blur the
+crowd's end; a run lasts a median 56 s under `rank` and 61 s under `max`,
+about half the window.
 
 *The forward/backward baseline is the `max` form.* That construction takes
 a one-sided *q*-quantile over the window ahead, *L*(*t*) over [*t*, *t* + *w*],

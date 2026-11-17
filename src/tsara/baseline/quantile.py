@@ -4,7 +4,7 @@ The definition (``docs/METHODS.md`` §6.3)
 ------------------------------------------
 The baseline of a variable at window *w* is a low quantile of the readings
 in a window of duration *w* centred on each reading, every reading weighted
-by the share of its own cell lying inside the window. It is one weighted
+by its overlap with the window, the length of its cell inside it. It is one weighted
 quantile, defined once:
 
     Sort the contributing readings by value. Each reading's weight is its

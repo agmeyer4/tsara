@@ -22,8 +22,8 @@ Shape of the subpackage
     The rolling quantile opened (§6.5): the low quantile of each window, then
     a high one of those over each window -- their (1 - q)-quantile or their
     highest -- so that a ramp is followed and a plume shorter than
-    (1 - q) x window is left whole; with the first pass's qualifiers and the sigmas of
-    the window the result rests on.
+    (1 - q) x window, alone in its windows, is left whole; with the first
+    pass's qualifiers and the sigmas of the window the result rests on.
 ``methods``
     The baseline methods, registered by name (§6.5): the rolling quantile
     of the variable's own readings, the same opened, another instrument's

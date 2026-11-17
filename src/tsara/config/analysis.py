@@ -209,7 +209,7 @@ class RollingQuantileMethod(_StrictModel):
     """The weighted low quantile of a variable's own readings over each window.
 
     The default for every variable. Each reading in a window counts in
-    proportion to the share of its cell inside the window (METHODS.md §6.3),
+    proportion to its overlap with the window (METHODS.md §6.3),
     and a window holding fewer readings than the count rule asks for is
     blank rather than a baseline built on a handful of points (§6.4).
     """
@@ -238,8 +238,9 @@ class RollingOpeningMethod(_StrictModel):
 
     It is a greyscale morphological opening with a flat window, the minimum
     and maximum replaced by quantiles. A plume shorter than (1 - q) x window
-    is left whole as enhancement, and anything slower is taken into the
-    baseline. A single centred quantile instead sits (0.5 - q) x window x
+    is left whole as enhancement while it is alone in its windows, and anything
+    wider is taken into the baseline, as are short plumes that crowd a window
+    (METHODS.md §6.5). A single centred quantile instead sits (0.5 - q) x window x
     slope below any steady ramp, rising and falling alike, so a ramp stands
     as enhancement. On a straight ramp without noise ``rank`` lies on the
     line, and ``max`` sits q x window x slope above it.

@@ -282,7 +282,7 @@ def available_baseline_methods() -> tuple[str, ...]:
     Returns
     -------
     tuple of str
-        e.g. ``('constant', 'from_field', 'rolling_quantile')``.
+        e.g. ``('constant', 'from_field', 'rolling_opening', 'rolling_quantile')``.
     """
     return tuple(sorted(_METHODS))
 
