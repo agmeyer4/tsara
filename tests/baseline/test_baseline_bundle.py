@@ -73,7 +73,6 @@ def analysis() -> AnalysisConfig:
     return AnalysisConfig.model_validate(
         {
             "baseline": {"windows": ["2min", "10min"], "quantiles": [0.01, 0.05]},
-            "regression": {"reference_species": "ch4"},
         }
     )
 

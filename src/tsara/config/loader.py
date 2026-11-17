@@ -20,8 +20,8 @@ Five entry points:
 * :func:`load_analysis` — a YAML file containing analysis settings.
 * :func:`load_config` — one combined file with top-level ``manifest:`` and
   ``analysis:`` keys (the form the CLI consumes), returning a
-  :class:`TsaraConfig` that also cross-validates the two halves (e.g. the
-  regression reference species must actually be a declared gas).
+  :class:`TsaraConfig` that also cross-validates the two halves (e.g. a
+  ratio set's reference must actually be a declared gas variable).
 * :func:`load_synthetic` — a YAML file describing a synthetic dataset to
   manufacture (Phase 2).
 * :func:`load_survey` — a YAML file of survey settings: what to measure
@@ -65,30 +65,42 @@ class TsaraConfig(_StrictModel):
     """A complete, cross-validated run configuration (manifest + analysis).
 
     Cross-field checks that need *both* halves live here — neither the
-    manifest nor the analysis schema alone can know whether
-    ``regression.reference_species`` names a real gas variable.
+    manifest nor the analysis schema alone can know whether a ratio set's
+    reference names a real gas variable.
     """
 
     manifest: Manifest
     analysis: AnalysisConfig
 
     @model_validator(mode="after")
-    def _reference_species_is_a_declared_gas(self) -> TsaraConfig:
-        """Check the reference species against fields, because it names a gas.
+    def _ratio_sets_name_declared_gases(self) -> TsaraConfig:
+        """Check every ratio set's reference and numerators against the manifest.
 
-        A ratio's denominator is a physical quantity rather than one
-        analyzer's column, so the comparison is with each variable's
-        ``field`` (which is its name unless declared otherwise). Two methane
-        analyzers declaring ``field: ch4`` make ``ch4`` a valid reference
-        whatever their variables are called.
+        The analysis schema checks how each name is spelled; here each must
+        exist. A reference is a ``role: gas`` variable of a declared
+        instrument (never circular, which the manifest refuses for a gas),
+        since it is fitted on its enhancement and its events (METHODS.md
+        §5.2), and the numerators must expand, by
+        :meth:`~tsara.config.analysis.RatioSetConfig.numerator_refs`, the rule
+        the ratio stage uses too, to such variables, none of them twice.
         """
-        ref = self.analysis.regression.reference_species
-        gases = self.manifest.gas_species
-        if ref not in gases:
-            raise ValueError(
-                f"regression.reference_species '{ref}' is not the field of any role='gas' "
-                f"variable in manifest '{self.manifest.name}'; declared gases: {sorted(gases)}."
-            )
+        gases = {
+            name: [
+                variable for variable, spec in instrument.variables.items() if spec.role == "gas"
+            ]
+            for name, instrument in self.manifest.instruments.items()
+        }
+        gases = {name: variables for name, variables in gases.items() if variables}
+        for ratio_set in self.analysis.ratios.sets:
+            instrument, _, variable = ratio_set.reference.partition(".")
+            if variable not in gases.get(instrument, []):
+                raise ValueError(
+                    f"ratios.sets names reference '{ratio_set.reference}', which is not a "
+                    f"role='gas' variable of manifest '{self.manifest.name}'; "
+                    "gas variables: "
+                    f"{sorted(f'{name}.{v}' for name, vs in gases.items() for v in vs)}."
+                )
+            ratio_set.numerator_refs(gases)
         return self
 
     @model_validator(mode="after")
@@ -421,7 +433,7 @@ def load_config(path: str | Path) -> TsaraConfig:
 
     This is the single-file form the CLI consumes for headless batch runs.
     Both sections are validated individually, then cross-validated (e.g.
-    the regression reference species must be a declared gas variable).
+    a ratio set's reference must be a declared gas variable).
 
     Parameters
     ----------

@@ -37,7 +37,7 @@ common scale on every declared sigma cancels, and only their ratio across
 the two axes matters (§4.2).
 
 The estimators are registered by name, like the file readers, the baseline
-methods and the clean-level estimators, and ``RegressionConfig.methods``
+methods and the clean-level estimators, and ``RatiosConfig.methods``
 names them.
 """
 
@@ -197,7 +197,7 @@ class LineFitter(Protocol):
         """Fit one line per group."""
 
 
-#: Registered estimators keyed by ``RegressionConfig.methods`` entries.
+#: Registered estimators keyed by ``RatiosConfig.methods`` entries.
 #: Module-private: mutation goes through :func:`register_line_fit`.
 _ESTIMATORS: dict[str, LineFitter] = {}
 
@@ -247,7 +247,7 @@ def register_line_fit(name: str, *, replace: bool = False) -> Callable[[F], F]:
     Parameters
     ----------
     name : str
-        The ``RegressionConfig.methods`` entry.
+        The ``RatiosConfig.methods`` entry.
     replace : bool, optional
         Replace an estimator already registered under ``name``.
 
@@ -295,7 +295,7 @@ def get_line_fit(name: str) -> LineFitter:
     Parameters
     ----------
     name : str
-        The ``RegressionConfig.methods`` entry.
+        The ``RatiosConfig.methods`` entry.
 
     Returns
     -------

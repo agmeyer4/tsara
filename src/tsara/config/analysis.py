@@ -3,32 +3,50 @@
 Where the manifest (:mod:`tsara.config.manifest`) describes the raw data,
 this module describes the science: the baseline parameter sweep and the
 method each variable's baseline is built with, how events are found
-(thresholds, records, triggers), smoothing, source-complex clustering,
-regression/UQ settings, and an optional uniform output grid for the run that
-wants to export a rectangular table.
+(thresholds, records, triggers), smoothing, source-complex clustering, the
+ratios (which to fit, on which clocks, and the gates a fit must pass), and an
+optional uniform output grid for the run that wants to export a rectangular
+table.
 
 The sweep philosophy
 --------------------
-Several fields here are deliberately *lists* (baseline ``windows``,
-``quantiles``, plumes ``enter_multiple`` and ``exit_multiple``, smoothing
-``cutoff_periods``). Each list
-becomes a named dimension of the parameter hypercube: the engine evaluates
-every combination, and the spread of results across the cube *is* the
-methodological uncertainty reported in Phase 7. A user who wants a single
-fixed methodology simply supplies one-element lists — the hypercube then
-collapses to a point and methodological variance is zero by construction.
+Several fields here are deliberately *lists* (baseline ``windows`` and
+``quantiles``, events ``enter_multiple`` and ``exit_multiple``, the ratios'
+``periods`` and every gate, smoothing ``cutoff_periods``). Each list is a
+named dimension of the sweep: the engine evaluates every combination, and
+the sweep summary shows the results at every point of it (METHODS.md §5.6).
+How far the results move across the sweep is the methodological
+uncertainty, and which dimensions are pooled into a ratio's sigma_method
+and which are reported side by side is METHODS §5.5's: a candidate's
+members (its quantiles and exits) are pooled, while the window, the pair
+clock and the gates are not. A user who wants a single fixed methodology
+supplies one-element lists, and the sweep collapses to a point.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping, Sequence
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypeVar
 
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 
 from tsara.config.base import StrictModel as _StrictModel
 from tsara.config.base import validate_positive_timedelta as _validate_duration
+
+#: The fewest points a line fit accepts: two fix a line exactly and leave no
+#: degree of freedom to judge it by (METHODS.md §4). Spelled here because the
+#: configuration layer sits below the ratio stage and may not import it; a test
+#: holds it equal to ``tsara.ratios.estimators.MIN_FIT_POINTS``.
+MIN_FIT_POINTS = 3
+
+#: The pair clock that is pairing's own rule (METHODS.md §5.2): the cells of
+#: the wider-supported of the two variables. Every other period is a duration.
+NATIVE_PERIOD = "native"
+
+#: A number a sweep list may hold.
+_N = TypeVar("_N", int, float)
 
 # ---------------------------------------------------------------------------
 # Output grid (optional: a uniform tiling, one kind of cell set, for an export)
@@ -703,14 +721,12 @@ class EventsConfig(_StrictModel):
         once with the spelling wanted.
         """
         for key, trigger in value.items():
-            parts = key.split(".")
-            if len(parts) > 2 or not all(part.isidentifier() for part in parts):
+            if not _is_instrument_or_variable_ref(key):
                 raise ValueError(
                     "EventsConfig.triggers keys are '<instrument>' or "
                     f"'<instrument>.<variable>', e.g. 'iwas' or 'iwas.benzene'; got {key!r}."
                 )
-            instrument, dot, variable = trigger.partition(".")
-            if not dot or not instrument.isidentifier() or not variable.isidentifier():
+            if not _is_variable_ref(trigger):
                 raise ValueError(
                     f"EventsConfig.triggers['{key}'] names its trigger as "
                     f"'<instrument>.<variable>', e.g. 'ptr.benzene'; got {trigger!r}."
@@ -808,32 +824,261 @@ class ClusteringConfig(_StrictModel):
 
 
 # ---------------------------------------------------------------------------
-# Regression & UQ
+# Ratios: which ratios to fit, on which clocks, and the gates a fit must pass
 # ---------------------------------------------------------------------------
 
 
-class RegressionConfig(_StrictModel):
-    """Enhancement-ratio regression settings.
+class RatioSetConfig(_StrictModel):
+    """One reference gas and the numerators fitted against it.
 
-    Ratios are species-vs-``reference_species`` slopes fitted over stretches
-    of readings (METHODS.md §4). ``york`` (§4.2) is the scientifically
-    preferred estimator: both axes carry measurement error — plain OLS
-    attenuates slopes toward zero (regression dilution) when x is noisy —
-    and York accepts a per-point x-y error correlation, the expected case
-    when numerator and denominator come from the same instrument. ``ols``
-    is kept for its familiar diagnostics. The names are the estimators
-    registered in ``tsara.ratios``; ``odr`` was deleted with ``scipy.odr``'s
-    deprecation (§4.4).
+    A ratio is a slope of a numerator's enhancement on the reference's, fitted
+    over each member of each of the reference's candidates (METHODS.md §5.2).
+    The events come from the reference: its own, or, for a sparse reference,
+    those of its trigger (``events.triggers``), so no third name is needed.
+    Choosing the fitted stretches on the reference keeps the population chosen
+    on x and never on a numerator, which is what leaves the slope unbiased by
+    the choice.
+
+    Both sides are named as the events stage's triggers are, ``<instrument>``
+    or ``<instrument>.<variable>``, because a field alone is ambiguous where
+    two analyzers measure one gas: ``ch4`` would not say which methane the
+    events come from. Whether the names exist is the combined configuration's
+    question (:class:`~tsara.config.loader.TsaraConfig`), since this schema
+    cannot see the manifest; the spelling is checked here.
     """
 
-    reference_species: str = Field(
+    reference: str = Field(
+        description=(
+            "The denominator, as '<instrument>.<variable>' (e.g. 'aeris.ch4'): a "
+            "role='gas' variable, whose candidates (METHODS.md §6.8) "
+            "are the stretches every numerator is fitted over."
+        ),
+    )
+    numerators: tuple[str, ...] = Field(
         min_length=1,
         description=(
-            "The denominator species (e.g. 'ch4' or 'co2'), as a field: the "
-            "physical quantity a manifest variable declares it measures, which "
-            "is the variable's name unless it declares `field`. Must be the "
-            "field of a role='gas' variable; cross-checked when manifest and "
-            "analysis configs are combined."
+            "What is fitted against the reference, each '<instrument>' (every "
+            "gas variable it declares, the reference excepted) or "
+            "'<instrument>.<variable>', on any instrument: the reference's own "
+            "analyzer's other gases, or another instrument's, paired on a common "
+            "clock (§5.2)."
+        ),
+    )
+
+    def numerator_refs(self, gases: Mapping[str, Sequence[str]]) -> tuple[tuple[str, str], ...]:
+        """Expand the numerators into ``(instrument, variable)`` pairs.
+
+        The one statement of the expansion rule, used both by the combined
+        configuration's check against the manifest and by the ratio stage
+        against the states it is handed, so the two cannot disagree.
+
+        Parameters
+        ----------
+        gases : mapping of str to sequence of str
+            Per instrument, the gas variables it declares, in the
+            order an ``'<instrument>'`` entry should expand to.
+
+        Returns
+        -------
+        tuple of (str, str)
+            The numerators in the order written, an instrument's variables in
+            the order ``gases`` gives them, the reference left out of an
+            instrument's expansion.
+
+        Raises
+        ------
+        ValueError
+            If an entry names an instrument ``gases`` does not hold or a
+            variable that is not one of its gases, if an instrument entry
+            expands to nothing, or if a numerator is reached twice.
+        """
+        reference = tuple(self.reference.split("."))
+        expanded: list[tuple[str, str]] = []
+        for entry in self.numerators:
+            instrument, _, variable = entry.partition(".")
+            if instrument not in gases:
+                raise ValueError(
+                    f"The ratio set of '{self.reference}' names numerator '{entry}', but no "
+                    f"instrument '{instrument}' declares a gas; instruments with gases: "
+                    f"{sorted(gases)}."
+                )
+            if variable:
+                if variable not in gases[instrument]:
+                    raise ValueError(
+                        f"The ratio set of '{self.reference}' names numerator '{entry}', but "
+                        f"'{variable}' is not a gas variable of '{instrument}'; "
+                        f"its gases: {sorted(gases[instrument])}."
+                    )
+                reached = [(instrument, variable)]
+            else:
+                reached = [(instrument, name) for name in gases[instrument]]
+                reached = [ref for ref in reached if ref != reference]
+                if not reached:
+                    raise ValueError(
+                        f"The ratio set of '{self.reference}' names instrument '{entry}' as "
+                        "numerators, but its only gas is the reference itself."
+                    )
+            for ref in reached:
+                if ref in expanded:
+                    raise ValueError(
+                        f"The ratio set of '{self.reference}' reaches numerator "
+                        f"'{'.'.join(ref)}' twice; name each numerator once."
+                    )
+                expanded.append(ref)
+        return tuple(expanded)
+
+    @field_validator("reference")
+    @classmethod
+    def _reference_names_one_variable(cls, value: str) -> str:
+        if not _is_variable_ref(value):
+            raise ValueError(
+                "RatioSetConfig.reference is '<instrument>.<variable>', e.g. 'aeris.ch4'; "
+                f"got {value!r}."
+            )
+        return value
+
+    @field_validator("numerators")
+    @classmethod
+    def _numerators_are_spelled_right(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Require every entry spelled as a variable or an instrument, each once."""
+        for entry in value:
+            if not _is_instrument_or_variable_ref(entry):
+                raise ValueError(
+                    "RatioSetConfig.numerators entries are '<instrument>' or "
+                    f"'<instrument>.<variable>', e.g. 'ptr' or 'aeris.c2h6'; got {entry!r}."
+                )
+        if len(set(value)) != len(value):
+            raise ValueError(f"RatioSetConfig.numerators names an entry twice: {list(value)}.")
+        return value
+
+    @model_validator(mode="after")
+    def _the_reference_is_not_its_own_numerator(self) -> RatioSetConfig:
+        if self.reference in self.numerators:
+            raise ValueError(
+                f"RatioSetConfig names '{self.reference}' as its own numerator; its ratio "
+                "to itself is 1 by definition."
+            )
+        return self
+
+
+class GatesConfig(_StrictModel):
+    """Thresholds a fit must meet to count toward a ratio, each a list swept as an axis.
+
+    A gate never changes a fit; it decides whether the fit counts (METHODS.md
+    §5.3). So every fit stores the number each gate reads, and a gate is a
+    threshold applied after fitting: each list here is an axis of the sweep
+    summary (§5.6) at no cost in refitting, and a one-element list is a fixed
+    gate. Every gate has a value that lets everything through, so turning one
+    off is a value rather than a switch: ``min_peak_z`` 0, ``min_points`` 3,
+    ``min_signal`` 0, ``mswd_probability`` 1.
+
+    Gate settings are not pooled into a candidate's sigma_method: within one
+    candidate a stricter gate only drops some of its members, and the spread of
+    the members is sigma_method already, so it would be counted twice. Where
+    the gates matter is the population, how many candidates count as good
+    ratios and how their ratios move, which the sweep summary shows.
+
+    Each list is strictly increasing, enforced rather than sorted, as the
+    events stage's multiples are: a shuffled or repeated sweep list more likely
+    holds a typo than an intention.
+    """
+
+    min_peak_z: tuple[float, ...] = Field(
+        default=(5.0,),
+        min_length=1,
+        description=(
+            "Height: the member's peak z, in clean spreads (METHODS.md §6.8), must "
+            "reach this. 5 by default: false candidates 0-0.25 an hour on every "
+            "generated record measured, against 2.7-21 ungated."
+        ),
+    )
+    min_points: tuple[int, ...] = Field(
+        default=(8,),
+        min_length=1,
+        description=(
+            f"Points: the pairs a fit used must number at least this (at least "
+            f"{MIN_FIT_POINTS}, the fewest a line fit accepts)."
+        ),
+    )
+    min_signal: tuple[float, ...] = Field(
+        default=(2.0,),
+        min_length=1,
+        description=(
+            "Signal: the reference's swing inside the member over its noise, "
+            "sqrt(max(0, var(dx) / mean(sigma_x^2) - 1)), must reach this. 2 by "
+            "default: below it York's slope sigma is 1.35x too tight or worse "
+            "(METHODS.md §4.5, Table 5). York's gate: it needs the reference's sigma."
+        ),
+    )
+    mswd_probability: tuple[float, ...] = Field(
+        default=(0.99,),
+        min_length=1,
+        description=(
+            "One source: York's MSWD must not exceed the chi-squared quantile at "
+            "this probability for n - 2 degrees of freedom, divided by n - 2 (2.51 "
+            "at 10 points and 1.33 at 120 for 0.99). 1 lets every MSWD through."
+        ),
+    )
+
+    @field_validator("min_peak_z", "min_signal")
+    @classmethod
+    def _non_negative_and_increasing(
+        cls, value: tuple[float, ...], info: ValidationInfo
+    ) -> tuple[float, ...]:
+        if any(not math.isfinite(v) or v < 0 for v in value):
+            raise ValueError(
+                f"GatesConfig.{info.field_name} must be finite and at least 0; got {list(value)}."
+            )
+        return _strictly_increasing(value, f"GatesConfig.{info.field_name}")
+
+    @field_validator("min_points")
+    @classmethod
+    def _enough_points_and_increasing(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        if any(v < MIN_FIT_POINTS for v in value):
+            raise ValueError(
+                f"GatesConfig.min_points must be at least {MIN_FIT_POINTS}, the fewest "
+                f"points a line fit accepts; got {list(value)}."
+            )
+        return _strictly_increasing(value, "GatesConfig.min_points")
+
+    @field_validator("mswd_probability")
+    @classmethod
+    def _probabilities_and_increasing(cls, value: tuple[float, ...]) -> tuple[float, ...]:
+        if any(not 0 < v <= 1 for v in value):
+            raise ValueError(
+                "GatesConfig.mswd_probability values are probabilities above 0 and at "
+                f"most 1 (1 lets every MSWD through); got {list(value)}."
+            )
+        return _strictly_increasing(value, "GatesConfig.mswd_probability")
+
+
+class RatiosConfig(_StrictModel):
+    """Enhancement ratios: which to fit, how, on which clocks, and the gates.
+
+    The ratio stage (``tsara.ratios``, METHODS.md §5) fits every numerator of
+    each ratio set against its reference over the members of the reference's
+    candidates, judges each fit by the gates, and reports a ratio per candidate
+    with its fit, method and systematic uncertainties. ``york`` (§4.2) is the
+    preferred estimator: both axes carry measurement error, and least squares
+    attenuates slopes toward zero when x is noisy (regression dilution); it
+    also accepts a per-point x-y error correlation, the expected case when
+    numerator and denominator come from one instrument. ``ols`` is kept for its
+    familiar diagnostics. The names are the estimators registered in
+    ``tsara.ratios``; ``odr`` was deleted with ``scipy.odr``'s deprecation
+    (§4.4).
+
+    Present with no ratio sets by default, as the other optional stages are
+    present but switched off: a run that stops at events fits nothing. Called
+    ``regression`` (``RegressionConfig``, one ``reference_species`` named by
+    field) until the 7c plan of 2026-11-17.
+    """
+
+    sets: tuple[RatioSetConfig, ...] = Field(
+        default=(),
+        description=(
+            "The ratio sets: each a reference and its numerators (METHODS.md §5.2). "
+            "Each reference appears in one set. Checked against the manifest when "
+            "the two configs are combined."
         ),
     )
     methods: tuple[Literal["ols", "york"], ...] = Field(
@@ -844,19 +1089,27 @@ class RegressionConfig(_StrictModel):
             "errors-in-both-axes estimator (METHODS.md §4.2), and 'ols' (§4.1)."
         ),
     )
-    min_points: int = Field(
-        default=8,
-        ge=3,
+    periods: tuple[str, ...] = Field(
+        default=(NATIVE_PERIOD,),
+        min_length=1,
         description=(
-            "Minimum synchronized samples within an event for a regression; "
-            "events with fewer get NaN ratios flagged in the catalog."
+            f"Pair clocks, each fitted and reported side by side, never pooled into "
+            f"sigma_method (METHODS.md §5.2): '{NATIVE_PERIOD}', the cells of the "
+            "wider-supported of the two variables (a tie to the one with fewer "
+            "readings), or a duration such as '5s', a uniform clock over both "
+            "records onto which both are averaged. A coarser clock starves short "
+            "events of pairs."
         ),
+    )
+    gates: GatesConfig = Field(
+        default_factory=GatesConfig,
+        description="Thresholds a fit must meet to count, each swept (METHODS.md §5.3).",
     )
     confidence_level: float = Field(
         default=0.95,
         gt=0,
         lt=1,
-        description="Confidence level for reported ratio intervals.",
+        description="Confidence level for reported ratio intervals (METHODS.md §5.5).",
     )
 
     @field_validator("methods")
@@ -865,7 +1118,42 @@ class RegressionConfig(_StrictModel):
         cls, value: tuple[Literal["ols", "york"], ...]
     ) -> tuple[Literal["ols", "york"], ...]:
         if len(set(value)) != len(value):
-            raise ValueError("RegressionConfig.methods contains duplicates.")
+            raise ValueError("RatiosConfig.methods contains duplicates.")
+        return value
+
+    @field_validator("periods")
+    @classmethod
+    def _periods_are_native_or_distinct_durations(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Require each period to be ``native`` or a positive duration, each once.
+
+        Two spellings of one duration ('10s' and '10 s') would fit the same
+        pairs twice and report them as two clocks, so durations are compared
+        by length, not by spelling.
+        """
+        import pandas as pd
+
+        lengths: list[object] = []
+        for period in value:
+            if period == NATIVE_PERIOD:
+                lengths.append(NATIVE_PERIOD)
+                continue
+            _validate_duration(period, field="RatiosConfig.periods")
+            lengths.append(pd.Timedelta(period))
+        if len(set(lengths)) != len(lengths):
+            raise ValueError(f"RatiosConfig.periods names one clock twice: {list(value)}.")
+        return value
+
+    @field_validator("sets")
+    @classmethod
+    def _one_set_per_reference(
+        cls, value: tuple[RatioSetConfig, ...]
+    ) -> tuple[RatioSetConfig, ...]:
+        references = [ratio_set.reference for ratio_set in value]
+        if len(set(references)) != len(references):
+            raise ValueError(
+                "RatiosConfig.sets names one reference in two sets; give each reference one "
+                f"set with all its numerators. References: {references}."
+            )
         return value
 
 
@@ -918,4 +1206,34 @@ class AnalysisConfig(_StrictModel):
     clustering: ClusteringConfig = Field(
         default_factory=ClusteringConfig, description="Optional Source Complex clustering."
     )
-    regression: RegressionConfig = Field(description="Enhancement-ratio regression settings.")
+    ratios: RatiosConfig = Field(
+        default_factory=RatiosConfig,
+        description=(
+            "Enhancement ratios: the ratio sets, estimators, pair clocks and gates "
+            "(METHODS.md §5). No ratio sets by default."
+        ),
+    )
+
+
+def _is_instrument_or_variable_ref(text: str) -> bool:
+    """Return whether ``text`` is ``<instrument>`` or ``<instrument>.<variable>``.
+
+    The spelling the triggers' keys and the ratio sets' numerators share, each
+    part an identifier, as a manifest's instrument and variable names are.
+    """
+    parts = text.split(".")
+    return len(parts) <= 2 and all(part.isidentifier() for part in parts)
+
+
+def _is_variable_ref(text: str) -> bool:
+    """Return whether ``text`` is spelled ``<instrument>.<variable>``, each an identifier."""
+    # Without a dot the variable part is empty, which is not an identifier.
+    instrument, _, variable = text.partition(".")
+    return instrument.isidentifier() and variable.isidentifier()
+
+
+def _strictly_increasing(value: tuple[_N, ...], field: str) -> tuple[_N, ...]:
+    """Return ``value``, refusing a list that does not strictly increase."""
+    if any(b <= a for a, b in zip(value, value[1:])):
+        raise ValueError(f"{field} must be strictly increasing; got {list(value)}.")
+    return value

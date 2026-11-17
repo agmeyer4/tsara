@@ -15,7 +15,10 @@ from tsara.config.analysis import (
     ConstantMethod,
     EventsConfig,
     FromFieldMethod,
+    GatesConfig,
     OutputGridConfig,
+    RatiosConfig,
+    RatioSetConfig,
     RollingOpeningMethod,
     RollingQuantileMethod,
 )
@@ -43,7 +46,10 @@ def test_minimal_analysis_parses(analysis_dict: dict[str, Any]) -> None:
     assert config.events.triggers == {}
     assert config.smoothing.enabled is False
     assert config.clustering.enabled is False
-    assert config.regression.methods == ("ols", "york")
+    assert config.ratios.sets == ()
+    assert config.ratios.methods == ("ols", "york")
+    assert config.ratios.periods == ("native",)
+    assert config.ratios.gates == GatesConfig()
 
 
 def test_sweep_lists_accepted(analysis_dict: dict[str, Any]) -> None:
@@ -315,44 +321,188 @@ def test_a_variable_key_wins_over_its_instrument_key() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Regression validation
+# Ratios (METHODS §5.2-5.3)
 # ---------------------------------------------------------------------------
+
+
+def _ratios(**fields: Any) -> RatiosConfig:
+    return RatiosConfig.model_validate(fields)
 
 
 def test_york_is_the_default_preferred_method(analysis_dict: dict[str, Any]) -> None:
     """York (errors-in-both-axes, correlation-aware) runs by default, beside OLS."""
     config = AnalysisConfig.model_validate(analysis_dict)
-    assert config.regression.methods == ("ols", "york")
+    assert config.ratios.methods == ("ols", "york")
 
 
-def test_odr_is_no_longer_a_method(analysis_dict: dict[str, Any]) -> None:
+def test_odr_is_no_longer_a_method() -> None:
     """``odr`` was deleted with scipy.odr's deprecation (METHODS §4.4)."""
-    bad = copy.deepcopy(analysis_dict)
-    bad["regression"]["methods"] = ["ols", "york", "odr"]
     with pytest.raises(ValidationError):
-        AnalysisConfig.model_validate(bad)
+        _ratios(methods=["ols", "york", "odr"])
 
 
-def test_unknown_method_rejected(analysis_dict: dict[str, Any]) -> None:
-    bad = copy.deepcopy(analysis_dict)
-    bad["regression"]["methods"] = ["ols", "wls"]  # 'wls' is not a registered estimator
+def test_unknown_method_rejected() -> None:
     with pytest.raises(ValidationError):
-        AnalysisConfig.model_validate(bad)
+        _ratios(methods=["ols", "wls"])  # 'wls' is not a registered estimator
 
 
-def test_duplicate_methods_rejected(analysis_dict: dict[str, Any]) -> None:
-    bad = copy.deepcopy(analysis_dict)
-    bad["regression"]["methods"] = ["ols", "ols"]
+def test_duplicate_methods_rejected() -> None:
     with pytest.raises(ValidationError, match="duplicate"):
-        AnalysisConfig.model_validate(bad)
+        _ratios(methods=["ols", "ols"])
 
 
-def test_min_points_floor(analysis_dict: dict[str, Any]) -> None:
-    """A 2-point regression always fits perfectly — meaningless."""
+def test_the_retired_regression_section_is_refused(analysis_dict: dict[str, Any]) -> None:
+    """``regression`` became ``ratios`` in the 7c plan; an old file fails by name."""
     bad = copy.deepcopy(analysis_dict)
-    bad["regression"]["min_points"] = 2
-    with pytest.raises(ValidationError):
+    bad["regression"] = {"reference_species": "ch4"}
+    with pytest.raises(ValidationError, match="regression"):
         AnalysisConfig.model_validate(bad)
+
+
+def test_a_ratio_set_names_a_reference_and_its_numerators() -> None:
+    config = _ratios(
+        sets=[
+            {"reference": "aeris.ch4", "numerators": ["aeris", "ptr.benzene"]},
+            {"reference": "picarro.co2", "numerators": ["caps.nox"]},
+        ]
+    )
+    assert [s.reference for s in config.sets] == ["aeris.ch4", "picarro.co2"]
+    assert config.sets[0].numerators == ("aeris", "ptr.benzene")
+
+
+@pytest.mark.parametrize("reference", ["ch4", "aeris", "aeris.ch4.dry", "aeris.", "1aeris.ch4"])
+def test_a_reference_names_one_variable_of_one_instrument(reference: str) -> None:
+    """A field alone is ambiguous where two analyzers measure one gas (METHODS §5.2)."""
+    with pytest.raises(ValidationError, match="'<instrument>.<variable>'"):
+        RatioSetConfig(reference=reference, numerators=("aeris.c2h6",))
+
+
+@pytest.mark.parametrize("entry", ["aeris.c2h6.x", "aeris.", ".c2h6", "a-b", ""])
+def test_a_numerator_is_an_instrument_or_one_of_its_variables(entry: str) -> None:
+    with pytest.raises(ValidationError, match="'<instrument>' or"):
+        RatioSetConfig(reference="aeris.ch4", numerators=(entry,))
+
+
+def test_a_ratio_set_needs_a_numerator() -> None:
+    with pytest.raises(ValidationError, match="at least 1"):
+        RatioSetConfig(reference="aeris.ch4", numerators=())
+
+
+def test_a_numerator_written_twice_is_refused() -> None:
+    with pytest.raises(ValidationError, match="names an entry twice"):
+        RatioSetConfig(reference="aeris.ch4", numerators=("ptr", "ptr"))
+
+
+def test_the_reference_is_not_its_own_numerator() -> None:
+    with pytest.raises(ValidationError, match="its own numerator"):
+        RatioSetConfig(reference="aeris.ch4", numerators=("aeris.ch4",))
+
+
+def test_one_set_per_reference() -> None:
+    with pytest.raises(ValidationError, match="one reference in two sets"):
+        _ratios(
+            sets=[
+                {"reference": "aeris.ch4", "numerators": ["aeris.c2h6"]},
+                {"reference": "aeris.ch4", "numerators": ["ptr"]},
+            ]
+        )
+
+
+# The expansion rule, which the combined configuration and the ratio stage share.
+# Not alphabetical, so that an expansion keeping the declared order is told from a sorted one.
+GASES = {"aeris": ["ch4", "c2h6"], "ptr": ["toluene", "benzene"], "pico": ["ch4"]}
+
+
+def test_an_instrument_expands_to_its_gases_in_order_without_the_reference() -> None:
+    ratio_set = RatioSetConfig(reference="aeris.ch4", numerators=("ptr", "aeris", "pico.ch4"))
+    assert ratio_set.numerator_refs(GASES) == (
+        ("ptr", "toluene"),
+        ("ptr", "benzene"),
+        ("aeris", "c2h6"),
+        ("pico", "ch4"),
+    )
+
+
+def test_an_instrument_whose_only_gas_is_the_reference_expands_to_nothing() -> None:
+    ratio_set = RatioSetConfig(reference="pico.ch4", numerators=("pico",))
+    with pytest.raises(ValueError, match="only gas is the reference itself"):
+        ratio_set.numerator_refs(GASES)
+
+
+def test_a_numerator_reached_twice_is_refused() -> None:
+    """Explicitly and again through its instrument: one fit would be reported twice."""
+    ratio_set = RatioSetConfig(reference="aeris.ch4", numerators=("ptr.benzene", "ptr"))
+    with pytest.raises(ValueError, match="reaches numerator 'ptr.benzene' twice"):
+        ratio_set.numerator_refs(GASES)
+
+
+@pytest.mark.parametrize(
+    ("entry", "message"),
+    [
+        ("lgr", "no instrument 'lgr' declares a gas"),
+        ("lgr.ch4", "no instrument 'lgr' declares a gas"),
+        ("ptr.xylene", "'xylene' is not a gas variable of 'ptr'"),
+    ],
+)
+def test_a_numerator_must_be_a_gas_the_instruments_declare(entry: str, message: str) -> None:
+    ratio_set = RatioSetConfig(reference="aeris.ch4", numerators=(entry,))
+    with pytest.raises(ValueError, match=message):
+        ratio_set.numerator_refs(GASES)
+
+
+def test_periods_are_native_or_durations() -> None:
+    assert _ratios(periods=["native", "5s", "1min"]).periods == ("native", "5s", "1min")
+    with pytest.raises(ValidationError, match="not a valid timedelta"):
+        _ratios(periods=["native", "fast"])
+    with pytest.raises(ValidationError, match="RatiosConfig.periods"):
+        _ratios(periods=["-5s"])
+
+
+@pytest.mark.parametrize("periods", [["native", "native"], ["10s", "10 s"], ["1min", "60s"]])
+def test_one_clock_is_named_once(periods: list[str]) -> None:
+    """Two spellings of one length would fit the same pairs twice as two clocks."""
+    with pytest.raises(ValidationError, match="names one clock twice"):
+        _ratios(periods=periods)
+
+
+def test_gates_default_to_the_measured_thresholds() -> None:
+    """METHODS §5.3: height 5, points 8, signal 2, MSWD at the 99 % quantile."""
+    gates = GatesConfig()
+    assert gates.min_peak_z == (5.0,)
+    assert gates.min_points == (8,)
+    assert gates.min_signal == (2.0,)
+    assert gates.mswd_probability == (0.99,)
+
+
+def test_every_gate_is_a_list_and_each_has_a_value_that_lets_everything_through() -> None:
+    """A gate switched off is a value, so a sweep can hold 'off' beside the defaults."""
+    gates = GatesConfig(
+        min_peak_z=(0.0, 4.0, 5.0),
+        min_points=(3, 8),
+        min_signal=(0.0, 2.0),
+        mswd_probability=(0.95, 0.99, 1.0),
+    )
+    assert gates.mswd_probability[-1] == 1.0
+
+
+@pytest.mark.parametrize(
+    ("field", "values", "message"),
+    [
+        ("min_peak_z", [5.0, 4.0], "strictly increasing"),
+        ("min_peak_z", [-1.0], "at least 0"),
+        ("min_signal", [float("nan")], "finite"),
+        ("min_signal", [2.0, 2.0], "strictly increasing"),
+        ("min_points", [2], "at least 3"),
+        ("min_points", [8, 5], "strictly increasing"),
+        ("mswd_probability", [0.0], "above 0"),
+        ("mswd_probability", [1.5], "at most 1"),
+        ("mswd_probability", [0.99, 0.95], "strictly increasing"),
+        ("min_points", [], "at least 1"),
+    ],
+)
+def test_gate_lists_are_checked(field: str, values: list[float], message: str) -> None:
+    with pytest.raises(ValidationError, match=message):
+        GatesConfig.model_validate({field: values})
 
 
 def test_unknown_key_rejected(analysis_dict: dict[str, Any]) -> None:

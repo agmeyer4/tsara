@@ -23,7 +23,8 @@ import pytest
 import statsmodels.api as sm  # type: ignore[import-untyped]
 from scipy.optimize import minimize_scalar
 
-from tsara.config.analysis import RegressionConfig
+from tsara.config import analysis as analysis_schema
+from tsara.config.analysis import RatiosConfig
 from tsara.ratios import (
     MIN_FIT_POINTS,
     FitStatus,
@@ -474,12 +475,17 @@ def test_a_point_outside_every_fit_may_declare_anything_but_a_negative_sigma() -
 
 
 def test_the_registered_fits_are_the_ones_the_configuration_names() -> None:
-    """``RegressionConfig.methods`` and the registry must not drift apart."""
-    annotation = RegressionConfig.model_fields["methods"].annotation
+    """``RatiosConfig.methods`` and the registry must not drift apart."""
+    annotation = RatiosConfig.model_fields["methods"].annotation
     (literal,) = typing.get_args(annotation)[:1]
     assert available_line_fits() == tuple(sorted(typing.get_args(literal)))
     assert get_line_fit("york") is york
     assert get_line_fit("ols") is ols
+
+
+def test_the_configuration_floors_points_where_the_fits_do() -> None:
+    """The configuration may not import the ratio stage, so it spells the floor itself."""
+    assert analysis_schema.MIN_FIT_POINTS == MIN_FIT_POINTS
 
 
 def test_an_unknown_fit_is_refused_naming_the_known_ones() -> None:

@@ -753,7 +753,7 @@ component systematic (§3.3) rather than by an enormous τ.
 ## 4. Regression estimators **[built 2026-10-19 — Phase 7a]**
 
 Registered names: `ols`, `york` (`tsara.ratios.estimators`). Defaults:
-`("ols", "york")` (config: `RegressionConfig.methods`, `tsara.config.analysis`,
+`("ols", "york")` (config: `RatiosConfig.methods`, `tsara.config.analysis`,
 whose names a test holds equal to the registry's). Built in Phase 7a as
 functions; no stage calls them yet: fitting events, and judging the fits
 across the sweep, are 7b and 7c.
@@ -1231,15 +1231,18 @@ construction.
 
 ### 5.2 Which readings a fit uses **[decided 2026-11-17 — 7c1]**
 
-**A ratio set** names a **reference** (the denominator) as
-`<instrument>.<variable>`, spelled as the events stage's triggers are (§6.8),
-since a field alone is ambiguous where two analyzers measure one gas, and its
-**numerators**, a list or every other gas variable of the campaign, on any
-instrument. Its events are the reference's, its own or, for a sparse
-reference, its trigger's: no third name is needed. Events come from the
-reference gas, so the fitted population is chosen on x and never on a
-numerator; coincidence across gases (§6.8) stays a description and never
-selects what is fitted (the methodology audit of 2026-10-22, CLAUDE.md).
+**A ratio set** (`ratios.sets`, built 2026-11-17 in 7c1's first stage, with
+the rest of the `ratios:` configuration) names a **reference** (the
+denominator) as `<instrument>.<variable>`, spelled as the events stage's
+triggers are (§6.8), since a field alone is ambiguous where two analyzers
+measure one gas, and its **numerators**, each an `<instrument>`, meaning every
+gas variable it declares but the reference, in the manifest's order, or an
+`<instrument>.<variable>`, on any instrument, none reached twice. Its events
+are the reference's, its own or, for a sparse reference, its trigger's: no
+third name is needed. Events come from the reference gas, so the fitted
+population is chosen on x and never on a numerator; coincidence across gases
+(§6.8) stays a description and never selects what is fitted (the methodology
+audit of 2026-10-22, CLAUDE.md).
 
 **Members.** A candidate's members are its distinct (quantile, exit)
 intervals at its window. Entry copies are one interval (§6.8, "Candidates":
@@ -1257,7 +1260,8 @@ midpoint < end: the rule a triggered variable's readings already follow
 (§6.8), and on one instrument exactly the event index (to be verified in the
 build). Rows missing either enhancement are not pairs.
 
-**Pairing periods.** `periods` lists pair clocks: `native` (the rule above,
+**Pairing periods.** `ratios.periods` lists pair clocks, each once (two
+spellings of one length are refused): `native` (the rule above,
 the default) and any durations, each a uniform clock over the two records
 (`target=`, §11.4). Every fit carries its period as a coordinate, and periods
 are reported side by side, never pooled into σ_method (§5.5). A coarser clock
@@ -1278,15 +1282,17 @@ stores the numbers a gate reads, and a gate is a threshold applied after
 fitting. Each gate takes a **list** of thresholds, and each list is an axis of
 the sweep summary (§5.6) at no cost in refitting: how many candidates count
 as good ratios, and how their ratios move, is then seen across gate settings
-as it is across windows. The gates, their defaults, and the evidence behind
-each:
+as it is across windows. Every gate has a value that lets everything through
+(`min_peak_z` 0, `min_points` 3, `min_signal` 0, `mswd_probability` 1), so
+switching one off is a value a sweep can hold beside the default. The gates,
+their defaults, and the evidence behind each:
 
-| gate | the number a fit stores | default | evidence |
+| gate (setting under `ratios.gates`) | the number a fit stores | default | evidence |
 |---|---|---|---|
-| height | the member's peak z (§6.8) | 5 | false candidates 0–0.25 an hour at peak z ≥ 5, on every generated record of §6.8 |
-| points | n, the pairs used | 8 | `min_points` of the 7a configuration |
-| signal | the reference's swing inside the member over its noise, √max(0, var(Δx) / mean(σx²) − 1) | 2 | Table 5: at a swing of 1.92–2.33, York's σ_b is 1.16–1.21× too tight; at 1.44, 1.35×; at 0.81, 2.14× |
-| one source | York's MSWD and its n − 2 degrees of freedom | the 99 % χ² quantile divided by n − 2 (2.51 at 10 points, 1.33 at 120) | notebook 07 §2: York's ± is 1.11× wider for a mixture than for one source, its MSWD 5.4× larger, and a mixture's slope moves with the declared noise (0.019 / 0.043 / 0.077 for the same air) |
+| height (`min_peak_z`) | the member's peak z (§6.8) | 5 | false candidates 0–0.25 an hour at peak z ≥ 5, on every generated record of §6.8 |
+| points (`min_points`) | n, the pairs used | 8 | `min_points` of the 7a configuration |
+| signal (`min_signal`) | the reference's swing inside the member over its noise, √max(0, var(Δx) / mean(σx²) − 1) | 2 | Table 5: at a swing of 1.92–2.33, York's σ_b is 1.16–1.21× too tight; at 1.44, 1.35×; at 0.81, 2.14× |
+| one source (`mswd_probability`) | York's MSWD and its n − 2 degrees of freedom | the 99 % χ² quantile divided by n − 2 (2.51 at 10 points, 1.33 at 120) | notebook 07 §2: York's ± is 1.11× wider for a mixture than for one source, its MSWD 5.4× larger, and a mixture's slope moves with the declared noise (0.019 / 0.043 / 0.077 for the same air) |
 
 For a threshold among the swept entries, the height gate is the entry
 dimension itself: a member is found at entry *g* exactly when its peak z
