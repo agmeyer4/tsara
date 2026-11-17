@@ -34,7 +34,9 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 6.5 | A baseline that follows a ramp: the rolling quantile opened (`rolling_opening`, `dilation: rank \| max`) | ✅ done |
 | 7a | Line fits: York's errors-in-both-variables line and least squares, through many groups of points at once | ✅ done |
 | 7b | Events grouped across the sweep into candidates, scored against the answer key | ✅ done |
-| 7c | A ratio per candidate, the plateau test, combined uncertainty, the stability cube | planned |
+| 7c1 | The ratio stage's fits: every numerator against the reference over each candidate's members, on a pair clock, with gates swept as thresholds | planned |
+| 7c2 | A ratio per candidate with its fit, method and systematic uncertainties, the sweep summary, save/load | planned |
+| 7c3 | The ratio stage on real data: the parked-night acceptance test, a drive, a pair of instruments | planned |
 | 7d | A run function and the `tsara` CLI | planned |
 | 8 | Smoothing + spatiotemporal source complexes | planned, after the first campaign results |
 | 9 | `Pipeline` class | planned |
@@ -54,7 +56,7 @@ share its peak across the rest of the sweep**. A manufactured campaign holds one
 every instrument samples, so any disagreement between two records of one gas
 is the instruments' own noise, rounding and support. It can fit York's line
 and least squares through many groups of points at once, but does not yet fit
-them to events or build the stability cube; there is no CLI yet (7d).
+them to events or summarize ratios across the sweep; there is no CLI yet (7d).
 
 ## Install
 

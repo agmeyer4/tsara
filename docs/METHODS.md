@@ -41,12 +41,17 @@ attributes and this document, because each was once used for several:
 | **plume** | an enhancement in the air from an emission: what the generator injects and the events stage (`tsara.events`) looks for. No stage yet reports one: whether events are a plume is judged across the sweep (Phase 7) | an interval the stage reported, which is an *event* |
 | **event** | an interval the events stage reported on one variable at one sweep point (`event_id`): what one sweep point sees, not a verdict: one plume, part of one, several merged, or a chance crossing, which is why the expected chance rate is recorded (§6.8) | a plume, or a source. The stage that reports events is `events` (`tsara.events`), named for its product as `baseline` is; its product is the **event state** and the **event catalog**, saved under `events/` in a bundle. It was named `plumes` until the Phase-6 walkthrough; no bundle under the old name exists outside that branch, so none is migrated |
 | **candidate** | the events of one variable at one baseline window that share a peak across quantile, entry and exit (`candidate_id`, `tsara.events.candidates`, §6.8): what the sweep sees of one thing at one scale, with how many sweep points found it and how tall it stood | a plume, or a verdict that one is there: whether a candidate is believed is judged by the ratio stage (Phase 7c) |
+| **member** | one of a candidate's distinct (quantile, exit) intervals at its window (§5.2): the interval its events share across entry, fitted once | an event: the events at several entries share one member |
+| **fit** | one line through the pairs of one member: one numerator, one estimator, one pairing period (§4, §5.2) | a ratio: a fit is what one sweep point gives; a ratio is read across a candidate's members |
+| **ratio** | a candidate's reported slope of a numerator on its reference, with σ_fit, σ_method and σ_sys beside their combination (§5.5) | a fit, or a slope over any other stretch |
+| **fingerprint** | a candidate's row of ratios across every numerator of its ratio set (§5.7) | a source's known signature: the package holds no library of those |
+| **sweep summary** | the fits' results summarized at every point of the sweep, gate thresholds included, over the candidates a caller names (§5.6): a view built on demand | a saved product. It was planned as the "stability cube" until 2026-11-17, renamed because a cube implies three dimensions |
 | **record** | a stretch of one stream over which the events stage computes its clean level and spread: split where consecutive readings are more than a set gap apart or, where the platform's speed is named, where it stays parked that long, and cut into pieces no longer than a set length (§6.8) | a file, a drive or a campaign |
 | **rolling** | the operation: a statistic over a window centred on each reading, moved along the record (`rolling_quantile`; Phase 7's fits over windows) | a stage or a product. The stage that computes baselines and enhancements is `baseline` (`tsara.baseline`); its product is the **baseline state**, saved under `baseline/` in a bundle. Both were named `rolling` until Phase 5 merged; no bundle under the old name exists outside that branch, so none is migrated |
 | **borrowed** | the share of a joined value resting on air outside its own cell (`borrowed_<name>`, `tsara_borrowed_share`, §11.2.4) | an uncertainty; it is a magnitude, and no threshold on it separates a blend from jitter |
 | **averaged / straddled / narrowed / copied** | what a join did to the readings behind a column (`tsara_support_transform`, §11.2.4): wholly inside their cells; lying across a boundary; wider than a cell they fill; at least twice as wide, which is refused unless asked for by name | |
 | **shift** | the one signed clock number: a duration added to every timestamp and both cell boundaries of a reading, corrected = recorded + shift, so a file that shows the air 7 s late takes −7 s. `time_shift` for a whole instrument, a correction table's `shift` for a stretch of one (§10.7, §12.3), and what the clock survey measures (§12.4), which writes the number it measures | a **lag**, which the survey reported until 2026-11-04 (positive for the later file, minus the shift; one number for both was decided in the Phase-3.6 walkthrough); not an `offset`, which is a unit conversion's additive term. "Lag" remains only where it is not a clock number: the generator's delay between species (`inter_species_lag`) and the lag-one autocorrelation |
-| **reference clock** | the clock a correction puts instruments on, named by the instrument that keeps it (§12.3) | "reference" alone, which is a ratio's denominator gas (`reference_species`) |
+| **reference clock** | the clock a correction puts instruments on, named by the instrument that keeps it (§12.3) | "reference" alone, which is a ratio's denominator gas (a ratio set's `reference`, §5.2) |
 | **tracer pair** | a variable on each of two instruments expected to show the same plumes: one gas on two analyzers, or gases emitted together; what the clock survey correlates, ranked in **tiers**, the first that decides a segment setting its shift (§12.4) | |
 | **segment** | a contiguous run of a record. The clock survey cuts records into segments of a set length and measures one shift on each (§12.4) | a record (§6.8) or an event |
 | **clock step**, **clock drift** | a shift that jumps between segments by more than the survey's tolerance, and one that changes steadily across a stretch (§12.5) | the background's drift (`drift_per_day`, §8.3) |
@@ -902,7 +907,13 @@ Therefore:
 - **Point weights use the random component** ($\sigma^{\mathrm{rand}}$, after
   any pairing-bin propagation), which satisfies that assumption between
   readings whose errors do not persist; §4.5's Table 4 measures what happens
-  when they do.
+  when they do. **It is the reading's own random sigma, not the
+  enhancement's** (decided 2026-11-17, for 7c): the enhancement's adds the
+  baseline's (§6.7), and every reading of an event sits on nearly the same
+  baseline, so that part of its error is shared by the event's points rather
+  than independent between them, and a fit with an intercept absorbs it.
+  Measured on the Wyoming van's 2026-02-03 afternoon (CLAUDE.md, DECIDED
+  2026-10-23): weighting by either moves σ_b by at most 2.5 %.
 - **A point with no declared random sigma is not weighed.** York reports its
   group `MISSING_SIGMA` with no line rather than inventing a sigma (§2.3).
   The 2024 archive's only per-point uncertainty columns are calibration
@@ -921,9 +932,12 @@ Therefore:
     added in quadrature at the event level.
 - **In neither component yet: the support error of §11.2.4.** A point built
   by a straddled or narrowed join carries a σ that omits the error that join
-  made, so weighting by σ alone over-trusts it. Whether the recorded borrowed
-  share enters these weights is to be decided before the stage that weighs
-  joined points is built (7c), not after.
+  made, so weighting by σ alone over-trusts it. **Decided 2026-11-17, for 7c:
+  recorded, not weighted.** Each fit records the largest borrowed share among
+  its pairs and how many of its readings are shared between pairs (§5.2);
+  neither enters a weight, since the borrowed share is a magnitude and not an
+  uncertainty (§11.2.4), and the pair clock's own rule (§1.3) keeps most
+  pairs averaged.
 
 ### 4.4 `odr` — deleted 2026-10-19
 
@@ -1130,7 +1144,7 @@ What the tables say, each a question for 7c rather than for the line:
 
 ---
 
-## 5. Combined uncertainty on reported ratios
+## 5. Ratios per candidate, and their combined uncertainty **[decided 2026-11-17 — Phase 7c]**
 
 Three terms, composed in quadrature, each with recorded provenance:
 
@@ -1141,13 +1155,25 @@ $$\sigma^2_{\text{ratio}} \;=\;
 \underbrace{\sigma^2_{\text{sys}}}_{\substack{\text{event-level systematic}\\
 \text{(scale terms, §4.3)}}}
 \;+\;
-\underbrace{\sigma^2_{\text{method}}}_{\substack{\text{variance across the}\\
-\text{parameter-sweep hypercube}}}$$
+\underbrace{\sigma^2_{\text{method}}}_{\substack{\text{spread across a}\\
+\text{candidate's members}}}$$
 
 The first term already contains propagated measurement noise (it is *not* an
 independent "measurement" term — adding one separately would double-count).
-The precise estimator for $\sigma^2_{\text{method}}$ (which cube axes, which
-dispersion statistic) is specified in Phase 7. **[partial stub — Phase 7]**
+Which parts of the sweep enter $\sigma^2_{\text{method}}$, and which are
+reported beside it instead, is §5.5.
+
+The ratio stage (`tsara.ratios`, config `ratios:`) was planned on 2026-11-17
+and is built in three parts, each its own pull request and walkthrough:
+**7c1**, the fits and their gates (§5.2–5.4); **7c2**, a candidate's ratio,
+the sweep summary and what the stage saves (§5.5–5.7); **7c3**, real data
+(the parked nights of 2026-02-05..12 as the acceptance test, a drive, and a
+pair of instruments). Nothing below is built yet. Out of 7c, each kept as an
+open flag in CLAUDE.md: which window's ratio belongs to which plume (§6.1;
+ratios are reported per window, linked by `parent_candidate_id`); events
+formed from several gases at once; rolling ratios as a product; declaring the
+x–y error correlation r (it stays 0, §4.2); source classes; spatial and wind
+work (Phase 8).
 
 ### 5.1 Error-budget closure: within-fit SE vs. between-fit scatter
 
@@ -1176,8 +1202,8 @@ Interpretation:
 
 Two uses in TSARA:
 
-1. **Stability-cube layer (Phase 7):** R_B is computed per sweep point, so a
-   user can see *where in parameter space the error budget closes*.
+1. **A layer of the sweep summary (§5.6):** R_B is computed per sweep point,
+   so a user can see *where in parameter space the error budget closes*.
 2. **Methodology selection:** choosing sweep parameters such that per-fit SE
    matches aggregate scatter (R_B ≈ 1) — the criterion used in the project
    owner's EM27 enhancement-ratio work — is a principled, self-consistency
@@ -1198,7 +1224,178 @@ qualify; overlapping rolling-window fits are serially correlated (effective
 K < K), biasing R_B low. And forcing R_B → 1 as a hard optimization target
 when the source ratio genuinely varies would drive selection toward
 over-conservative parameters: use closure as a constraint and diagnostic,
-not a sole objective. **[estimator details — Phase 7]**
+not a sole objective. R_B over K candidates needs those candidates to be
+one source's, so the sweep summary computes it over the candidates its caller
+names (§5.6): over a whole drive it mixes sources and reads high by
+construction.
+
+### 5.2 Which readings a fit uses **[decided 2026-11-17 — 7c1]**
+
+**A ratio set** names a **reference** (the denominator) as
+`<instrument>.<variable>`, spelled as the events stage's triggers are (§6.8),
+since a field alone is ambiguous where two analyzers measure one gas, and its
+**numerators**, a list or every other gas variable of the campaign, on any
+instrument. Its events are the reference's, its own or, for a sparse
+reference, its trigger's: no third name is needed. Events come from the
+reference gas, so the fitted population is chosen on x and never on a
+numerator; coincidence across gases (§6.8) stays a description and never
+selects what is fitted (the methodology audit of 2026-10-22, CLAUDE.md).
+
+**Members.** A candidate's members are its distinct (quantile, exit)
+intervals at its window. Entry copies are one interval (§6.8, "Candidates":
+54 of 54), so each member is fitted once, never once per entry, which would
+count one interval several times and narrow the spread across the sweep by
+construction. Every candidate is fitted, gated or not; gates are applied
+afterwards (§5.3).
+
+**Pairs.** The numerator's and the reference's enhancements are put onto one
+**pair clock** by pairing's rule (§1.3, §11.4: the wider-supported member's
+cells, a tie going to the member with fewer readings), through the join, every
+version of the baseline sweep at once (§11.2). A cell of the pair clock
+belongs to a member when its midpoint lies in the member's interval, start ≤
+midpoint < end: the rule a triggered variable's readings already follow
+(§6.8), and on one instrument exactly the event index (to be verified in the
+build). Rows missing either enhancement are not pairs.
+
+**Pairing periods.** `periods` lists pair clocks: `native` (the rule above,
+the default) and any durations, each a uniform clock over the two records
+(`target=`, §11.4). Every fit carries its period as a coordinate, and periods
+are reported side by side, never pooled into σ_method (§5.5). A coarser clock
+starves short events: on the 2024-07-18 NOAA drive (Picarro methane the
+reference, the PTR's VOCs on its cells, the members at 10 min, *q* 0.05 and
+exit 1 of its 234 gated candidates; CLAUDE.md, DECIDED 2026-10-23) the median
+member held 22 pairs on the native clock, 10 on 5 s cells and 3–9 on 10 s.
+
+**Weights and support.** Point weights are the reading's own random sigma
+put onto the pair clock (§4.3), not the enhancement's. Each fit records the
+largest borrowed share among its pairs and the count of its readings shared
+between pairs (§11.2.4, §11.4.1); neither weighs a point (§4.3).
+
+### 5.3 Gates **[decided 2026-11-17 — 7c1]**
+
+A gate never changes a fit; it decides whether the fit counts. So every fit
+stores the numbers a gate reads, and a gate is a threshold applied after
+fitting. Each gate takes a **list** of thresholds, and each list is an axis of
+the sweep summary (§5.6) at no cost in refitting: how many candidates count
+as good ratios, and how their ratios move, is then seen across gate settings
+as it is across windows. The gates, their defaults, and the evidence behind
+each:
+
+| gate | the number a fit stores | default | evidence |
+|---|---|---|---|
+| height | the member's peak z (§6.8) | 5 | false candidates 0–0.25 an hour at peak z ≥ 5, on every generated record of §6.8 |
+| points | n, the pairs used | 8 | `min_points` of the 7a configuration |
+| signal | the reference's swing inside the member over its noise, √max(0, var(Δx) / mean(σx²) − 1) | 2 | Table 5: at a swing of 1.92–2.33, York's σ_b is 1.16–1.21× too tight; at 1.44, 1.35×; at 0.81, 2.14× |
+| one source | York's MSWD and its n − 2 degrees of freedom | the 99 % χ² quantile divided by n − 2 (2.51 at 10 points, 1.33 at 120) | notebook 07 §2: York's ± is 1.11× wider for a mixture than for one source, its MSWD 5.4× larger, and a mixture's slope moves with the declared noise (0.019 / 0.043 / 0.077 for the same air) |
+
+For a threshold among the swept entries, the height gate is the entry
+dimension itself: a member is found at entry *g* exactly when its peak z
+reaches *g* (§6.8). §6.8 measured the gate on a candidate's tallest event;
+whether it is read on the tallest member or on each member is measured in
+7c1. The signal and one-source gates are York's; least squares' fits over the
+same pairs carry York's gate results, and where York cannot weigh
+(`MISSING_SIGMA`) a least-squares fit is reported ungated and labelled so.
+Gate thresholds are axes of the sweep summary, not of a candidate's σ_method:
+within one candidate a stricter gate only drops some of its members, whose
+spread is σ_method already, so it would be counted twice.
+
+**The plateau test** (fits at widths centred on an event, proposed when the
+rolling map was measured; CLAUDE.md, DECIDED 2026-10-19) is measured in 7c1
+before it is built: the exit dimension already gives each candidate nested
+intervals inside the event, and a member's own MSWD already flags a mixture.
+Fits at two and four times a member's interval, centred on it, are kept only
+if they tell single sources from mixtures and close neighbours that the
+MSWD and the spread across exits miss; otherwise they are not built.
+
+### 5.4 σ_b, widened **[decided 2026-11-17 — 7c1]**
+
+$$\sigma_{b,\text{w}} = \sigma_b \sqrt{N / N_\text{eff}}\,\sqrt{\max(1,\ \text{MSWD})}$$
+
+- **√(N / N_eff)** accounts for readings whose errors persist, which the MSWD
+  cannot see (Table 4). N_eff is from the declared decorrelation time through
+  `tsara.core.propagation.n_effective` (§3.4) on the pairs' cells, with the
+  longer of the two axes' τ (the safe side). Table 7: honest up to τ 2.8 s on
+  1 s readings and on the safe side at 9.5 s. With τ undeclared the factor is
+  1 and the fit says so; the Aeris pair's τ is at most 0.6 s (CLAUDE.md,
+  DECIDED 2026-10-22), so the factor is about 1 there.
+- **√max(1, MSWD)**, the Birge scale factor, widens σ_b when the scatter is
+  larger than the declared noise explains and never narrows it (Table 3).
+  Plain √MSWD would also narrow a σ_b whose noise was declared generously,
+  the unsafe direction; with either, only the ratio of the two axes'
+  precisions then matters, and that ratio still moves the slope (Table 6).
+
+Both factors and the unwidened σ_b are recorded beside the widened one. Not
+yet accounted for: Table 5's 1.2× where the signal is good; 7c2's Monte Carlo
+(§5.5) measures whether σ_method carries it, and resampling is the next step
+if it does not.
+
+### 5.5 A candidate's ratio **[decided 2026-11-17 — 7c2; its point estimate is chosen there by measurement]**
+
+A candidate's ratio is read from its members that pass the gates, at one
+window, pairing period, estimator and gate setting. **Its members are not
+repeat measurements**: they share most of their readings (the exits nest, the
+quantiles move the baseline a little), so averaging them averages away no
+noise, and their number says nothing about precision. That rules out an
+inverse-variance mean, which would favour the widest member (the lowest exit,
+the likeliest to hold a neighbour) and invite dividing σ by the root of the
+number of members.
+
+- **The point estimate** is chosen in 7c2 among (1) the median of the
+  members' slopes; (2) the **median member**, the one fit whose slope is the
+  median, so that slope, σ_b, n and MSWD all describe one real fit (the
+  leading candidate); (3) one primary sweep point per campaign, chosen by a
+  rule such as R_B ≈ 1 (§5.1; the primary-combinations flag in CLAUDE.md),
+  the members still giving σ_method; (4) the seed's fit, rejected, since the
+  seed is the lowest-exit interval, the most merged (§6.8). Rule: generated
+  campaigns with known ratios (single sources, mixtures, close neighbours),
+  each estimator's bias and coverage.
+- **σ_fit** is the widened σ_b (§5.4) of the fit the point estimate comes
+  from.
+- **σ_method** is the standard deviation of the passing members' slopes,
+  blank with its reason below two members. The window and the pairing period
+  are not pooled into it (each is reported per value; a ratio belongs to its
+  own window, CLAUDE.md 7c item p), nor are gate settings (§5.3). A constant
+  baseline's spread across the sweep is zero by construction and is read
+  with `tsara_baseline_method` (§6.5).
+- **σ_sys** is $|b|\sqrt{s_x^2 + s_y^2}$ from the declared relative systematic
+  terms of the two axes (§4.3). Absolute terms cancel in the enhancement and
+  the intercept. A systematic stated per point (`reported`) cannot be split
+  into scale and offset, and is labelled rather than used.
+- **The combination** is $\sqrt{\sigma_\text{fit}^2 + \sigma_\text{method}^2 +
+  \sigma_\text{sys}^2}$, every term reported beside it so that a fit's ± and
+  the sweep's spread are seen apart. Quadrature's justification is written
+  in 7c2 with the decisive check: Monte Carlo coverage of the combined
+  interval on generated campaigns with known ratios. The interval at
+  `confidence_level` uses the normal quantile.
+- **Upper limits are results.** The signal gate reads the reference only, so a
+  numerator that never rises still gets a slope and its ±, and whether a
+  candidate's interval is consistent with a source type is read from that
+  interval in `analyses/`; the package assigns no source classes.
+
+### 5.6 The sweep summary **[decided 2026-11-17 — 7c2]**
+
+A view, not a saved product: `sweep_summary(fits, population=…, gates=…)`
+returns an xarray Dataset whose dimensions are the sweep's axes (baseline
+window, quantile, exit, pairing period and each gate's thresholds) per
+numerator and estimator, holding the count of fits and of passes per gate,
+the count of good ratios, the population's median ratio and its spread, the
+median MSWD, and R_B (§5.1) over the candidates the caller names as one
+population (the parked nights, say). It is built on demand because a saved
+one would freeze one population and one set of gates. It is a table of
+summaries, one row per sweep point, not a per-reading array; whether Dask is
+needed is measured in 7c2 (CLAUDE.md open flags). It was planned as the
+"stability cube" until 2026-11-17 and renamed because a cube implies three
+dimensions.
+
+### 5.7 What the stage saves **[decided 2026-11-17 — 7c2]**
+
+Under `ratios/` in a bundle: `fits.parquet`, one row per member, numerator,
+estimator and pairing period, keyed by the `event_id` of the member's lowest
+entry and naming its `candidate_id`; `ratios.parquet`, one row per candidate,
+numerator, estimator, period and gate setting; and `analysis.yaml`, the
+`ratios:` section alone (§6.6's rule). A candidate's **fingerprint**, its row of
+ratios across numerators, and the sweep summary are built from these by
+functions rather than saved. Column names are settled in the build.
 
 ---
 
@@ -1270,7 +1467,7 @@ ratio fitted there mixes the two sources; the blip's own ratio comes from the
 short window, and the landfill's from the long one. Candidate rule, not
 decided: an event's ratio is judged across the windows at which that event is
 found; a ratio flat across them belongs to the source, and one that drifts is
-mixing with another scale. That is the stability cube (§5) read per event.
+mixing with another scale. That is the sweep's spread (§5) read per event.
 
 **Measured (2026-09-29): the parent's ratio is the hard one.** Event intervals
 from the answer key, so that detection is set aside. Rule: 12 h of generated
@@ -1386,7 +1583,8 @@ over the ten 2024 drive days:
 
 Native rate is thirteen times smaller than the spanning grid and loses nothing.
 Thirty species at native rate is about 1.3 GB, which eager NumPy carries; the
-Dask question stays with Phase 7's cube.
+Dask question stays with Phase 7, whose sweep summary is a table of
+summaries rather than a per-reading array (§5.6).
 
 A per-reading product keeps each reading's cell, so it is joined like a
 stream (§11.2.3): putting a dense instrument's baseline onto a canister's fills
@@ -1619,8 +1817,9 @@ until a sweep needs it.
   rather than a model, and is not built until a configuration uses a
   non-zero constant. A constant is stored at every sweep point so that every
   variable has one shape, and its spread across the sweep is therefore zero
-  by construction, not by stability: the stability cube of Phase 7 has to
-  read `tsara_baseline_method` before it reads that spread as agreement.
+  by construction, not by stability: the ratio stage's σ_method and sweep
+  summary (§5.5, §5.6) have to read `tsara_baseline_method` before they read
+  that spread as agreement.
 
 The method is chosen per variable under `baseline.methods`, keyed
 `<instrument>.<variable>` because a variable's name is unique per instrument
@@ -2042,7 +2241,7 @@ reading (same rule, seed 7), the ratio is **0.08**: the reported figure is a
 thirteenth of the true scatter. It is therefore a **floor** on the sampling
 error, labelled as such (`empirical`, with the assumption named in the
 attribute), and not the spread of the baseline; that spread, across windows
-and quantiles, is the sweep's and is read in Phase 7's stability cube.
+and quantiles, is the sweep's and is read by the ratio stage (§5.5, §5.6).
 
 **An opening's sampling sigma** (§6.5, built 2026-11-12) is the Woodruff
 interval of the window whose first-pass value it took (`max`), or the
@@ -6315,7 +6514,7 @@ pairing clock through it, under the same rule (§11.4.1).
 **There is deliberately no "PMF matrix" object.** A receptor-model matrix is
 this function called with a chosen set of columns. Which columns is a
 scientific decision — raw concentrations or the enhancements §5 will compute,
-which species, whether met belongs in the same cube — and hard-coding any of it
+which species, whether met belongs in the same table — and hard-coding any of it
 would make the block need editing every time that decision changed.
 
 #### The period rule
