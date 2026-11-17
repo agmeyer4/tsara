@@ -934,8 +934,8 @@ Therefore:
   by a straddled or narrowed join carries a σ that omits the error that join
   made, so weighting by σ alone over-trusts it. **Decided 2026-11-17, for 7c:
   recorded, not weighted.** Each fit records the largest borrowed share among
-  its pairs and how many of its readings are shared between pairs (§5.2);
-  neither enters a weight, since the borrowed share is a magnitude and not an
+  its pairs, and the pairing records how many readings formed more than one
+  of its pairs (§5.2); neither enters a weight, since the borrowed share is a magnitude and not an
   uncertainty (§11.2.4), and the pair clock's own rule (§1.3) keeps most
   pairs averaged.
 
@@ -1259,8 +1259,10 @@ alone (built in 7c1's second stage, §11.4 "Swept members"). The readings
 themselves are carried beside them (`carry=`), for their sigma. A cell of the pair clock
 belongs to a member when its midpoint lies in the member's interval, start ≤
 midpoint < end: the rule a triggered variable's readings already follow
-(§6.8), and on one instrument exactly the event index (to be verified in the
-build). Rows missing either enhancement are not pairs.
+(§6.8), and on one instrument exactly the event index (verified on a generated
+hour of one 1 s analyzer at all 16 sweep points of a 2 × 2 × 2 × 2 sweep: every
+reading, `tests/ratios/test_fits.py`). Rows missing either enhancement are not
+pairs.
 
 **Pairing periods.** `ratios.periods` lists pair clocks, each once (two
 spellings of one length are refused): `native` (the rule above,
@@ -1274,8 +1276,24 @@ member held 22 pairs on the native clock, 10 on 5 s cells and 3–9 on 10 s.
 
 **Weights and support.** Point weights are the reading's own random sigma
 put onto the pair clock (§4.3), not the enhancement's. Each fit records the
-largest borrowed share among its pairs and the count of its readings shared
-between pairs (§11.2.4, §11.4.1); neither weighs a point (§4.3).
+largest borrowed share among its pairs (§11.2.4). How many readings formed
+more than one pair is the pairing's own record, over all its pairs
+(`tsara_shared_readings`, §11.4.1): a fit sees the paired product, not the
+readings behind it. Neither weighs a point (§4.3).
+
+**What a fit stores** (built 2026-11-17 in 7c1's third stage,
+`tsara.ratios.member_fits`, its columns `tsara.ratios.FIT_COLUMNS`): one row
+per member, estimator, numerator and pair clock, keyed by the `event_id` of
+the member's lowest entry and naming its `candidate_id`; the member's window,
+quantile, exit, interval and peak time; the line and its statistics as the
+estimator returns them (§4: slope, intercept, their sigmas, r², points used,
+rows dropped, iterations, status by name); the gate numbers of §5.3; the
+factors of §5.4 and the widened sigma; the largest borrowed share; and the
+provenance of each axis's sigma (`none` where no sigma was carried). Every
+candidate is fitted, gated or not. A member whose interval holds no pair
+cell's midpoint holds no line (`TOO_FEW_POINTS`, n 0). A reference whose
+events come from a trigger has no z of its own, so its members stand as tall
+as the trigger events they copy (`trigger_event_id`).
 
 ### 5.3 Gates **[decided 2026-11-17 — 7c1]**
 
@@ -1296,8 +1314,11 @@ their defaults, and the evidence behind each:
 | signal (`min_signal`) | the reference's swing inside the member over its noise, √max(0, var(Δx) / mean(σx²) − 1) | 2 | Table 5: at a swing of 1.92–2.33, York's σ_b is 1.16–1.21× too tight; at 1.44, 1.35×; at 0.81, 2.14× |
 | one source (`mswd_probability`) | York's MSWD and its n − 2 degrees of freedom | the 99 % χ² quantile divided by n − 2 (2.51 at 10 points, 1.33 at 120) | notebook 07 §2: York's ± is 1.11× wider for a mixture than for one source, its MSWD 5.4× larger, and a mixture's slope moves with the declared noise (0.019 / 0.043 / 0.077 for the same air) |
 
-For a threshold among the swept entries, the height gate is the entry
-dimension itself: a member is found at entry *g* exactly when its peak z
+The signal is computed over the points a fit could weigh (finite enhancements
+and a finite reference sigma), with the variance on n − 1, so that the noise's
+share of it is unbiased; it is blank below two points or with no sigma, and
+unbounded for an exact reference. For a threshold among the swept entries,
+the height gate is the entry dimension itself: a member is found at entry *g* exactly when its peak z
 reaches *g* (§6.8). §6.8 measured the gate on a candidate's tallest event;
 whether it is read on the tallest member or on each member is measured in
 7c1. The signal and one-source gates are York's; least squares' fits over the
@@ -1332,8 +1353,19 @@ $$\sigma_{b,\text{w}} = \sigma_b \sqrt{N / N_\text{eff}}\,\sqrt{\max(1,\ \text{M
   the unsafe direction; with either, only the ratio of the two axes'
   precisions then matters, and that ratio still moves the slope (Table 6).
 
-Both factors and the unwidened σ_b are recorded beside the widened one. Not
-yet accounted for: Table 5's 1.2× where the signal is good; 7c2's Monte Carlo
+Both factors and the unwidened σ_b are recorded beside the widened one; least
+squares' σ_b comes from the scatter already, so it takes the persistence
+factor only. The spacing is the pair clock's median, the fit's points treated
+as an AR(1) at that spacing. **Measured through the stage** (built 2026-11-17;
+rule: Table 7's plume and noise, 2,000 plumes per row, one member each, σ's
+and τ declared exactly, `~/.cache/tsara-walkthrough/scripts/p7c1/mc_widening.py`,
+800 plumes of the middle row pinned in `tests/ratios/test_fits.py`): the
+slopes' spread ÷ York's σ as it comes is 1.71, 2.14 and 2.77 at ρ 0.5, 0.7
+and 0.9 (2σ coverage 0.76, 0.65, 0.53), and ÷ the widened σ 0.98, 0.91 and
+0.69 (0.96, 0.96, 0.99). With the persistence factor alone the ratios are
+1.00, 0.92 and 0.69: the Birge factor, above 1 on 34, 25 and 11 % of fits,
+barely moves the median, and the rows differ from Table 7's 1.01, 0.97 and
+0.73 by the draws. Not yet accounted for: Table 5's 1.2× where the signal is good; 7c2's Monte Carlo
 (§5.5) measures whether σ_method carries it, and resampling is the next step
 if it does not.
 

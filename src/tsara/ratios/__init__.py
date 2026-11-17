@@ -5,7 +5,8 @@ against another's over a stretch of readings (``docs/METHODS.md`` §4). Both
 axes carry measurement error, so the preferred line is York's, which weighs
 every point by its declared sigmas on both axes and reports how well they
 explain the scatter; ordinary least squares is kept beside it. This package
-holds the line fits; it reads nothing from the other stages.
+holds the line fits and the stage's fits over the events' members; it reads
+nothing from the other stages, which hand it their products.
 
 Shape of the subpackage
 -----------------------
@@ -13,6 +14,10 @@ Shape of the subpackage
     Straight lines fitted through many groups of points at once, York's and
     least squares, registered by name: what each fit reports, why a group
     holds no line, and the package's error class.
+``fits``
+    The stage's fits: every numerator against its reference over each member
+    of each of the reference's candidates, on a paired product, with every
+    number the gates read and the slope's sigma widened (§5.2-5.4).
 """
 
 from __future__ import annotations
@@ -29,15 +34,19 @@ from tsara.ratios.estimators import (
     register_line_fit,
     york,
 )
+from tsara.ratios.fits import FIT_COLUMNS, PairColumns, member_fits
 
 __all__ = [
+    "FIT_COLUMNS",
     "FitStatus",
     "LineFit",
     "LineFitter",
     "MIN_FIT_POINTS",
+    "PairColumns",
     "TsaraRatioError",
     "available_line_fits",
     "get_line_fit",
+    "member_fits",
     "ols",
     "register_line_fit",
     "york",
