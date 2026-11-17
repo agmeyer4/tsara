@@ -30,6 +30,16 @@ sqrt(max(0, var(dx) / mean(sigma_x^2) - 1)) with the variance on n - 1, and
 York's MSWD with its n - 2 degrees of freedom. Least squares' rows carry
 York's MSWD for the same pairs, since least squares has none of its own.
 
+The height a gate reads is the candidate's tallest member's (measured in
+7c1's fourth stage: a tall candidate's lower members are as good air as its
+tallest, §5.3), so every row also carries ``candidate_peak_z``. And beside
+each member's own line, York's line over the **plateau**: a window
+:data:`PLATEAU_WIDTH` times the member's duration, centred on it, every pair
+cell in it at the member's sweep point. Its MSWD is a gate's number (off by
+default); measured, it rejects most of the mixtures the MSWD gate lets
+through, and half of the good single-source members with them, so whether
+to use it is the sweep's to show (§5.3).
+
 The slope's sigma widened (§5.4)
 --------------------------------
 York's sigma times sqrt(N / N_eff), for readings whose errors persist (the
@@ -71,7 +81,7 @@ from tsara.core.naming import (
 from tsara.core.propagation import n_effective
 from tsara.core.support import stream_cells
 from tsara.core.timebase import NS_PER_S
-from tsara.ratios.estimators import FitStatus, TsaraRatioError, get_line_fit
+from tsara.ratios.estimators import FitStatus, LineFitter, TsaraRatioError, get_line_fit
 
 if TYPE_CHECKING:  # pragma: no cover
     import numpy.typing as npt
@@ -79,7 +89,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["FIT_COLUMNS", "PairColumns", "member_fits"]
+__all__ = ["FIT_COLUMNS", "PLATEAU_WIDTH", "PairColumns", "member_fits"]
 
 #: The fit table's columns, in order: one row per member, estimator,
 #: numerator and pair clock (METHODS §5.2-5.4). The member is named by the
@@ -98,6 +108,7 @@ FIT_COLUMNS: tuple[str, ...] = (
     "peak_time",
     "end_time",
     "peak_z",
+    "candidate_peak_z",
     "n",
     "n_dropped",
     "status",
@@ -110,6 +121,9 @@ FIT_COLUMNS: tuple[str, ...] = (
     "mswd",
     "dof",
     "signal",
+    "plateau_slope",
+    "plateau_mswd",
+    "plateau_dof",
     "tau_s",
     "persistence_factor",
     "birge_factor",
@@ -136,13 +150,14 @@ _FIT_DTYPES: dict[str, str] = {
         "str",
     ),
     **dict.fromkeys(("start_time", "peak_time", "end_time"), "datetime64[ns]"),
-    **dict.fromkeys(("n", "n_dropped", "iterations", "dof"), "int64"),
+    **dict.fromkeys(("n", "n_dropped", "iterations", "dof", "plateau_dof"), "int64"),
     **dict.fromkeys(
         (
             "baseline_window",
             "baseline_quantile",
             "exit_multiple",
             "peak_z",
+            "candidate_peak_z",
             "slope",
             "intercept",
             "slope_sigma",
@@ -150,6 +165,8 @@ _FIT_DTYPES: dict[str, str] = {
             "r_squared",
             "mswd",
             "signal",
+            "plateau_slope",
+            "plateau_mswd",
             "tau_s",
             "persistence_factor",
             "birge_factor",
@@ -159,6 +176,12 @@ _FIT_DTYPES: dict[str, str] = {
         "float64",
     ),
 }
+
+#: How many times its member's duration the plateau fit's window is, centred
+#: on the member (§5.3). A measured constant, not a knob: at 2 the plateau's
+#: MSWD gate rejected 120 of the 142 mixtures the member's own MSWD let
+#: through and kept 37 % of the good single-source members; at 4, 12 %.
+PLATEAU_WIDTH = 2
 
 #: The attribute a variable declares its decorrelation time in (§3.4), as
 #: ingestion writes it and the baseline stage copies it onto an enhancement.
@@ -251,18 +274,17 @@ def member_fits(
         )
     rows = _rows(members, pairs, midpoints)
     # Each member's pairs at its own sweep point, and the readings' own sigma.
-    x = deltas[1][rows.cell, rows.window, rows.quantile]
-    y = deltas[0][rows.cell, rows.window, rows.quantile]
     sigma_x, provenance_x = _sigma(pairs, columns.reference_reading)
     sigma_y, provenance_y = _sigma(pairs, columns.numerator_reading)
-    sx = None if sigma_x is None else sigma_x[rows.cell]
-    sy = None if sigma_y is None else sigma_y[rows.cell]
+    x, y, sx, sy = _gather(deltas, (sigma_x, sigma_y), rows)
     n_members = len(members)
     fits = {
         method: fitter(x, y, sigma_x=sx, sigma_y=sy, group=rows.group, n_groups=n_members)
         for method, fitter in fitters
     }
     york = fits.get("york")
+    # York again over each member's plateau window, when York is run at all.
+    plateau = _plateau(members, pairs, midpoints, deltas, (sigma_x, sigma_y), dict(fitters))
     signal = _signal(x, y, sx, rows.group, n_members)
     tau_s = _tau(pairs, columns)
     spacing_s = float(np.median(np.diff(midpoints))) / NS_PER_S if midpoints.size > 1 else np.nan
@@ -291,6 +313,9 @@ def member_fits(
                     "peak_time": members["peak_time"].to_numpy(),
                     "end_time": members["end_time"].to_numpy(),
                     "peak_z": members["peak_z"].to_numpy(),
+                    "candidate_peak_z": members.groupby("candidate_id", sort=False)["peak_z"]
+                    .transform("max")
+                    .to_numpy(),
                     "n": fit.n,
                     "n_dropped": fit.n_dropped,
                     "status": [FitStatus(code).name for code in fit.status],
@@ -303,6 +328,9 @@ def member_fits(
                     "mswd": mswd,
                     "dof": dof,
                     "signal": signal,
+                    "plateau_slope": plateau[0],
+                    "plateau_mswd": plateau[1],
+                    "plateau_dof": plateau[2],
                     "tau_s": tau_s,
                     "persistence_factor": persistence,
                     "birge_factor": birge,
@@ -418,6 +446,54 @@ def _rows(members: pd.DataFrame, pairs: xr.Dataset, midpoints: npt.NDArray[np.in
         window=np.repeat(_positions(members["baseline_window"], pairs, WINDOW_DIM), counts),
         quantile=np.repeat(_positions(members["baseline_quantile"], pairs, QUANTILE_DIM), counts),
     )
+
+
+def _gather(
+    deltas: tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]],
+    sigmas: tuple[npt.NDArray[np.float64] | None, npt.NDArray[np.float64] | None],
+    rows: _Rows,
+) -> tuple[
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64] | None,
+    npt.NDArray[np.float64] | None,
+]:
+    """Return the reference's and numerator's values at each row's sweep point, and their sigmas."""
+    x = deltas[1][rows.cell, rows.window, rows.quantile]
+    y = deltas[0][rows.cell, rows.window, rows.quantile]
+    sx = None if sigmas[0] is None else sigmas[0][rows.cell]
+    sy = None if sigmas[1] is None else sigmas[1][rows.cell]
+    return x, y, sx, sy
+
+
+def _plateau(
+    members: pd.DataFrame,
+    pairs: xr.Dataset,
+    midpoints: npt.NDArray[np.int64],
+    deltas: tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]],
+    sigmas: tuple[npt.NDArray[np.float64] | None, npt.NDArray[np.float64] | None],
+    fitters: dict[str, LineFitter],
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.int64]]:
+    """Return York's slope, MSWD and dof over each member's plateau window (§5.3).
+
+    The window is :data:`PLATEAU_WIDTH` times the member's duration, centred
+    on it, and holds every pair cell whose midpoint lies in it, at the
+    member's sweep point, inside the member's events or not. Blank when York
+    is not among the estimators run: only York has an MSWD to gate on.
+    """
+    n_members = len(members)
+    if "york" not in fitters:
+        return np.full(n_members, np.nan), np.full(n_members, np.nan), np.full(n_members, -2)
+    start = members["start_time"].to_numpy(dtype="datetime64[ns]").astype(np.int64)
+    stop = members["end_time"].to_numpy(dtype="datetime64[ns]").astype(np.int64)
+    centre, half = start + (stop - start) // 2, (stop - start) * PLATEAU_WIDTH // 2
+    wide = members.assign(
+        start_time=pd.to_datetime(centre - half), end_time=pd.to_datetime(centre + half)
+    )
+    rows = _rows(wide, pairs, midpoints)
+    x, y, sx, sy = _gather(deltas, sigmas, rows)
+    line = fitters["york"](x, y, sigma_x=sx, sigma_y=sy, group=rows.group, n_groups=n_members)
+    return line.slope, line.mswd, line.n - 2
 
 
 def _positions(values: pd.Series, pairs: xr.Dataset, dim: str) -> npt.NDArray[np.intp]:

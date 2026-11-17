@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
+from scipy.stats import chi2
 
 from tsara.align import pair_species
 from tsara.baseline import baseline_state
@@ -34,6 +35,7 @@ from tsara.core.timebase import SECOND_NS as SECOND
 from tsara.events import event_catalog, event_states
 from tsara.ratios import (
     FIT_COLUMNS,
+    PLATEAU_WIDTH,
     PairColumns,
     TsaraRatioError,
     member_fits,
@@ -218,6 +220,61 @@ def test_only_the_references_events_are_read(paper: tuple[xr.Dataset, pd.DataFra
     other = pd.DataFrame([event_row("z3", "cz", (0, 12), species="c2h6")])
     table = fit(pairs, pd.concat([catalog, other], ignore_index=True))
     assert "z3" not in set(table["event_id"])
+
+
+def test_every_row_carries_its_candidates_tallest_height() -> None:
+    """The height gate reads the candidate's tallest member (METHODS §5.3)."""
+    pairs = make_pairs(np.arange(20.0), 0.5 * np.arange(20.0), quantiles=(0.05, 0.10))
+    catalog = pd.DataFrame(
+        [
+            event_row("a3", "c0", (0, 8), peak_z=7.5),
+            event_row("b3", "c0", (0, 8), quantile=0.10, peak_z=4.2),
+            event_row("c3", "c1", (10, 18), peak_z=3.9),
+        ]
+    )
+    table = fit(pairs, catalog)
+    assert table["peak_z"].tolist() == [7.5, 7.5, 4.2, 4.2, 3.9, 3.9]
+    assert table["candidate_peak_z"].tolist() == [7.5, 7.5, 7.5, 7.5, 3.9, 3.9]
+
+
+def test_the_plateau_is_york_over_twice_the_member_centred_on_it() -> None:
+    """A member over cells 8-11 of a 20-cell ramp at 0.05, with a neighbour at 0 after it.
+
+    The plateau window is 4 s either side of the member's centre, 10 s: cells
+    6-13, eight points. The member's own four points lie on one line (MSWD 0);
+    the plateau's do not, since cells 12 and 13 hold the neighbour. A window
+    anchored on the member's start (cells 4-11) would miss it.
+    """
+    assert PLATEAU_WIDTH == 2
+    dx = np.arange(20.0) + 10.0
+    dy = 0.05 * dx
+    dy[[12, 13]] = 0.0
+    table = fit(make_pairs(dx, dy), pd.DataFrame([event_row("e3", "c0", (8, 12))]))
+    york_row = table.iloc[1]
+    assert york_row["n"] == 4
+    assert york_row["mswd"] == pytest.approx(0.0, abs=1e-12)
+    assert york_row["plateau_dof"] == 6
+    # Well past the 99 % gate for six degrees of freedom, which the member passes.
+    assert york_row["plateau_mswd"] > chi2.ppf(0.99, 6) / 6
+    assert york_row["plateau_slope"] != pytest.approx(0.05, rel=0.1)
+    # Least squares' row carries the same plateau numbers.
+    assert table.iloc[0]["plateau_mswd"] == york_row["plateau_mswd"]
+
+
+def test_on_a_single_line_the_plateau_agrees_with_the_member() -> None:
+    dx = np.arange(20.0) + 10.0
+    table = fit(make_pairs(dx, 0.05 * dx), pd.DataFrame([event_row("e3", "c0", (8, 12))]))
+    assert table.iloc[1]["plateau_slope"] == pytest.approx(0.05, rel=1e-12)
+    assert table.iloc[1]["plateau_mswd"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_without_york_the_plateau_is_blank() -> None:
+    dx = np.arange(20.0) + 10.0
+    table = fit(
+        make_pairs(dx, 0.05 * dx), pd.DataFrame([event_row("e3", "c0", (8, 12))]), methods=("ols",)
+    )
+    assert table["plateau_slope"].isna().all() and table["plateau_mswd"].isna().all()
+    assert table["plateau_dof"].tolist() == [-2]
 
 
 def test_a_member_holding_no_pair_cell_has_no_line() -> None:

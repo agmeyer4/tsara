@@ -970,7 +970,9 @@ class GatesConfig(_StrictModel):
     summary (§5.6) at no cost in refitting, and a one-element list is a fixed
     gate. Every gate has a value that lets everything through, so turning one
     off is a value rather than a switch: ``min_peak_z`` 0, ``min_points`` 3,
-    ``min_signal`` 0, ``mswd_probability`` 1.
+    ``min_signal`` 0, ``mswd_probability`` and ``plateau_probability`` 1. The
+    plateau gate is off by default, the others on, as measured in 7c1's fourth
+    stage (METHODS.md §5.3).
 
     Gate settings are not pooled into a candidate's sigma_method: within one
     candidate a stricter gate only drops some of its members, and the spread of
@@ -987,9 +989,10 @@ class GatesConfig(_StrictModel):
         default=(5.0,),
         min_length=1,
         description=(
-            "Height: the member's peak z, in clean spreads (METHODS.md §6.8), must "
-            "reach this. 5 by default: false candidates 0-0.25 an hour on every "
-            "generated record measured, against 2.7-21 ungated."
+            "Height: the candidate's tallest member's peak z, in clean spreads "
+            "(METHODS.md §6.8), must reach this; a tall candidate's lower members "
+            "count with it (§5.3). 5 by default: false candidates 0-0.25 an hour on "
+            "every generated record measured, against 2.7-21 ungated."
         ),
     )
     min_points: tuple[int, ...] = Field(
@@ -1019,6 +1022,18 @@ class GatesConfig(_StrictModel):
             "at 10 points and 1.33 at 120 for 0.99). 1 lets every MSWD through."
         ),
     )
+    plateau_probability: tuple[float, ...] = Field(
+        default=(1.0,),
+        min_length=1,
+        description=(
+            "Plateau: York's MSWD over a window twice the member's duration, "
+            "centred on it, must not exceed the chi-squared quantile at this "
+            "probability for its own degrees of freedom. Off (1) by default: "
+            "measured, at 0.99 it rejects most mixtures the member's own MSWD "
+            "lets through, and half of the good single-source members with them, "
+            "because it rejects a neighbour nearby as much as a mixture (§5.3)."
+        ),
+    )
 
     @field_validator("min_peak_z", "min_signal")
     @classmethod
@@ -1041,15 +1056,17 @@ class GatesConfig(_StrictModel):
             )
         return _strictly_increasing(value, "GatesConfig.min_points")
 
-    @field_validator("mswd_probability")
+    @field_validator("mswd_probability", "plateau_probability")
     @classmethod
-    def _probabilities_and_increasing(cls, value: tuple[float, ...]) -> tuple[float, ...]:
+    def _probabilities_and_increasing(
+        cls, value: tuple[float, ...], info: ValidationInfo
+    ) -> tuple[float, ...]:
         if any(not 0 < v <= 1 for v in value):
             raise ValueError(
-                "GatesConfig.mswd_probability values are probabilities above 0 and at "
+                f"GatesConfig.{info.field_name} values are probabilities above 0 and at "
                 f"most 1 (1 lets every MSWD through); got {list(value)}."
             )
-        return _strictly_increasing(value, "GatesConfig.mswd_probability")
+        return _strictly_increasing(value, f"GatesConfig.{info.field_name}")
 
 
 class RatiosConfig(_StrictModel):

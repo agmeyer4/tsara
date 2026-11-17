@@ -34,7 +34,7 @@ from tsara.ratios.estimators import (
     register_line_fit,
     york,
 )
-from tsara.ratios.fits import FIT_COLUMNS, PairColumns, member_fits
+from tsara.ratios.fits import FIT_COLUMNS, PLATEAU_WIDTH, PairColumns, member_fits
 
 __all__ = [
     "FIT_COLUMNS",
@@ -42,6 +42,7 @@ __all__ = [
     "LineFit",
     "LineFitter",
     "MIN_FIT_POINTS",
+    "PLATEAU_WIDTH",
     "PairColumns",
     "TsaraRatioError",
     "available_line_fits",

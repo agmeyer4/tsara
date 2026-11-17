@@ -1295,7 +1295,7 @@ cell's midpoint holds no line (`TOO_FEW_POINTS`, n 0). A reference whose
 events come from a trigger has no z of its own, so its members stand as tall
 as the trigger events they copy (`trigger_event_id`).
 
-### 5.3 Gates **[decided 2026-11-17 — 7c1]**
+### 5.3 Gates **[decided 2026-11-17 — 7c1; measured and built in its fourth stage]**
 
 A gate never changes a fit; it decides whether the fit counts. So every fit
 stores the numbers a gate reads, and a gate is a threshold applied after
@@ -1303,38 +1303,74 @@ fitting. Each gate takes a **list** of thresholds, and each list is an axis of
 the sweep summary (§5.6) at no cost in refitting: how many candidates count
 as good ratios, and how their ratios move, is then seen across gate settings
 as it is across windows. Every gate has a value that lets everything through
-(`min_peak_z` 0, `min_points` 3, `min_signal` 0, `mswd_probability` 1), so
-switching one off is a value a sweep can hold beside the default. The gates,
+(`min_peak_z` 0, `min_points` 3, `min_signal` 0, `mswd_probability` and
+`plateau_probability` 1), so switching one off is a value a sweep can hold
+beside the default. The gates,
 their defaults, and the evidence behind each:
 
 | gate (setting under `ratios.gates`) | the number a fit stores | default | evidence |
 |---|---|---|---|
-| height (`min_peak_z`) | the member's peak z (§6.8) | 5 | false candidates 0–0.25 an hour at peak z ≥ 5, on every generated record of §6.8 |
+| height (`min_peak_z`) | the candidate's tallest member's peak z, `candidate_peak_z` (each member's own is `peak_z`) | 5 | false candidates 0–0.25 an hour at peak z ≥ 5, on every generated record of §6.8; read on the tallest member by the measurement below |
 | points (`min_points`) | n, the pairs used | 8 | `min_points` of the 7a configuration |
 | signal (`min_signal`) | the reference's swing inside the member over its noise, √max(0, var(Δx) / mean(σx²) − 1) | 2 | Table 5: at a swing of 1.92–2.33, York's σ_b is 1.16–1.21× too tight; at 1.44, 1.35×; at 0.81, 2.14× |
-| one source (`mswd_probability`) | York's MSWD and its n − 2 degrees of freedom | the 99 % χ² quantile divided by n − 2 (2.51 at 10 points, 1.33 at 120) | notebook 07 §2: York's ± is 1.11× wider for a mixture than for one source, its MSWD 5.4× larger, and a mixture's slope moves with the declared noise (0.019 / 0.043 / 0.077 for the same air) |
+| one source (`mswd_probability`) | York's MSWD and its n − 2 degrees of freedom | the 99 % χ² quantile divided by n − 2 (2.51 at 10 points, 1.33 at 120) | notebook 07 §2: York's ± is 1.11× wider for a mixture than for one source, its MSWD 5.4× larger, and a mixture's slope moves with the declared noise (0.019 / 0.043 / 0.077 for the same air); below, it lets 5 % of the mixtures through |
+| plateau (`plateau_probability`) | York's MSWD over a window `PLATEAU_WIDTH` (2) times the member's duration centred on it, `plateau_mswd` and `plateau_dof`, with `plateau_slope` beside them | 1 (off) | below: it removes most of the mixtures the one-source gate lets through, and half the good single-source members with them |
 
 The signal is computed over the points a fit could weigh (finite enhancements
 and a finite reference sigma), with the variance on n − 1, so that the noise's
 share of it is unbiased; it is blank below two points or with no sigma, and
-unbounded for an exact reference. For a threshold among the swept entries,
-the height gate is the entry dimension itself: a member is found at entry *g* exactly when its peak z
-reaches *g* (§6.8). §6.8 measured the gate on a candidate's tallest event;
-whether it is read on the tallest member or on each member is measured in
-7c1. The signal and one-source gates are York's; least squares' fits over the
+unbounded for an exact reference. The height is read on the candidate's
+tallest member, as §6.8 measured it, so a tall candidate's lower members (at a
+higher quantile, say) count with it; for a threshold among the swept entries
+that is the candidate being found at that entry. The signal, one-source and
+plateau gates are York's; least squares' fits over the
 same pairs carry York's gate results, and where York cannot weigh
 (`MISSING_SIGMA`) a least-squares fit is reported ungated and labelled so.
 Gate thresholds are axes of the sweep summary, not of a candidate's σ_method:
 within one candidate a stricter gate only drops some of its members, whose
 spread is σ_method already, so it would be counted twice.
 
-**The plateau test** (fits at widths centred on an event, proposed when the
-rolling map was measured; CLAUDE.md, DECIDED 2026-10-19) is measured in 7c1
-before it is built: the exit dimension already gives each candidate nested
-intervals inside the event, and a member's own MSWD already flags a mixture.
-Fits at two and four times a member's interval, centred on it, are kept only
-if they tell single sources from mixtures and close neighbours that the
-MSWD and the spread across exits miss; otherwise they are not built.
+**Measured** (2026-11-17, 7c1's fourth stage; rule, in full in the docstring
+of `~/.cache/tsara-walkthrough/scripts/p7c1/stage4_measure.py`: through the
+package's whole chain, one 1 s analyzer, 6 h × seeds 1–3; a methane
+background wandering 30 ppb a day and ethane 0.6, as random walks; source A
+at ethane/methane 0.05 and B at 0, 20 plumes an hour each, Gaussian with σ_t
+5–60 s, methane peaks lognormal with median 15 ppb and σ_log 0.8; noise 0.7
+and 0.05 ppb declared exactly; baseline 2, 10, 60 min × q 0.01, 0.05, 0.10;
+entry 3, 4, 5 × exit 1, 1.5, 2; York per member). A member is **single** when
+one source holds at least 95 % of its true methane enhancement, a **mixture**
+otherwise; a single member's truth is its source's ratio. Of the members
+passing height (each member's own ≥ 5), points and signal (2,327 single,
+2,746 mixtures), kept by each rule, and the single members' 2σ coverage with
+the widened σ:
+
+| rule | single members kept | mixtures kept | single members' coverage |
+|---|---|---|---|
+| no MSWD gate | 2,327 (all) | 2,746 (all) | 0.647 |
+| one-source gate | 1,670 (72 %) | 142 (5 %) | 0.764 |
+| one-source + plateau at 2× | 870 (37 %) | 22 (1 %) | 0.830 |
+| one-source + plateau at 4× | 275 (12 %) | 2 (0 %) | 0.836 |
+| one-source + plateau slope at 2× within 2σ | 1,109 (48 %) | 51 (2 %) | 0.839 |
+| one-source + slope within 2σ of its candidate's (same quantile) | 1,666 (72 %) | 139 (5 %) | 0.764 |
+
+So agreement across exits adds nothing to the one-source gate, and the
+plateau removes 120 of the 142 mixtures that gate lets through but half the
+good members with them: it rejects a neighbour nearby as readily as a
+mixture. **Decided** (owner, 2026-11-17): the plateau's numbers are stored on
+every fit and its gate is off by default, so that the sweep shows the trade
+(`plateau_probability: [0.99, 1.0]` holds both); the 4× window is not built.
+
+**Height on the tallest member.** Read on the candidate's tallest member, the
+one-source gate keeps 1,729 single members and 149 mixtures (coverage 0.765)
+against 1,670 and 142 (0.764) read on each member: the 66 members a tall
+candidate adds (59 single, 7 mixtures) cover 0.797, as good as the rest.
+**Decided:** the tallest.
+
+**The signal.** Of the single members passing the other gates, by signal: 38
+at 1–1.5 cover 0.63 (their errors' robust spread 1.99× the widened σ), 49 at
+1.5–2 cover 0.71, and from 2 up 0.73–0.81 in every bin (134 at 2–3 to 632 at
+10 and above). Below about 1.5 a fit is clearly worse; from 2 up what limits
+coverage is the baseline's error (§5.4), not the signal. **Decided:** 2 stays.
 
 ### 5.4 σ_b, widened **[decided 2026-11-17 — 7c1]**
 
@@ -1368,6 +1404,43 @@ barely moves the median, and the rows differ from Table 7's 1.01, 0.97 and
 0.73 by the draws. Not yet accounted for: Table 5's 1.2× where the signal is good; 7c2's Monte Carlo
 (§5.5) measures whether σ_method carries it, and resampling is the next step
 if it does not.
+
+**What the widened σ does not hold: the baseline's error across a member**
+(measured 2026-11-17, 7c1's fourth stage, on the generated chain of §5.3;
+members at least 99.9 % one source passing every gate, seeds 1 and 2,
+`~/.cache/tsara-walkthrough/scripts/p7c1/stage4_diag.py`). The single members'
+2σ coverage with the widened σ, and their errors' robust spread in widened
+σ's, as one ingredient is swapped at a time:
+
+| enhancement fitted | background | coverage | spread |
+|---|---|---|---|
+| reading − the true background | wandering | 0.945, 0.949 | 0.89, 0.93 |
+| reading − the true background | flat | 0.924, 0.961 | 0.94, 0.94 |
+| reading − the package's baseline | flat | 0.905, 0.907 | 1.19, 1.31 |
+| reading − the package's baseline | wandering | 0.754, 0.684 | 1.65, 1.60 |
+
+The fits and their σ are honest about what they model, the readings' own
+noise. What they do not model is the baseline's error: the background wanders
+between the baseline's window and the event, and differently in each gas, so
+the difference between baseline and true background changes across a member.
+That error is neither independent from point to point, the assumption of a
+point weight, nor constant across the member, the assumption under which a
+fit's intercept absorbs it (§4.3), and the MSWD cannot see it, since a slowly
+varying error bends a line more than it scatters it. Weighting by the
+enhancement's sigma, which adds the baseline's own (§6.7, a floor) to the
+reading's, changes nothing (0.741 and 0.687). Over the stage-4 records,
+seeds 1–3, the 149 candidates whose passing members are all at least 99.9 %
+one source, each read from its median member, cover 0.758 with that member's
+widened σ and 0.839 with σ_method added (§5.5; 0.858 over the 141 with two
+members or more, σ_method about 0.4 of σ_fit). The closure test of §5.1 sees
+it: R_B over the pure-A members at one sweep point is 1.6 to 2.4 (three to
+seven members each) where the true ratio is constant. **So the combined
+uncertainty of §5.5 must add the baseline's error, and its Monte Carlo must
+show that it does (7c2).** Candidates to measure there, none yet measured: the
+background's wobble at the window's scale, which the clean spread holds beside
+the noise (§6.8), entered as an error persisting over the window; and the
+spread across windows. Until then a ratio's interval on wandering air is about
+1.5× too narrow.
 
 ### 5.5 A candidate's ratio **[decided 2026-11-17 — 7c2; its point estimate is chosen there by measurement]**
 

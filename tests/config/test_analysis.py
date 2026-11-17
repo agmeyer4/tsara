@@ -472,6 +472,7 @@ def test_gates_default_to_the_measured_thresholds() -> None:
     assert gates.min_points == (8,)
     assert gates.min_signal == (2.0,)
     assert gates.mswd_probability == (0.99,)
+    assert gates.plateau_probability == (1.0,)
 
 
 def test_every_gate_is_a_list_and_each_has_a_value_that_lets_everything_through() -> None:
@@ -497,6 +498,9 @@ def test_every_gate_is_a_list_and_each_has_a_value_that_lets_everything_through(
         ("mswd_probability", [0.0], "above 0"),
         ("mswd_probability", [1.5], "at most 1"),
         ("mswd_probability", [0.99, 0.95], "strictly increasing"),
+        ("plateau_probability", [0.0], "above 0"),
+        ("plateau_probability", [1.5], "at most 1"),
+        ("plateau_probability", [1.0, 0.99], "strictly increasing"),
         ("min_points", [], "at least 1"),
     ],
 )

@@ -168,8 +168,12 @@ ratios:
   # A gate decides whether a fit counts, never what it is; each is a list
   # swept as an axis of the sweep summary, at no cost in refitting (§5.3).
   gates:
-    min_peak_z: [4.0, 5.0]      # the member's peak z, in clean spreads
+    min_peak_z: [4.0, 5.0]      # the candidate's tallest member's peak z, in clean spreads
     min_points: [8]             # pairs a fit used (at least 3)
     min_signal: [2.0]           # the reference's swing inside the member over its noise
     mswd_probability: [0.99]    # York's MSWD below this chi-squared quantile (1 = off)
+    # York's MSWD over twice the member's duration: on (0.99) and off (1) side
+    # by side. Off by default, since it rejects a neighbour nearby as readily
+    # as a mixture, and half the good members with it (METHODS.md §5.3).
+    plateau_probability: [0.99, 1.0]
   confidence_level: 0.95
