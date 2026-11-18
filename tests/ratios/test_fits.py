@@ -1060,3 +1060,40 @@ def test_enhancements_known_to_carry_no_baseline_error_are_not_widened_for_one()
     np.testing.assert_allclose(
         york_rows.slope_sigma_widened, york_rows.slope_sigma * birge, rtol=1e-12
     )
+
+
+@pytest.mark.parametrize(
+    ("attrs", "relative", "provenance"),
+    [
+        (
+            {
+                "uncertainty_provenance_systematic": "declared",
+                "uncertainty_systematic_relative": 0.02,
+            },
+            0.02,
+            "declared",
+        ),
+        ({"uncertainty_provenance_systematic": "zero"}, 0.0, "zero"),
+        ({"uncertainty_provenance_systematic": "reported"}, None, "reported"),
+        ({"uncertainty_provenance_systematic": "declared"}, None, "declared"),
+        ({}, None, "unknown"),
+    ],
+    ids=["declared", "zero", "reported", "declared without its terms", "nothing said"],
+)
+def test_each_fit_records_each_axis_relative_systematic(
+    paper: tuple[xr.Dataset, pd.DataFrame],
+    attrs: dict[str, object],
+    relative: float | None,
+    provenance: str,
+) -> None:
+    """§5.5: the ratio's systematic comes from each axis's relative term; reported per
+    reading or not declared, it is unknown, never assumed zero."""
+    paper_pairs, catalog = paper[0].copy(), paper[1]
+    paper_pairs["ch4"].attrs.update(attrs)
+    got = fit(paper_pairs, catalog)
+    if relative is None:
+        assert got.reference_systematic_relative.isna().all()
+    else:
+        assert (got.reference_systematic_relative == relative).all()
+    assert set(got.reference_systematic_provenance) == {provenance}
+    assert set(got.numerator_systematic_provenance) == {"unknown"}

@@ -293,3 +293,30 @@ def test_a_variable_with_no_event_state_has_no_wobble(campaign: Campaign) -> Non
     assert len(got) > 0
     assert got.wobble_reference.isna().all() and got.wobble_numerator.notna().all()
     assert set(got.baseline_error) <= {"wander", "none"}
+
+
+def test_the_chain_ends_in_a_ratio_per_candidate_naming_its_parent(campaign: Campaign) -> None:
+    from tsara.config.analysis import GatesConfig
+    from tsara.events import event_candidates
+    from tsara.ratios import candidate_ratios
+
+    states, events, catalog = campaign
+    fits = ratio_fits(
+        states,
+        events,
+        catalog,
+        _config(sets=[{"reference": "van.ch4", "numerators": ["van.c2h6"]}]),
+    )
+    candidates = event_candidates(catalog, events)
+    ratios = candidate_ratios(fits, candidates, GatesConfig())
+    reference = candidates[(candidates.instrument == "van") & (candidates.species == "ch4")]
+    # Every one of the reference's candidates has a row per estimator, passing or not.
+    assert set(ratios.candidate_id) == set(reference.candidate_id)
+    assert len(ratios) == 2 * len(reference)
+    parents = reference.set_index("candidate_id").parent_candidate_id
+    pd.testing.assert_series_equal(
+        ratios.set_index("candidate_id").parent_candidate_id.groupby(level=0).first(),
+        parents.sort_index(),
+        check_names=False,
+    )
+    assert (ratios.n_members > 0).any()

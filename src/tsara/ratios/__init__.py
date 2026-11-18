@@ -24,10 +24,22 @@ Shape of the subpackage
     of each of the reference's candidates, on a paired product, with every
     number the gates read and the slope's sigma widened for the readings'
     persistence and the baseline's error (§5.2-5.4).
+``candidate_ratio``
+    A candidate's ratio, read from its members that pass the gates at every
+    gate setting: the median member, its fit's sigma, the members' spread and
+    the declared systematic, combined; and the fingerprint, a candidate's
+    ratios across numerators (§5.5).
 """
 
 from __future__ import annotations
 
+from tsara.ratios.candidate_ratio import (
+    GATE_COLUMNS,
+    RATIO_COLUMNS,
+    RATIO_DTYPES,
+    candidate_ratios,
+    fingerprints,
+)
 from tsara.ratios.estimators import (
     MIN_FIT_POINTS,
     FitStatus,
@@ -46,13 +58,18 @@ __all__ = [
     "FIT_COLUMNS",
     "FIT_DTYPES",
     "FitStatus",
+    "GATE_COLUMNS",
     "LineFit",
     "LineFitter",
     "MIN_FIT_POINTS",
     "PLATEAU_WIDTH",
     "PairColumns",
+    "RATIO_COLUMNS",
+    "RATIO_DTYPES",
     "TsaraRatioError",
     "available_line_fits",
+    "candidate_ratios",
+    "fingerprints",
     "get_line_fit",
     "member_fits",
     "ols",

@@ -155,6 +155,10 @@ FIT_COLUMNS: tuple[str, ...] = (
     "borrowed_max",
     "reference_sigma_provenance",
     "numerator_sigma_provenance",
+    "reference_systematic_relative",
+    "numerator_systematic_relative",
+    "reference_systematic_provenance",
+    "numerator_systematic_provenance",
 )
 
 #: The fit table's column types: declared so a table survives Parquet exactly,
@@ -172,6 +176,8 @@ FIT_DTYPES: dict[str, str] = {
             "baseline_error",
             "reference_sigma_provenance",
             "numerator_sigma_provenance",
+            "reference_systematic_provenance",
+            "numerator_systematic_provenance",
         ),
         "str",
     ),
@@ -202,6 +208,8 @@ FIT_DTYPES: dict[str, str] = {
             "wobble_reference",
             "wobble_numerator",
             "borrowed_max",
+            "reference_systematic_relative",
+            "numerator_systematic_relative",
         ),
         "float64",
     ),
@@ -320,6 +328,8 @@ def member_fits(
     # Each member's pairs at its own sweep point, and the readings' own sigma.
     sigma_x, provenance_x = _sigma(pairs, columns.reference_reading)
     sigma_y, provenance_y = _sigma(pairs, columns.numerator_reading)
+    systematic_x = _systematic(pairs, columns.reference_reading)
+    systematic_y = _systematic(pairs, columns.numerator_reading)
     x, y, sx, sy = _gather(deltas, (sigma_x, sigma_y), rows)
     n_members = len(members)
     fits = {
@@ -400,6 +410,10 @@ def member_fits(
                     "borrowed_max": borrowed,
                     "reference_sigma_provenance": provenance_x,
                     "numerator_sigma_provenance": provenance_y,
+                    "reference_systematic_relative": systematic_x[0],
+                    "numerator_systematic_relative": systematic_y[0],
+                    "reference_systematic_provenance": systematic_x[1],
+                    "numerator_systematic_provenance": systematic_y[1],
                 },
                 # Numbered member-major, so that sorting by it puts each
                 # member's estimators together, in the order given.
@@ -600,6 +614,22 @@ def _sigma(pairs: xr.Dataset, reading: str) -> tuple[npt.NDArray[np.float64] | N
         np.asarray(sigma.values, dtype=np.float64),
         str(sigma.attrs.get("uncertainty_provenance", "unknown")),
     )
+
+
+def _systematic(pairs: xr.Dataset, reading: str) -> tuple[float, str]:
+    """Return a carried reading's declared relative systematic term, and its provenance.
+
+    Zero where its budget declares no systematic component; unknown (NaN)
+    where it is not declared, or is reported per reading, which cannot be split
+    into a scale and an offset (§5.5).
+    """
+    attrs = pairs[reading].attrs
+    provenance = str(attrs.get("uncertainty_provenance_systematic", "unknown"))
+    if provenance == "zero":
+        return 0.0, provenance
+    if provenance == "declared":
+        return float(attrs.get("uncertainty_systematic_relative", np.nan)), provenance
+    return np.nan, provenance
 
 
 def _signal(

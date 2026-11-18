@@ -390,7 +390,11 @@ determine what pedigree of uncertainty produced each interval.
 Provenance is recorded **per component**, in
 `uncertainty_provenance_random` and `uncertainty_provenance_systematic`, because real
 manifests mix modes freely (the shipped example pairs a *reported* random
-component with a *declared* systematic one). The species-level
+component with a *declared* systematic one). A declared systematic component
+also keeps its two terms apart, as `uncertainty_systematic_relative` and
+`uncertainty_systematic_absolute` on the variable (written 2026-11-19, 7c2):
+the per-reading `sigma_sys_` cannot keep them, and a ratio's systematic error
+comes from the relative term alone (§5.5). The species-level
 `uncertainty_provenance` is then `mixed` when the two components disagree, and the
 sigma companions carry `uncertainty_component` saying which one they are. Two further component values are needed to keep §2.3
 honest, and they are not interchangeable:
@@ -1604,9 +1608,9 @@ the likeliest to hold a neighbour) and invite dividing σ by the root of the
 number of members.
 
 - **The point estimate is the median member** **[decided 2026-11-18, 7c2
-  stage 0]**: the passing member whose slope is nearest the median of their
-  slopes (the lower on a tie), so that slope, σ_b, n and MSWD all describe one
-  real fit. Measured under §5.4's rule for the baseline's error, with that
+  stage 0]**: the passing member whose slope is the lower median of their
+  slopes (the middle one; of two middle ones, the lower), so that slope, σ_b,
+  n and MSWD all describe one real fit. Measured under §5.4's rule for the baseline's error, with that
   error entered: its combined interval covers the true ratio in 0.968 of
   candidates on wandering air and 0.974 on flat air, as the median of the
   slopes does (0.968, 0.974); the seed's member, the tallest event's, covers 3
@@ -1638,6 +1642,36 @@ number of members.
   numerator that never rises still gets a slope and its ±, and whether a
   candidate's interval is consistent with a source type is read from that
   interval in `analyses/`; the package assigns no source classes.
+
+**Built** (2026-11-19, 7c2 stage 3; `tsara.ratios.candidate_ratios`,
+`tsara.ratios.fingerprints`). One row per candidate, numerator, estimator,
+pair clock and gate setting, every combination of the gates' threshold lists
+(the last gate varying fastest), the columns `tsara.ratios.RATIO_COLUMNS`. A
+candidate that no member passes at a gate setting keeps its row, its ratio
+blank and `n_members` 0, so that counting what a gate keeps needs no second
+table; each row names `parent_candidate_id` from the events stage's candidate
+table (§5.7). As built:
+
+- the median member is the passing member at sorted position ⌊(n − 1)/2⌋ of
+  their slopes, the definition above without reading a tie off floating-point
+  distances (with an even count the two middle slopes are equally near the
+  median only in exact arithmetic);
+- σ_method is blank with one member and enters the combination as zero there;
+- each axis's relative systematic term is read from its reading,
+  `uncertainty_systematic_relative` (§2.4), which ingestion writes for a
+  declared systematic and the joins carry to the pair cells; zero where the
+  budget declares no systematic component, unknown where it is not declared
+  or is reported per reading. σ_sys is blank where either axis's is unknown,
+  `sigma_sys_known` says so, and `sigma_combined` then holds the fit and the
+  method only;
+- the one-source and plateau gates pass a fit with no MSWD to read (least
+  squares where York could not weigh, or was not run): reported ungated, its
+  row's `mswd` blank, as above.
+
+Measured through the stage (rule: §5.4's, the default gates): candidates
+whose passing members are all at least 99.9 % one source cover the true ratio
+in 0.974 (154 candidates, flat air) and 0.968 (157, wandering air), as stage 0
+found, at least 0.956 at every window.
 
 ### 5.6 The sweep summary **[decided 2026-11-17 — 7c2]**
 
