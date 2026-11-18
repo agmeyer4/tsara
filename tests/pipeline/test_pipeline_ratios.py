@@ -27,6 +27,8 @@ from tsara.pipeline import ratio_fits
 from tsara.ratios import FIT_DTYPES, PairColumns, TsaraRatioError, member_fits
 
 START = pd.Timestamp("2026-01-01").value
+#: The fixture: baseline states, event states and the event catalog.
+Campaign = tuple[dict[str, xr.Dataset], dict[str, xr.Dataset], pd.DataFrame]
 DECLARED = {
     "uncertainty_provenance": "declared",
     "uncertainty_provenance_random": "declared",
@@ -69,7 +71,7 @@ def _stream(values: dict[str, np.ndarray], sigmas: dict[str, float], width_s: in
 
 
 @pytest.fixture(scope="module")
-def campaign() -> tuple[dict[str, xr.Dataset], pd.DataFrame]:
+def campaign() -> Campaign:
     """Half an hour of one source's plumes: a 1 s analyzer of three gases, a 2 s one of methane."""
     rng = np.random.default_rng(7)
     n = 1800
@@ -101,25 +103,37 @@ def campaign() -> tuple[dict[str, xr.Dataset], pd.DataFrame]:
         catalog = event_catalog(events, states)
     finally:
         logging.disable(logging.NOTSET)
-    return states, catalog
+    return states, events, catalog
 
 
 def _by_hand(
     states: dict[str, xr.Dataset],
+    events: dict[str, xr.Dataset],
     catalog: pd.DataFrame,
     reference: str,
     numerator: str,
     period: str,
     methods: tuple[str, ...] = ("ols", "york"),
 ) -> pd.DataFrame:
-    """The pairing and the fits called directly, as METHODS §5.2 describes them."""
+    """The pairing and the fits called directly, as METHODS §5.2 and §5.4 describe them:
+    both readings and both clean spreads carried onto the pair cells."""
     r_inst, r_var = reference.split(".")
     n_inst, n_var = numerator.split(".")
+    streams = dict(states)
+    for inst, var in ((n_inst, n_var), (r_inst, r_var)):
+        streams[inst] = streams[inst].assign(
+            {f"clean_spread_{var}": events[inst][f"clean_spread_{var}"]}
+        )
     paired = pair_species(
-        states,
+        streams,
         (n_inst, f"enhancement_{n_var}"),
         (r_inst, f"enhancement_{r_var}"),
-        carry=[(n_inst, n_var), (r_inst, r_var)],
+        carry=[
+            (n_inst, n_var),
+            (r_inst, r_var),
+            (n_inst, f"clean_spread_{n_var}"),
+            (r_inst, f"clean_spread_{r_var}"),
+        ],
         target=None if period == "native" else period,
     )
     return member_fits(
@@ -138,17 +152,18 @@ def _config(**kwargs: object) -> RatiosConfig:
 
 
 def test_the_table_is_each_pairings_fits_in_the_configurations_order(
-    campaign: tuple[dict[str, xr.Dataset], pd.DataFrame],
+    campaign: Campaign,
 ) -> None:
-    states, catalog = campaign
+    states, events, catalog = campaign
     got = ratio_fits(
         states,
+        events,
         catalog,
         _config(sets=[{"reference": "van.ch4", "numerators": ["van"]}], periods=["native", "10s"]),
     )
     expected = pd.concat(
         [
-            _by_hand(states, catalog, "van.ch4", numerator, period)
+            _by_hand(states, events, catalog, "van.ch4", numerator, period)
             for numerator in ("van.c2h6", "van.co")
             for period in ("native", "10s")
         ],
@@ -159,36 +174,42 @@ def test_the_table_is_each_pairings_fits_in_the_configurations_order(
 
 
 def test_an_instrument_expands_over_its_enhancements_without_the_reference(
-    campaign: tuple[dict[str, xr.Dataset], pd.DataFrame],
+    campaign: Campaign,
 ) -> None:
-    states, catalog = campaign
+    states, events, catalog = campaign
     assert enhanced_variables(states["van"]) == ["ch4", "c2h6", "co"]
     got = ratio_fits(
-        states, catalog, _config(sets=[{"reference": "van.c2h6", "numerators": ["van"]}])
+        states, events, catalog, _config(sets=[{"reference": "van.c2h6", "numerators": ["van"]}])
     )
     assert list(dict.fromkeys(got.numerator)) == ["van.ch4", "van.co"]
     assert set(got.reference) == {"van.c2h6"}
 
 
 def test_a_reference_on_another_instrument_is_paired_on_the_wider_cells(
-    campaign: tuple[dict[str, xr.Dataset], pd.DataFrame],
+    campaign: Campaign,
 ) -> None:
-    states, catalog = campaign
+    states, events, catalog = campaign
     got = ratio_fits(
-        states, catalog, _config(sets=[{"reference": "lab.ch4", "numerators": ["van.c2h6"]}])
+        states,
+        events,
+        catalog,
+        _config(sets=[{"reference": "lab.ch4", "numerators": ["van.c2h6"]}]),
     )
-    pd.testing.assert_frame_equal(got, _by_hand(states, catalog, "lab.ch4", "van.c2h6", "native"))
+    pd.testing.assert_frame_equal(
+        got, _by_hand(states, events, catalog, "lab.ch4", "van.c2h6", "native")
+    )
     # The 2 s analyzer's methane is the reference, so its candidates are the members'.
     assert len(got) > 0
     assert got.candidate_id.str.startswith("lab.ch4/").all()
 
 
 def test_ratio_sets_follow_one_another_and_only_the_named_estimators_run(
-    campaign: tuple[dict[str, xr.Dataset], pd.DataFrame],
+    campaign: Campaign,
 ) -> None:
-    states, catalog = campaign
+    states, events, catalog = campaign
     got = ratio_fits(
         states,
+        events,
         catalog,
         _config(
             sets=[
@@ -200,8 +221,8 @@ def test_ratio_sets_follow_one_another_and_only_the_named_estimators_run(
     )
     expected = pd.concat(
         [
-            _by_hand(states, catalog, "van.ch4", "van.co", "native", ("york",)),
-            _by_hand(states, catalog, "lab.ch4", "van.c2h6", "native", ("york",)),
+            _by_hand(states, events, catalog, "van.ch4", "van.co", "native", ("york",)),
+            _by_hand(states, events, catalog, "lab.ch4", "van.c2h6", "native", ("york",)),
         ],
         ignore_index=True,
     )
@@ -210,10 +231,10 @@ def test_ratio_sets_follow_one_another_and_only_the_named_estimators_run(
 
 
 def test_no_ratio_set_gives_an_empty_table_of_the_declared_types(
-    campaign: tuple[dict[str, xr.Dataset], pd.DataFrame],
+    campaign: Campaign,
 ) -> None:
-    states, catalog = campaign
-    got = ratio_fits(states, catalog, _config())
+    states, events, catalog = campaign
+    got = ratio_fits(states, events, catalog, _config())
     assert got.empty
     assert {name: str(dtype) for name, dtype in got.dtypes.items()} == {
         name: str(pd.Series(dtype=dtype).dtype) for name, dtype in FIT_DTYPES.items()
@@ -230,18 +251,45 @@ def test_no_ratio_set_gives_an_empty_table_of_the_declared_types(
     ],
 )
 def test_names_no_baseline_state_holds_are_refused(
-    campaign: tuple[dict[str, xr.Dataset], pd.DataFrame], ratio_set: dict[str, object], match: str
+    campaign: Campaign, ratio_set: dict[str, object], match: str
 ) -> None:
-    states, catalog = campaign
+    states, events, catalog = campaign
     with pytest.raises(TsaraRatioError, match=match):
-        ratio_fits(states, catalog, _config(sets=[ratio_set]))
+        ratio_fits(states, events, catalog, _config(sets=[ratio_set]))
 
 
 def test_the_fixture_has_events_on_both_references(
-    campaign: tuple[dict[str, xr.Dataset], pd.DataFrame],
+    campaign: Campaign,
 ) -> None:
     """Guard: a test over a reference with no events would compare two empty tables."""
-    _, catalog = campaign
+    _, _, catalog = campaign
     held = catalog.groupby(["instrument", "species"]).size()
     assert held.get(("van", "ch4"), 0) > 0
     assert held.get(("lab", "ch4"), 0) > 0
+
+
+def test_each_gas_brings_its_clean_spread_so_the_fits_hold_the_baselines_wobble(
+    campaign: Campaign,
+) -> None:
+    states, events, catalog = campaign
+    got = ratio_fits(
+        states,
+        events,
+        catalog,
+        _config(sets=[{"reference": "van.ch4", "numerators": ["van.c2h6"]}]),
+    )
+    assert got.wobble_reference.notna().all() and got.wobble_numerator.notna().all()
+    assert set(got.baseline_error) <= {"wobble and wander", "wobble"}
+
+
+def test_a_variable_with_no_event_state_has_no_wobble(campaign: Campaign) -> None:
+    states, events, catalog = campaign
+    got = ratio_fits(
+        states,
+        {"van": events["van"]},  # the 2 s analyzer's event state left out
+        catalog,
+        _config(sets=[{"reference": "lab.ch4", "numerators": ["van.c2h6"]}]),
+    )
+    assert len(got) > 0
+    assert got.wobble_reference.isna().all() and got.wobble_numerator.notna().all()
+    assert set(got.baseline_error) <= {"wander", "none"}

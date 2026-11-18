@@ -5,8 +5,9 @@ A ratio set names a reference and its numerators (``RatiosConfig``,
 every member of every one of the reference's candidates, on each pair clock
 the configuration lists: one pairing of the two enhancements
 (``tsara.align.pair_species``), carrying both readings so that the fits are
-weighted by the readings' own sigma (§4.3), then one call of
-``tsara.ratios.member_fits``. The two belong to two stages that never import
+weighted by the readings' own sigma (§4.3) and each gas's clean spread from
+the event states so that they hold the baseline's wobble (§5.4), then one
+call of ``tsara.ratios.member_fits``. The two belong to two stages that never import
 each other, which is why this loop lives on the layer above them.
 
 Nothing is computed here. The table is the fits' own, one call's rows after
@@ -26,7 +27,7 @@ import pandas as pd
 
 from tsara.align import pair_species
 from tsara.config.analysis import NATIVE_PERIOD
-from tsara.core.naming import enhanced_variables, enhancement_name
+from tsara.core.naming import clean_spread_name, enhanced_variables, enhancement_name
 from tsara.ratios import FIT_COLUMNS, FIT_DTYPES, PairColumns, TsaraRatioError, member_fits
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -41,6 +42,7 @@ __all__ = ["ratio_fits"]
 
 def ratio_fits(
     states: Mapping[str, xr.Dataset],
+    events: Mapping[str, xr.Dataset],
     catalog: pd.DataFrame,
     ratios: RatiosConfig,
 ) -> pd.DataFrame:
@@ -51,6 +53,11 @@ def ratio_fits(
     states : mapping of str to xarray.Dataset
         The baseline states, keyed by instrument (``tsara.baseline``), each
         holding its readings beside their enhancements.
+    events : mapping of str to xarray.Dataset
+        The event states, keyed by instrument (``tsara.events.event_states``):
+        a variable's clean spread there gives its baseline's wobble (§5.4). A
+        variable without one (a triggered variable, or an instrument with no
+        event state) has no wobble, and its fits say so.
     catalog : pandas.DataFrame
         The event catalog with its candidates linked (``tsara.events``).
     ratios : RatiosConfig
@@ -93,7 +100,13 @@ def ratio_fits(
             for period in ratios.periods:
                 tables.append(
                     _fit_one(
-                        states, catalog, (instrument, variable), numerator, period, ratios.methods
+                        states,
+                        events,
+                        catalog,
+                        (instrument, variable),
+                        numerator,
+                        period,
+                        ratios.methods,
                     )
                 )
     if not tables:
@@ -103,6 +116,7 @@ def ratio_fits(
 
 def _fit_one(
     states: Mapping[str, xr.Dataset],
+    events: Mapping[str, xr.Dataset],
     catalog: pd.DataFrame,
     reference: tuple[str, str],
     numerator: tuple[str, str],
@@ -110,14 +124,33 @@ def _fit_one(
     methods: Sequence[str],
 ) -> pd.DataFrame:
     """Pair one numerator with its reference on one pair clock, and fit every member."""
+    # Each gas's clean spread rides beside its baseline state into the pairing,
+    # where an event state holds one.
+    streams = dict(states)
+    spreads: dict[tuple[str, str], tuple[str, str]] = {}
+    for instrument, variable in (numerator, reference):
+        name = clean_spread_name(variable)
+        event_state = events.get(instrument)
+        if event_state is not None and name in event_state:
+            streams[instrument] = streams[instrument].assign({name: event_state[name]})
+            spreads[(instrument, variable)] = (instrument, name)
+    carry = [numerator, reference, *spreads.values()]
     paired = pair_species(
-        states,
+        streams,
         (numerator[0], enhancement_name(numerator[1])),
         (reference[0], enhancement_name(reference[1])),
-        carry=[numerator, reference],
+        carry=carry,
         target=None if period == NATIVE_PERIOD else period,
     )
-    columns = PairColumns(paired.y_name, paired.x_name, *paired.carried)
+    named = dict(zip(carry, paired.carried, strict=True))
+    columns = PairColumns(
+        paired.y_name,
+        paired.x_name,
+        named[numerator],
+        named[reference],
+        named[spreads[numerator]] if numerator in spreads else None,
+        named[spreads[reference]] if reference in spreads else None,
+    )
     logger.info(
         "Fitting %s.%s against %s.%s on the %s clock (%s): %d pair cells.",
         *numerator,

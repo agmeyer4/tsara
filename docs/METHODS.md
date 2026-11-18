@@ -1512,8 +1512,9 @@ alone:
   and $\sigma_g$ the reading's random σ, correlated as two baselines share
   their windows, $\max(0,\ 1 - |t_i - t_j| / W)$;
 - **the background's wander**, the semivariogram $\gamma_g(L)$ of the
-  enhancement on the readings outside every event of either gas (entry and
-  exit at their lowest), less $\sigma_g^2$, which white noise adds at every lag.
+  enhancement on the pair cells outside every event of either gas at that
+  window and quantile (every entry and exit, whose union is the widest
+  events', §6.8), less $\sigma_g^2$, which white noise adds at every lag.
 
 For a pair of gases, the residual's error is $\delta y - b\,\delta x$, so its
 slow covariance is
@@ -1553,6 +1554,43 @@ generated air, not a derivation. The error against the *true* background is
 not the target: at a short window the baseline follows a broad plume by
 design (§6.1), and a model of that error widened every σ far past honest
 (robust spread 0.09 at 2 min) and let 41 % of mixtures through.
+
+**Built** (2026-11-18, 7c2 stage 2; `tsara.ratios.baseline_error`, used by
+`member_fits`). The semivariograms are measured once per pairing and sweep
+point, on the pair clock: each out-of-event cell paired with the one nearest
+a lag later, accepted within half the median spacing plus 2 % of the lag, at
+40 lags from 1 s to 2 h evenly spaced in log, a lag read only from 30 pairs or
+more and the others filled in log lag from the nearest read ones, zero at a
+sweep point where none is. A member's wobble is the median of each gas's
+wobble variance over its points, unknown where its pairing carried no clean
+spread (`tsara.pipeline.ratio_fits` carries both gases' from the event
+states; a triggered variable has none). Two rules the build settled. The
+baseline's part is **floored at zero**, in the slope's variance and in what it
+leaves in the scatter: a measured semivariogram need not be a valid one, and
+on §5.3's generated chain 213 of 2,751 single-source members (7.7 %) would
+otherwise have had their σ narrowed and 30 a σ with no value. And enhancements
+known to carry no baseline error (made on a true background, by a test or a
+notebook) are fitted with `baseline_error=False`: the wander is measured on
+every reading outside the events, which on generated air includes plume tails
+and plumes too small to be events, so on such enhancements it widened the σ
+of good single-source members to a robust spread of 0.69 (notebook 09 §6).
+Each fit stores `baseline_factor` (the slope's σ multiplier beside the
+persistence factor), `mswd_expected` with the baseline's error in it,
+`wobble_reference` and `wobble_numerator`, and `baseline_error`, which parts
+it holds (`wobble and wander`, `wander`, `wobble` or `none`).
+
+Measured through the package (rule: stage 0's, the fits by `ratio_fits`):
+single-source members cover 0.941 (flat air) and 0.932 (wandering air), and
+candidates, read from the median member with σ_method, 0.974 and 0.968, as
+stage 0 found; the one-source gate turns away 6.3 % and 10.0 % of the single
+sources, and lets through 6.4 % and 7.3 % of the mixtures. On the same 570
+good members of notebook 09 §6 (seed 1, wandering air) the readings' noise
+alone covers 71 % (robust spread 1.82, 17 % turned away), with the baseline's
+error 95 % (1.07, 9 %). The plume tails read as wander make the term err wide
+where the background does not wander: on flat air, the same comparison covers
+98 % at a robust spread of 0.75. A cleaner estimate of the wander (only
+readings below the clean level, or a margin around the events) was not built;
+7c3's real air says whether it is needed.
 
 ### 5.5 A candidate's ratio **[decided 2026-11-17 — 7c2; its point estimate chosen by measurement 2026-11-18]**
 

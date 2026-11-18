@@ -14,10 +14,16 @@ Shape of the subpackage
     Straight lines fitted through many groups of points at once, York's and
     least squares, registered by name: what each fit reports, why a group
     holds no line, and the package's error class.
+``baseline_error``
+    The baseline's error across a member, as a covariance between its points:
+    the background's wander, measured on the pair cells outside every event,
+    and the baseline's own wobble, from the events stage's clean spread
+    (§5.4).
 ``fits``
     The stage's fits: every numerator against its reference over each member
     of each of the reference's candidates, on a paired product, with every
-    number the gates read and the slope's sigma widened (§5.2-5.4).
+    number the gates read and the slope's sigma widened for the readings'
+    persistence and the baseline's error (§5.2-5.4).
 """
 
 from __future__ import annotations

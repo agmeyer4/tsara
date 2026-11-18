@@ -82,6 +82,7 @@ __all__ = [
     "WINDOW_DIM",
     "baseline_name",
     "borrowed_name",
+    "clean_spread_name",
     "coverage_name",
     "coverage_window_name",
     "enhanced_variables",
@@ -452,6 +453,25 @@ def enhancement_name(variable: str) -> str:
         e.g. ``'enhancement_ch4'``.
     """
     return f"{ENHANCEMENT_PREFIX}{variable}"
+
+
+def clean_spread_name(variable: str) -> str:
+    """Return the name of a variable's clean spread in the event state.
+
+    The events stage writes it (``docs/METHODS.md`` §6.8); the ratio stage
+    reads the baseline's wobble from it (§5.4), carried onto the pair cells.
+
+    Parameters
+    ----------
+    variable : str
+        Canonical variable name, e.g. ``'ch4'``.
+
+    Returns
+    -------
+    str
+        e.g. ``'clean_spread_ch4'``.
+    """
+    return f"clean_spread_{variable}"
 
 
 def enhanced_variables(state: xr.Dataset) -> list[str]:

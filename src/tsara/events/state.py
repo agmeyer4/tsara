@@ -60,6 +60,7 @@ from tsara.core.naming import (
     TIME_BOUNDS_VAR,
     TIME_COORD,
     WINDOW_DIM,
+    clean_spread_name,
     enhanced_variables,
     enhancement_name,
     sigma_rand_name,
@@ -399,7 +400,7 @@ def _own_events(
             level,
             {"units": units, "long_name": f"clean level of {variable}'s enhancement"},
         ),
-        f"clean_spread_{variable}": (
+        clean_spread_name(variable): (
             swept,
             spread,
             {
