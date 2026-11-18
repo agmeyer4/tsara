@@ -1555,7 +1555,12 @@ dimensions.
 Under `ratios/` in a bundle: `fits.parquet`, one row per member, numerator,
 estimator and pairing period, keyed by the `event_id` of the member's lowest
 entry and naming its `candidate_id`; `ratios.parquet`, one row per candidate,
-numerator, estimator, period and gate setting; and `analysis.yaml`, the
+numerator, estimator, period and gate setting, each row naming its
+candidate's `parent_candidate_id` (the candidate at the nearest longer
+window, §6.8), copied from the events stage's candidate table so the two
+cannot disagree, so that a rule across windows (which window's ratio belongs
+to which plume, and a parent's own ratio, §6.1) can be added later from the
+saved tables without refitting; and `analysis.yaml`, the
 `ratios:` section alone (§6.6's rule). A candidate's **fingerprint**, its row of
 ratios across numerators, and the sweep summary are built from these by
 functions rather than saved. Column names are settled in the build.
