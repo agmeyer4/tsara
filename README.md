@@ -34,8 +34,11 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 6.5 | A baseline that follows a ramp: the rolling quantile opened (`rolling_opening`, `dilation: rank \| max`) | ✅ done |
 | 7a | Line fits: York's errors-in-both-variables line and least squares, through many groups of points at once | ✅ done |
 | 7b | Events grouped across the sweep into candidates, scored against the answer key | ✅ done |
-| 7c | A ratio per candidate, the plateau test, combined uncertainty, the stability cube | planned |
+| 7c1 | The ratio stage's fits: every numerator against the reference over each candidate's members, on a pair clock, with gates swept as thresholds | ✅ done |
+| 7c2 | A ratio per candidate with its fit, method and systematic uncertainties, the sweep summary, save/load | planned |
+| 7c3 | The ratio stage on real data: the parked-night acceptance test, a drive, a pair of instruments | planned |
 | 7d | A run function and the `tsara` CLI | planned |
+| 7e | Ratios across baseline windows: which window's ratio belongs to which plume, and a broad plume's own ratio beneath its blips | planned |
 | 8 | Smoothing + spatiotemporal source complexes | planned, after the first campaign results |
 | 9 | `Pipeline` class | planned |
 | 10 | Docs + tutorial | planned |
@@ -54,7 +57,7 @@ share its peak across the rest of the sweep**. A manufactured campaign holds one
 every instrument samples, so any disagreement between two records of one gas
 is the instruments' own noise, rounding and support. It can fit York's line
 and least squares through many groups of points at once, but does not yet fit
-them to events or build the stability cube; there is no CLI yet (7d).
+them to events or summarize ratios across the sweep; there is no CLI yet (7d).
 
 ## Install
 
@@ -213,7 +216,7 @@ silently keeping the last value. Fuller, commented examples ship in
 GPS clock at ingestion, or ever, on the gas side. Interpolating a gas creates
 samples that were never measured and would inflate a regression's `N` with
 pseudo-replicates. Streams are paired late, per event, on the cells of the
-**wider-supported** member, with its partner bin-averaged onto them. Smooth
+**wider-supported** variable, with its partner bin-averaged onto them. Smooth
 auxiliary fields (GPS, met) *may* be interpolated, under an explicit
 maximum-gap guard. (`METHODS.md` §1.1)
 
@@ -432,6 +435,15 @@ without being run, and none needs any real data:
   happened; a drifting clock, an outlier and an undecided stretch, named; and
   the loop closed, the survey's own table applied and the campaign surveyed
   again. Same shape as 05.
+- [`09_ratio_fits_walkthrough.ipynb`](examples/notebooks/09_ratio_fits_walkthrough.ipynb)
+  — the ratio stage's fits, on air of two sources at known ratios: a
+  candidate's members and the points each holds, against loops written from
+  the definition; two instruments on one pair clock, every sweep point paired
+  as if alone; one member's York line and least squares, and every number
+  stored beside them; the slope's σ widened for errors that persist, by Monte
+  Carlo; the gates as thresholds on stored numbers, and the plateau's trade;
+  and what the widened σ does not hold, the baseline's error across a member.
+  Same shape as 05.
 
 Three companions run on the real campaign archive instead, and are therefore
 committed **without** outputs:

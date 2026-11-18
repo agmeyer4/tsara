@@ -57,15 +57,16 @@ def test_example_configs_are_valid() -> None:
     manifest = load_manifest(examples / "manifest_mobile_example.yaml")
     analysis = load_analysis(examples / "analysis_example.yaml")
     assert "benzene" in manifest.gas_species
-    assert analysis.regression.reference_species in manifest.gas_species
+    assert analysis.ratios.sets
 
 
 def test_the_example_analysis_combines_with_the_manifest_it_names() -> None:
     """The example analysis names instruments of the multiformat example manifest.
 
-    Its `baseline.methods` and `events.triggers` say they are checked against
-    that manifest when the two are combined; this is the check, so that an
-    example cannot drift into naming variables nothing declares.
+    Its `baseline.methods`, `events.triggers` and `ratios.sets` say they are
+    checked against that manifest when the two are combined; this is the
+    check, so that an example cannot drift into naming variables nothing
+    declares.
     """
     from pathlib import Path
 
@@ -76,6 +77,7 @@ def test_the_example_analysis_combines_with_the_manifest_it_names() -> None:
     )
     assert config.analysis.baseline.methods
     assert config.analysis.events.triggers
+    assert config.analysis.ratios.sets
 
 
 def test_stationary_example_config_is_valid() -> None:
@@ -231,13 +233,73 @@ def test_combined_missing_section_rejected(
 # ---------------------------------------------------------------------------
 
 
-def test_reference_species_must_be_declared_gas(
+def _with_ratio_sets(analysis: dict[str, Any], *sets: dict[str, Any]) -> dict[str, Any]:
+    with_sets = copy.deepcopy(analysis)
+    with_sets["ratios"] = {"sets": list(sets)}
+    return with_sets
+
+
+def test_a_ratio_set_of_declared_gases_combines(
     write_yaml: WriteYaml, stationary_manifest_dict: dict[str, Any], analysis_dict: dict[str, Any]
 ) -> None:
-    bad_analysis = copy.deepcopy(analysis_dict)
-    bad_analysis["regression"]["reference_species"] = "sf6"  # not in manifest
-    path = write_yaml({"manifest": stationary_manifest_dict, "analysis": bad_analysis}, "run.yaml")
-    with pytest.raises(TsaraConfigError, match="sf6"):
+    analysis = _with_ratio_sets(
+        analysis_dict, {"reference": "picarro.ch4", "numerators": ["picarro"]}
+    )
+    path = write_yaml({"manifest": stationary_manifest_dict, "analysis": analysis}, "run.yaml")
+    config = load_config(path)
+    assert config.analysis.ratios.sets[0].numerator_refs({"picarro": ["ch4", "co2"]}) == (
+        ("picarro", "co2"),
+    )
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "lgr.ch4",  # no such instrument
+        "picarro.sf6",  # no such variable
+        "picarro.cavity_pressure",  # declared, but not a gas
+        "gps.wind_dir",  # a direction: role met and circular
+    ],
+)
+def test_a_reference_must_be_a_declared_gas_variable(
+    write_yaml: WriteYaml,
+    mobile_manifest_dict: dict[str, Any],
+    analysis_dict: dict[str, Any],
+    reference: str,
+) -> None:
+    manifest = copy.deepcopy(mobile_manifest_dict)
+    manifest["instruments"]["picarro"]["variables"]["cavity_pressure"] = {
+        "column": "P",
+        "role": "aux",
+        "units": "torr",
+    }
+    analysis = _with_ratio_sets(analysis_dict, {"reference": reference, "numerators": ["picarro"]})
+    path = write_yaml({"manifest": manifest, "analysis": analysis}, "run.yaml")
+    with pytest.raises(TsaraConfigError, match=f"reference '{reference}', which is not a"):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("numerators", "message"),
+    [
+        (["lgr"], "no instrument 'lgr' declares a gas"),
+        (["picarro.sf6"], "'sf6' is not a gas variable of 'picarro'"),
+        (["gps"], "no instrument 'gps' declares a gas"),
+        (["picarro.co2", "picarro"], "reaches numerator 'picarro.co2' twice"),
+    ],
+)
+def test_numerators_must_expand_to_declared_gases(
+    write_yaml: WriteYaml,
+    mobile_manifest_dict: dict[str, Any],
+    analysis_dict: dict[str, Any],
+    numerators: list[str],
+    message: str,
+) -> None:
+    analysis = _with_ratio_sets(
+        analysis_dict, {"reference": "picarro.ch4", "numerators": numerators}
+    )
+    path = write_yaml({"manifest": mobile_manifest_dict, "analysis": analysis}, "run.yaml")
+    with pytest.raises(TsaraConfigError, match=message):
         load_config(path)
 
 
@@ -257,26 +319,23 @@ def _two_methane_analyzers(manifest: dict[str, Any]) -> dict[str, Any]:
     return both
 
 
-def test_reference_species_is_checked_against_fields(
+def test_a_reference_names_the_variable_not_its_field(
     write_yaml: WriteYaml, stationary_manifest_dict: dict[str, Any], analysis_dict: dict[str, Any]
 ) -> None:
-    """No variable is called 'ch4', and 'ch4' is still the gas both measure."""
-    manifest = _two_methane_analyzers(stationary_manifest_dict)
-    path = write_yaml({"manifest": manifest, "analysis": analysis_dict}, "run.yaml")
-    config = load_config(path)
-    assert config.analysis.regression.reference_species == "ch4"
-    assert config.manifest.gas_species == ("ch4", "co2")
+    """With two methane analyzers, 'ch4' would not say whose events are fitted over.
 
-
-def test_reference_species_is_not_a_variable_name_that_declares_another_field(
-    write_yaml: WriteYaml, stationary_manifest_dict: dict[str, Any], analysis_dict: dict[str, Any]
-) -> None:
-    """A denominator names a gas; 'ch4_lgr' is one analyzer's record of it."""
+    The reference is one analyzer's variable, and the other analyzer's methane
+    may be its numerator: their slope is the two analyzers' relative gain.
+    """
     manifest = _two_methane_analyzers(stationary_manifest_dict)
-    analysis = copy.deepcopy(analysis_dict)
-    analysis["regression"]["reference_species"] = "ch4_lgr"
+    analysis = _with_ratio_sets(
+        analysis_dict, {"reference": "picarro.ch4_picarro", "numerators": ["lgr"]}
+    )
     path = write_yaml({"manifest": manifest, "analysis": analysis}, "run.yaml")
-    with pytest.raises(TsaraConfigError, match="not the field of any role='gas' variable"):
+    assert load_config(path).manifest.gas_species == ("ch4", "co2")
+    analysis["ratios"]["sets"][0]["reference"] = "picarro.ch4"
+    path = write_yaml({"manifest": manifest, "analysis": analysis}, "run.yaml")
+    with pytest.raises(TsaraConfigError, match="reference 'picarro.ch4', which is not a"):
         load_config(path)
 
 

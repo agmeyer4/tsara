@@ -17,7 +17,7 @@ Both are opt-in, because each takes longer than the rest of the suite:
   ``docs/METHODS.md`` quotes, re-measured from the files, and a count of the
   checks made from the definitions; the test requires no ledger entry to
   differ and every check to hold.
-* ``04``, ``05``, ``06``, ``07`` and ``08`` run when ``TSARA_NOTEBOOKS`` is set to anything
+* ``04``, ``05``, ``06``, ``07``, ``08`` and ``09`` run when ``TSARA_NOTEBOOKS`` is set to anything
   (about a minute each; generated data only). Each scoreboard cell prints
   ``N of N checks hold``, and the test requires exactly that.
 * ``05b`` and ``06b`` run with ``04b`` when ``TSARA_ARCHIVE`` is set, under the
@@ -165,6 +165,7 @@ def test_real_data_notebook_executes_and_its_ledger_agrees(tmp_path: Path, name:
         "06_events_walkthrough",
         "07_ratios_walkthrough",
         "08_clocks_walkthrough",
+        "09_ratio_fits_walkthrough",
     ],
 )
 def test_generated_data_notebook_executes_and_every_check_holds(tmp_path: Path, name: str) -> None:

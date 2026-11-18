@@ -25,7 +25,7 @@ Shape of the subpackage
     with uncertainty, counts and coverage travelling automatically. Everything
     else here is a choice of *which cells*.
 ``pairing``
-    Two species for a regression, on the cells of the wider-supported member
+    Two species for a regression, on the cells of the wider-supported variable
     (``docs/METHODS.md`` §1.3).
 ``auxiliary``
     The one exception to the interpolation rule: smooth fields evaluated

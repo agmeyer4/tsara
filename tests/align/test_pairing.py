@@ -421,7 +421,7 @@ def test_a_species_paired_against_a_multiple_of_itself_returns_that_multiple() -
 
     Two species with identical time behaviour and a fixed ratio, measured on
     different clocks. Binning is linear, so the ratio must survive it exactly
-    -- if it does not, the two members were not averaged over the same air.
+    -- if it does not, the two variables were not averaged over the same air.
     """
     rng = np.random.default_rng(20260915)
     signal = rng.normal(2000.0, 50.0, size=600)
@@ -890,7 +890,7 @@ def test_cells_that_all_start_together_have_no_cadence_to_measure() -> None:
 def test_a_clock_cell_narrower_than_half_a_partner_reading_refuses_the_pair() -> None:
     """Canister fills of 14, 15 and 1.8 s against a 10 s analyzer.
 
-    The canister is the wider-supported member by median, so it is the clock;
+    The canister is the wider-supported variable by median, so it is the clock;
     but a 10 s reading on its 1.8 s fill is five times as wide as the cell it
     fills, which the per-pair rule refuses and the summed rule it replaced
     let through. Allowed by name, the partner column reads 'copied'.
@@ -922,7 +922,7 @@ def test_a_clock_cell_narrower_than_half_a_partner_reading_refuses_the_pair() ->
 
 
 def test_explicit_cells_put_both_species_on_them() -> None:
-    """Neither member is the clock: both are averaged, and the product says so."""
+    """Neither variable is the clock: both are averaged, and the product says so."""
     streams = half_phase_pair(sparse_every=1)
     windows = CellBounds(
         start_ns=np.arange(0, 40, 10, dtype=np.int64) * SECOND,
@@ -961,7 +961,7 @@ def test_a_period_target_is_a_grid_over_the_two_records() -> None:
 
 
 def test_a_period_target_is_checked_by_the_copy_rule(two_rates: dict[str, xr.Dataset]) -> None:
-    """The 4 s member on a 1 s target would be copied: refused, as the grid refuses it."""
+    """The 4 s variable on a 1 s target would be copied: refused, as the grid refuses it."""
     with pytest.raises(TsaraAlignError, match="too fine for 'slow'"):
         pair_species(two_rates, "ch4", "co2", target="1s")
     paired = pair_species(two_rates, "ch4", "co2", target="1s", finer_support="allow")
@@ -991,7 +991,7 @@ def test_a_dense_partner_half_a_cell_from_the_clock_is_warned_about_with_the_rem
     """The drive suite's dense shape: equal widths, half a cell apart, every reading in two pairs.
 
     No reading is used twice, so the readings count is silent; the borrowed
-    share is 0.50; and 39 of the 40 readings of the averaged member formed two
+    share is 0.50; and 39 of the 40 readings of the averaged variable formed two
     neighbouring pairs (the first overlaps only the first pair), so the
     warning names the consequence and a coarser common clock.
     """
@@ -1100,7 +1100,7 @@ def test_no_blend_warning_when_the_partner_is_in_phase(caplog: pytest.LogCapture
 
 
 def test_the_remedy_the_blend_warning_names_removes_it(caplog: pytest.LogCaptureFixture) -> None:
-    """On the coarser common clock the warning names, neither member is half a cell off."""
+    """On the coarser common clock the warning names, neither variable is half a cell off."""
     streams = half_phase_pair(sparse_every=1)
     with caplog.at_level("WARNING", logger="tsara.align.pairing"):
         paired = pair_species(streams, "noy", "co2", target="10s")
@@ -1113,7 +1113,7 @@ def test_a_caller_who_chose_offset_cells_is_not_warned_about_the_blend(
 ) -> None:
     """Explicit 1 s cells half a cell from the picarro: the blend is the caller's choice.
 
-    The record still says so (borrowed share 0.5 on the offset member); the
+    The record still says so (borrowed share 0.5 on the offset variable); the
     warning is for the case the clock rule chose without the caller seeing it.
     """
     streams = half_phase_pair(sparse_every=1)

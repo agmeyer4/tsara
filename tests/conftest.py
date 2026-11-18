@@ -101,7 +101,6 @@ def analysis_dict() -> dict[str, Any]:
     return {
         "output_grid": {"freq": "1s"},
         "baseline": {"windows": ["2min", "10min"], "quantiles": [0.05]},
-        "regression": {"reference_species": "ch4"},
     }
 
 
