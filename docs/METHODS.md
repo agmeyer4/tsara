@@ -1493,14 +1493,68 @@ members or more, σ_method about 0.4 of σ_fit). The closure test of §5.1 sees
 it: R_B over the pure-A members at one sweep point is 1.6 to 2.4 (three to
 seven members each) where the true ratio is constant. **So the combined
 uncertainty of §5.5 must add the baseline's error, and its Monte Carlo must
-show that it does (7c2).** Candidates to measure there, none yet measured: the
-background's wobble at the window's scale, which the clean spread holds beside
-the noise (§6.8), entered as an error persisting over the window; and the
-spread across windows. Until then a ratio's interval on wandering air is 1.6
-to 1.8× too narrow, and the one-source gate turns away a sixth of the good
-members.
+show that it does (7c2).** Until it is built, a ratio's interval on wandering
+air is 1.6 to 1.8× too narrow, and the one-source gate turns away a sixth of
+the good members.
 
-### 5.5 A candidate's ratio **[decided 2026-11-17 — 7c2; its point estimate is chosen there by measurement]**
+**The baseline's error, entered** **[decided 2026-11-18 — 7c2 stage 0;
+calibrated on generated air, to be tested on real air in 7c3]**. The slope
+depends only on how the baseline's error *changes* across a member: a constant
+moves the intercept, which York fits. So the error enters as a covariance
+between a member's points that is written from how much the error changes
+over a time lag, and the same algebra as P and E (above) carries it into the
+slope's σ and the MSWD a single source is expected to read. Per gas $g$, at the
+member's window $W$ and quantile, two slow parts, measured from the data
+alone:
+
+- **the baseline's own wobble**, of variance
+  $w_g^2 = \max(0,\ c_g^2 - \sigma_g^2)$ with $c_g$ the clean spread (§6.8)
+  and $\sigma_g$ the reading's random σ, correlated as two baselines share
+  their windows, $\max(0,\ 1 - |t_i - t_j| / W)$;
+- **the background's wander**, the semivariogram $\gamma_g(L)$ of the
+  enhancement on the readings outside every event of either gas (entry and
+  exit at their lowest), less $\sigma_g^2$, which white noise adds at every lag.
+
+For a pair of gases, the residual's error is $\delta y - b\,\delta x$, so its
+slow covariance is
+
+$$S_{ij} = (w_y^2 + b^2 w_x^2)\,\max\!\left(0,\ 1 - \tfrac{|t_i - t_j|}{W}\right)
+- \left[\gamma_y + b^2\gamma_x - 2b\,\gamma_{xy}\right]\!\left(|t_i - t_j|\right),$$
+
+$\gamma_{xy}$ the cross-semivariogram of the two enhancements on the same
+readings, since on real air the gases' backgrounds wander together and part of
+the error cancels in the residual (on the generated air below they wander
+independently and $\gamma_{xy} \approx 0$). With $\tilde S_{ij} =
+\sqrt{W_i W_j}\,S_{ij}$, P and E are those of the paragraph above with the
+noise's correlation $R$ replaced by $R + \tilde S$; the widened σ and the
+one-source gate (MSWD / E) follow unchanged.
+
+Measured (rule: §5.3's chain, seeds 1–3 at 6 h, on wandering air as above and
+on flat air, both backgrounds constant; members at least 99.9 % one source
+that pass every gate but the one-source gate; candidates whose passing members
+are all that pure, read from the median member with σ_method added):
+
+| | the widened σ of 7c1 | with the baseline's error |
+|---|---|---|
+| members, wandering air: 2σ coverage (robust spread) | 0.722 (1.79) | 0.941 (0.96); 0.939, 0.964, 0.921 at 2, 10, 60 min |
+| members, flat air | 0.876 (1.45) | 0.945 (1.04) |
+| single sources the one-source gate turns away, wandering / flat | 19.1 % / 9.3 % | 8.9 % / 5.6 % |
+| mixtures (5–95 % of one source) it lets through, wandering / flat | 5.1 % / 5.4 % | 7.5 % / 6.5 % |
+| candidates, wandering / flat | 0.797 / 0.954 | 0.968 / 0.974, at least 0.956 at every window |
+
+Each part alone fails somewhere: the wobble alone (0.875 on wandering air)
+fails at 60 min (0.780), where the background's wander decorrelates the error
+within about a quarter of the window, much faster than two windows' overlap;
+the wander alone (0.889) fails at 2 min (0.860), where the clean readings'
+semivariogram is small. Why the clean spread exceeds what the semivariogram
+shows at short windows (the low quantile's own sampling noise is the likely
+part) is not measured, so the wobble's amplitude is a calibration on
+generated air, not a derivation. The error against the *true* background is
+not the target: at a short window the baseline follows a broad plume by
+design (§6.1), and a model of that error widened every σ far past honest
+(robust spread 0.09 at 2 min) and let 41 % of mixtures through.
+
+### 5.5 A candidate's ratio **[decided 2026-11-17 — 7c2; its point estimate chosen by measurement 2026-11-18]**
 
 A candidate's ratio is read from its members that pass the gates, at one
 window, pairing period, estimator and gate setting. **Its members are not
@@ -1511,17 +1565,17 @@ inverse-variance mean, which would favour the widest member (the lowest exit,
 the likeliest to hold a neighbour) and invite dividing σ by the root of the
 number of members.
 
-- **The point estimate** is chosen in 7c2 among (1) the median of the
-  members' slopes; (2) the **median member**, the one fit whose slope is the
-  median, so that slope, σ_b, n and MSWD all describe one real fit (the
-  leading candidate); (3) one primary sweep point per campaign, chosen by a
-  rule such as R_B ≈ 1 (§5.1; the primary-combinations flag in CLAUDE.md),
-  the members still giving σ_method; (4) the seed's fit, rejected, since the
-  seed is the lowest-exit interval, the most merged (§6.8). Rule: generated
-  campaigns with known ratios (single sources, mixtures, close neighbours),
-  each estimator's bias and coverage.
-- **σ_fit** is the widened σ_b (§5.4) of the fit the point estimate comes
-  from.
+- **The point estimate is the median member** **[decided 2026-11-18, 7c2
+  stage 0]**: the passing member whose slope is nearest the median of their
+  slopes (the lower on a tie), so that slope, σ_b, n and MSWD all describe one
+  real fit. Measured under §5.4's rule for the baseline's error, with that
+  error entered: its combined interval covers the true ratio in 0.968 of
+  candidates on wandering air and 0.974 on flat air, as the median of the
+  slopes does (0.968, 0.974); the seed's member, the tallest event's, covers 3
+  to 6 points less. A primary sweep point per campaign (R_B ≈ 1, §5.1) stays a
+  reading of the sweep summary, not an estimator.
+- **σ_fit** is the widened σ_b (§5.4), with the baseline's error, of the
+  median member.
 - **σ_method** is the standard deviation of the passing members' slopes,
   blank with its reason below two members. The window and the pairing period
   are not pooled into it (each is reported per value; a ratio belongs to its
@@ -1534,10 +1588,14 @@ number of members.
   into scale and offset, and is labelled rather than used.
 - **The combination** is $\sqrt{\sigma_\text{fit}^2 + \sigma_\text{method}^2 +
   \sigma_\text{sys}^2}$, every term reported beside it so that a fit's ± and
-  the sweep's spread are seen apart. Quadrature's justification is written
-  in 7c2 with the decisive check: Monte Carlo coverage of the combined
-  interval on generated campaigns with known ratios. The interval at
-  `confidence_level` uses the normal quantile.
+  the sweep's spread are seen apart. Quadrature treats the fit's error and
+  the members' spread as independent, though members share readings; it is
+  kept because it measures right: under §5.4's rule, with no systematic
+  declared, the fit's σ alone covers 0.949 and 0.968 of candidates (wandering
+  and flat air) and with σ_method added 0.968 and 0.974, a little on the safe
+  side. The decisive check, the same Monte Carlo through the stage itself, is
+  a test of 7c2's build. The interval at `confidence_level` uses the normal
+  quantile.
 - **Upper limits are results.** The signal gate reads the reference only, so a
   numerator that never rises still gets a slope and its ±, and whether a
   candidate's interval is consistent with a source type is read from that
