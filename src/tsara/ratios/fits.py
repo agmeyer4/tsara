@@ -98,7 +98,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["FIT_COLUMNS", "PLATEAU_WIDTH", "PairColumns", "member_fits"]
+__all__ = ["FIT_COLUMNS", "FIT_DTYPES", "PLATEAU_WIDTH", "PairColumns", "member_fits"]
 
 #: The fit table's columns, in order: one row per member, estimator,
 #: numerator and pair clock (METHODS §5.2-5.4). The member is named by the
@@ -143,8 +143,9 @@ FIT_COLUMNS: tuple[str, ...] = (
     "numerator_sigma_provenance",
 )
 
-#: Declared so a table survives Parquet exactly, as the event catalog's do.
-_FIT_DTYPES: dict[str, str] = {
+#: The fit table's column types: declared so a table survives Parquet exactly,
+#: as the event catalog's do, and so a table with no rows still has them.
+FIT_DTYPES: dict[str, str] = {
     **dict.fromkeys(
         (
             "event_id",
@@ -708,4 +709,4 @@ def _correlated_sums(
 def _table(frames: list[pd.DataFrame]) -> pd.DataFrame:
     """Return the fit table with its declared types, empty when there is nothing."""
     table = pd.concat(frames) if frames else pd.DataFrame(columns=list(FIT_COLUMNS))
-    return table.loc[:, list(FIT_COLUMNS)].astype(_FIT_DTYPES)
+    return table.loc[:, list(FIT_COLUMNS)].astype(FIT_DTYPES)

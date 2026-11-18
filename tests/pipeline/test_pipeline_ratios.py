@@ -1,0 +1,247 @@
+"""Tests for the ratio stage over a configuration (tsara.pipeline.ratio_fits, METHODS §5.2).
+
+``ratio_fits`` computes nothing of its own: it pairs each numerator with its
+reference on each pair clock and hands the pairing to the fits. So the
+evidence is that its table is, frame for frame, what those two calls give by
+hand in the configuration's order; that an ``'<instrument>'`` numerator
+expands over the variables that instrument's baseline state holds an
+enhancement of, the reference left out; and the refusals.
+"""
+
+from __future__ import annotations
+
+import logging
+
+import numpy as np
+import pandas as pd
+import pytest
+import xarray as xr
+
+from tsara.align import pair_species
+from tsara.baseline import baseline_state
+from tsara.config.analysis import BaselineConfig, EventsConfig, RatiosConfig
+from tsara.core.naming import enhanced_variables
+from tsara.core.timebase import SECOND_NS as SECOND
+from tsara.events import event_catalog, event_states
+from tsara.pipeline import ratio_fits
+from tsara.ratios import FIT_DTYPES, PairColumns, TsaraRatioError, member_fits
+
+START = pd.Timestamp("2026-01-01").value
+DECLARED = {
+    "uncertainty_provenance": "declared",
+    "uncertainty_provenance_random": "declared",
+    "uncertainty_provenance_systematic": "zero",
+}
+
+
+def _stream(values: dict[str, np.ndarray], sigmas: dict[str, float], width_s: int) -> xr.Dataset:
+    """A stream of back-to-back cells ``width_s`` long holding the given gases."""
+    n = next(iter(values.values())).size
+    start = START + np.arange(n, dtype=np.int64) * width_s * SECOND
+    data: dict[str, tuple[str, np.ndarray, dict[str, object]]] = {}
+    for name, v in values.items():
+        data[name] = (
+            "time",
+            v,
+            {"units": "ppb", "role": "gas", "cell_methods": "time: mean", **DECLARED},
+        )
+        data["sigma_rand_" + name] = (
+            "time",
+            np.full(n, sigmas[name]),
+            {
+                "units": "ppb",
+                "uncertainty_component": "random",
+                "uncertainty_provenance": "declared",
+            },
+        )
+    stream = xr.Dataset(
+        data,
+        coords={
+            "time": (start + width_s * SECOND // 2).astype("datetime64[ns]"),
+            "time_bnds": (
+                ("time", "nv"),
+                np.stack([start, start + width_s * SECOND], 1).astype("datetime64[ns]"),
+            ),
+        },
+    )
+    stream["time"].attrs["bounds"] = "time_bnds"
+    return stream
+
+
+@pytest.fixture(scope="module")
+def campaign() -> tuple[dict[str, xr.Dataset], pd.DataFrame]:
+    """Half an hour of one source's plumes: a 1 s analyzer of three gases, a 2 s one of methane."""
+    rng = np.random.default_rng(7)
+    n = 1800
+    t = np.arange(n, dtype=float)
+    plume = np.zeros(n)
+    for centre, width, height in ((300, 20, 25), (700, 35, 40), (1100, 15, 18), (1500, 25, 30)):
+        plume += height * np.exp(-0.5 * ((t - centre) / width) ** 2)
+    van = _stream(
+        {
+            "ch4": 1950 + plume + rng.normal(0, 0.7, n),
+            "c2h6": 2.0 + 0.05 * plume + rng.normal(0, 0.05, n),
+            "co": 120 + 0.4 * plume + rng.normal(0, 2.0, n),
+        },
+        {"ch4": 0.7, "c2h6": 0.05, "co": 2.0},
+        width_s=1,
+    )
+    half = plume.reshape(-1, 2).mean(axis=1)
+    lab = _stream({"ch4": 1950 + half + rng.normal(0, 1.0, half.size)}, {"ch4": 1.0}, width_s=2)
+    baseline = BaselineConfig(windows=("2min", "10min"), quantiles=(0.05,))
+    logging.disable(logging.WARNING)
+    try:
+        states = {
+            name: baseline_state(stream, instrument=name, baseline=baseline)
+            for name, stream in (("van", van), ("lab", lab))
+        }
+        events = event_states(
+            states, EventsConfig(enter_multiple=(3.0, 5.0), exit_multiple=(1.0, 2.0))
+        )
+        catalog = event_catalog(events, states)
+    finally:
+        logging.disable(logging.NOTSET)
+    return states, catalog
+
+
+def _by_hand(
+    states: dict[str, xr.Dataset],
+    catalog: pd.DataFrame,
+    reference: str,
+    numerator: str,
+    period: str,
+    methods: tuple[str, ...] = ("ols", "york"),
+) -> pd.DataFrame:
+    """The pairing and the fits called directly, as METHODS §5.2 describes them."""
+    r_inst, r_var = reference.split(".")
+    n_inst, n_var = numerator.split(".")
+    paired = pair_species(
+        states,
+        (n_inst, f"enhancement_{n_var}"),
+        (r_inst, f"enhancement_{r_var}"),
+        carry=[(n_inst, n_var), (r_inst, r_var)],
+        target=None if period == "native" else period,
+    )
+    return member_fits(
+        paired.dataset,
+        catalog,
+        PairColumns(paired.y_name, paired.x_name, *paired.carried),
+        reference=reference,
+        numerator=numerator,
+        period=period,
+        methods=methods,
+    )
+
+
+def _config(**kwargs: object) -> RatiosConfig:
+    return RatiosConfig.model_validate(kwargs)
+
+
+def test_the_table_is_each_pairings_fits_in_the_configurations_order(
+    campaign: tuple[dict[str, xr.Dataset], pd.DataFrame],
+) -> None:
+    states, catalog = campaign
+    got = ratio_fits(
+        states,
+        catalog,
+        _config(sets=[{"reference": "van.ch4", "numerators": ["van"]}], periods=["native", "10s"]),
+    )
+    expected = pd.concat(
+        [
+            _by_hand(states, catalog, "van.ch4", numerator, period)
+            for numerator in ("van.c2h6", "van.co")
+            for period in ("native", "10s")
+        ],
+        ignore_index=True,
+    )
+    assert len(got) > 0
+    pd.testing.assert_frame_equal(got, expected)
+
+
+def test_an_instrument_expands_over_its_enhancements_without_the_reference(
+    campaign: tuple[dict[str, xr.Dataset], pd.DataFrame],
+) -> None:
+    states, catalog = campaign
+    assert enhanced_variables(states["van"]) == ["ch4", "c2h6", "co"]
+    got = ratio_fits(
+        states, catalog, _config(sets=[{"reference": "van.c2h6", "numerators": ["van"]}])
+    )
+    assert list(dict.fromkeys(got.numerator)) == ["van.ch4", "van.co"]
+    assert set(got.reference) == {"van.c2h6"}
+
+
+def test_a_reference_on_another_instrument_is_paired_on_the_wider_cells(
+    campaign: tuple[dict[str, xr.Dataset], pd.DataFrame],
+) -> None:
+    states, catalog = campaign
+    got = ratio_fits(
+        states, catalog, _config(sets=[{"reference": "lab.ch4", "numerators": ["van.c2h6"]}])
+    )
+    pd.testing.assert_frame_equal(got, _by_hand(states, catalog, "lab.ch4", "van.c2h6", "native"))
+    # The 2 s analyzer's methane is the reference, so its candidates are the members'.
+    assert len(got) > 0
+    assert got.candidate_id.str.startswith("lab.ch4/").all()
+
+
+def test_ratio_sets_follow_one_another_and_only_the_named_estimators_run(
+    campaign: tuple[dict[str, xr.Dataset], pd.DataFrame],
+) -> None:
+    states, catalog = campaign
+    got = ratio_fits(
+        states,
+        catalog,
+        _config(
+            sets=[
+                {"reference": "van.ch4", "numerators": ["van.co"]},
+                {"reference": "lab.ch4", "numerators": ["van.c2h6"]},
+            ],
+            methods=["york"],
+        ),
+    )
+    expected = pd.concat(
+        [
+            _by_hand(states, catalog, "van.ch4", "van.co", "native", ("york",)),
+            _by_hand(states, catalog, "lab.ch4", "van.c2h6", "native", ("york",)),
+        ],
+        ignore_index=True,
+    )
+    pd.testing.assert_frame_equal(got, expected)
+    assert set(got.method) == {"york"}
+
+
+def test_no_ratio_set_gives_an_empty_table_of_the_declared_types(
+    campaign: tuple[dict[str, xr.Dataset], pd.DataFrame],
+) -> None:
+    states, catalog = campaign
+    got = ratio_fits(states, catalog, _config())
+    assert got.empty
+    assert {name: str(dtype) for name, dtype in got.dtypes.items()} == {
+        name: str(pd.Series(dtype=dtype).dtype) for name, dtype in FIT_DTYPES.items()
+    }
+
+
+@pytest.mark.parametrize(
+    ("ratio_set", "match"),
+    [
+        ({"reference": "van.so2", "numerators": ["van"]}, "reference 'van.so2'"),
+        ({"reference": "ship.ch4", "numerators": ["van"]}, "reference 'ship.ch4'"),
+        ({"reference": "van.ch4", "numerators": ["ship"]}, "no instrument 'ship'"),
+        ({"reference": "van.ch4", "numerators": ["van.so2"]}, "so2"),
+    ],
+)
+def test_names_no_baseline_state_holds_are_refused(
+    campaign: tuple[dict[str, xr.Dataset], pd.DataFrame], ratio_set: dict[str, object], match: str
+) -> None:
+    states, catalog = campaign
+    with pytest.raises(TsaraRatioError, match=match):
+        ratio_fits(states, catalog, _config(sets=[ratio_set]))
+
+
+def test_the_fixture_has_events_on_both_references(
+    campaign: tuple[dict[str, xr.Dataset], pd.DataFrame],
+) -> None:
+    """Guard: a test over a reference with no events would compare two empty tables."""
+    _, catalog = campaign
+    held = catalog.groupby(["instrument", "species"]).size()
+    assert held.get(("van", "ch4"), 0) > 0
+    assert held.get(("lab", "ch4"), 0) > 0

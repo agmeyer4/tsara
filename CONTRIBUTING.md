@@ -69,12 +69,14 @@ by `tests/test_architecture.py`; the rest is this section.
 ```
 core/        a leaf: imports nothing else from tsara
 config/      every schema plus the one YAML door: imports only core
-synthetic/  ingest/  align/  baseline/  events/  ratios/
+synthetic/  ingest/  align/  baseline/  events/  ratios/  survey/
              the stages: import core, config and themselves, and NEVER each
              other. They hand each other xarray Datasets whose vocabulary
              lives in core/naming.py. That is what lets a new stage be
              inserted anywhere.
-pipeline, cli   (future) on top
+pipeline/    on top: the loops that take one step of the science through
+             two stages in turn (pairing, then the fits), computing
+             nothing either stage does not; the CLI (future) beside it
 ```
 
 `tsara/_version.py` is the one place the version number is written; anything

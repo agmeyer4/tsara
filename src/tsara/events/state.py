@@ -56,11 +56,11 @@ from tsara._version import __version__
 from tsara.core.bundle import pin_time_encoding
 from tsara.core.naming import (
     BASELINE_STAGE,
-    ENHANCEMENT_PREFIX,
     QUANTILE_DIM,
     TIME_BOUNDS_VAR,
     TIME_COORD,
     WINDOW_DIM,
+    enhanced_variables,
     enhancement_name,
     sigma_rand_name,
 )
@@ -264,7 +264,7 @@ def event_states(
     first: dict[str, xr.Dataset] = {}
     later: dict[str, list[str]] = {}
     for instrument, state in states.items():
-        names = _default_variables(state)
+        names = enhanced_variables(state)
         own = [v for v in names if events.trigger_for(instrument, v) is None]
         later[instrument] = [v for v in names if v not in own]
         if own:
@@ -300,23 +300,14 @@ def event_states(
 def _select(state: xr.Dataset, instrument: str, variables: Sequence[str] | None) -> list[str]:
     """Return the variables to find events for, refusing one with no enhancement."""
     if variables is None:
-        return _default_variables(state)
+        return enhanced_variables(state)
     missing = [v for v in variables if enhancement_name(v) not in state.data_vars]
     if missing:
         raise TsaraEventError(
             f"The baseline state of '{instrument}' holds no enhancement of {missing}; "
-            f"it holds enhancements of {_default_variables(state)}."
+            f"it holds enhancements of {enhanced_variables(state)}."
         )
     return list(variables)
-
-
-def _default_variables(state: xr.Dataset) -> list[str]:
-    """Return every variable the baseline state holds an enhancement of, in order."""
-    return [
-        str(name)[len(ENHANCEMENT_PREFIX) :]
-        for name in state.data_vars
-        if str(name).startswith(ENHANCEMENT_PREFIX)
-    ]
 
 
 # ---------------------------------------------------------------------------

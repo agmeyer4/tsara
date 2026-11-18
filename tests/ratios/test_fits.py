@@ -329,7 +329,7 @@ class _quiet:
 
 
 @pytest.mark.parametrize("borrowed", [(0.1, 0.25), (0.25, 0.1)])
-def test_the_largest_borrowed_share_of_either_member_is_recorded(
+def test_the_largest_borrowed_share_of_either_variable_is_recorded(
     borrowed: tuple[float, float],
 ) -> None:
     pairs = make_pairs(np.arange(10.0), 0.5 * np.arange(10.0), borrowed=borrowed)

@@ -577,6 +577,7 @@ LAYERS: tuple[tuple[str, ...], ...] = (
     ("core",),
     ("config",),
     ("synthetic", "ingest", "align", "baseline", "events", "ratios", "survey"),
+    ("pipeline",),
 )
 
 #: Layer index of every package that has one.
