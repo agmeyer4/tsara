@@ -1,8 +1,8 @@
-"""Tests for pairing swept members, and variables carried beside a pair.
+"""Tests for pairing a swept pair, and variables carried beside a pair.
 
 The ratio stage pairs enhancements, which carry the baseline's sweep: one
 version per (window, quantile) point (METHODS §6.2, §5.2). Pairing a swept
-member must give, at every sweep point, exactly what pairing that sweep
+variable must give, at every sweep point, exactly what pairing that sweep
 point alone gives through the unswept path, which earlier phases verified
 against a slow reimplementation, closed forms and Monte Carlo. So the
 evidence here is, in order of strength:
@@ -97,7 +97,7 @@ def test_each_sweep_point_is_paired_on_its_own_and_a_row_kept_if_any_is(
     by_hand: dict[str, xr.Dataset],
 ) -> None:
     """Version 0: (1.5, 10) and (3.5, 20). Version 1: (1.0, 10) only; its second row,
-    a pair at version 0, holds neither member at version 1."""
+    a pair at version 0, holds neither variable at version 1."""
     paired = pair_species(by_hand, ("a", "y"), ("b", "x"))
     data = paired.dataset
     assert paired.clock == "b"
@@ -119,17 +119,17 @@ def test_min_coverage_is_asked_at_each_sweep_point(by_hand: dict[str, xr.Dataset
     paired = pair_species(by_hand, ("a", "y"), ("b", "x"), min_coverage=0.6)
     data = paired.dataset
     assert data.attrs[PAIRS_PER_SWEEP_POINT_ATTR] == [2, 0]
-    # Both members are blanked where the row is no pair, x's 10 at version 1 too.
+    # Both variables are blanked where the row is no pair, x's 10 at version 1 too.
     np.testing.assert_array_equal(data["y"].values, [[1.5, np.nan], [3.5, np.nan]])
     np.testing.assert_array_equal(data["x"].values, [[10.0, np.nan], [20.0, np.nan]])
-    # Either member's coverage counts: named the other way round, the same.
+    # Either variable's coverage counts: named the other way round, the same.
     swapped = pair_species(by_hand, ("b", "x"), ("a", "y"), min_coverage=0.6)
     assert swapped.dataset.attrs[PAIRS_PER_SWEEP_POINT_ATTR] == [2, 0]
     np.testing.assert_array_equal(data[coverage_name("y")].values, [[1.0, 0.5], [1.0, 1.0]])
 
 
 def test_a_tie_in_width_counts_a_swept_member_measured_where_any_point_is() -> None:
-    """Equal 1 s cells half a second apart: the sparser member is the clock (§11.4.1).
+    """Equal 1 s cells half a second apart: the sparser variable is the clock (§11.4.1).
 
     a holds four readings at version 0 and two at version 1; b holds three at
     both. Read as measured where any version is, a has four and b three, so b
@@ -276,7 +276,7 @@ def test_every_sweep_point_is_what_pairing_it_alone_gives(
         alone = {name: _at(state, index) for name, state in states.items()}
         at = data.isel(dict(zip(SWEEP, index, strict=True)))
         pairs_here = np.isfinite(at[swept.y_name].values)
-        # A row that is no pair here holds neither member here.
+        # A row that is no pair here holds neither variable here.
         assert np.array_equal(np.isfinite(at[swept.x_name].values), pairs_here)
         if per_point[column] == 0:
             # Nothing to pair at this point, alone or swept.
@@ -294,7 +294,7 @@ def test_every_sweep_point_is_what_pairing_it_alone_gives(
             np.testing.assert_array_equal(
                 here[name].values, single.dataset[name].values, err_msg=f"{name} at {index}"
             )
-    # Each member records the most any one point draws on, as the binner does.
+    # Each variable records the most any one point draws on, as the binner does.
     for name, attr in (
         (swept.y_name, READINGS_ATTR),
         (swept.y_name, SHARED_READINGS_ATTR),
@@ -397,7 +397,7 @@ def test_members_with_different_sweeps_are_refused(states: dict[str, xr.Dataset]
 
 def test_a_member_cannot_also_be_carried(states: dict[str, xr.Dataset]) -> None:
     y, x = ("aeris", "enhancement_c2h6"), ("picarro", "enhancement_ch4")
-    with pytest.raises(TsaraAlignError, match="member of the pair"):
+    with pytest.raises(TsaraAlignError, match="one of the pair's variables"):
         pair_species(states, y, x, carry=[x])
 
 

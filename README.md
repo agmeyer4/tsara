@@ -216,7 +216,7 @@ silently keeping the last value. Fuller, commented examples ship in
 GPS clock at ingestion, or ever, on the gas side. Interpolating a gas creates
 samples that were never measured and would inflate a regression's `N` with
 pseudo-replicates. Streams are paired late, per event, on the cells of the
-**wider-supported** member, with its partner bin-averaged onto them. Smooth
+**wider-supported** variable, with its partner bin-averaged onto them. Smooth
 auxiliary fields (GPS, met) *may* be interpolated, under an explicit
 maximum-gap guard. (`METHODS.md` §1.1)
 

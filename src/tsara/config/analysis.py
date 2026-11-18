@@ -138,7 +138,7 @@ class AlignmentConfig(_StrictModel):
     interpolated.
 
     Cross-species pairing (§1.3) reads neither knob by default: its clock is
-    the wider-supported member's own cells, so nothing is copied there, and
+    the wider-supported variable's own cells, so nothing is copied there, and
     nothing is interpolated. It reads ``finer_support`` only for a clock
     whose cells vary in width (§11.2.4).
     """

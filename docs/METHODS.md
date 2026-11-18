@@ -41,7 +41,7 @@ attributes and this document, because each was once used for several:
 | **plume** | an enhancement in the air from an emission: what the generator injects and the events stage (`tsara.events`) looks for. No stage yet reports one: whether events are a plume is judged across the sweep (Phase 7) | an interval the stage reported, which is an *event* |
 | **event** | an interval the events stage reported on one variable at one sweep point (`event_id`): what one sweep point sees, not a verdict: one plume, part of one, several merged, or a chance crossing, which is why the expected chance rate is recorded (§6.8) | a plume, or a source. The stage that reports events is `events` (`tsara.events`), named for its product as `baseline` is; its product is the **event state** and the **event catalog**, saved under `events/` in a bundle. It was named `plumes` until the Phase-6 walkthrough; no bundle under the old name exists outside that branch, so none is migrated |
 | **candidate** | the events of one variable at one baseline window that share a peak across quantile, entry and exit (`candidate_id`, `tsara.events.candidates`, §6.8): what the sweep sees of one thing at one scale, with how many sweep points found it and how tall it stood | a plume, or a verdict that one is there: whether a candidate is believed is judged by the ratio stage (Phase 7c) |
-| **member** | one of a candidate's distinct (quantile, exit) intervals at its window (§5.2): the interval its events share across entry, fitted once | an event: the events at several entries share one member |
+| **member** | one of a candidate's distinct (quantile, exit) intervals at its window (§5.2): the interval its events share across entry, fitted once | an event: the events at several entries share one member; nor one of a pair's two **variables** (§11.4), which pairing called its members until 2026-11-18 |
 | **fit** | one line through the pairs of one member: one numerator, one estimator, one pairing period (§4, §5.2) | a ratio: a fit is what one sweep point gives; a ratio is read across a candidate's members |
 | **ratio** | a candidate's reported slope of a numerator on its reference, with σ_fit, σ_method and σ_sys beside their combination (§5.5) | a fit, or a slope over any other stretch |
 | **fingerprint** | a candidate's row of ratios across every numerator of its ratio set (§5.7) | a source's known signature: the package holds no library of those |
@@ -143,7 +143,7 @@ when they come from instruments with different rates:
    canister's clock would
    split a 60 s mean onto 15 s, which the interval model forbids; pairing on
    the mean's clock is admissible, and the coverage of 0.25 is what says how
-   much to trust it. When the two widths are equal, the member with fewer
+   much to trust it. When the two widths are equal, the variable with fewer
    measured values where the records overlap is the clock (§11.4.1). A
    caller may instead supply the cells (`pair_species(target=)`), which is
    the remedy for the one shape no choice of clock makes honest: two dense
@@ -165,13 +165,13 @@ Consequences: every regression point contains at least one real measurement
 of *each* species. This eliminates interpolation pseudo-replication
 (interpolated points posing as independent samples and silently inflating
 degrees of freedom). It does not by itself make every pair independent: a
-sparse member whose cells straddle the clock's boundaries can put one reading
+sparse variable whose cells straddle the clock's boundaries can put one reading
 into two pairs, so the product records how many distinct readings of each
 species stand behind its pairs, and that — not the pair count — is the ceiling
 on a regression's N (§11.4.1).
 
 Different species pairs may therefore be paired on different clocks (each pair
-uses its own wider-supported member). Each ratio is an independent slope estimate with
+uses its own wider-supported variable). Each ratio is an independent slope estimate with
 its own honest CI; no shared clock across pairs is required for the ratios to
 be comparable as estimates.
 
@@ -1253,10 +1253,10 @@ construction. Every candidate is fitted, gated or not; gates are applied
 afterwards (§5.3).
 
 **Pairs.** The numerator's and the reference's enhancements are put onto one
-**pair clock** by pairing's rule (§1.3, §11.4: the wider-supported member's
-cells, a tie going to the member with fewer readings), through the join, every
+**pair clock** by pairing's rule (§1.3, §11.4: the wider-supported variable's
+cells, a tie going to the variable with fewer readings), through the join, every
 version of the baseline sweep at once (§11.2), each sweep point paired as if
-alone (built in 7c1's second stage, §11.4 "Swept members"). The readings
+alone (built in 7c1's second stage, §11.4 "Swept pairs"). The readings
 themselves are carried beside them (`carry=`), for their sigma. A cell of the pair clock
 belongs to a member when its midpoint lies in the member's interval, start ≤
 midpoint < end: the rule a triggered variable's readings already follow
@@ -5531,7 +5531,7 @@ one**. The two products of this phase differ only in what the target is.
 
 | product | target cells | consumer |
 |---|---|---|
-| a species pair (§11.4) | the wider-supported member's own cells | §4 regression |
+| a species pair (§11.4) | the wider-supported variable's own cells | §4 regression |
 | a campaign matrix (§11.7) | a uniform grid | receptor modelling, continuous state |
 
 They are not two designs. `tsara.align.binning.bin_streams_onto_cells` is the
@@ -5635,7 +5635,7 @@ shrinks by √60 ≈ 7.7, which is exactly the pseudo-replication that pairing o
 the wider-supported clock exists to prevent (§1.3).
 
 Both products of this phase already prevent it by choosing their target:
-`pair_species` pairs on the wider-supported member, and `build_output_grid`
+`pair_species` pairs on the wider-supported variable, and `build_output_grid`
 runs this same test against its cells before binning (§11.7). The primitive
 they share refuses it too, and has to, because it is public and is the
 documented route to a receptor-model matrix over a caller's own target cells.
@@ -5978,7 +5978,7 @@ designs them, because past that point the omission is baked into every ratio;
 the within-cell spread of a faster stream, measured above as a calibrated
 price, is the companion that would carry it if the answer is yes.
 
-**A consequence for pairing.** The clock is the wider-supported member's cells
+**A consequence for pairing.** The clock is the wider-supported variable's cells
 by median width, so its partner is normally averaged, never copied. A clock
 whose cells vary in width can still hold one cell less than half as wide as a
 partner reading — the canisters' fills run from 1.8 s to 20.1 s on the ten
@@ -6016,7 +6016,7 @@ are about nine times slower than a 60 s stationary mean by rate (530 s against
 60 s) and four times *narrower* by support (14.9 s against 60 s; medians over
 all 261 fills of the ten 2024 drive days).
 
-When the widths are equal, the clock is the member with **fewer measured
+When the widths are equal, the clock is the variable with **fewer measured
 values where the two records overlap**, and if those tie too, the first
 instrument by name (§11.4.1). No step looks at argument order, so which
 species is numerator never changes which air is compared.
@@ -6025,31 +6025,31 @@ species is numerator never changes which air is compared.
 rule: explicit cells, or a period such as `'10s'` built as a uniform grid over
 the two records by `grid_cells`, under the same copy rule (§11.2.4). Both
 species are then averaged onto it, `tsara_pairing_clock` reads `explicit`,
-and every pair carries both members' counts, coverage and borrowed shares.
+and every pair carries both variables' counts, coverage and borrowed shares.
 The measured use is the dense half-cell blend of §11.4.1: on a common clock
 five to ten times coarser than the cells the naive standard error is honest
 again while the real scatter is unchanged (0.67× → 0.92× at 10 s, notebook 04
-§9). When the clock rule chose the cells and a binned member's cells are
+§9). When the clock rule chose the cells and a binned variable's cells are
 exactly as wide as the clock's but offset from them, the product warns,
 naming the borrowed share and a coarser period to pass — the same exact test
 the grid applies to its own cells (§11.9.1), through one function
 (`phase_offset_s`). A caller who supplied the cells is not warned twice.
 
-**Swept members, and variables carried beside a pair** (built 2026-11-17,
+**Swept pairs, and variables carried beside a pair** (built 2026-11-17,
 7c1's second stage, for the ratio stage, §5.2). An enhancement carries the
 baseline's sweep, one version per (window, quantile) point (§6.2), and the
 binner already averages every version at once (§11.2). Pairing asks its pair
-rule of each version: a row is a pair *at a sweep point* when both members
+rule of each version: a row is a pair *at a sweep point* when both variables
 hold a value there and both are covered at least `min_coverage`; a row is
 kept when it is a pair at one point or more; and at a point where a kept row
-is not a pair, both members' values are blanked, so every finite value is
+is not a pair, both variables' values are blanked, so every finite value is
 half of a real pair at its own point, as an unswept pair's always was (a
-blanked value's companions keep what the binner found). Both members must
+blanked value's companions keep what the binner found). Both variables must
 carry the same sweep dimensions, since a pair compares one point of each;
-the clock rule's count of measured values reads a swept member as measured
+the clock rule's count of measured values reads a swept variable as measured
 where any version is, so one pair of instruments keeps one clock whichever of
 their variables are paired. The counts are per sweep point:
-`tsara_pairing_pairs_per_sweep_point`, and each member's `tsara_n_readings`
+`tsara_pairing_pairs_per_sweep_point`, and each variable's `tsara_n_readings`
 and `tsara_shared_readings` the most any one point holds, as the binner
 records a column's readings. **Checked against the unswept path**, which the
 rest of this section verified: on the baseline states of a 1 s and a 2 s
@@ -6089,7 +6089,7 @@ random one's interval and timescale, which §10.8 forbids; on 10 s cells under
 a random figure quoted at 1 s, a 4.0 ppb systematic came out 1.78 ppb at
 τ = 1 s and 3.98 ppb at τ = 5 min. It needed both an interval and a timescale
 declared, which no manifest of the real archive does, so no real product
-changed. Only then is the binned member's uncertainty propagated through
+changed. Only then is the binned variable's uncertainty propagated through
 the *same* overlap weights that formed its value (§3), the two components
 separately.
 
@@ -6120,7 +6120,7 @@ product is the output grid (§11.7). Its attributes:
 | `tsara_pairing_min_coverage` | the guard applied (`PairingConfig.min_coverage`) |
 | `tsara_pairing_cells_considered` | candidate cells before dropping |
 | `tsara_pairing_cells_dropped` | how many produced no usable pair |
-| `tsara_pairing_pairs_per_sweep_point` | swept members only: the pairs at each sweep point, in the product's order of sweep dimensions with the last varying fastest (below) |
+| `tsara_pairing_pairs_per_sweep_point` | swept pairs only: the pairs at each sweep point, in the product's order of sweep dimensions with the last varying fastest (below) |
 
 and per variable:
 
@@ -6129,8 +6129,8 @@ and per variable:
 | `tsara_instrument` | which stream this species came from |
 | `tsara_binned` | 1 if averaged onto the clock, 0 if already on it |
 | `tsara_sigma_at_support` | how a declared σ was moved onto its own cells, `unscaled` when it could not be, or `unchanged` when nothing was moved, which a systematic σ never is |
-| `tsara_n_readings` | distinct readings of this species behind the surviving pairs (§11.2.4, §11.4.1); for a swept member, the most any one sweep point draws on |
-| `tsara_shared_readings` | distinct readings of this species that formed more than one surviving pair, so that neighbouring pairs share their error; 0 for a species on the clock, by construction (§11.4.1); for a swept member, the most at any one sweep point |
+| `tsara_n_readings` | distinct readings of this species behind the surviving pairs (§11.2.4, §11.4.1); for a swept variable, the most any one sweep point draws on |
+| `tsara_shared_readings` | distinct readings of this species that formed more than one surviving pair, so that neighbouring pairs share their error; 0 for a species on the clock, by construction (§11.4.1); for a swept variable, the most at any one sweep point |
 
 and on each propagated σ companion, `tsara_propagation_form`: the registered
 form that produced *that* number, or `independent` when no decorrelation
@@ -6151,7 +6151,7 @@ written from the definition of §1.3, agreeing to 1e-12 on random cells with a
 masked sample; two closed forms — the mean of a linear ramp over a cell equals
 the ramp at the cell midpoint, and a species paired against a constant
 multiple of itself returns that multiple exactly, which is the property that
-would fail if the two members were averaged over different air; and invariants
+would fail if the two variables were averaged over different air; and invariants
 needing no ground truth — binning a stream onto matching cells returns it, and
 a cell with no partner data yields no pair rather than an interpolation. The
 tie rule and the reading counts of §11.4.1 are pinned by fixtures that each
@@ -6159,13 +6159,13 @@ isolate one decision, and those tests were mutation-scored: nine plausible
 defects injected one at a time (argument order deciding a tie, rows counted
 instead of finite values, whole records counted instead of the shared span,
 the name tie reversed, a zero-overlap or masked cell counted as a reading, a
-binned member credited one reading per pair, the warning firing on equality,
-the denser member preferred), and all nine caught. The first run caught eight;
+binned variable credited one reading per pair, the warning firing on equality,
+the denser variable preferred), and all nine caught. The first run caught eight;
 the miss was the zero-overlap filter, which is reachable only when one reading's
 cell nests inside another and the overlap search brackets a cell that does not
 overlap, and a fixture of exactly that shape now pins it.
 
-**And on real data.** The 2024-07-18 mobile-lab drive carries both members of
+**And on real data.** The 2024-07-18 mobile-lab drive carries both variables of
 the canister case: on that day, 32 iWAS fills of median width 14.7 s at a
 441 s cadence (exact cells from `iWAS_Stop_UTC`), and the Picarro's measured
 `CH4_ppb`, a 1 s file with a value in every second or third row. Pairing
@@ -6194,10 +6194,10 @@ records the trap for anyone writing a manifest against these files.
 
 #### 11.4.1 A tie in width, and the reading counted twice
 
-"The wider-supported member" has no answer for two instruments with equal
+"The wider-supported variable" has no answer for two instruments with equal
 cells, and the code as first written broke the tie by argument order. That is
 harmless while equal-width cells coincide, since each cell is then its own
-partner. It is not harmless when they are **out of phase and one member is
+partner. It is not harmless when they are **out of phase and one variable is
 sparse**: every sparse reading then straddles two cells of the denser clock,
 half-covers each, and appears in both pairs.
 
@@ -6228,15 +6228,15 @@ to well within noise, a true NOy/CO₂ slope of 8, and the noise redrawn 300
 times per row. The naive least-squares standard error is compared with how
 much the slope actually scatters across draws:
 
-| σ on CO₂ (ppm) | σ on NOy (ppb) | naive SE ÷ real scatter, sparser member's clock | the same, denser member's clock |
+| σ on CO₂ (ppm) | σ on NOy (ppb) | naive SE ÷ real scatter, sparser variable's clock | the same, denser variable's clock |
 |---|---|---|---|
 | 0 | 1.0 | 0.96 | 1.00 |
 | 0.15 | 1.0 | 1.02 | **0.82** |
 | 0.30 | 0.5 | 1.03 | **0.74** |
 
 The slope agrees to every printed digit on both clocks. On the sparser
-member's cells the naive standard error describes the real scatter; on the
-denser member's cells it is a fifth to a quarter too narrow as soon as the
+variable's cells the naive standard error describes the real scatter; on the
+denser variable's cells it is a fifth to a quarter too narrow as soon as the
 duplicated species carries error of its own, bounded by 1/√2 when all of the
 error sits there. Nothing in `coverage` or `n_readings` shows it.
 
@@ -6252,8 +6252,8 @@ pairs of instruments with equal widths, **312 are half a cell apart at 1 s**
 pairs in the 60 s stationary suite are in phase**, so that suite never meets
 the case. No two 2026 instruments share an exact width.
 
-**The rule.** On a tie in width, the member with fewer finite values sets the
-clock. Each of its readings is then exactly one pair, and the denser member is
+**The rule.** On a tie in width, the variable with fewer finite values sets the
+clock. Each of its readings is then exactly one pair, and the denser variable is
 averaged across it, centred on the same interval. Counted over the span where
 *both* records run, because a sparse analyzer logging all day beside a dense
 one switched on for ten minutes has more readings in total and fewer in the
@@ -6264,7 +6264,7 @@ drive above, both argument orders now give the Picarro clock and 8,447 pairs.
 
 **What the rule does not settle, stated rather than rounded.** Two *dense*
 instruments of equal width half a cell apart duplicate nothing on either
-clock, but every reading of the binned member now contributes half of itself
+clock, but every reading of the binned variable now contributes half of itself
 to each of two *neighbouring* pairs, so adjacent pairs share an error. The
 same experiment with no sparseness at all (every CO₂ row filled, 3599 pairs
 on either clock):
@@ -6278,16 +6278,16 @@ on either clock):
 Both tables are the executed output of `examples/notebooks/04_alignment_walkthrough.ipynb`
 §9 (seeds 0–299), so they re-run from the repository.
 
-No choice of clock is honest in general: whichever member is averaged carries
+No choice of clock is honest in general: whichever variable is averaged carries
 the shared error, and the standard error is too narrow by up to 1/√2 when that
-member's error dominates. Phase 4.6 gave the case a remedy short of modelling
-it: `pair_species(target=)` puts both members on a coarser common clock, where
+variable's error dominates. Phase 4.6 gave the case a remedy short of modelling
+it: `pair_species(target=)` puts both variables on a coarser common clock, where
 the naive standard error is honest again — measured over 800 draws with a
 smooth truth, 0.67× the real scatter at 1 s, 0.89× at 5 s, 0.92× at 10 s, the
 real scatter unchanged at every width. This is not rare. On the same 2024-07-18 drive the
 iodide-CIMS species (finite in 92–97 % of rows) and the PTR-MS species (94–95 %)
 are dense, start-labelled and half a cell from the mid-labelled LIF. The
-tie rule still gives them a deterministic clock (the member with fewer finite
+tie rule still gives them a deterministic clock (the variable with fewer finite
 values, which there is the CIMS or PTR stream), and the reading count below
 cannot flag them, because sharing a reading between two pairs is a
 *correlation* between pairs rather than a shortfall of readings. Accounting for
@@ -6297,12 +6297,12 @@ weights imply; it is recorded as an open question for Phase 7.
 **Sparse and dense are the same geometry and not the same problem.** The
 warning that names the remedy was first written to fire on the geometry
 alone — equal widths, a non-zero phase offset — and to assert the consequence
-above. That consequence does not hold when the averaged member is *sparse*.
+above. That consequence does not hold when the averaged variable is *sparse*.
 Its pairs then sit two or three cells apart, each of its readings straddles
 one pair's cell and one dropped candidate, and no reading reaches two pairs:
 the borrowed share is 0.50 exactly as in the dense case, and the pairs are
 independent. The first table above already said so from the other side (the
-sparser member's clock, 1.02× and 1.03×), and the walkthrough of notebook 04
+sparser variable's clock, 1.02× and 1.03×), and the walkthrough of notebook 04
 §9 caught the warning contradicting it. So the product now counts the thing
 itself, per species, in `tsara_shared_readings`: the distinct readings that
 formed more than one surviving pair, on the same membership rule as every
@@ -6312,14 +6312,14 @@ because it is real in both cases: each value is a mean of two readings
 straddling its cell and rests on air outside it by the borrowed share. The
 remedy is named only when that count is not zero. Measured on 2024-07-18:
 
-| pair | clock | pairs | averaged member | `tsara_n_readings` | `tsara_shared_readings` | remedy named |
+| pair | clock | pairs | averaged variable | `tsara_n_readings` | `tsara_shared_readings` | remedy named |
 |---|---|---|---|---|---|---|
 | NOy vs CO₂ (43 % finite) | Picarro | 8,447 | NOy | 16,893 | **0** | no |
 | NOy vs O₃ (50 %) | ozone | 9,750 | NOy | 19,498 | **0** | no |
 | benzene (PTR, 95 %) vs NOy | PTR | 18,439 | NOy | 18,478 | **18,397** | yes |
 
 The same drive holds both shapes, and nothing but the count separates them:
-in every row the averaged member is labelled `straddled` with a borrowed
+in every row the averaged variable is labelled `straddled` with a borrowed
 share of 0.500. Notebook 04 §9's miniature of the drive gives the same
 answer (its sparse default 0 of 3,127 readings shared, its dense variant
 3,598 of 3,599). One more number belongs beside these, because the count
@@ -6337,12 +6337,12 @@ itself has structure at the scale of a cell. On a synthetic campaign of two
 noise-free 60 s instruments half a cell apart, with plumes about as wide as
 the cells and a true ratio of 0.25, a least-squares fit of tracer on CH₄ gives
 **0.285** on the tracer's clock and **0.169** on the CH₄'s, while the
-mass-weighted ratio is 0.251 on both. Which member gets smoothed decides which
+mass-weighted ratio is 0.251 on both. Which variable gets smoothed decides which
 way the slope is biased. The 60 s stationary suite is in phase throughout, so
 the archive does not meet this at 60 s; at 1 s it would need plumes one or two
 samples wide, which the drive records do contain (§9.5).
 
-**The duplication a clock cannot remove.** A sparse member narrower than the
+**The duplication a clock cannot remove.** A sparse variable narrower than the
 clock can still straddle its boundaries: a 15 s canister fill across a minute
 boundary of a 60 s mean is one reading in two pairs whichever rule chooses
 the clock. In a synthetic campaign of 327 fills against 60 s means, 84 fills
@@ -7053,7 +7053,7 @@ fills over how many days.
 
 One source drives two species. One is measured every second, the other once a
 minute, and the ratio between them is fixed and known. If pairing averages
-both members over the same air, that ratio comes back; if it averages them
+both variables over the same air, that ratio comes back; if it averages them
 over *different* air — one stream placed out of time, an off-by-one cell, an
 overlap weight applied to the wrong partner — the ratio drifts, and nothing
 else in the suite would say so.

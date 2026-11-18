@@ -579,7 +579,7 @@ def _borrowed(
     y: npt.NDArray[np.float64],
     n_groups: int,
 ) -> npt.NDArray[np.float64]:
-    """Return each member's largest borrowed share over its pairs, of either member (§11.2.4)."""
+    """Return each member's largest borrowed share over its pairs, of either variable (§11.2.4)."""
     used = np.isfinite(x) & np.isfinite(y)
     largest = np.full(n_groups, -np.inf)
     for name in (columns.numerator, columns.reference):

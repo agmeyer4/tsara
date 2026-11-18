@@ -9,7 +9,7 @@ say) is outside their reach and is caught by the round-trip harness and the
 support tests instead (``docs/METHODS.md`` §11.9). What they measure is:
 
 * a known ratio between two species measured on different clocks must survive
-  pairing exactly, which it can only do if both members were averaged over the
+  pairing exactly, which it can only do if both variables were averaged over the
   same air;
 * the uncertainty a binned value reports must match the scatter that value
   actually has around the truth, which is the second half of the
@@ -143,7 +143,7 @@ def test_a_known_ratio_survives_pairing_across_a_sixty_fold_rate_difference() ->
     """The acceptance criterion of the phase.
 
     One source drives two species. One is measured every second, the other
-    once a minute. If pairing averages both members over the same air, the
+    once a minute. If pairing averages both variables over the same air, the
     ratio of the paired enhancements is the ratio the source was given. If it
     averages them over *different* air -- one stream placed out of time, an
     off-by-one cell, an overlap weight applied to the wrong partner -- the ratio

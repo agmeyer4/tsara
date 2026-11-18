@@ -8,7 +8,7 @@ package does with more than one clock is that operation with a different
 target:
 
 * two species compared for a regression — the target is the cells of the
-  wider-supported member (:mod:`tsara.align.pairing`, ``docs/METHODS.md``
+  wider-supported variable (:mod:`tsara.align.pairing`, ``docs/METHODS.md``
   §1.3);
 * a campaign-wide matrix for receptor modelling — the target is a cell set
   chosen for it, a uniform grid being one kind (§1.4).
@@ -408,7 +408,7 @@ def _refuse_upsampling(
     """Refuse, or loudly allow, a join that would copy a reading across rows.
 
     Both of this phase's products already prevent this by choosing their
-    target: pairing takes the wider-supported member's cells, and the grid
+    target: pairing takes the wider-supported variable's cells, and the grid
     checks its period with this same ratio before building anything. The
     primitive they share has to refuse it too, because it is public and is
     the documented way to build a receptor-model matrix from a chosen set of
