@@ -34,7 +34,7 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 6.5 | A baseline that follows a ramp: the rolling quantile opened (`rolling_opening`, `dilation: rank \| max`) | ✅ done |
 | 7a | Line fits: York's errors-in-both-variables line and least squares, through many groups of points at once | ✅ done |
 | 7b | Events grouped across the sweep into candidates, scored against the answer key | ✅ done |
-| 7c1 | The ratio stage's fits: every numerator against the reference over each candidate's members, on a pair clock, with gates swept as thresholds | planned |
+| 7c1 | The ratio stage's fits: every numerator against the reference over each candidate's members, on a pair clock, with gates swept as thresholds | ✅ done |
 | 7c2 | A ratio per candidate with its fit, method and systematic uncertainties, the sweep summary, save/load | planned |
 | 7c3 | The ratio stage on real data: the parked-night acceptance test, a drive, a pair of instruments | planned |
 | 7d | A run function and the `tsara` CLI | planned |

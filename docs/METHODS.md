@@ -1332,8 +1332,7 @@ Gate thresholds are axes of the sweep summary, not of a candidate's σ_method:
 within one candidate a stricter gate only drops some of its members, whose
 spread is σ_method already, so it would be counted twice.
 
-**Measured** (2026-11-17, 7c1's fourth stage; rule, in full in the docstring
-of `~/.cache/tsara-walkthrough/scripts/p7c1/stage4_measure.py`: through the
+**Measured** (2026-11-17, 7c1's fourth stage; rule: through the
 package's whole chain, one 1 s analyzer, 6 h × seeds 1–3; a methane
 background wandering 30 ppb a day and ethane 0.6, as random walks; source A
 at ethane/methane 0.05 and B at 0, 20 plumes an hour each, Gaussian with σ_t
@@ -1457,8 +1456,8 @@ resampling is the next step if it does not.
 
 **What the widened σ does not hold: the baseline's error across a member**
 (measured 2026-11-17, 7c1's fourth stage, on the generated chain of §5.3;
-members at least 99.9 % one source passing every gate, seeds 1 and 2,
-`~/.cache/tsara-walkthrough/scripts/p7c1/stage4_diag.py`). The single members'
+members at least 99.9 % one source passing every gate, each row's members
+gated on that row's own fits, seeds 1 and 2). The single members'
 2σ coverage with the widened σ, and their errors' robust spread in widened
 σ's, as one ingredient is swapped at a time:
 
@@ -1475,8 +1474,16 @@ between the baseline's window and the event, and differently in each gas, so
 the difference between baseline and true background changes across a member.
 That error is neither independent from point to point, the assumption of a
 point weight, nor constant across the member, the assumption under which a
-fit's intercept absorbs it (§4.3), and the MSWD cannot see it, since a slowly
-varying error bends a line more than it scatters it. Weighting by the
+fit's intercept absorbs it (§4.3), and the MSWD sees only part of it, since a
+slowly varying error tilts a line more than it scatters it about the line.
+Measured on one set of members (2026-11-18; rule: the chain above at seed 1,
+the 570 members at least 99.9 % one source that pass every gate when fitted on
+the true background, each also fitted on the package's baseline; notebook 09
+§6): on the package's baseline 71 % of them cover the true ratio with the
+widened σ, against 94 % on the true background (robust spread 1.82 against
+0.89 σ), and the one-source gate turns away 99 of them (17 %), every one a
+single source. The gate's false alarms on wandering air are this error.
+Weighting by the
 enhancement's sigma, which adds the baseline's own (§6.7, a floor) to the
 reading's, changes nothing (0.741 and 0.687). Over the stage-4 records,
 seeds 1–3, the 149 candidates whose passing members are all at least 99.9 %
@@ -1489,8 +1496,9 @@ uncertainty of §5.5 must add the baseline's error, and its Monte Carlo must
 show that it does (7c2).** Candidates to measure there, none yet measured: the
 background's wobble at the window's scale, which the clean spread holds beside
 the noise (§6.8), entered as an error persisting over the window; and the
-spread across windows. Until then a ratio's interval on wandering air is about
-1.5× too narrow.
+spread across windows. Until then a ratio's interval on wandering air is 1.6
+to 1.8× too narrow, and the one-source gate turns away a sixth of the good
+members.
 
 ### 5.5 A candidate's ratio **[decided 2026-11-17 — 7c2; its point estimate is chosen there by measurement]**
 
