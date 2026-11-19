@@ -149,12 +149,16 @@ def _summary(group: pd.DataFrame) -> dict[str, float]:
     slopes = group["slope"].to_numpy(dtype=np.float64)
     sigma = group["slope_sigma_widened"].to_numpy(dtype=np.float64)
     median = float(np.median(slopes))
-    # Blank where there is no budget to close: one fit (0 / 0), or a fit with no
-    # sigma or a zero one, whose weight is not a number.
-    with np.errstate(divide="ignore", invalid="ignore"):
-        weight = 1.0 / sigma**2
-        mean = float(np.sum(weight * slopes) / np.sum(weight))
-        birge = float(np.sqrt(np.sum(weight * (slopes - mean) ** 2) / (slopes.size - 1)))
+    # Blank where there is no budget to close: one fit, or a fit with no sigma
+    # or a zero one, whose weight is not a number. One fit is refused by name:
+    # its weighted mean (w b) / w can miss b by a rounding step, and the 0 / 0
+    # it was left to then reads infinite (b 0.0497 with sigma 0.0049 does).
+    birge = np.nan
+    if slopes.size > 1:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            weight = 1.0 / sigma**2
+            mean = float(np.sum(weight * slopes) / np.sum(weight))
+            birge = float(np.sqrt(np.sum(weight * (slopes - mean) ** 2) / (slopes.size - 1)))
     return {
         "n_population": float(slopes.size),
         "median_ratio": median,

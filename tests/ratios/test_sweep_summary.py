@@ -162,3 +162,10 @@ def test_the_median_mswd_is_the_median_and_a_zero_sigma_leaves_no_budget() -> No
     assert float(sweep_summary(fits, GatesConfig()).median_mswd.squeeze()) == pytest.approx(1.1)
     zero = pd.DataFrame([_fit("c1", 0.05), _fit("c2", 0.06, sigma=0.0)])
     assert np.isnan(float(sweep_summary(zero, GatesConfig()).birge_ratio.squeeze()))
+
+
+def test_one_fit_has_no_birge_ratio_even_where_its_weighted_mean_misses_its_slope() -> None:
+    """(w b) / w is not b for every float: for b 0.0497 and sigma 0.0049 it misses by a
+    rounding step, and R_B over that one fit read infinite before it was refused by name."""
+    point = sweep_summary(pd.DataFrame([_fit("c1", 0.0497, sigma=0.0049)]), GatesConfig()).squeeze()
+    assert int(point.n_population) == 1 and np.isnan(float(point.birge_ratio))

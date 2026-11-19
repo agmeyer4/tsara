@@ -369,7 +369,7 @@ reading order true.
 
 ## Notebooks
 
-The seven walkthroughs are committed with their outputs, so they read on GitHub
+The ten walkthroughs are committed with their outputs, so they read on GitHub
 without being run, and none needs any real data:
 
 - [`01_synthetic_data_walkthrough.ipynb`](examples/notebooks/01_synthetic_data_walkthrough.ipynb)
@@ -444,6 +444,15 @@ without being run, and none needs any real data:
   Carlo; the gates as thresholds on stored numbers, and the plateau's trade;
   and what the widened σ does not hold, the baseline's error across a member.
   Same shape as 05.
+- [`10_candidate_ratios_walkthrough.ipynb`](examples/notebooks/10_candidate_ratios_walkthrough.ipynb)
+  — a candidate's ratio, on air of two sources with different fingerprints:
+  the median member and the three terms of its uncertainty, against a loop
+  written from the definition; a ratio at every setting of the gates from one
+  set of fits; many candidates against the truth, to see whether the interval
+  holds; a calibration error, the one term that never averages down; the
+  fingerprint across gases, upper limits included; the sweep summary and the
+  Birge ratio over a named population; and saving and loading the stage's
+  tables. Same shape as 05.
 
 Three companions run on the real campaign archive instead, and are therefore
 committed **without** outputs:
@@ -480,7 +489,7 @@ pytest --cov=tsara --cov-branch     # suite; the 100% line+branch floor fails th
 TSARA_ARCHIVE=/path/to/Data TSARA_NOTEBOOKS=1 pytest tests/test_notebooks.py \
     tests/events/test_candidates_real_drive.py
                             # opt-in: executes notebooks 04b, 05b and 06b (against
-                            # the archive) and 04 to 09, and requires every
+                            # the archive) and 04 to 10, and requires every
                             # check and ledger row to hold; re-measures METHODS
                             # §6.8's real drive
 TSARA_SLOW=1 pytest tests/events/test_methods_tables.py tests/events/test_candidate_tables.py \
