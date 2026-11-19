@@ -24,17 +24,24 @@ Shape of the subpackage
     of each of the reference's candidates, on a paired product, with every
     number the gates read and the slope's sigma widened for the readings'
     persistence and the baseline's error (§5.2-5.4).
+``gates``
+    Which fits count at each setting of the gates' thresholds: height, points,
+    signal, one source and plateau, each a list, every combination a setting
+    (§5.3).
 ``candidate_ratio``
     A candidate's ratio, read from its members that pass the gates at every
     gate setting: the median member, its fit's sigma, the members' spread and
     the declared systematic, combined; and the fingerprint, a candidate's
     ratios across numerators (§5.5).
+``sweep``
+    The sweep summary: at every sweep point and gate setting, how many fits
+    count and, over a named population, their median ratio, its spread, the
+    median MSWD and the Birge ratio; a view built on demand (§5.6).
 """
 
 from __future__ import annotations
 
 from tsara.ratios.candidate_ratio import (
-    GATE_COLUMNS,
     RATIO_COLUMNS,
     RATIO_DTYPES,
     candidate_ratios,
@@ -53,12 +60,15 @@ from tsara.ratios.estimators import (
     york,
 )
 from tsara.ratios.fits import FIT_COLUMNS, FIT_DTYPES, PLATEAU_WIDTH, PairColumns, member_fits
+from tsara.ratios.gates import GATE_COLUMNS, GATE_NAMES, gate_passes, gate_settings, passes
+from tsara.ratios.sweep import SWEEP_DIMS, sweep_summary
 
 __all__ = [
     "FIT_COLUMNS",
     "FIT_DTYPES",
     "FitStatus",
     "GATE_COLUMNS",
+    "GATE_NAMES",
     "LineFit",
     "LineFitter",
     "MIN_FIT_POINTS",
@@ -66,13 +76,18 @@ __all__ = [
     "PairColumns",
     "RATIO_COLUMNS",
     "RATIO_DTYPES",
+    "SWEEP_DIMS",
     "TsaraRatioError",
     "available_line_fits",
     "candidate_ratios",
     "fingerprints",
+    "gate_passes",
+    "gate_settings",
     "get_line_fit",
     "member_fits",
     "ols",
+    "passes",
     "register_line_fit",
+    "sweep_summary",
     "york",
 ]

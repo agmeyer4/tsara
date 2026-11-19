@@ -48,31 +48,22 @@ A candidate's **fingerprint** is its row of ratios across numerators
 
 from __future__ import annotations
 
-import itertools
 import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-from scipy.stats import chi2, norm
+from scipy.stats import norm
 
 from tsara.ratios.estimators import TsaraRatioError
+from tsara.ratios.gates import GATE_COLUMNS, gate_settings, passes
 
 if TYPE_CHECKING:  # pragma: no cover
     from tsara.config.analysis import GatesConfig
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["GATE_COLUMNS", "RATIO_COLUMNS", "RATIO_DTYPES", "candidate_ratios", "fingerprints"]
-
-#: The gate setting a ratio row was read at, one column per gate (§5.3).
-GATE_COLUMNS: tuple[str, ...] = (
-    "min_peak_z",
-    "min_points",
-    "min_signal",
-    "mswd_probability",
-    "plateau_probability",
-)
+__all__ = ["RATIO_COLUMNS", "RATIO_DTYPES", "candidate_ratios", "fingerprints"]
 
 #: The ratio table's columns, in order (METHODS §5.5).
 RATIO_COLUMNS: tuple[str, ...] = (
@@ -193,12 +184,8 @@ def candidate_ratios(
         )
     if fits.empty:
         return pd.DataFrame(columns=list(RATIO_COLUMNS)).astype(RATIO_DTYPES)
-    settings = itertools.product(*(getattr(gates, name) for name in GATE_COLUMNS))
     table = pd.concat(
-        [
-            _at_setting(fits, dict(zip(GATE_COLUMNS, setting, strict=True)), confidence_level)
-            for setting in settings
-        ],
+        [_at_setting(fits, setting, confidence_level) for setting in gate_settings(gates)],
         ignore_index=True,
     )
     table["parent_candidate_id"] = table["candidate_id"].map(parents)
@@ -251,7 +238,7 @@ def _at_setting(
     fits: pd.DataFrame, setting: dict[str, float], confidence_level: float
 ) -> pd.DataFrame:
     """Return every candidate's ratio at one gate setting."""
-    passing = _passes(fits, setting)
+    passing = pd.Series(passes(fits, setting), index=fits.index)
     z = float(norm.ppf(0.5 + confidence_level / 2.0))
     rows = []
     for key, members in fits.groupby(_KEY, sort=False):
@@ -266,38 +253,6 @@ def _at_setting(
         row.update(_ratio(kept, z))
         rows.append(row)
     return pd.DataFrame(rows)
-
-
-def _passes(fits: pd.DataFrame, setting: dict[str, float]) -> pd.Series:
-    """Return which fits pass every gate at one setting (§5.3).
-
-    The one-source gate reads the MSWD against what a single source is
-    expected to read, ``mswd_expected`` (§5.4), at the 99 % (or the setting's)
-    chi-squared quantile over the degrees of freedom; a probability of 1 lets
-    everything through, as does the plateau's, off by default. A fit with no
-    MSWD to read (least squares where York could not weigh, or was not run) is
-    not judged by either: it is reported ungated, its row's ``mswd`` blank
-    (§5.3).
-    """
-    ok = (
-        (fits["status"] == "OK").to_numpy()
-        & (fits["candidate_peak_z"] >= setting["min_peak_z"]).to_numpy()
-        & (fits["n"] >= setting["min_points"]).to_numpy()
-        & (fits["signal"] >= setting["min_signal"]).to_numpy()
-        & _below(fits["mswd"] / fits["mswd_expected"], fits["dof"], setting["mswd_probability"])
-        & _below(fits["plateau_mswd"], fits["plateau_dof"], setting["plateau_probability"])
-    )
-    return pd.Series(ok, index=fits.index)
-
-
-def _below(mswd: pd.Series, dof: pd.Series, probability: float) -> np.ndarray:
-    """Return whether each MSWD is unknown or at most its chi-squared quantile over dof."""
-    m = mswd.to_numpy(dtype=np.float64)
-    d = dof.to_numpy(dtype=np.float64)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        # At a probability of 1 the quantile is infinite: everything known passes.
-        limit = chi2.ppf(probability, np.where(d > 0, d, np.nan)) / d
-    return np.asarray(np.isnan(m) | (m <= limit), dtype=bool)
 
 
 def _ratio(kept: pd.DataFrame, z: float) -> dict[str, object]:

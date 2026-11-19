@@ -1688,6 +1688,27 @@ needed is measured in 7c2 (CLAUDE.md open flags). It was planned as the
 "stability cube" until 2026-11-17 and renamed because a cube implies three
 dimensions.
 
+**Built** (2026-11-19, 7c2 stage 4; `tsara.ratios.sweep_summary`, the gates
+read by `tsara.ratios.gates`, which `candidate_ratios` reads too, so the two
+cannot disagree about which fits count). Dimensions `tsara.ratios.SWEEP_DIMS`
+(numerator, `estimator`, pair clock, window, quantile, exit) and every gate's
+threshold list; the fit table's `method` is `estimator` here because
+`method=` is xarray's own keyword in `.sel`, and a dimension of that name
+could not be selected by it. At each point: `n_fits`, `n_pass`, and
+`n_pass_<gate>` for each gate alone (a fit with no line passes none);
+over the passing fits of the named population (every candidate when none
+is named, which the `population` attr says), `n_population`,
+`median_ratio`, `spread_ratio` (1.4826 × the median absolute deviation),
+`median_mswd` and `birge_ratio`, R_B from the widened σ (§5.4), blank with
+one fit or a fit with no σ; and per window and gate setting, `n_candidates`,
+the candidates with a passing member, which is how many ratios
+`candidate_ratios` gives there (tested). **Cost, measured** (rule: the
+11,397 York fits of §5.4's six records; best of three): 0.13 s and a few kB
+at the default gates, 1.4 s and 0.05 MB with 18 gate settings (height 3/5/8
+× one source 0.95/0.99/0.999 × plateau 0.99/1). So the summary needs no Dask:
+the ratio stage's cost is in the fits (about 25 s per 6 h record, §5.4), not
+in reading them.
+
 ### 5.7 What the stage saves **[decided 2026-11-17 — 7c2]**
 
 Under `ratios/` in a bundle: `fits.parquet`, one row per member, numerator,
