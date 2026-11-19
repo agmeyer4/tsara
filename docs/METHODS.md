@@ -1173,7 +1173,10 @@ and is built in three parts, each its own pull request and walkthrough:
 **7c1**, the fits and their gates (§5.2–5.4); **7c2**, a candidate's ratio,
 the sweep summary and what the stage saves (§5.5–5.7); **7c3**, real data
 (the parked nights of 2026-02-05..12 as the acceptance test, a drive, and a
-pair of instruments). Nothing below is built yet. Out of 7c, each kept as an
+pair of instruments). 7c1 and 7c2 are built: each subsection's **Built**
+paragraph says what the package does, and the coverage numbers measured
+through the stage (§5.4, §5.5) are re-run by an opt-in test,
+`tests/ratios/test_ratio_coverage.py`. 7c3 is next. Out of 7c, each kept as an
 open flag in CLAUDE.md: which window's ratio belongs to which plume (§6.1;
 ratios are reported per window, linked by `parent_candidate_id`); events
 formed from several gases at once; rolling ratios as a product; declaring the
@@ -1208,7 +1211,9 @@ Interpretation:
 Two uses in TSARA:
 
 1. **A layer of the sweep summary (§5.6):** R_B is computed per sweep point,
-   so a user can see *where in parameter space the error budget closes*.
+   so a user can see *where in parameter space the error budget closes*
+   (built in 7c2 as `birge_ratio`, with each fit's widened σ of §5.4 as
+   $\sigma_{b,k}$, over the passing fits of the candidates the caller names).
 2. **Methodology selection:** choosing sweep parameters such that per-fit SE
    matches aggregate scatter (R_B ≈ 1) — the criterion used in the project
    owner's EM27 enhancement-ratio work — is a principled, self-consistency
@@ -1497,9 +1502,9 @@ members or more, σ_method about 0.4 of σ_fit). The closure test of §5.1 sees
 it: R_B over the pure-A members at one sweep point is 1.6 to 2.4 (three to
 seven members each) where the true ratio is constant. **So the combined
 uncertainty of §5.5 must add the baseline's error, and its Monte Carlo must
-show that it does (7c2).** Until it is built, a ratio's interval on wandering
-air is 1.6 to 1.8× too narrow, and the one-source gate turns away a sixth of
-the good members.
+show that it does (7c2).** Before it was built (7c2 stage 2, below), a
+ratio's interval on wandering air was 1.6 to 1.8× too narrow, and the
+one-source gate turned away a sixth of the good members.
 
 **The baseline's error, entered** **[decided 2026-11-18 — 7c2 stage 0;
 calibrated on generated air, to be tested on real air in 7c3]**. The slope
@@ -1583,7 +1588,8 @@ persistence factor), `mswd_expected` with the baseline's error in it,
 `wobble_reference` and `wobble_numerator`, and `baseline_error`, which parts
 it holds (`wobble and wander`, `wander`, `wobble` or `none`).
 
-Measured through the package (rule: stage 0's, the fits by `ratio_fits`):
+Measured through the package (rule: the measurement's above, the fits by
+`ratio_fits`; re-run by `tests/ratios/test_ratio_coverage.py`, §5.5):
 single-source members cover 0.941 (flat air) and 0.932 (wandering air), and
 candidates, read from the median member with σ_method, 0.974 and 0.968, as
 stage 0 found; the one-source gate turns away 6.3 % and 10.0 % of the single
@@ -1636,7 +1642,7 @@ number of members.
   declared, the fit's σ alone covers 0.949 and 0.968 of candidates (wandering
   and flat air) and with σ_method added 0.968 and 0.974, a little on the safe
   side. The decisive check, the same Monte Carlo through the stage itself, is
-  a test of 7c2's build. The interval at `confidence_level` uses the normal
+  an opt-in test of the build (below). The interval at `confidence_level` uses the normal
   quantile.
 - **Upper limits are results.** The signal gate reads the reference only, so a
   numerator that never rises still gets a slope and its ±, and whether a
@@ -1655,7 +1661,10 @@ table (§5.7). As built:
 - the median member is the passing member at sorted position ⌊(n − 1)/2⌋ of
   their slopes, the definition above without reading a tie off floating-point
   distances (with an even count the two middle slopes are equally near the
-  median only in exact arithmetic);
+  median only in exact arithmetic). The lower of two is a convention, not a
+  measured choice: taking the upper instead leaves both coverages below
+  unchanged at three decimals (stage 6, the coverage test run on that
+  change);
 - σ_method is blank with one member and enters the combination as zero there;
 - each axis's relative systematic term is read from its reading,
   `uncertainty_systematic_relative` (§2.4), which ingestion writes for a
@@ -1679,7 +1688,13 @@ table (§5.7). As built:
 Measured through the stage (rule: §5.4's, the default gates): candidates
 whose passing members are all at least 99.9 % one source cover the true ratio
 in 0.974 (154 candidates, flat air) and 0.968 (157, wandering air), as stage 0
-found, at least 0.956 at every window.
+found, at least 0.956 at every window. That is the Monte Carlo through the
+stage itself: `tests/ratios/test_ratio_coverage.py` (opt-in, `TSARA_SLOW=1`,
+about five minutes) re-runs this paragraph's numbers and §5.4's measured
+through the package, from the records to `candidate_ratios`, and requires
+each to reproduce as printed. σ_sys has no Monte Carlo there: the generated
+air declares no systematic, and σ_sys is the first-order propagation of a
+gain on each axis, $b(1 + g_y)/(1 + g_x) \approx b(1 + g_y - g_x)$.
 
 ### 5.6 The sweep summary **[decided 2026-11-17 — 7c2]**
 
@@ -1692,7 +1707,7 @@ median MSWD, and R_B (§5.1) over the candidates the caller names as one
 population (the parked nights, say). It is built on demand because a saved
 one would freeze one population and one set of gates. It is a table of
 summaries, one row per sweep point, not a per-reading array; whether Dask is
-needed is measured in 7c2 (CLAUDE.md open flags). It was planned as the
+needed was measured in 7c2 (below: it is not). It was planned as the
 "stability cube" until 2026-11-17 and renamed because a cube implies three
 dimensions.
 

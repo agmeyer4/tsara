@@ -48,15 +48,15 @@ TSARA_ARCHIVE=/path/to/Data pytest tests/test_notebooks.py tests/events/test_can
                                                     # against the campaign archive and
                                                     # requires every ledger row to reproduce;
                                                     # re-measures §6.8's real drive
-TSARA_SLOW=1 pytest tests/events/test_methods_tables.py tests/events/test_candidate_tables.py
-                                                    # re-runs METHODS §6.8's generated-data
-                                                    # tables through the package (about
-                                                    # 14 minutes)
+TSARA_SLOW=1 pytest tests/events/test_methods_tables.py tests/events/test_candidate_tables.py \
+    tests/ratios/test_ratio_coverage.py             # re-runs METHODS §6.8's generated-data
+                                                    # tables and §5.4-5.5's coverage through
+                                                    # the package (about 19 minutes)
 ```
 
 Run the notebook gates before a pull request that touches alignment, the
 baseline stage, the events stage, `tsara.ratios` or the notebooks, and the tables gate before
-one that touches the events stage.
+one that touches the events stage or the ratio stage.
 
 ## How the package is laid out
 
