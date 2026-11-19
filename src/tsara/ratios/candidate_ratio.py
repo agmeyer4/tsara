@@ -59,6 +59,8 @@ from tsara.ratios.estimators import TsaraRatioError
 from tsara.ratios.gates import GATE_COLUMNS, gate_settings, passes
 
 if TYPE_CHECKING:  # pragma: no cover
+    from numpy.typing import DTypeLike
+
     from tsara.config.analysis import GatesConfig
 
 logger = logging.getLogger(__name__)
@@ -184,8 +186,12 @@ def candidate_ratios(
         )
     if fits.empty:
         return pd.DataFrame(columns=list(RATIO_COLUMNS)).astype(RATIO_DTYPES)
+    codes, heads = _heads(fits)
     table = pd.concat(
-        [_at_setting(fits, setting, confidence_level) for setting in gate_settings(gates)],
+        [
+            _at_setting(fits, codes, heads, setting, confidence_level)
+            for setting in gate_settings(gates)
+        ],
         ignore_index=True,
     )
     table["parent_candidate_id"] = table["candidate_id"].map(parents)
@@ -234,76 +240,96 @@ def fingerprints(ratios: pd.DataFrame, *, value: str = "ratio", **select: object
     return table.loc[list(dict.fromkeys(rows["candidate_id"])), order]
 
 
+def _heads(fits: pd.DataFrame) -> tuple[np.ndarray, pd.DataFrame]:
+    """Give each fit its ratio's number, and read what does not depend on the gates.
+
+    A ratio is one candidate, numerator, estimator and pair clock; they are
+    numbered in the order of their first fit, as a groupby that does not sort
+    gives them. Per ratio: its key, its window and the candidate's peak z
+    from its first fit (every member holds the same, ``fits``' tallest
+    member's z); and the peak time of its tallest member (the first of equal
+    peaks, as argmax picks it).
+
+    Returns
+    -------
+    codes : numpy.ndarray
+        Each fit's ratio number.
+    heads : pandas.DataFrame
+        One row per ratio, in number order.
+    """
+    codes = fits.groupby(_KEY, sort=False).ngroup().to_numpy()
+    first = np.unique(codes, return_index=True)[1]
+    numbers = np.arange(first.size)
+    # Each ratio's fits, tallest first. The sort is stable, so of equal peaks
+    # (or a triggered variable's, which have no z at all) the first fit leads.
+    tallest = np.lexsort((-fits["peak_z"].to_numpy(dtype=np.float64), codes))
+    lead = tallest[np.searchsorted(codes[tallest], numbers)]
+    heads = fits.iloc[first][[*_KEY, "baseline_window", "candidate_peak_z"]].reset_index(drop=True)
+    heads["peak_time"] = fits["peak_time"].to_numpy()[lead]
+    return codes, heads
+
+
 def _at_setting(
-    fits: pd.DataFrame, setting: dict[str, float], confidence_level: float
+    fits: pd.DataFrame,
+    codes: np.ndarray,
+    heads: pd.DataFrame,
+    setting: dict[str, float],
+    confidence_level: float,
 ) -> pd.DataFrame:
-    """Return every candidate's ratio at one gate setting."""
-    passing = pd.Series(passes(fits, setting), index=fits.index)
+    """Return every ratio at one gate setting, from its members that pass it.
+
+    One pass over every ratio at once: the passing members are sorted by
+    ratio and then by slope, so each ratio's members sit together in slope
+    order and its median member is at position (count - 1) // 2 of its run.
+    The sort is stable, so equal slopes keep the order of the fits. A ratio
+    with no passing member keeps its row, blank but for what ``heads`` holds.
+    """
+    n = len(heads)
+    slope = fits["slope"].to_numpy(dtype=np.float64)
+    passing = np.flatnonzero(passes(fits, setting))
+    order = passing[np.lexsort((slope[passing], codes[passing]))]
+    counts = np.bincount(codes[order], minlength=n)
+    found = counts > 0
+    member = order[(np.cumsum(counts) - counts + (counts - 1) // 2)[found]]
+
+    def chosen(column: str, blank: object, dtype: DTypeLike = np.float64) -> np.ndarray:
+        """Return the median member's value of a column, ``blank`` where no member passes."""
+        values: np.ndarray = np.full(n, blank, dtype=dtype)
+        values[found] = fits[column].to_numpy()[member]
+        return values
+
+    b = chosen("slope", np.nan)
+    sigma_fit = chosen("slope_sigma_widened", np.nan)
+    s_x = chosen("reference_systematic_relative", np.nan)
+    s_y = chosen("numerator_systematic_relative", np.nan)
+    # The members' spread (n - 1), blank below two members.
+    in_run = codes[order]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = np.bincount(in_run, weights=slope[order], minlength=n) / counts
+        squares = np.bincount(in_run, weights=(slope[order] - mean[in_run]) ** 2, minlength=n)
+        sigma_method = np.where(counts > 1, np.sqrt(squares / (counts - 1)), np.nan)
+    known = np.isfinite(s_x) & np.isfinite(s_y)
+    sigma_sys = np.where(known, np.abs(b) * np.hypot(s_x, s_y), np.nan)
+    # The terms that are known in quadrature: a single member's spread as
+    # zero, an unknown systematic left out, and no interval without the fit's.
+    combined = np.sqrt(np.nansum(np.stack([sigma_fit**2, sigma_method**2, sigma_sys**2]), axis=0))
+    combined[~np.isfinite(sigma_fit)] = np.nan
     z = float(norm.ppf(0.5 + confidence_level / 2.0))
-    rows = []
-    for key, members in fits.groupby(_KEY, sort=False):
-        row: dict[str, object] = dict(zip(_KEY, key, strict=True))
-        row.update(setting)
-        row["baseline_window"] = float(members["baseline_window"].iloc[0])
-        row["candidate_peak_z"] = float(members["candidate_peak_z"].max())
-        row["peak_time"] = members["peak_time"].iloc[int(np.argmax(members["peak_z"].to_numpy()))]
-        row["confidence_level"] = confidence_level
-        kept = members[passing[members.index]]
-        row["n_members"] = len(kept)
-        row.update(_ratio(kept, z))
-        rows.append(row)
-    return pd.DataFrame(rows)
-
-
-def _ratio(kept: pd.DataFrame, z: float) -> dict[str, object]:
-    """Return the ratio and its terms from one candidate's passing members."""
-    blank: dict[str, object] = {
-        "event_id": None,
-        "ratio": np.nan,
-        "intercept": np.nan,
-        "n": 0,
-        "mswd": np.nan,
-        "dof": 0,
-        "sigma_fit": np.nan,
-        "sigma_method": np.nan,
-        "sigma_sys": np.nan,
-        "sigma_sys_known": False,
-        "sigma_combined": np.nan,
-        "lower": np.nan,
-        "upper": np.nan,
-    }
-    if kept.empty:
-        return blank
-    slopes = kept["slope"].to_numpy(dtype=np.float64)
-    # The median member: the lower median, the member at sorted position
-    # (n - 1) // 2. It is the one nearest the median slope, the lower on a tie,
-    # in exact arithmetic; with an even count the two middle slopes are equally
-    # near only there, and in floats one wins by 1e-17, so a tie is never read
-    # off the distances.
-    k = int(np.argsort(slopes, kind="stable")[(slopes.size - 1) // 2])
-    member = kept.iloc[k]
-    b = float(member["slope"])
-    sigma_fit = float(member["slope_sigma_widened"])
-    sigma_method = float(np.std(slopes, ddof=1)) if slopes.size > 1 else np.nan
-    s_x = float(member["reference_systematic_relative"])
-    s_y = float(member["numerator_systematic_relative"])
-    known = bool(np.isfinite(s_x) and np.isfinite(s_y))
-    sigma_sys = abs(b) * float(np.hypot(s_x, s_y)) if known else np.nan
-    combined = float(np.sqrt(np.nansum([sigma_fit**2, sigma_method**2, sigma_sys**2])))
-    if not np.isfinite(sigma_fit):
-        combined = np.nan
-    return {
-        "event_id": member["event_id"],
-        "ratio": b,
-        "intercept": float(member["intercept"]),
-        "n": int(member["n"]),
-        "mswd": float(member["mswd"]),
-        "dof": int(member["dof"]),
-        "sigma_fit": sigma_fit,
-        "sigma_method": sigma_method,
-        "sigma_sys": sigma_sys,
-        "sigma_sys_known": known,
-        "sigma_combined": combined,
-        "lower": b - z * combined,
-        "upper": b + z * combined,
-    }
+    return heads.assign(
+        **setting,
+        confidence_level=confidence_level,
+        n_members=counts,
+        event_id=chosen("event_id", None, object),
+        ratio=b,
+        intercept=chosen("intercept", np.nan),
+        n=chosen("n", 0, np.int64),
+        mswd=chosen("mswd", np.nan),
+        dof=chosen("dof", 0, np.int64),
+        sigma_fit=sigma_fit,
+        sigma_method=sigma_method,
+        sigma_sys=sigma_sys,
+        sigma_sys_known=known,
+        sigma_combined=combined,
+        lower=b - z * combined,
+        upper=b + z * combined,
+    )

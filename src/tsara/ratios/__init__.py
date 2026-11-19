@@ -5,8 +5,9 @@ against another's over a stretch of readings (``docs/METHODS.md`` §4). Both
 axes carry measurement error, so the preferred line is York's, which weighs
 every point by its declared sigmas on both axes and reports how well they
 explain the scatter; ordinary least squares is kept beside it. This package
-holds the line fits and the stage's fits over the events' members; it reads
-nothing from the other stages, which hand it their products.
+holds the line fits, the stage's fits over the events' members, a candidate's
+ratio read from them, the sweep summary, and their saving; it reads nothing
+from the other stages, which hand it their products.
 
 Shape of the subpackage
 -----------------------
@@ -37,10 +38,15 @@ Shape of the subpackage
     The sweep summary: at every sweep point and gate setting, how many fits
     count and, over a named population, their median ratio, its spread, the
     median MSWD and the Birge ratio; a view built on demand (§5.6).
+``bundle``
+    Saving and reloading the stage's tables under a bundle's ``ratios/``: the
+    fits, every candidate's ratio at every gate setting (built from the fits
+    as they are written) and the ratios section of the configuration (§5.7).
 """
 
 from __future__ import annotations
 
+from tsara.ratios.bundle import RatioTables, load_ratios, save_ratios
 from tsara.ratios.candidate_ratio import (
     RATIO_COLUMNS,
     RATIO_DTYPES,
@@ -76,6 +82,7 @@ __all__ = [
     "PairColumns",
     "RATIO_COLUMNS",
     "RATIO_DTYPES",
+    "RatioTables",
     "SWEEP_DIMS",
     "TsaraRatioError",
     "available_line_fits",
@@ -84,10 +91,12 @@ __all__ = [
     "gate_passes",
     "gate_settings",
     "get_line_fit",
+    "load_ratios",
     "member_fits",
     "ols",
     "passes",
     "register_line_fit",
+    "save_ratios",
     "sweep_summary",
     "york",
 ]

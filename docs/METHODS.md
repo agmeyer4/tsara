@@ -1666,7 +1666,15 @@ table (§5.7). As built:
   method only;
 - the one-source and plateau gates pass a fit with no MSWD to read (least
   squares where York could not weigh, or was not run): reported ungated, its
-  row's `mswd` blank, as above.
+  row's `mswd` blank, as above;
+- the table is built for every candidate at once, one pass per gate setting
+  (the passing members sorted by ratio and then by slope, so each ratio's
+  median member sits at a known place in its run). Measured on the 11,397
+  fits of §5.4's six records: 0.06 s at the default gates and 0.58 s at 18
+  gate settings, where the first build, a loop over candidates, took 3.3 s
+  and 60 s (stage 5, before `save_ratios` was built on it). The two give the
+  same table but for σ_method, summed in another order (at most 3.3 × 10⁻¹⁶
+  relative), and a reference written one ratio at a time is a test.
 
 Measured through the stage (rule: §5.4's, the default gates): candidates
 whose passing members are all at least 99.9 % one source cover the true ratio
@@ -1722,7 +1730,27 @@ to which plume, and a parent's own ratio, §6.1) can be added later from the
 saved tables without refitting; and `analysis.yaml`, the
 `ratios:` section alone (§6.6's rule). A candidate's **fingerprint**, its row of
 ratios across numerators, and the sweep summary are built from these by
-functions rather than saved. Column names are settled in the build.
+functions rather than saved. Column names were settled in the build (below).
+
+**Built** (2026-11-19, 7c2 stage 5; `tsara.ratios.save_ratios`,
+`load_ratios`, `RatioTables`). `save_ratios(fits, path, candidates=…,
+ratios=…)` writes the three files, the tables with the columns
+`tsara.ratios.FIT_COLUMNS` and `RATIO_COLUMNS`. The ratio table is built from
+the fits, the events stage's candidate table and the configuration's gates
+and confidence level as it is written, as the events stage builds its
+candidate table from the catalog, so the fits, the ratios and the
+configuration beside them cannot disagree. Refused before anything is
+written: fits without the fit table's columns; fits of a reference, a
+numerator, an estimator or a pair clock the configuration does not ask for
+(an `<instrument>` numerator asks for every variable of that instrument);
+and a fit naming a candidate the candidate table does not hold. A part of a
+run's fits (one estimator, say) is saved as it is, since no candidate's ratio
+reads another candidate's fits. `load_ratios` returns both tables and the
+configuration, and refuses a directory missing any of the three files as
+incomplete. Both tables declare their types and come back exactly: on the
+11,397 fits of §5.4 and their 27,396 ratio rows at 18 gate settings, equal
+column for column and type for type after the round trip, in 1.6 MB and
+0.3 MB.
 
 ---
 

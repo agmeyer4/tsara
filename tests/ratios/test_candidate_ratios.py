@@ -5,6 +5,10 @@ The evidence, in order of strength:
 * fit tables small enough to work out on paper: which member is the median,
   each term of the uncertainty, each gate, the blank row of a candidate no
   member passes, the parent copied from the candidate table;
+* a reference written one candidate at a time from §5.5's paragraph, against
+  which the table (built for every candidate at once) is compared on random
+  fit tables with ties, candidates no member passes and a triggered
+  variable's members, which have no z;
 * the fingerprint as a pivot of that table;
 * the whole chain (baseline, events, candidates, the pipeline's fits) handed
   to it, every candidate and parent present;
@@ -13,7 +17,9 @@ The evidence, in order of strength:
 
 from __future__ import annotations
 
+import itertools
 import math
+import statistics
 
 import numpy as np
 import pandas as pd
@@ -29,6 +35,7 @@ from tsara.ratios import (
     candidate_ratios,
     fingerprints,
 )
+from tsara.ratios.gates import passes
 
 Z95 = 1.959963984540054
 
@@ -244,3 +251,132 @@ def test_a_fit_with_no_mswd_to_read_is_reported_ungated() -> None:
     row = _fit("c1", 0.05, method="ols", mswd=np.nan, mswd_expected=1.0, plateau_mswd=np.nan)
     got = _ratios([row], GatesConfig(plateau_probability=(0.99,)))
     assert got.n_members.iloc[0] == 1 and np.isnan(got.mswd.iloc[0])
+
+
+def _reference(
+    fits: pd.DataFrame, candidates: pd.DataFrame, gates: GatesConfig, level: float
+) -> pd.DataFrame:
+    """§5.5 one ratio at a time: the slow form the table must agree with."""
+    key = ["candidate_id", "reference", "numerator", "method", "period"]
+    parents = dict(zip(candidates.candidate_id, candidates.parent_candidate_id, strict=True))
+    z = statistics.NormalDist().inv_cdf(0.5 + level / 2)
+    rows = []
+    for values in itertools.product(*(getattr(gates, name) for name in GATE_COLUMNS)):
+        setting = dict(zip(GATE_COLUMNS, values, strict=True))
+        ok = passes(fits, setting)
+        for ratio in dict.fromkeys(fits[key].itertuples(index=False, name=None)):
+            mine = np.all(fits[key].to_numpy() == np.array(ratio, dtype=object), axis=1)
+            members = fits[mine]
+            zs = members.peak_z.to_numpy()
+            tallest = 0 if np.all(np.isnan(zs)) else int(np.nanargmax(zs))
+            row: dict[str, object] = dict(zip(key, ratio, strict=True)) | setting
+            row |= {
+                "parent_candidate_id": parents[ratio[0]],
+                "baseline_window": members.baseline_window.iloc[0],
+                "candidate_peak_z": members.candidate_peak_z.max(),
+                "peak_time": members.peak_time.iloc[tallest],
+                "confidence_level": level,
+            }
+            kept = fits[mine & ok]
+            row["n_members"] = len(kept)
+            if kept.empty:
+                rows.append(row | {"n": 0, "dof": 0, "sigma_sys_known": False})
+                continue
+            slopes = list(kept.slope)
+            m = kept.iloc[
+                sorted(range(len(slopes)), key=slopes.__getitem__)[(len(slopes) - 1) // 2]
+            ]
+            spread = statistics.stdev(slopes) if len(slopes) > 1 else math.nan
+            known = math.isfinite(m.reference_systematic_relative) and math.isfinite(
+                m.numerator_systematic_relative
+            )
+            sys = (
+                abs(m.slope)
+                * math.hypot(m.reference_systematic_relative, m.numerator_systematic_relative)
+                if known
+                else math.nan
+            )
+            terms = [t for t in (m.slope_sigma_widened, spread, sys) if math.isfinite(t)]
+            combined = math.sqrt(sum(t * t for t in terms))
+            if not math.isfinite(m.slope_sigma_widened):
+                combined = math.nan
+            rows.append(
+                row
+                | {
+                    "event_id": m.event_id,
+                    "ratio": m.slope,
+                    "intercept": m.intercept,
+                    "n": m.n,
+                    "mswd": m.mswd,
+                    "dof": m.dof,
+                    "sigma_fit": m.slope_sigma_widened,
+                    "sigma_method": spread,
+                    "sigma_sys": sys,
+                    "sigma_sys_known": known,
+                    "sigma_combined": combined,
+                    "lower": m.slope - z * combined,
+                    "upper": m.slope + z * combined,
+                }
+            )
+    return pd.DataFrame(rows, columns=list(RATIO_COLUMNS)).astype(RATIO_DTYPES)
+
+
+def _random_fits(seed: int) -> pd.DataFrame:
+    """Members of a few candidates, several numerators, estimators and clocks, rows shuffled.
+
+    Slopes are drawn from a coarse set, so members tie; the gates' numbers
+    straddle their thresholds, so some members pass and some candidates have
+    none; one candidate is a triggered variable's, with no z; a few fits have
+    no line, no widened sigma or no systematic term.
+    """
+    rng = np.random.default_rng(seed)
+    rows = []
+    for c in range(6):
+        no_z = c == 5
+        for numerator, method, period in itertools.product(
+            ("van.c2h6", "van.co"), ("york", "ols"), ("native", "5s")
+        ):
+            for q, x in itertools.product((0.01, 0.05), (1.0, 2.0)):
+                if rng.random() < 0.2:
+                    continue
+                rows.append(
+                    _fit(
+                        f"c{c}",
+                        float(rng.choice([0.03, 0.04, 0.05, 0.05, 0.06]) + rng.choice([0, 1e-3])),
+                        numerator=numerator,
+                        method=method,
+                        period=period,
+                        baseline_quantile=q,
+                        exit_multiple=x,
+                        event_id=f"c{c}/{numerator}/{method}/{period}/q{q}/x{x}",
+                        peak_z=np.nan if no_z else float(rng.choice([4.0, 6.0, 9.0, 9.0])),
+                        candidate_peak_z=np.nan if no_z else 9.0,
+                        peak_time=pd.Timestamp("2026-01-01")
+                        + pd.Timedelta(seconds=int(rng.integers(600))),
+                        n=int(rng.integers(5, 40)),
+                        mswd=float(rng.uniform(0.3, 3.0)),
+                        status="OK" if rng.random() > 0.05 else "MISSING_SIGMA",
+                        slope_sigma_widened=np.nan
+                        if rng.random() < 0.05
+                        else float(rng.uniform(1e-3, 1e-2)),
+                        reference_systematic_relative=np.nan if rng.random() < 0.3 else 0.01,
+                        numerator_systematic_relative=0.02,
+                    )
+                )
+    return pd.DataFrame(rows).sample(frac=1.0, random_state=seed).reset_index(drop=True)
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_the_table_is_the_reference_one_ratio_at_a_time(seed: int) -> None:
+    fits = _random_fits(seed)
+    candidates = pd.DataFrame(
+        {"candidate_id": [f"c{c}" for c in range(6)], "parent_candidate_id": [None, "p0"] * 3}
+    )
+    gates = GatesConfig(min_peak_z=(0.0, 5.0), min_points=(8, 20), mswd_probability=(0.9, 0.99))
+    got = candidate_ratios(fits, candidates, gates, confidence_level=0.9)
+    pd.testing.assert_frame_equal(
+        got, _reference(fits, candidates, gates, 0.9), check_exact=False, rtol=1e-12
+    )
+    # The cases the reference is there for occur.
+    assert (got.n_members == 0).any() and (got.n_members > 1).any()
+    assert got.candidate_peak_z.isna().any() and got.sigma_sys_known.any()
