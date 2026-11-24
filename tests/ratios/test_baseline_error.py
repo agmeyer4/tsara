@@ -7,7 +7,10 @@ The evidence, in order of strength:
   walk times b has a cross-semivariogram b times the walk's;
 * the cells inside an event of either gas are left out, so a plume changes
   nothing;
-* the wobble and the slow covariance worked out on paper.
+* the wobble and the slow covariance worked out on paper;
+* a semivariogram that dips, as one read from a record's fragments between
+  its events can, is stored as its non-decreasing fit, and the
+  cross-semivariogram never exceeds what the two gases' allow.
 """
 
 from __future__ import annotations
@@ -22,6 +25,9 @@ from tsara.ratios.baseline_error import (
     LAGS_S,
     MIN_LAG_PAIRS,
     Wander,
+    _filled,
+    _non_decreasing,
+    _semivariograms,
     slow_covariance,
     wander,
     wobble,
@@ -259,3 +265,48 @@ def test_a_lag_shorter_than_half_the_pair_clocks_spacing_pairs_no_cell_with_itse
     np.testing.assert_array_equal(measured.reference[0, 0, short], measured.reference[0, 0, first])
     # One cell apart, the walk's step of 1 ppb: half its variance.
     assert measured.reference[0, 0, first] == pytest.approx(0.5, rel=0.15)
+
+
+def test_the_non_decreasing_fit_pools_a_dip_into_its_neighbours() -> None:
+    # Worked by hand: 3, 2, 2 pool to 7/3; 5, 4 pool to 4.5; the rest already rise.
+    got = _non_decreasing(np.array([0.0, 1.0, 3.0, 2.0, 2.0, 5.0, 4.0, 6.0]))
+    np.testing.assert_allclose(got, [0.0, 1.0, 7 / 3, 7 / 3, 7 / 3, 4.5, 4.5, 6.0])
+    rising = np.array([0.0, 0.5, 0.5, 2.0])
+    np.testing.assert_array_equal(_non_decreasing(rising), rising)
+    # Falling throughout pools into one block, the mean.
+    np.testing.assert_allclose(_non_decreasing(np.array([4.0, 2.0, 0.0])), [2.0, 2.0, 2.0])
+
+
+def test_a_semivariogram_that_dips_is_stored_as_its_non_decreasing_fit() -> None:
+    """A background with a 120 s cycle: its semivariogram peaks at 60 s and dips at 120 s,
+    as a measured one can; the stored wander is the non-decreasing fit to the measured."""
+    rng = np.random.default_rng(7)
+    n = 20_000
+    seconds = np.arange(n, dtype=np.float64)
+    cycle = 3.0 * np.sin(2 * np.pi * seconds / 120.0)
+    x = cycle + rng.normal(0, 0.7, n)
+    y = 0.05 * cycle + rng.normal(0, 0.05, n)
+    measured = _measure(x, y, 0.7, 0.05)
+    raw = _filled(_semivariograms(seconds + 0.5, (x, y), (np.full(n, 0.7), np.full(n, 0.05)))[0])
+    peak, dip = _lag(60.0), _lag(120.0)
+    assert raw[dip] < 0.5 * raw[peak]  # the raw curve dips
+    np.testing.assert_allclose(measured.reference[0, 0], _non_decreasing(raw))
+    assert np.all(np.diff(measured.reference[0, 0]) >= 0)
+    assert np.all(np.diff(measured.numerator[0, 0]) >= 0)
+
+
+def test_the_cross_semivariogram_never_exceeds_what_the_two_gases_allow() -> None:
+    """The reference declared noisier than it is: its wander, the noise removed, is zero at
+    every lag, so whatever the two gases seem to share is clipped to zero; and on a gas
+    that is the other's walk times b the bound is met, not cut."""
+    rng = np.random.default_rng(8)
+    n = 20_000
+    walk = np.cumsum(rng.normal(0, 0.3, n))
+    measured = _measure(rng.normal(0, 0.5, n) + 0.0 * walk, 0.05 * walk, 0.9, 0.05)
+    assert np.all(measured.reference[0, 0] == 0.0)
+    assert np.all(measured.cross[0, 0] == 0.0)
+    both = _measure(walk + rng.normal(0, 0.7, n), 0.05 * walk + rng.normal(0, 0.05, n), 0.7, 0.05)
+    bound = np.sqrt(both.reference[0, 0] * both.numerator[0, 0])
+    assert np.all(np.abs(both.cross[0, 0]) <= bound + 1e-12)
+    k = _lag(100.0)
+    assert both.cross[0, 0, k] == pytest.approx(0.05 * 0.5 * 0.3**2 * LAGS_S[k], rel=0.15)

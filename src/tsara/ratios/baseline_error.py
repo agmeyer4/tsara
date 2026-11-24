@@ -21,6 +21,16 @@ entered"):
   real air two gases' backgrounds wander together and part of the error
   cancels in the residual.
 
+Each gas's wander, as measured, is then made non-decreasing in lag (its
+least-squares non-decreasing fit), and the cross-semivariogram is bounded by
+the two (``|g_xy| <= sqrt(g_x g_y)``). Two errors cannot be more alike at a
+longer gap than at a shorter one, but a semivariogram read from the fragments
+of a record between its events can dip: on a real 2026 drive it rose to 4.5 ppb
+of methane by 20 s, fell to 2.1 by 40 s and rose again. Used as measured, a
+dip can make the slope's variance from the baseline's error negative for a
+member, which the fits floor at zero; on real air with known plumes added
+that left a fifth of the good members with no allowance at all (§5.4).
+
 For a pair the residual's error is ``delta_y - b delta_x``, so the slow
 covariance between two points ``dt`` apart is
 
@@ -67,8 +77,9 @@ class Wander:
     reference, numerator, cross : numpy.ndarray
         ``(window, quantile, lag)``, in the gases' units squared (``cross`` in
         their product), the readings' noise removed; at a lag the record could
-        not describe, the nearest described lag's value; zero throughout at a
-        sweep point with no lag described.
+        not describe, the nearest described lag's value; each gas's
+        non-decreasing in lag, the cross within ``+/- sqrt(reference x
+        numerator)``; zero throughout at a sweep point with no lag described.
     described : numpy.ndarray of bool
         ``(window, quantile)``: whether any lag was.
     """
@@ -130,6 +141,9 @@ def wander(
             for table, values in zip(tables, measured, strict=True):
                 if np.isfinite(values).any():
                     table[i, j] = _filled(values)
+            tables[0][i, j], tables[1][i, j], tables[2][i, j] = _monotone(
+                tables[0][i, j], tables[1][i, j], tables[2][i, j]
+            )
             described[i, j] = bool(np.isfinite(measured[0]).any())
     return Wander(reference=tables[0], numerator=tables[1], cross=tables[2], described=described)
 
@@ -256,6 +270,43 @@ def _filled(values: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     known = np.isfinite(values)
     logs = np.log(LAGS_S)
     return np.interp(logs, logs[known], values[known])
+
+
+def _monotone(
+    reference: npt.NDArray[np.float64],
+    numerator: npt.NDArray[np.float64],
+    cross: npt.NDArray[np.float64],
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """Make each gas's semivariogram non-decreasing in lag and bound the cross by the two.
+
+    Each gas's is replaced by its least-squares non-decreasing fit over the
+    lags (pool-adjacent-violators, every lag weighted alike); the cross is
+    clipped to ``+/- sqrt(reference x numerator)``, what two gases' errors
+    can share at most (Cauchy-Schwarz).
+    """
+    reference, numerator = _non_decreasing(reference), _non_decreasing(numerator)
+    bound = np.sqrt(reference * numerator)
+    return reference, numerator, np.clip(cross, -bound, bound)
+
+
+def _non_decreasing(values: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """Return the least-squares non-decreasing fit to ``values`` (pool-adjacent-violators).
+
+    Walking along the lags, a value below the block before it is pooled into
+    that block, which takes the mean of its values, and pooling repeats
+    backwards until the blocks rise.
+    """
+    sums: list[float] = []
+    counts: list[int] = []
+    for value in values:
+        sums.append(float(value))
+        counts.append(1)
+        while len(sums) > 1 and sums[-2] * counts[-1] > sums[-1] * counts[-2]:
+            # Pop first: in `sums[-2] += sums.pop()` the -2 would be read after the pop.
+            last_sum, last_count = sums.pop(), counts.pop()
+            sums[-1] += last_sum
+            counts[-1] += last_count
+    return np.repeat(np.asarray(sums) / np.asarray(counts), counts)
 
 
 def _at(
