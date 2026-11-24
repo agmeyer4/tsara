@@ -50,7 +50,7 @@ from tsara.config.analysis import BaselineConfig, EventsConfig, GatesConfig, Rat
 from tsara.core.timebase import SECOND_NS
 from tsara.events import event_candidates, event_catalog, event_states
 from tsara.pipeline import ratio_fits
-from tsara.ratios import candidate_ratios, gate_passes, gate_settings
+from tsara.ratios import GATE_NAMES, candidate_ratios, gate_passes, gate_settings
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("TSARA_SLOW"),
@@ -169,7 +169,10 @@ def _members(air: str) -> pd.DataFrame:
         frames.append(
             fits.assign(
                 seed=seed,
-                others=each["height"] & each["points"] & each["signal"] & each["plateau"],
+                # Every gate but the one-source gate, so that it can be judged alone.
+                others=np.logical_and.reduce(
+                    [each[name] for name in GATE_NAMES if name != "one_source"]
+                ),
                 one_source=each["one_source"],
                 single=(fits.share >= 0.999) | (fits.share <= 0.001),
                 mixture=(fits.share > 0.05) & (fits.share < 0.95),
@@ -204,12 +207,13 @@ def _candidates(air: str) -> pd.DataFrame:
     return pd.concat(frames)
 
 
-@pytest.mark.parametrize(("air", "coverage"), [("flat", 0.941), ("wandering", 0.932)])
+@pytest.mark.parametrize(("air", "coverage"), [("flat", 0.966), ("wandering", 0.935)])
 def test_single_source_members_widened_sigma_covers_the_true_ratio(
     air: str, coverage: float
 ) -> None:
-    """§5.4 Built: members of one source passing every gate but the one-source gate,
-    covered at 2σ with the widened σ (the baseline's error in it)."""
+    """§5.4 Built and re-measured: members of one source passing every gate but the
+    one-source gate (the crowding gate among them), covered at 2σ with the widened σ
+    (the baseline allowance in it)."""
     members = _members(air)
     kept = members[(members.status == "OK") & members.others & members.single]
     truth = np.where(kept.share >= 0.5, RATIO_A, 0.0)
@@ -218,7 +222,7 @@ def test_single_source_members_widened_sigma_covers_the_true_ratio(
 
 
 @pytest.mark.parametrize(
-    ("air", "turned_away", "let_through"), [("flat", 0.063, 0.064), ("wandering", 0.100, 0.073)]
+    ("air", "turned_away", "let_through"), [("flat", 0.057, 0.076), ("wandering", 0.072, 0.100)]
 )
 def test_what_the_one_source_gate_turns_away_and_lets_through(
     air: str, turned_away: float, let_through: float
@@ -232,22 +236,22 @@ def test_what_the_one_source_gate_turns_away_and_lets_through(
 
 
 @pytest.mark.parametrize(
-    ("air", "count", "coverage"), [("flat", 154, 0.974), ("wandering", 157, 0.968)]
+    ("air", "count", "coverage"), [("flat", 111, 0.964), ("wandering", 119, 0.966)]
 )
 def test_a_candidates_combined_interval_covers_the_true_ratio(
     air: str, count: int, coverage: float
 ) -> None:
     """§5.5 Built: candidates of one source, read from the median member, covered by
-    the combined interval at 95 %; and at every window at least 0.956."""
+    the combined interval at 95 %; and at every window at least 0.893."""
     scored = _candidates(air)
     assert len(scored) == count
     assert round(float(scored.covered.mean()), 3) == coverage
 
 
-def test_every_window_covers_at_least_0956() -> None:
+def test_every_window_covers_at_least_0893() -> None:
     worst = min(
         float(group.covered.mean())
         for air in AIRS
         for _, group in _candidates(air).groupby("baseline_window")
     )
-    assert round(worst, 3) == 0.956
+    assert round(worst, 3) == 0.893

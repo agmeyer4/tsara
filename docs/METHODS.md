@@ -44,6 +44,8 @@ attributes and this document, because each was once used for several:
 | **member** | one of a candidate's distinct (quantile, exit) intervals at its window (§5.2): the interval its events share across entry, fitted once | an event: the events at several entries share one member; nor one of a pair's two **variables** (§11.4), which pairing called its members until 2026-11-18 |
 | **fit** | one line through the pairs of one member: one numerator, one estimator, one pairing period (§4, §5.2) | a ratio: a fit is what one sweep point gives; a ratio is read across a candidate's members |
 | **ratio** | a candidate's reported slope of a numerator on its reference, with σ_fit, σ_method and σ_sys beside their combination (§5.5) | a fit, or a slope over any other stretch |
+| **crowding** | a member whose interval fills most of its baseline window, so that its own readings lift the window's low quantile and the baseline eats part of it: a bias, the ratio reading low. The crowding gate (`max_window_fill`, §5.3) leaves such a plume to a longer window, where it fits | the background's drift, the other way a baseline errs across a member, which is random and carried in the σ (§5.4) |
+| **baseline allowance** | the part of a fit's σ for the baseline's error across a member (§5.4): how different the baseline's error can be at two readings L seconds apart, measured from the readings between events, looked up at the gaps between the member's own readings and run through the slope's arithmetic. In a fit: `baseline_factor`, `baseline_error` | crowding, a bias no allowance repairs; or the readings' own noise |
 | **fingerprint** | a candidate's row of ratios across every numerator of its ratio set (§5.7) | a source's known signature: the package holds no library of those |
 | **sweep summary** | the fits' results summarized at every point of the sweep, gate thresholds included, over the candidates a caller names (§5.6): a view built on demand | a saved product. It was planned as the "stability cube" until 2026-11-17, renamed because a cube implies three dimensions |
 | **record** | a stretch of one stream over which the events stage computes its clean level and spread: split where consecutive readings are more than a set gap apart or, where the platform's speed is named, where it stays parked that long, and cut into pieces no longer than a set length (§6.8) | a file, a drive or a campaign |
@@ -1315,7 +1317,7 @@ the sweep summary (§5.6) at no cost in refitting: how many candidates count
 as good ratios, and how their ratios move, is then seen across gate settings
 as it is across windows. Every gate has a value that lets everything through
 (`min_peak_z` 0, `min_points` 3, `min_signal` 0, `mswd_probability` and
-`plateau_probability` 1), so switching one off is a value a sweep can hold
+`plateau_probability` 1, `max_window_fill` infinite), so switching one off is a value a sweep can hold
 beside the default. The gates,
 their defaults, and the evidence behind each:
 
@@ -1326,6 +1328,7 @@ their defaults, and the evidence behind each:
 | signal (`min_signal`) | the reference's swing inside the member over its noise, √max(0, var(Δx) / mean(σx²) − 1) | 2 | Table 5: at a swing of 1.92–2.33, York's σ_b is 1.16–1.21× too tight; at 1.44, 1.35×; at 0.81, 2.14× |
 | one source (`mswd_probability`) | York's MSWD and its n − 2 degrees of freedom | the 99 % χ² quantile divided by n − 2 (2.51 at 10 points, 1.33 at 120) | notebook 07 §2: York's ± is 1.11× wider for a mixture than for one source, its MSWD 5.4× larger, and a mixture's slope moves with the declared noise (0.019 / 0.043 / 0.077 for the same air); below, it lets 5 % of the mixtures through |
 | plateau (`plateau_probability`) | York's MSWD over a window `PLATEAU_WIDTH` (2) times the member's duration centred on it, `plateau_mswd` and `plateau_dof`, with `plateau_slope` beside them | 1 (off) | below: it removes most of the mixtures the one-source gate lets through, and half the good single-source members with them |
+| crowding (`max_window_fill`) | the member's duration over its baseline window, read from the `start_time`, `end_time` and `baseline_window` every fit stores | 3/4 | below, "Crowding": on real air with known plumes added, daytime members above 3/4 of their window read a median 0.8–1.4 % low and their 2σ intervals held the truth in 70–72 %; below 3/4 no bias |
 
 The signal is computed over the points a fit could weigh (finite enhancements
 and a finite reference sigma), with the variance on n − 1, so that the noise's
@@ -1381,6 +1384,40 @@ at 1–1.5 cover 0.63 (their errors' robust spread 1.99× the widened σ), 49 at
 1.5–2 cover 0.71, and from 2 up 0.73–0.81 in every bin (134 at 2–3 to 632 at
 10 and above). Below about 1.5 a fit is clearly worse; from 2 up what limits
 coverage is the baseline's error (§5.4), not the signal. **Decided:** 2 stays.
+
+**Crowding** **[decided 2026-11-24 — the 7c2 walkthrough]**. A window's
+baseline is a low quantile of the readings in it, which describes the air a
+plume sits in only when the window holds clean air around the plume. A plume
+that fills most of its window lifts that quantile with its own readings: the
+baseline rises under it and eats part of it, most where the plume is
+tallest, and the ratio reads low (§5.4, "Two problems"). That is a bias, which
+no wider σ repairs, and a question of scale. Each window sees plumes of its own
+scale (§6.1), so a plume too wide for one window is read at a longer one,
+where it fits (owner: "in the case that the window doesn't do a good job of
+defining the baseline relative to the plume, that should be clear and not
+used"). The gate makes that explicit: a member counts only where its duration
+is at most `max_window_fill` of its baseline window. A window between the
+scales of two nested sources then drops out by one gate or the other: too
+short for the broad plume (crowding), or long enough to hold the broad plume
+with the sharp one riding on it, a mixture the one-source gate rejects. The
+gate reads the start, end and window every fit stores, so the fit table needs
+no new column; a fit with no interval to read is not judged by it, as one
+with no MSWD is not judged by the one-source gate. On real air with known
+plumes added (§5.4, "On real air"), by the member's duration over its window,
+daytime members, the baseline allowance included:
+
+| share of the window | members | 2σ coverage | median slope error |
+|---|---|---|---|
+| at most 1/4 | 7,437 | 0.937 | +0.2 % |
+| 1/4–1/2 | 1,318 | 0.876 | +0.2 % |
+| 1/2–3/4 | 470 | 0.883 | −0.1 % |
+| 3/4–1 | 309 | 0.715 | −0.8 % |
+| above 1 | 713 | 0.700 | −1.4 % |
+
+**Decided** (owner, 2026-11-24): 3/4 by default, where the bias starts, swept
+like the other gates. Leaving the crowded members out takes busy daytime
+members at 2 min from 0.86 to 0.91 and leaves 10 and 60 min as they were; the
+longer windows still carry those plumes.
 
 ### 5.4 σ_b, widened **[decided 2026-11-17 — 7c1; both factors made the slope's own 2026-11-18]**
 
@@ -1600,7 +1637,128 @@ error 95 % (1.07, 9 %). The plume tails read as wander make the term err wide
 where the background does not wander: on flat air, the same comparison covers
 98 % at a robust spread of 0.75. A cleaner estimate of the wander (only
 readings below the clean level, or a margin around the events) was not built;
-7c3's real air says whether it is needed.
+on real air (below) the allowance errs wide where the air is quiet and a
+little narrow where it is busy, so it was not needed first.
+
+**Re-measured 2026-11-24**, with the wander made non-decreasing and the
+crowding gate on (both below), by the same test: single-source members passing
+every gate but the one-source gate cover 0.966 (flat air, 915 members) and
+0.935 (wandering air, 986); the one-source gate turns away 5.7 % and 7.2 % of
+the single sources and lets through 7.6 % and 10.0 % of the mixtures, the
+allowance being a little wider; candidates, §5.5. Notebook 09 §6's 570 members
+are as before to the precision printed (with the allowance 95 %, robust spread
+1.07, 9 % turned away; median baseline factor 1.69).
+
+**Two problems, and which part of the ± handles each** **[decided
+2026-11-24 — the 7c2 walkthrough]**. The baseline's error changes along a
+member in two ways. **Crowding**: a plume that fills most of its window lifts
+the window's low quantile with its own readings, so the error grows where the
+plume is tallest and the ratio reads low, every time; a bias, handled by scale,
+the crowding gate (§5.3). **Drift**: even at the right scale the low quantile
+of a window's readings jitters, and the background moves between the clean air
+a window sees and the air under the plume; this is random from member to
+member and belongs in the σ, the **baseline allowance** above. The two parts
+of the allowance target them unequally: the wander is measured where no event
+is, so it sees the drift and by construction not the crowding; the wobble,
+whose amplitude was calibrated on generated air, stands in for crowding there
+and is not a model of it. Measured on notebook 09 §6's chain (seed 1,
+wandering air, the 570 good members): the baseline recomputed with every
+event's readings masked at each window and quantile, so that no plume sits in
+any window, and every member refitted on it, the slope's error splits exactly
+into crowding (the package's baseline against the masked one) and drift (the
+masked baseline against the true background). In units of the noise-only σ
+(robust spreads, over the members whose masked baseline is complete):
+
+| window | members | crowded (above 3/4 of the window) | noise only: crowded / the rest | crowding | drift |
+|---|---|---|---|---|---|
+| 2 min | 249 | 154 | 0.69 / 0.88 | 0.26 | 0.53 (57 members) |
+| 10 min | 180 | 9 | 0.33 / 0.67 | 0.16 | 0.98 (155) |
+| 60 min | 141 | 0 | — / 0.67 | 0.04 | 0.77 (141) |
+
+On this air the allowance covers the crowded members too (0.99 at 2 min),
+since the wobble was tuned on it; on real air it does not (0.70–0.72, §5.3),
+which is why crowding is a gate's to handle.
+
+**The wander made non-decreasing** **[decided 2026-11-24 — the 7c2
+walkthrough]**. Read from the fragments of a record between its events (29 %
+of the readings at the 10 min window on a real 2026 afternoon), a
+semivariogram can dip: methane rose to 4.5 ppb by 20 s, fell to 2.1 by 40 s
+and rose again. Two errors cannot be more alike at a longer gap than at a
+shorter one, and a dip can make a member's slope variance from the baseline's
+error negative, which the floor above sets to zero: on real air (below) a
+fifth of the good daytime members got no allowance at all (21, 16 and 22 % at
+2, 10 and 60 min) and covered 0.78, 0.86 and 0.88, against 0.85, 0.89 and 0.90
+for the members given one. Each gas's semivariogram is now replaced by its
+least-squares non-decreasing fit over the lags (pool-adjacent-violators,
+every lag weighted alike), and the cross-semivariogram is clipped to
+±√(γ_x γ_y), what two errors can share. On the same members (only the σ and E
+change): no allowance in 9, 7 and 17 %; busy daytime members cover 0.86,
+0.93 and 0.93. A non-decreasing curve is still not a valid one, which is why
+some members stay at the floor; a fitted model valid by construction (a nugget
+and an exponential) would remove it, and was not built.
+
+**On real air, with known plumes added** **[measured 2026-11-24 — the 7c2
+walkthrough]**. The test the generated air could not give: real noise, real
+drift, real crowding and the package's own baseline, with plumes of known
+ratio added. Rule: the Wyoming van's Aeris ultra460, 2026-02-03..12, from the
+owner's aligned stage, calibration periods masked; σ declared 2.2 ppb
+(methane) and 0.27 ppb (ethane), the 2026-10-22 audit's first differences of
+quiet readings; r = 0; τ undeclared. Records: each UTC day's stretches outside
+03:00–13:00 UTC of 02-05..02-12, split at gaps over 30 min and at least 45 min
+long (14, **daytime**), and those nights' 03:00–13:00 UTC (7, **parked**,
+beside a pipeline whose puffs are real plumes). The chain: the rolling
+quantile at 2, 10 and 60 min × q 0.01, 0.05 and 0.10 on both gases; events on
+both gases at entry 3, 4 and 5 × exit 1, 1.5 and 2; York, the native clock,
+the default gates. Plumes Gaussian in time, full width at half maximum
+log-uniform in 5–120 s, methane peak log-uniform in 20–600 ppb, ethane
+exactly 0.05 × methane, added to the readings (no noise added: the readings
+carry their own), placed every 12 min from a random phase and jittered by
+±2 min, three placements. Two tests. **Quiet**: a plume is kept only where no
+real event of peak z ≥ 5 of either gas at the 2 min window lies within its
+peak ± (3σ_t + 60 s), and a member is scored only where no such real event at
+its own window and quantile overlaps it (265 plumes). **Busy**: plumes kept
+wherever the air is (2,672); a member is one source when the real methane
+excess, the un-injected record's enhancement above its clean level summed over
+the member's readings inside the un-injected record's events at its window
+and quantile, is at most 2 % of the injected methane (13,411 of the 60,808
+members passing the gates; most urban members hold real air). Members holding
+one injected peak and passing height, points and signal; covered when
+|slope − 0.05| ≤ 2σ; candidates read as §5.5 at the default gates, covered at
+1.96 σ_combined. Between two placements the numbers moved by up to 4 points
+(about 220 daytime plumes in the quiet test, a candidate's members missing together):
+read them ±3–4 points.
+
+| 2σ coverage, at 2 / 10 / 60 min | noise only (7c1) | with the allowance | and the crowding gate |
+|---|---|---|---|
+| quiet, daytime members | 0.82 / 0.87 / 0.87 | 0.89 / 0.96 / 0.96 | 0.93 / 0.96 / 0.96 |
+| quiet, daytime candidates | 0.93 / 0.91 / 0.92 | — | 0.94 / 0.97 / 0.97 |
+| busy, daytime members | 0.78 / 0.83 / 0.85 | 0.86 / 0.93 / 0.93 | 0.91 / 0.94 / 0.93 |
+| busy, daytime candidates | 0.90 / 0.88 / 0.92 | — | 0.93 / 0.96 / 0.96 |
+| busy, parked members | 0.90 / 0.87 / 0.87 | 0.98 / 0.98 / 0.97 | 0.99 / 0.98 / 0.97 |
+
+(Candidates are always read with the crowding gate on, the default; their
+noise-only column is the ratio table built from the noise-only fits.) What it
+says:
+
+- The allowance helps at every window, by 7–10 points; with the crowding gate
+  daytime members cover 0.91–0.96 and candidates 0.93–0.97, against a promised
+  0.95.
+- The allowance follows the air: its median factor on these daytime members is
+  1.09–1.31, against 1.69 on notebook 09 §6's generated air.
+- It errs wide where the air is quiet: parked members' errors spread 0.63–0.75
+  of the widened σ, quiet daytime ones 0.64–0.80 at 10 and 60 min. The safe
+  side, at a cost in precision.
+- What is left on busy air is mostly neighbours: one-source members whose
+  interval overlaps a real event at their window cover 0.71–0.80 at 2 min
+  (0.90 where none does), day and night together.
+- The ethane part of the allowance rests on the declared precision: on the
+  2026-02-03 afternoon at 2 min the ethane's clean spread (0.247 ppb) is below
+  its declared σ (0.27), so its wobble clips to zero, and its wander too.
+- What the test cannot say: whether the one-source gate catches mixtures. The
+  valley's own gas reads about 0.049 against the injected 0.05, so a mixture
+  with it looks single (the 47,397 busy members holding real air have a
+  median slope of 0.049, and the gate turns away 17–23 % of them). A rerun at
+  0 or 0.10 would.
 
 ### 5.5 A candidate's ratio **[decided 2026-11-17 — 7c2; its point estimate chosen by measurement 2026-11-18]**
 
@@ -1675,7 +1833,8 @@ table (§5.7). As built:
   method only;
 - the one-source and plateau gates pass a fit with no MSWD to read (least
   squares where York could not weigh, or was not run): reported ungated, its
-  row's `mswd` blank, as above;
+  row's `mswd` blank, as above; the crowding gate likewise passes a fit with
+  no interval to read;
 - the table is built for every candidate at once, one pass per gate setting
   (the passing members sorted by ratio and then by slope, so each ratio's
   median member sits at a known place in its run). Measured on the 11,397
@@ -1688,7 +1847,13 @@ table (§5.7). As built:
 Measured through the stage (rule: §5.4's, the default gates): candidates
 whose passing members are all at least 99.9 % one source cover the true ratio
 in 0.974 (154 candidates, flat air) and 0.968 (157, wandering air), as stage 0
-found, at least 0.956 at every window. That is the Monte Carlo through the
+found, at least 0.956 at every window. Re-measured 2026-11-24 with the wander
+made non-decreasing and the crowding gate on (§5.3, §5.4): 0.964 (111, flat)
+and 0.966 (119, wandering), at least 0.893 at every window (25 of 28 at 2 min
+on flat air, which a promise of 95 % gives one time in six). Fewer
+candidates are scored because a candidate whose passing members were all
+crowded now has none and gives no ratio at its window; the plume is read at a
+longer one. That is the Monte Carlo through the
 stage itself: `tests/ratios/test_ratio_coverage.py` (opt-in, `TSARA_SLOW=1`,
 about five minutes) re-runs this paragraph's numbers and §5.4's measured
 through the package, from the records to `candidate_ratios`, and requires
