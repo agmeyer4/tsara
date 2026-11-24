@@ -120,6 +120,7 @@ RATIO_DTYPES: dict[str, str] = {
             "min_signal",
             "mswd_probability",
             "plateau_probability",
+            "max_window_fill",
             "ratio",
             "intercept",
             "mswd",

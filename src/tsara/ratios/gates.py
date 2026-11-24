@@ -18,12 +18,17 @@ The gates, each at its own threshold:
   (``mswd / mswd_expected``, §5.4) at most the chi-squared quantile at
   ``mswd_probability`` over the degrees of freedom;
 * **plateau**: the plateau's MSWD at most the same quantile at
-  ``plateau_probability`` over its degrees of freedom (off at 1, the default).
+  ``plateau_probability`` over its degrees of freedom (off at 1, the default);
+* **crowding**: the member's duration over its baseline window at most
+  ``max_window_fill``: a plume that fills most of its window is read at a
+  longer window, where it fits (3/4 by default, infinite lets everything
+  through).
 
 A probability of 1 lets everything through. A fit with no MSWD to read (least
 squares where York could not weigh, or was not run) is not judged by the
-one-source or plateau gate: it is reported ungated (§5.3). A fit with no line
-(``status`` not ``OK``) passes no setting.
+one-source or plateau gate, and one with no interval to read by the crowding
+gate: it is reported ungated there (§5.3). A fit with no line (``status`` not
+``OK``) passes no setting.
 """
 
 from __future__ import annotations
@@ -32,11 +37,10 @@ import itertools
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pandas as pd
 from scipy.stats import chi2
 
 if TYPE_CHECKING:  # pragma: no cover
-    import pandas as pd
-
     from tsara.config.analysis import GatesConfig
 
 __all__ = ["GATE_COLUMNS", "GATE_NAMES", "gate_passes", "gate_settings", "passes"]
@@ -48,10 +52,11 @@ GATE_COLUMNS: tuple[str, ...] = (
     "min_signal",
     "mswd_probability",
     "plateau_probability",
+    "max_window_fill",
 )
 
 #: Each gate by name, in the order of :data:`GATE_COLUMNS`.
-GATE_NAMES: tuple[str, ...] = ("height", "points", "signal", "one_source", "plateau")
+GATE_NAMES: tuple[str, ...] = ("height", "points", "signal", "one_source", "plateau", "crowding")
 
 
 def gate_settings(gates: GatesConfig) -> list[dict[str, float]]:
@@ -85,6 +90,7 @@ def gate_passes(fits: pd.DataFrame, setting: dict[str, float]) -> dict[str, np.n
         & _below(fits["mswd"] / fits["mswd_expected"], fits["dof"], setting["mswd_probability"]),
         "plateau": line
         & _below(fits["plateau_mswd"], fits["plateau_dof"], setting["plateau_probability"]),
+        "crowding": line & _fits_its_window(fits, setting["max_window_fill"]),
     }
 
 
@@ -102,3 +108,12 @@ def _below(mswd: pd.Series, dof: pd.Series, probability: float) -> np.ndarray:
         # At a probability of 1 the quantile is infinite: everything known passes.
         limit = chi2.ppf(probability, np.where(d > 0, d, np.nan)) / d
     return np.asarray(np.isnan(m) | (m <= limit), dtype=bool)
+
+
+def _fits_its_window(fits: pd.DataFrame, most: float) -> np.ndarray:
+    """Return whether each member's duration over its window is unknown or at most ``most``."""
+    # Through pandas: a fit table built without intervals holds them as NaN, read as NaT.
+    duration = pd.to_datetime(fits["end_time"]) - pd.to_datetime(fits["start_time"])
+    seconds = duration.dt.total_seconds().to_numpy(dtype=np.float64)
+    fill = seconds / fits["baseline_window"].to_numpy(dtype=np.float64)
+    return np.asarray(np.isnan(fill) | (fill <= most), dtype=bool)

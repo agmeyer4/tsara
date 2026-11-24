@@ -27,8 +27,8 @@ Shape of the subpackage
     persistence and the baseline's error (§5.2-5.4).
 ``gates``
     Which fits count at each setting of the gates' thresholds: height, points,
-    signal, one source and plateau, each a list, every combination a setting
-    (§5.3).
+    signal, one source, plateau and crowding, each a list, every combination a
+    setting (§5.3).
 ``candidate_ratio``
     A candidate's ratio, read from its members that pass the gates at every
     gate setting: the median member, its fit's sigma, the members' spread and

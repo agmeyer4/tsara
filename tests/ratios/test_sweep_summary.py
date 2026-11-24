@@ -76,6 +76,7 @@ def test_the_counts_at_each_sweep_point_and_gate_setting() -> None:
         "min_signal": 2.0,
         "mswd_probability": 0.99,
         "plateau_probability": 1.0,
+        "max_window_fill": 0.75,
     }
     one = got.sel({**at, "exit_multiple": 1.0})
     assert list(one.n_fits.values) == [4, 4]
@@ -169,3 +170,17 @@ def test_one_fit_has_no_birge_ratio_even_where_its_weighted_mean_misses_its_slop
     rounding step, and R_B over that one fit read infinite before it was refused by name."""
     point = sweep_summary(pd.DataFrame([_fit("c1", 0.0497, sigma=0.0049)]), GatesConfig()).squeeze()
     assert int(point.n_population) == 1 and np.isnan(float(point.birge_ratio))
+
+
+def test_the_crowding_gate_is_counted_alone_and_with_the_rest() -> None:
+    """c2's member at exit 1 lasts 460 s of its 600 s window: it crowds the window at 3/4
+    and passes with the gate off."""
+    fits = _fits()
+    crowded = (fits.candidate_id == "c2") & (fits.exit_multiple == 1.0)
+    fits["start_time"] = pd.Timestamp("2026-01-01 00:00")
+    fits["end_time"] = pd.Timestamp("2026-01-01 00:01")
+    fits.loc[crowded, "end_time"] = pd.Timestamp("2026-01-01 00:07:40")
+    got = sweep_summary(fits, GatesConfig(max_window_fill=(0.75, float("inf"))))
+    one = got.sel(exit_multiple=1.0).squeeze()
+    assert list(one.n_pass_crowding.values) == [2, 3]
+    assert list(one.n_pass.values) == [2, 3]

@@ -176,4 +176,7 @@ ratios:
     # by side. Off by default, since it rejects a neighbour nearby as readily
     # as a mixture, and half the good members with it (METHODS.md §5.3).
     plateau_probability: [0.99, 1.0]
+    # A member's duration over its baseline window: above 3/4 the plume crowds
+    # its own window and reads low; it is read at a longer window instead.
+    max_window_fill: [0.75]
   confidence_level: 0.95

@@ -140,6 +140,14 @@ def test_a_member_with_no_widened_sigma_gives_no_interval() -> None:
         ({"n": 7}, "points"),
         ({"signal": 1.9}, "signal"),
         ({"mswd": 2.0, "dof": 48}, "one source"),
+        # 460 s of a 600 s window: the plume crowds its window (0.77 > 3/4).
+        (
+            {
+                "start_time": pd.Timestamp("2026-01-01 00:06:10"),
+                "end_time": pd.Timestamp("2026-01-01 00:13:50"),
+            },
+            "crowding",
+        ),
         ({"status": "MISSING_SIGMA"}, "no line"),
     ],
 )
@@ -243,6 +251,29 @@ def test_gate_columns_are_the_gates_of_the_configuration() -> None:
 def test_a_gate_at_its_threshold_lets_the_member_through() -> None:
     got = _ratios([_fit("c1", 0.05, n=8, signal=2.0, candidate_peak_z=5.0)])
     assert got.n_members.iloc[0] == 1
+    # 450 s of a 600 s window is exactly 3/4.
+    at_three_quarters = _fit(
+        "c1",
+        0.05,
+        start_time=pd.Timestamp("2026-01-01 00:06:15"),
+        end_time=pd.Timestamp("2026-01-01 00:13:45"),
+    )
+    assert _ratios([at_three_quarters]).n_members.iloc[0] == 1
+
+
+def test_the_crowding_gate_reads_the_members_own_window() -> None:
+    """The same 460 s member crowds a 600 s window and fits a 3600 s one; with no
+    interval to read (a fit made without one) it is not judged, as a fit with no MSWD
+    is not judged by the one-source gate."""
+    span = {
+        "start_time": pd.Timestamp("2026-01-01 00:06:10"),
+        "end_time": pd.Timestamp("2026-01-01 00:13:50"),
+    }
+    assert _ratios([_fit("c1", 0.05, **span)]).n_members.iloc[0] == 0
+    assert _ratios([_fit("c1", 0.05, baseline_window=3600.0, **span)]).n_members.iloc[0] == 1
+    off = _ratios([_fit("c1", 0.05, **span)], GatesConfig(max_window_fill=(float("inf"),)))
+    assert off.n_members.iloc[0] == 1
+    assert _ratios([_fit("c1", 0.05)]).n_members.iloc[0] == 1
 
 
 def test_a_fit_with_no_mswd_to_read_is_reported_ungated() -> None:
@@ -339,6 +370,9 @@ def _random_fits(seed: int) -> pd.DataFrame:
             for q, x in itertools.product((0.01, 0.05), (1.0, 2.0)):
                 if rng.random() < 0.2:
                     continue
+                peak = pd.Timestamp("2026-01-01") + pd.Timedelta(seconds=int(rng.integers(600)))
+                # 100, 400 or 500 s of the 600 s window: the last crowds it.
+                duration = float(rng.choice([100.0, 400.0, 500.0]))
                 rows.append(
                     _fit(
                         f"c{c}",
@@ -351,8 +385,9 @@ def _random_fits(seed: int) -> pd.DataFrame:
                         event_id=f"c{c}/{numerator}/{method}/{period}/q{q}/x{x}",
                         peak_z=np.nan if no_z else float(rng.choice([4.0, 6.0, 9.0, 9.0])),
                         candidate_peak_z=np.nan if no_z else 9.0,
-                        peak_time=pd.Timestamp("2026-01-01")
-                        + pd.Timedelta(seconds=int(rng.integers(600))),
+                        peak_time=peak,
+                        start_time=peak - pd.Timedelta(seconds=duration / 2),
+                        end_time=peak + pd.Timedelta(seconds=duration / 2),
                         n=int(rng.integers(5, 40)),
                         mswd=float(rng.uniform(0.3, 3.0)),
                         status="OK" if rng.random() > 0.05 else "MISSING_SIGMA",
@@ -372,7 +407,12 @@ def test_the_table_is_the_reference_one_ratio_at_a_time(seed: int) -> None:
     candidates = pd.DataFrame(
         {"candidate_id": [f"c{c}" for c in range(6)], "parent_candidate_id": [None, "p0"] * 3}
     )
-    gates = GatesConfig(min_peak_z=(0.0, 5.0), min_points=(8, 20), mswd_probability=(0.9, 0.99))
+    gates = GatesConfig(
+        min_peak_z=(0.0, 5.0),
+        min_points=(8, 20),
+        mswd_probability=(0.9, 0.99),
+        max_window_fill=(0.75, float("inf")),
+    )
     got = candidate_ratios(fits, candidates, gates, confidence_level=0.9)
     pd.testing.assert_frame_equal(
         got, _reference(fits, candidates, gates, 0.9), check_exact=False, rtol=1e-12
@@ -380,3 +420,6 @@ def test_the_table_is_the_reference_one_ratio_at_a_time(seed: int) -> None:
     # The cases the reference is there for occur.
     assert (got.n_members == 0).any() and (got.n_members > 1).any()
     assert got.candidate_peak_z.isna().any() and got.sigma_sys_known.any()
+    # The crowding gate drops members: fewer pass at 3/4 than with it off.
+    crowded = got.max_window_fill == 0.75
+    assert got.n_members[crowded].sum() < got.n_members[~crowded].sum()
