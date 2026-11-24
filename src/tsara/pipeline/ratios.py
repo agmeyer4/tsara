@@ -85,6 +85,7 @@ def ratio_fits(
     # of: what a ratio can be formed from, and what '<instrument>' expands to.
     gases = {instrument: enhanced_variables(state) for instrument, state in states.items()}
     tables = []
+    warned: set[tuple[str, str]] = set()
     for ratio_set in ratios.sets:
         instrument, _, variable = ratio_set.reference.partition(".")
         if variable not in gases.get(instrument, ()):
@@ -97,6 +98,7 @@ def ratio_fits(
         except ValueError as error:
             raise TsaraRatioError(str(error)) from error
         for numerator in numerators:
+            _warn_without_clean_spread(events, ((instrument, variable), numerator), warned)
             for period in ratios.periods:
                 tables.append(
                     _fit_one(
@@ -112,6 +114,35 @@ def ratio_fits(
     if not tables:
         return pd.DataFrame(columns=list(FIT_COLUMNS)).astype(FIT_DTYPES)
     return pd.concat(tables, ignore_index=True)
+
+
+def _warn_without_clean_spread(
+    events: Mapping[str, xr.Dataset],
+    gases: Sequence[tuple[str, str]],
+    warned: set[tuple[str, str]],
+) -> None:
+    """Warn, once per gas, when a ratio's gas has no clean spread to give its wobble.
+
+    Without one, the gas's baseline wobble is unknown and its fits carry only
+    the wander (§5.4); they say so in ``baseline_error``, and this says it
+    where a run is watched. The usual cause is events found on the reference
+    alone.
+    """
+    for instrument, variable in gases:
+        event_state = events.get(instrument)
+        if (instrument, variable) in warned or (
+            event_state is not None and clean_spread_name(variable) in event_state
+        ):
+            continue
+        warned.add((instrument, variable))
+        logger.warning(
+            "%s.%s has no clean spread in its event state (no events were found on it), so "
+            "its baseline's wobble is unknown and the fits it is in carry only the "
+            "wander part of the baseline's error (METHODS §5.4). Find events on every gas "
+            "a ratio uses; a triggered variable has none by design.",
+            instrument,
+            variable,
+        )
 
 
 def _fit_one(

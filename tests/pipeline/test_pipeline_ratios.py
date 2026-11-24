@@ -282,17 +282,60 @@ def test_each_gas_brings_its_clean_spread_so_the_fits_hold_the_baselines_wobble(
     assert set(got.baseline_error) <= {"wobble and wander", "wobble"}
 
 
-def test_a_variable_with_no_event_state_has_no_wobble(campaign: Campaign) -> None:
+def test_a_variable_with_no_event_state_has_no_wobble(
+    campaign: Campaign, caplog: pytest.LogCaptureFixture
+) -> None:
     states, events, catalog = campaign
-    got = ratio_fits(
-        states,
-        {"van": events["van"]},  # the 2 s analyzer's event state left out
-        catalog,
-        _config(sets=[{"reference": "lab.ch4", "numerators": ["van.c2h6"]}]),
-    )
-    assert len(got) > 0
+    with caplog.at_level(logging.WARNING, logger="tsara.pipeline.ratios"):
+        got = ratio_fits(
+            states,
+            {"van": events["van"]},  # the 2 s analyzer's event state left out
+            catalog,
+            # Two numerators against the one reference with no clean spread: said once.
+            _config(sets=[{"reference": "lab.ch4", "numerators": ["van"]}]),
+        )
+    assert set(got.numerator) == {"van.ch4", "van.c2h6", "van.co"}
     assert got.wobble_reference.isna().all() and got.wobble_numerator.notna().all()
     assert set(got.baseline_error) <= {"wander", "none"}
+    said = [r.getMessage() for r in caplog.records if "clean spread" in r.getMessage()]
+    assert len(said) == 1 and said[0].startswith("lab.ch4 has no clean spread")
+
+
+def test_events_found_on_the_reference_alone_are_warned_once_per_gas(
+    campaign: Campaign, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The usual way to lose the wobble: events found on methane only, so ethane has no
+    clean spread. Said once, though two pair clocks fit it twice."""
+    states, events, catalog = campaign
+    reference_only = {"van": events["van"].drop_vars("clean_spread_c2h6"), "lab": events["lab"]}
+    with caplog.at_level(logging.WARNING, logger="tsara.pipeline.ratios"):
+        got = ratio_fits(
+            states,
+            reference_only,
+            catalog,
+            _config(
+                sets=[{"reference": "van.ch4", "numerators": ["van.c2h6"]}],
+                periods=["native", "10s"],
+            ),
+        )
+    assert got.wobble_numerator.isna().all() and got.wobble_reference.notna().any()
+    said = [r.getMessage() for r in caplog.records if "clean spread" in r.getMessage()]
+    assert len(said) == 1 and said[0].startswith("van.c2h6 has no clean spread")
+    assert "Find events on every gas" in said[0]
+
+
+def test_no_warning_when_every_gas_brings_its_clean_spread(
+    campaign: Campaign, caplog: pytest.LogCaptureFixture
+) -> None:
+    states, events, catalog = campaign
+    with caplog.at_level(logging.WARNING, logger="tsara.pipeline.ratios"):
+        ratio_fits(
+            states,
+            events,
+            catalog,
+            _config(sets=[{"reference": "van.ch4", "numerators": ["van.c2h6"]}]),
+        )
+    assert not [r for r in caplog.records if "clean spread" in r.getMessage()]
 
 
 def test_the_chain_ends_in_a_ratio_per_candidate_naming_its_parent(campaign: Campaign) -> None:
