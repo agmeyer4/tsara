@@ -14,32 +14,37 @@ entered"):
   events stage's clean spread and ``sigma`` the reading's random sigma,
   correlated as two baselines share their windows,
   ``max(0, 1 - |t_i - t_j| / W)``;
-* the background's **wander**: the semivariogram of the enhancement on the
-  pair cells outside every event of either gas at the window and quantile,
-  less the readings' noise, which adds its
-  variance at every lag; and for the pair the cross-semivariogram, since on
-  real air two gases' backgrounds wander together and part of the error
-  cancels in the residual.
+* the background's **wander**: how different the enhancement is at two times
+  a lag apart on the pair cells outside every event of either gas at the
+  window and quantile (its semivariogram), less the readings' noise, which
+  adds its variance at every lag; and for the pair the cross-semivariogram,
+  since on real air two gases' backgrounds wander together and part of the
+  error cancels in the residual.
 
-Each gas's wander, as measured, is then made non-decreasing in lag (its
-least-squares non-decreasing fit), and the cross-semivariogram is bounded by
-the two (``|g_xy| <= sqrt(g_x g_y)``). Two errors cannot be more alike at a
-longer gap than at a shorter one, but a semivariogram read from the fragments
-of a record between its events can dip: on a real 2026 drive it rose to 4.5 ppb
-of methane by 20 s, fell to 2.1 by 40 s and rose again. Used as measured, a
-dip can make the slope's variance from the baseline's error negative for a
-member, which the fits floor at zero; on real air with known plumes added
-that left a fifth of the good members with no allowance at all (§5.4).
+The wander is measured at :data:`LAGS_S` and never used as measured. Read
+from the fragments of a record between its events, a measured curve is
+ragged (on a real 2026 drive methane's rose to 4.5 ppb by 20 s, fell to 2.1
+by 40 s and rose again), and a ragged curve can describe an error no
+background could have, one that changes more over a gap than two half-gaps
+allow, which makes a member's slope variance from it negative. So the three
+curves are fitted, per window and quantile, by one model that is valid by
+construction (§5.4, "The wander as a fitted model"):
 
-For a pair the residual's error is ``delta_y - b delta_x``, so the slow
+    g_x(L) = n_x + s_x (1 - exp(-L / tau)),  g_y and g_xy likewise, L > 0,
+
+one decorrelation time ``tau`` shared by the two gases, each gas's nugget
+``n`` and sill ``s`` at least zero, and the cross's within what the two
+gases' allow (``|n_xy| <= sqrt(n_x n_y)``, ``|s_xy| <= sqrt(s_x s_y)``).
+For a pair the residual's error is ``delta_y - b delta_x``, whose curve is
+then ``(n_y + b^2 n_x - 2 b n_xy) + (s_y + b^2 s_x - 2 b s_xy)(1 - exp(-L / tau))``,
+both coefficients at least zero for every ``b``: the curve of a white part and
+an exponentially correlated part, a valid error whatever the slope. The slow
 covariance between two points ``dt`` apart is
 
-    S(dt) = (w_y^2 + b^2 w_x^2) max(0, 1 - |dt| / W)
-            - max(0, g_y + b^2 g_x - 2 b g_xy)(|dt|),
+    S(dt) = (w_y^2 + b^2 w_x^2) max(0, 1 - |dt| / W) - g_r(|dt|),   g_r(0) = 0.
 
-the semivariograms ``g`` read on :data:`LAGS_S`, in log lag between them and
-held beyond their ends. This module measures the wander on a paired product
-and evaluates ``S``; the fits do the rest.
+This module measures and fits the wander on a paired product and evaluates
+``S``; the fits do the rest.
 """
 
 from __future__ import annotations
@@ -49,6 +54,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import nnls
 
 from tsara.core.naming import QUANTILE_DIM, TIME_COORD, WINDOW_DIM
 from tsara.core.timebase import NS_PER_S
@@ -67,27 +73,84 @@ LAGS_S: npt.NDArray[np.float64] = np.geomspace(1.0, 7200.0, 40)
 #: semivariogram there is not read: a lag the record cannot describe.
 MIN_LAG_PAIRS = 30
 
+#: The decorrelation times the model is fitted at: 80 steps evenly spaced in
+#: log from 0.5 s to ten baseline windows, the one with the least squared
+#: error kept. Past ten windows the exponential is a straight line over every
+#: lag a member at the window can span, so longer times add nothing a fit
+#: could tell apart.
+_TIMESCALE_STEPS = 80
+_TIMESCALE_MIN_S = 0.5
+_TIMESCALE_MAX_WINDOWS = 10.0
+
+#: Fewer read lags than this within the window, and the model is fitted to
+#: every read lag instead: two parameters per curve need more than two points.
+_MIN_FIT_LAGS = 3
+
+#: The order of the three curves along the last axis of the model's arrays.
+_REFERENCE, _NUMERATOR, _CROSS = 0, 1, 2
+
 
 @dataclass(frozen=True)
 class Wander:
-    """The two gases' wander, per sweep point: semivariograms on :data:`LAGS_S`.
+    """The two gases' wander, per sweep point: the fitted model and what it was fitted to.
 
     Attributes
     ----------
-    reference, numerator, cross : numpy.ndarray
-        ``(window, quantile, lag)``, in the gases' units squared (``cross`` in
-        their product), the readings' noise removed; at a lag the record could
-        not describe, the nearest described lag's value; each gas's
-        non-decreasing in lag, the cross within ``+/- sqrt(reference x
-        numerator)``; zero throughout at a sweep point with no lag described.
+    nugget, sill : numpy.ndarray
+        ``(window, quantile, 3)``: the model's white part and its exponential
+        part's height for the reference, the numerator and the cross, in the
+        gases' units squared (the cross in their product); zero at a sweep
+        point with no lag read.
+    timescale : numpy.ndarray
+        ``(window, quantile)``: the exponential part's decorrelation time (s),
+        shared by the three curves; NaN at a sweep point with no lag read.
+    measured : numpy.ndarray
+        ``(window, quantile, 3, lag)``: the three semivariograms as measured on
+        :data:`LAGS_S`, the readings' noise removed; NaN at a lag not read.
+        Kept to be looked at beside the model, never used.
     described : numpy.ndarray of bool
-        ``(window, quantile)``: whether any lag was.
+        ``(window, quantile)``: whether any lag was read.
     """
 
-    reference: npt.NDArray[np.float64]
-    numerator: npt.NDArray[np.float64]
-    cross: npt.NDArray[np.float64]
+    nugget: npt.NDArray[np.float64]
+    sill: npt.NDArray[np.float64]
+    timescale: npt.NDArray[np.float64]
+    measured: npt.NDArray[np.float64]
     described: npt.NDArray[np.bool_]
+
+    def curves(self, lags_s: npt.ArrayLike) -> npt.NDArray[np.float64]:
+        """Return the model's three curves at ``lags_s``, ``(window, quantile, 3, lag)``.
+
+        Each is zero at a lag of zero, where a semivariogram is zero by definition.
+        """
+        lags = np.abs(np.asarray(lags_s, dtype=np.float64))
+        shape = -np.expm1(-lags / self.timescale[..., None, None])
+        values = self.nugget[..., None] + self.sill[..., None] * np.nan_to_num(shape)
+        return np.where(lags > 0, values, 0.0)
+
+    def residual(
+        self, sweep: npt.NDArray[np.intp], slope: npt.NDArray[np.float64]
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Return the residual ``delta_y - b delta_x``'s nugget, sill and timescale, per entry.
+
+        ``sweep`` is each entry's sweep point as ``window * n_quantiles +
+        quantile``, ``slope`` its ``b``. Both coefficients are at least zero
+        for every ``b`` by the model's bounds; the floor at zero only keeps
+        rounding from turning an exact zero negative, and a slope that is NaN
+        (a fit that failed) gives NaN.
+        """
+        nugget = self.nugget.reshape(-1, 3)[sweep]
+        sill = self.sill.reshape(-1, 3)[sweep]
+
+        def combined(part: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+            return np.maximum(
+                0.0,
+                part[:, _NUMERATOR]
+                + slope * slope * part[:, _REFERENCE]
+                - 2.0 * slope * part[:, _CROSS],
+            )
+
+        return combined(nugget), combined(sill), self.timescale.reshape(-1)[sweep]
 
 
 def wander(
@@ -98,7 +161,7 @@ def wander(
     midpoints: npt.NDArray[np.int64],
     variables: tuple[str, str],
 ) -> Wander:
-    """Measure the two gases' wander on the pair cells outside every event of either.
+    """Measure the two gases' wander outside every event of either, and fit its model.
 
     Parameters
     ----------
@@ -110,7 +173,7 @@ def wander(
         The numerator's and the reference's enhancements, ``(cell, window, quantile)``.
     sigmas : tuple of numpy.ndarray or None
         The numerator's and the reference's readings' random sigma per cell;
-        without them the noise cannot be removed, and no lag is described.
+        without them the noise cannot be removed, and no lag is read.
     midpoints : numpy.ndarray of int64
         The pair cells' midpoints (ns), in time order.
     variables : tuple of str
@@ -122,30 +185,31 @@ def wander(
     """
     windows = np.asarray(pairs[WINDOW_DIM].values, dtype=np.float64)
     quantiles = np.asarray(pairs[QUANTILE_DIM].values, dtype=np.float64)
-    shape = (windows.size, quantiles.size, LAGS_S.size)
-    tables = [np.zeros(shape) for _ in range(3)]
-    described = np.zeros(shape[:2], dtype=bool)
+    nugget = np.zeros((windows.size, quantiles.size, 3))
+    sill = np.zeros((windows.size, quantiles.size, 3))
+    timescale = np.full((windows.size, quantiles.size), np.nan)
+    measured = np.full((windows.size, quantiles.size, 3, LAGS_S.size), np.nan)
     dy, dx = deltas
     sy, sx = sigmas
-    if sx is None or sy is None:
-        return Wander(
-            reference=tables[0], numerator=tables[1], cross=tables[2], described=described
-        )
-    seconds = midpoints.astype(np.float64) / NS_PER_S
-    for i, window in enumerate(windows):
-        for j, quantile in enumerate(quantiles):
-            inside = _inside(catalog, variables, window, quantile, midpoints)
-            ok = ~inside & np.isfinite(dx[:, i, j]) & np.isfinite(dy[:, i, j])
-            ok &= np.isfinite(sx) & np.isfinite(sy)
-            measured = _semivariograms(seconds[ok], (dx[ok, i, j], dy[ok, i, j]), (sx[ok], sy[ok]))
-            for table, values in zip(tables, measured, strict=True):
-                if np.isfinite(values).any():
-                    table[i, j] = _filled(values)
-            tables[0][i, j], tables[1][i, j], tables[2][i, j] = _monotone(
-                tables[0][i, j], tables[1][i, j], tables[2][i, j]
-            )
-            described[i, j] = bool(np.isfinite(measured[0]).any())
-    return Wander(reference=tables[0], numerator=tables[1], cross=tables[2], described=described)
+    if sx is not None and sy is not None:
+        seconds = midpoints.astype(np.float64) / NS_PER_S
+        for i, window in enumerate(windows):
+            for j, quantile in enumerate(quantiles):
+                inside = _inside(catalog, variables, window, quantile, midpoints)
+                ok = ~inside & np.isfinite(dx[:, i, j]) & np.isfinite(dy[:, i, j])
+                ok &= np.isfinite(sx) & np.isfinite(sy)
+                measured[i, j] = _semivariograms(
+                    seconds[ok], (dx[ok, i, j], dy[ok, i, j]), (sx[ok], sy[ok])
+                )
+                if np.isfinite(measured[i, j, _REFERENCE]).any():
+                    nugget[i, j], sill[i, j], timescale[i, j] = _fit_model(measured[i, j], window)
+    return Wander(
+        nugget=nugget,
+        sill=sill,
+        timescale=timescale,
+        measured=measured,
+        described=np.isfinite(timescale),
+    )
 
 
 def wobble(
@@ -190,12 +254,12 @@ def slow_covariance(
     wandering : Wander
         The two gases' wander at every sweep point.
     """
-    gx, gy, gxy = (
-        _at(table.reshape(-1, LAGS_S.size), sweep, dt_s)
-        for table in (wandering.reference, wandering.numerator, wandering.cross)
-    )
-    wander_part = np.fmax(0.0, gy + slope * slope * gx - 2.0 * slope * gxy)
-    wobble_part = amplitude * np.fmax(0.0, 1.0 - np.abs(dt_s) / window_s)
+    nugget, sill, timescale = wandering.residual(sweep, slope)
+    lag = np.abs(dt_s)
+    # A sweep point with no lag read has no timescale and a zero sill: no wander.
+    shape = np.where(sill > 0, -np.expm1(-lag / np.where(sill > 0, timescale, 1.0)), 0.0)
+    wander_part = np.where(lag > 0, nugget + sill * shape, 0.0)
+    wobble_part = amplitude * np.fmax(0.0, 1.0 - lag / window_s)
     return wobble_part - wander_part
 
 
@@ -265,58 +329,60 @@ def _semivariograms(
     return gx, gy, gxy
 
 
-def _filled(values: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-    """Fill the lags not described from the described ones, in log lag, held at the ends."""
-    known = np.isfinite(values)
-    logs = np.log(LAGS_S)
-    return np.interp(logs, logs[known], values[known])
+def _fit_model(
+    measured: npt.NDArray[np.float64], window: float
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], float]:
+    """Fit the three measured curves by the model, over the read lags up to the window.
 
+    At each trial decorrelation time the model is linear in its nugget and
+    sill: each gas's pair is the least-squares fit with both at least zero, the
+    cross's the plain least-squares fit then held within what the two gases'
+    allow, so that the model stays valid. The trial with the least summed
+    squared error is kept, each curve's error divided by its own mean square
+    so that methane does not drown ethane. Only the lags a member at this
+    window can span are fitted (a longer member is the crowding gate's,
+    METHODS §5.3), unless fewer than :data:`_MIN_FIT_LAGS` of them were read.
 
-def _monotone(
-    reference: npt.NDArray[np.float64],
-    numerator: npt.NDArray[np.float64],
-    cross: npt.NDArray[np.float64],
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-    """Make each gas's semivariogram non-decreasing in lag and bound the cross by the two.
-
-    Each gas's is replaced by its least-squares non-decreasing fit over the
-    lags (pool-adjacent-violators, every lag weighted alike); the cross is
-    clipped to ``+/- sqrt(reference x numerator)``, what two gases' errors
-    can share at most (Cauchy-Schwarz).
+    Returns
+    -------
+    nugget, sill : numpy.ndarray
+        ``(3,)``: reference, numerator, cross.
+    timescale : float
+        Seconds.
     """
-    reference, numerator = _non_decreasing(reference), _non_decreasing(numerator)
-    bound = np.sqrt(reference * numerator)
-    return reference, numerator, np.clip(cross, -bound, bound)
-
-
-def _non_decreasing(values: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-    """Return the least-squares non-decreasing fit to ``values`` (pool-adjacent-violators).
-
-    Walking along the lags, a value below the block before it is pooled into
-    that block, which takes the mean of its values, and pooling repeats
-    backwards until the blocks rise.
-    """
-    sums: list[float] = []
-    counts: list[int] = []
-    for value in values:
-        sums.append(float(value))
-        counts.append(1)
-        while len(sums) > 1 and sums[-2] * counts[-1] > sums[-1] * counts[-2]:
-            # Pop first: in `sums[-2] += sums.pop()` the -2 would be read after the pop.
-            last_sum, last_count = sums.pop(), counts.pop()
-            sums[-1] += last_sum
-            counts[-1] += last_count
-    return np.repeat(np.asarray(sums) / np.asarray(counts), counts)
-
-
-def _at(
-    table: npt.NDArray[np.float64], sweep: npt.NDArray[np.intp], dt_s: npt.NDArray[np.float64]
-) -> npt.NDArray[np.float64]:
-    """Read each pair's semivariogram, at its sweep point's row of ``table``, at its |dt|."""
-    logs = np.log(LAGS_S)
-    where = np.log(np.clip(np.abs(dt_s), LAGS_S[0], LAGS_S[-1]))
-    upper = np.clip(np.searchsorted(logs, where), 1, LAGS_S.size - 1)
-    lower = upper - 1
-    share = (where - logs[lower]) / (logs[upper] - logs[lower])
-    low, high = table[sweep, lower], table[sweep, upper]
-    return np.where(dt_s == 0, 0.0, low + share * (high - low))
+    read = np.isfinite(measured[_REFERENCE])
+    use = read & (LAGS_S <= window)
+    if use.sum() < _MIN_FIT_LAGS:
+        use = read
+    lags = LAGS_S[use]
+    curves = measured[:, use]
+    scales = (
+        float(np.mean(curves[_REFERENCE] ** 2)),
+        float(np.mean(curves[_NUMERATOR] ** 2)),
+        float(np.mean(np.abs(curves[_REFERENCE] * curves[_NUMERATOR]))),
+    )
+    best_error = np.inf
+    best: tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], float] = (
+        np.zeros(3),
+        np.zeros(3),
+        np.nan,
+    )
+    for timescale in np.geomspace(
+        _TIMESCALE_MIN_S, _TIMESCALE_MAX_WINDOWS * window, _TIMESCALE_STEPS
+    ):
+        design = np.column_stack([np.ones(lags.size), -np.expm1(-lags / timescale)])
+        nugget, sill = np.zeros(3), np.zeros(3)
+        for part in (_REFERENCE, _NUMERATOR):
+            (nugget[part], sill[part]), _ = nnls(design, curves[part])
+        (nugget[_CROSS], sill[_CROSS]), *_ = np.linalg.lstsq(design, curves[_CROSS], rcond=None)
+        for coefficient in (nugget, sill):
+            bound = np.sqrt(coefficient[_REFERENCE] * coefficient[_NUMERATOR])
+            coefficient[_CROSS] = np.clip(coefficient[_CROSS], -bound, bound)
+        error = sum(
+            float(np.sum((curves[part] - design @ (nugget[part], sill[part])) ** 2)) / scale
+            for part, scale in enumerate(scales)
+            if scale > 0
+        )
+        if error < best_error:
+            best_error, best = error, (nugget, sill, float(timescale))
+    return best

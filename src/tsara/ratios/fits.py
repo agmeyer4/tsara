@@ -56,13 +56,14 @@ decorrelation time declared, both factors and E are 1 and ``tau_s`` is blank.
 
 The baseline's error enters the same algebra (``baseline_error``): a
 covariance S between a member's points, from the background's wander (always
-measured, on the pair cells outside every event of either gas) and the
-baseline's own wobble (where the pairing carried each gas's clean spread,
-``PairColumns.*_clean_spread``). It multiplies the slope's sigma by the
-**baseline factor** and raises E by what it leaves in the scatter, each
-floored so that it never narrows, since a measured semivariogram need not be
-a valid one. ``baseline_error`` says which parts a fit holds, and the two
-wobbles are stored. Every factor is stored beside the widened sigma.
+measured, on the pair cells outside every event of either gas, and fitted by a
+model valid by construction) and the baseline's own wobble (where the pairing
+carried each gas's clean spread, ``PairColumns.*_clean_spread``). It
+multiplies the slope's sigma by the **baseline factor** and raises E by what
+it leaves in the scatter. ``baseline_error`` says which parts a fit holds;
+the two wobbles and the residual's wander curve at the fit's own slope
+(``wander_nugget``, ``wander_sill``, ``wander_timescale``) are stored. Every
+factor is stored beside the widened sigma.
 
 Weights and support
 -------------------
@@ -151,6 +152,9 @@ FIT_COLUMNS: tuple[str, ...] = (
     "slope_sigma_widened",
     "wobble_reference",
     "wobble_numerator",
+    "wander_nugget",
+    "wander_sill",
+    "wander_timescale",
     "baseline_error",
     "borrowed_max",
     "reference_sigma_provenance",
@@ -207,6 +211,9 @@ FIT_DTYPES: dict[str, str] = {
             "slope_sigma_widened",
             "wobble_reference",
             "wobble_numerator",
+            "wander_nugget",
+            "wander_sill",
+            "wander_timescale",
             "borrowed_max",
             "reference_systematic_relative",
             "numerator_systematic_relative",
@@ -364,6 +371,11 @@ def member_fits(
         )
         mswd = york.mswd if york is not None else np.full(n_members, np.nan)
         dof = (york.n if york is not None else fit.n) - 2
+        # The residual's wander curve this fit used, at its own slope; NaN where none was read.
+        read = slow.wandering.described.reshape(-1)[slow.sweep]
+        wander_curve = [
+            np.where(read, part, np.nan) for part in slow.wandering.residual(slow.sweep, fit.slope)
+        ]
         frames.append(
             pd.DataFrame(
                 {
@@ -406,6 +418,9 @@ def member_fits(
                     "slope_sigma_widened": widened,
                     "wobble_reference": np.sqrt(slow.wobble_x),
                     "wobble_numerator": np.sqrt(slow.wobble_y),
+                    "wander_nugget": wander_curve[0],
+                    "wander_sill": wander_curve[1],
+                    "wander_timescale": wander_curve[2],
                     "baseline_error": slow.label,
                     "borrowed_max": borrowed,
                     "reference_sigma_provenance": provenance_x,
@@ -853,10 +868,10 @@ def _widening(
     with np.errstate(invalid="ignore", divide="ignore"):
         persistence = np.sqrt(v_rv / v_v)
         # The baseline's part is floored at zero, in the slope's variance and
-        # in the scatter it leaves: a measured semivariogram is not always a
-        # valid one, and on generated air 7.7 % of members would otherwise have
-        # had their sigma narrowed by it (§5.4). So the baseline factor never
-        # narrows, as the Birge factor never does.
+        # in the scatter it leaves. The wander is a model valid by
+        # construction and the wobble a triangle, so v'S~v >= 0 in exact
+        # arithmetic (§5.4); the floor keeps rounding, or a stand-in S a test
+        # hands in, from ever narrowing a sigma, as the Birge factor never does.
         v_sv = np.fmax(v_sv, 0.0)
         total = np.sqrt((v_rv + v_sv) / v_v)
         baseline = total / persistence

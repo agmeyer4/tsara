@@ -42,6 +42,7 @@ from tsara.ratios import (
     ols,
     york,
 )
+from tsara.ratios.baseline_error import Wander
 
 COLUMNS = PairColumns(
     numerator="enhancement_c2h6",
@@ -914,11 +915,9 @@ def _wandering_record(
 
 
 def _slow_factors_by_hand(
-    pairs: xr.Dataset, catalog: pd.DataFrame, row: pd.Series, wandering: object
+    pairs: xr.Dataset, catalog: pd.DataFrame, row: pd.Series, wandering: Wander
 ) -> tuple[float, float]:
     """The baseline factor and expected MSWD of one fit, by a double loop from METHODS §5.4."""
-    from tsara.ratios.baseline_error import LAGS_S
-
     mid = pairs.time.values.astype("datetime64[ns]").astype(np.int64)
     inside = (mid >= pd.Timestamp(row.start_time).value) & (mid < pd.Timestamp(row.end_time).value)
     at = dict(baseline_window=row.baseline_window, baseline_quantile=row.baseline_quantile)
@@ -934,17 +933,20 @@ def _slow_factors_by_hand(
     s = np.sqrt(weight)
     v = s * (x - np.sum(weight * x) / np.sum(weight))
     i = list(pairs.baseline_window.values).index(row.baseline_window)
-    tables = [getattr(wandering, name)[i, 0] for name in ("reference", "numerator", "cross")]
+    (nx, ny, nxy), (gx, gy, gxy) = wandering.nugget[i, 0], wandering.sill[i, 0]
+    tau = wandering.timescale[i, 0]
     wobble_x = np.median(np.fmax(0.0, 1.1**2 - sx**2))
     wobble_y = np.median(np.fmax(0.0, 0.07**2 - sy**2))
     amplitude = wobble_y + b * b * wobble_x
-    # S whole, as a matrix: METHODS' formula at every pair's |dt|, read in log lag.
+    # S whole, as a matrix: METHODS' formula at every pair's |dt|, the residual's
+    # model written out from the three curves' nuggets, sills and timescale.
     dt = np.abs(t[:, None] - t[None, :])
-    logs = np.log(np.clip(dt, 1.0, 7200.0))
-    g = [np.where(dt == 0, 0.0, np.interp(logs, np.log(LAGS_S), tab)) for tab in tables]
-    S = amplitude * np.fmax(0.0, 1 - dt / row.baseline_window) - np.fmax(
-        0.0, g[1] + b * b * g[0] - 2 * b * g[2]
-    )
+    nugget, sill = ny + b * b * nx - 2 * b * nxy, gy + b * b * gx - 2 * b * gxy
+    assert row.wander_nugget == pytest.approx(nugget, rel=1e-12)
+    assert row.wander_sill == pytest.approx(sill, rel=1e-12)
+    assert row.wander_timescale == tau
+    curve = np.where(dt == 0, 0.0, nugget + sill * (1 - np.exp(-dt / tau)))
+    S = amplitude * np.fmax(0.0, 1 - dt / row.baseline_window) - curve
     St = (c[:, None] * S) * c[None, :]
     v_sv = max(0.0, v @ St @ v)
     total2 = (v @ v + v_sv) / (v @ v)
@@ -991,9 +993,10 @@ def test_the_baseline_factor_and_expected_mswd_are_their_definitions(varying: bo
 
 
 def test_the_baseline_factor_never_narrows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A measured semivariogram need not be a valid one (§5.4). Stand in the most invalid:
-    S(dt) = +|dt|, minus a valid semivariogram, so that v'S~v is negative for every member;
-    the baseline's part is floored, and every fit keeps the noise's own factors."""
+    """The wander's model is valid by construction (§5.4), so v'S~v < 0 only by rounding;
+    the floor is checked with the most invalid stand-in: S(dt) = +|dt|, minus a valid
+    semivariogram, so that v'S~v is negative for every member; the baseline's part is
+    floored, and every fit keeps the noise's own factors."""
     import tsara.ratios.fits as fits_module
 
     pairs, catalog = _wandering_record(12)
@@ -1017,8 +1020,11 @@ def test_each_fit_says_which_parts_of_the_baseline_error_it_holds() -> None:
         pairs["enhancement_c2h6"].values[:, 0, 0],
         windows=(120.0, 600.0),
     )
-    assert set(fit(no_clean, catalog).baseline_error) == {"wander"}
-    assert fit(no_clean, catalog).wobble_reference.isna().all()
+    wander_only = fit(no_clean, catalog)
+    assert set(wander_only.baseline_error) == {"wander"}
+    assert wander_only.wobble_reference.isna().all()
+    curve = wander_only[["wander_nugget", "wander_sill", "wander_timescale"]]
+    assert np.isfinite(curve.to_numpy()).all()
     # A record too short to read any lag of, outside its events, with clean spreads: wobble only.
     short = make_pairs(
         np.linspace(0, 10, 40), np.linspace(0, 0.5, 40), windows=(600.0,), clean_spread=(1.1, 0.07)
@@ -1033,6 +1039,8 @@ def test_each_fit_says_which_parts_of_the_baseline_error_it_holds() -> None:
         period="native",
     )
     assert set(got.baseline_error) == {"wobble"}
+    # No lag read, so no wander curve: blank, not a curve of zeros.
+    assert got[["wander_nugget", "wander_sill", "wander_timescale"]].isna().all().all()
     # Neither: no clean spread and no lag.
     bare = make_pairs(np.linspace(0, 10, 40), np.linspace(0, 0.5, 40), windows=(600.0,))
     assert set(fit(bare, short_catalog).baseline_error) == {"none"}
