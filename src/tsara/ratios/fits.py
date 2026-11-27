@@ -53,7 +53,17 @@ Birge factor widens an understated sigma and never narrows a generous one.
 Least squares' sigma comes from the scatter, which persistence shrinks by the
 same E, so it is widened by the persistence factor over sqrt(E). With no
 decorrelation time declared, both factors and E are 1 and ``tau_s`` is blank.
-Every factor is stored beside the widened sigma.
+
+The baseline's error enters the same algebra (``baseline_error``): a
+covariance S between a member's points, from the background's wander (always
+measured, on the pair cells outside every event of either gas, and fitted by a
+model valid by construction) and the baseline's own wobble (where the pairing
+carried each gas's clean spread, ``PairColumns.*_clean_spread``). It
+multiplies the slope's sigma by the **baseline factor** and raises E by what
+it leaves in the scatter. ``baseline_error`` says which parts a fit holds;
+the two wobbles and the residual's wander curve at the fit's own slope
+(``wander_nugget``, ``wander_sill``, ``wander_timescale``) are stored. Every
+factor is stored beside the widened sigma.
 
 Weights and support
 -------------------
@@ -84,6 +94,7 @@ from tsara.core.naming import (
 )
 from tsara.core.support import stream_cells
 from tsara.core.timebase import NS_PER_S
+from tsara.ratios.baseline_error import Wander, slow_covariance, wander, wobble
 from tsara.ratios.estimators import (
     FitStatus,
     LineFit,
@@ -98,7 +109,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["FIT_COLUMNS", "PLATEAU_WIDTH", "PairColumns", "member_fits"]
+__all__ = ["FIT_COLUMNS", "FIT_DTYPES", "PLATEAU_WIDTH", "PairColumns", "member_fits"]
 
 #: The fit table's columns, in order: one row per member, estimator,
 #: numerator and pair clock (METHODS §5.2-5.4). The member is named by the
@@ -135,16 +146,28 @@ FIT_COLUMNS: tuple[str, ...] = (
     "plateau_dof",
     "tau_s",
     "persistence_factor",
+    "baseline_factor",
     "mswd_expected",
     "birge_factor",
     "slope_sigma_widened",
+    "wobble_reference",
+    "wobble_numerator",
+    "wander_nugget",
+    "wander_sill",
+    "wander_timescale",
+    "baseline_error",
     "borrowed_max",
     "reference_sigma_provenance",
     "numerator_sigma_provenance",
+    "reference_systematic_relative",
+    "numerator_systematic_relative",
+    "reference_systematic_provenance",
+    "numerator_systematic_provenance",
 )
 
-#: Declared so a table survives Parquet exactly, as the event catalog's do.
-_FIT_DTYPES: dict[str, str] = {
+#: The fit table's column types: declared so a table survives Parquet exactly,
+#: as the event catalog's do, and so a table with no rows still has them.
+FIT_DTYPES: dict[str, str] = {
     **dict.fromkeys(
         (
             "event_id",
@@ -154,8 +177,11 @@ _FIT_DTYPES: dict[str, str] = {
             "period",
             "method",
             "status",
+            "baseline_error",
             "reference_sigma_provenance",
             "numerator_sigma_provenance",
+            "reference_systematic_provenance",
+            "numerator_systematic_provenance",
         ),
         "str",
     ),
@@ -179,10 +205,18 @@ _FIT_DTYPES: dict[str, str] = {
             "plateau_mswd",
             "tau_s",
             "persistence_factor",
+            "baseline_factor",
             "mswd_expected",
             "birge_factor",
             "slope_sigma_widened",
+            "wobble_reference",
+            "wobble_numerator",
+            "wander_nugget",
+            "wander_sill",
+            "wander_timescale",
             "borrowed_max",
+            "reference_systematic_relative",
+            "numerator_systematic_relative",
         ),
         "float64",
     ),
@@ -214,12 +248,19 @@ class PairColumns:
     numerator_reading, reference_reading : str
         The two readings, carried beside them (``PairedSpecies.carried``);
         their random sigma, where declared, weighs the fit (METHODS §4.3).
+    numerator_clean_spread, reference_clean_spread : str or None
+        The events stage's clean spread of each enhancement, carried onto the
+        pair cells over the sweep, from which the baseline's wobble is read
+        (METHODS §5.4); None where none was carried, and then that gas's
+        wobble is not known.
     """
 
     numerator: str
     reference: str
     numerator_reading: str
     reference_reading: str
+    numerator_clean_spread: str | None = None
+    reference_clean_spread: str | None = None
 
 
 def member_fits(
@@ -231,6 +272,7 @@ def member_fits(
     numerator: str,
     period: str,
     methods: Sequence[str] = ("ols", "york"),
+    baseline_error: bool = True,
 ) -> pd.DataFrame:
     """Fit the numerator against the reference over every member of every candidate.
 
@@ -252,6 +294,12 @@ def member_fits(
         The pair clock's name, ``'native'`` or a duration, for the table.
     methods : sequence of str, optional
         Registered estimators (``RatiosConfig.methods``).
+    baseline_error : bool, optional
+        Whether the enhancements carry a baseline's error to widen for (§5.4).
+        False for enhancements known to carry none, made on a true
+        background as a test or a notebook makes them: the wander measured
+        outside the events would then be the air's own small plumes, read as
+        an error there is not, and every fit says ``'none'``.
 
     Returns
     -------
@@ -287,6 +335,8 @@ def member_fits(
     # Each member's pairs at its own sweep point, and the readings' own sigma.
     sigma_x, provenance_x = _sigma(pairs, columns.reference_reading)
     sigma_y, provenance_y = _sigma(pairs, columns.numerator_reading)
+    systematic_x = _systematic(pairs, columns.reference_reading)
+    systematic_y = _systematic(pairs, columns.numerator_reading)
     x, y, sx, sy = _gather(deltas, (sigma_x, sigma_y), rows)
     n_members = len(members)
     fits = {
@@ -299,13 +349,33 @@ def member_fits(
     signal = _signal(x, y, sx, rows.group, n_members)
     tau_s = _tau(pairs, columns)
     borrowed = _borrowed(pairs, columns, rows, x, y, n_members)
+    # The baseline's error (§5.4): the two gases' wander on the pair cells
+    # outside every event of either, and each gas's wobble where its clean
+    # spread came along with the pairing.
+    slow = _describe_slow(
+        baseline_error,
+        pairs,
+        catalog,
+        columns,
+        members,
+        rows,
+        deltas,
+        (sigma_x, sigma_y),
+        midpoints,
+        (numerator, reference),
+    )
     frames = []
     for position, (method, fit) in enumerate(fits.items()):
-        persistence, expected, birge, widened = _widening(
-            fit, method == "york", (x, y, sx, sy), rows, midpoints, tau_s
+        persistence, baseline, expected, birge, widened = _widening(
+            fit, method == "york", (x, y, sx, sy), rows, midpoints, tau_s, slow
         )
         mswd = york.mswd if york is not None else np.full(n_members, np.nan)
         dof = (york.n if york is not None else fit.n) - 2
+        # The residual's wander curve this fit used, at its own slope; NaN where none was read.
+        read = slow.wandering.described.reshape(-1)[slow.sweep]
+        wander_curve = [
+            np.where(read, part, np.nan) for part in slow.wandering.residual(slow.sweep, fit.slope)
+        ]
         frames.append(
             pd.DataFrame(
                 {
@@ -342,12 +412,23 @@ def member_fits(
                     "plateau_dof": plateau[2],
                     "tau_s": tau_s,
                     "persistence_factor": persistence,
+                    "baseline_factor": baseline,
                     "mswd_expected": expected,
                     "birge_factor": birge,
                     "slope_sigma_widened": widened,
+                    "wobble_reference": np.sqrt(slow.wobble_x),
+                    "wobble_numerator": np.sqrt(slow.wobble_y),
+                    "wander_nugget": wander_curve[0],
+                    "wander_sill": wander_curve[1],
+                    "wander_timescale": wander_curve[2],
+                    "baseline_error": slow.label,
                     "borrowed_max": borrowed,
                     "reference_sigma_provenance": provenance_x,
                     "numerator_sigma_provenance": provenance_y,
+                    "reference_systematic_relative": systematic_x[0],
+                    "numerator_systematic_relative": systematic_y[0],
+                    "reference_systematic_provenance": systematic_x[1],
+                    "numerator_systematic_provenance": systematic_y[1],
                 },
                 # Numbered member-major, so that sorting by it puts each
                 # member's estimators together, in the order given.
@@ -355,6 +436,25 @@ def member_fits(
             )
         )
     return _table(frames).sort_index(kind="stable").reset_index(drop=True)
+
+
+@dataclass(frozen=True)
+class _Slow:
+    """The baseline's error a member's fit carries (§5.4), one entry per member.
+
+    ``wobble_x`` and ``wobble_y`` are the reference's and the numerator's
+    wobble variances (NaN where unknown), ``window_s`` the member's baseline
+    window, ``sweep`` its sweep point as ``window * n_quantiles + quantile``,
+    ``wandering`` the two gases' wander at every sweep point, and ``label``
+    which parts the fit holds.
+    """
+
+    wobble_x: npt.NDArray[np.float64]
+    wobble_y: npt.NDArray[np.float64]
+    window_s: npt.NDArray[np.float64]
+    sweep: npt.NDArray[np.intp]
+    wandering: Wander
+    label: npt.NDArray[np.str_]
 
 
 @dataclass(frozen=True)
@@ -531,6 +631,22 @@ def _sigma(pairs: xr.Dataset, reading: str) -> tuple[npt.NDArray[np.float64] | N
     )
 
 
+def _systematic(pairs: xr.Dataset, reading: str) -> tuple[float, str]:
+    """Return a carried reading's declared relative systematic term, and its provenance.
+
+    Zero where its budget declares no systematic component; unknown (NaN)
+    where it is not declared, or is reported per reading, which cannot be split
+    into a scale and an offset (§5.5).
+    """
+    attrs = pairs[reading].attrs
+    provenance = str(attrs.get("uncertainty_provenance_systematic", "unknown"))
+    if provenance == "zero":
+        return 0.0, provenance
+    if provenance == "declared":
+        return float(attrs.get("uncertainty_systematic_relative", np.nan)), provenance
+    return np.nan, provenance
+
+
 def _signal(
     x: npt.NDArray[np.float64],
     y: npt.NDArray[np.float64],
@@ -591,6 +707,72 @@ def _borrowed(
     return np.where(np.isfinite(largest), largest, np.nan)
 
 
+def _describe_slow(
+    enabled: bool,
+    pairs: xr.Dataset,
+    catalog: pd.DataFrame,
+    columns: PairColumns,
+    members: pd.DataFrame,
+    rows: _Rows,
+    deltas: tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]],
+    sigmas: tuple[npt.NDArray[np.float64] | None, npt.NDArray[np.float64] | None],
+    midpoints: npt.NDArray[np.int64],
+    variables: tuple[str, str],
+) -> _Slow:
+    """Return the baseline's error each member's fit carries (§5.4).
+
+    The wander is the pairing's, measured once per sweep point; a member's
+    wobble is the median, over its points at its sweep point, of each gas's
+    wobble variance. Not ``enabled``, it describes nothing: every member says ``'none'``.
+    """
+    sigma_x, sigma_y = sigmas
+    n_members = len(members)
+    if not enabled:
+        # Without the readings' sigma wander() describes no lag, and no wobble is read.
+        sigma_x = sigma_y = None
+        columns = PairColumns(
+            columns.numerator,
+            columns.reference,
+            columns.numerator_reading,
+            columns.reference_reading,
+        )
+    wandering = wander(pairs, catalog, deltas, (sigma_y, sigma_x), midpoints, variables)
+    wobble_x = _member_wobble(
+        wobble(pairs, columns.reference_clean_spread, sigma_x), rows, n_members
+    )
+    wobble_y = _member_wobble(
+        wobble(pairs, columns.numerator_clean_spread, sigma_y), rows, n_members
+    )
+    window = _positions(members["baseline_window"], pairs, WINDOW_DIM)
+    quantile = _positions(members["baseline_quantile"], pairs, QUANTILE_DIM)
+    described = wandering.described[window, quantile]
+    known = np.isfinite(wobble_x) & np.isfinite(wobble_y)
+    label = np.where(
+        described,
+        np.where(known, "wobble and wander", "wander"),
+        np.where(known, "wobble", "none"),
+    )
+    return _Slow(
+        wobble_x=wobble_x,
+        wobble_y=wobble_y,
+        window_s=members["baseline_window"].to_numpy(dtype=np.float64),
+        sweep=(window * pairs.sizes[QUANTILE_DIM] + quantile).astype(np.intp),
+        wandering=wandering,
+        label=label,
+    )
+
+
+def _member_wobble(
+    values: npt.NDArray[np.float64] | None, rows: _Rows, n_members: int
+) -> npt.NDArray[np.float64]:
+    """Return each member's median wobble variance over its points; NaN where unknown."""
+    if values is None:
+        return np.full(n_members, np.nan)
+    at = values[rows.cell, rows.window, rows.quantile]
+    median = pd.Series(at).groupby(rows.group).median()
+    return np.asarray(median.reindex(np.arange(n_members)), dtype=np.float64)
+
+
 def _widening(
     fit: LineFit,
     is_york: bool,
@@ -603,47 +785,51 @@ def _widening(
     rows: _Rows,
     midpoints: npt.NDArray[np.int64],
     tau_s: float,
+    slow: _Slow,
 ) -> tuple[
     npt.NDArray[np.float64],
     npt.NDArray[np.float64],
     npt.NDArray[np.float64],
     npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
 ]:
-    """Return each fit's persistence factor, expected MSWD, Birge factor and widened sigma (§5.4).
+    """Return each fit's persistence, baseline and Birge factors, expected MSWD, widened sigma.
 
-    Under errors that persist, correlated as exp(-|t_i - t_j| / tau) between
-    points i and j, the slope of a line fitted with weights w varies more than
-    its sigma says, by the factor P = sqrt(v'Rv / v'v), where v is each
-    point's sqrt(w) times its x's distance from the weighted mean of x, and R
-    those correlations: the slope's own factor, not the mean's
-    sqrt(N / N_eff), which a slope exceeds (noise lingering across a plume
-    lifts all its points, and moves the intercept, not the slope). The same
-    persistence makes the scatter about the line smaller than the declared
-    noise explains, by E = (n - s'Rs / s's - P^2) / (n - 2), s = sqrt(w): the
-    trace of R left after the fit, per degree of freedom, and the MSWD a
-    single source is expected to read. So York's sigma is widened by P and by
-    sqrt(max(1, MSWD / E)), and least squares', which comes from the scatter,
-    by P / sqrt(E). With no decorrelation time declared, P and E are 1.
-    York's weights are its own at its final slope, 1 / (sigma_y^2 + b^2
-    sigma_x^2); least squares' are equal.
+    A fit's points carry two errors besides independent noise (§5.4): the
+    readings' noise may persist, correlated as R_ij = exp(-|t_i - t_j| / tau),
+    and the baseline's error changes across the member, a covariance S_ij
+    between the points (``baseline_error``). In the slope's own metric, with
+    weights w and c_i = 1 / sigma_e,i the inverse of each point's residual
+    noise (York's weights are c^2; least squares' are equal, its c the
+    member's mean), the slope varies by P^2 = (v'Rv + v'S~v) / v'v times what
+    York's sigma says, v = sqrt(w) (x - weighted mean of x) and S~_ij =
+    c_i c_j S_ij: the persistence factor sqrt(v'Rv / v'v) times the baseline
+    factor P / that. The MSWD a single source is expected to read is E = (n +
+    tr S~ - (s'Rs + s'S~s) / s's - P^2) / (n - 2), s = sqrt(w): what the two
+    leave after the line's intercept and slope are fitted, per degree of
+    freedom. York's sigma is widened by P and sqrt(max(1, MSWD / E)); least
+    squares', which comes from the scatter, by P / sqrt(E). With no
+    decorrelation time declared R is the identity; with no baseline error
+    described S is zero; with neither, every factor is 1.
     """
     x, y, sigma_x, sigma_y = points
     n_groups = fit.n.size
     birge = np.sqrt(np.fmax(1.0, fit.mswd)) if is_york else np.full(n_groups, np.nan)
-    if not np.isfinite(tau_s):
+    persist = np.isfinite(tau_s)
+    has_slow = sigma_x is not None and sigma_y is not None and (slow.label != "none").any()
+    if not persist and not has_slow:
         ones = np.ones(n_groups)
-        return ones, ones, birge, fit.slope_sigma * (birge if is_york else 1.0)
-    if not is_york:
-        weight = np.ones_like(x)
-    elif sigma_x is None or sigma_y is None:
-        weight = np.full_like(x, np.nan)  # York could not weigh, and fitted nothing
+        return ones, ones, ones, birge, fit.slope_sigma * (birge if is_york else 1.0)
+    group = rows.group
+    b = fit.slope[group]
+    if sigma_x is None or sigma_y is None:
+        noise_w = np.full_like(x, np.nan)  # no residual noise to scale the baseline's error by
     else:
-        b = fit.slope[rows.group]
-        with np.errstate(invalid="ignore"):
-            weight = 1.0 / (sigma_y**2 + b * b * sigma_x**2)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            noise_w = 1.0 / (sigma_y**2 + b * b * sigma_x**2)
+    weight = noise_w if is_york else np.ones_like(x)
     used = np.isfinite(x) & np.isfinite(y) & np.isfinite(weight)
     weight = np.where(used, weight, 0.0)
-    group = rows.group
     sum_w = np.bincount(group, weights=weight, minlength=n_groups)
     with np.errstate(invalid="ignore", divide="ignore"):
         mean_x = (
@@ -652,21 +838,54 @@ def _widening(
     s = np.sqrt(weight)
     v = np.where(used, s * (x - mean_x[group]), 0.0)
     seconds = midpoints[rows.cell].astype(np.float64) / NS_PER_S
-    s_rs, v_rv = _correlated_sums((s, v), group, seconds, tau_s, n_groups)
     v_v = np.bincount(group, weights=v * v, minlength=n_groups)
     count = np.bincount(group, weights=used.astype(np.float64), minlength=n_groups)
+    if persist:
+        s_rs, v_rv = _correlated_sums((s, v), group, seconds, tau_s, n_groups)
+    else:
+        s_rs, v_rv = sum_w.astype(np.float64), v_v.astype(np.float64)
+    s_ss = v_sv = trace = np.zeros(n_groups)
+    if has_slow:
+        scale = np.where(used & np.isfinite(noise_w), np.sqrt(np.where(used, noise_w, 0.0)), 0.0)
+        if not is_york:
+            # Least squares' weights are equal, so its residual noise is the member's mean.
+            with np.errstate(invalid="ignore", divide="ignore"):
+                mean_var = (
+                    np.bincount(
+                        group,
+                        weights=np.where(
+                            scale > 0, 1.0 / np.where(scale > 0, scale, 1.0) ** 2, 0.0
+                        ),
+                        minlength=n_groups,
+                    )
+                    / count
+                )
+                scale = np.where(scale > 0, 1.0 / np.sqrt(mean_var[group]), 0.0)
+        amplitude = np.nan_to_num(slow.wobble_y) + fit.slope**2 * np.nan_to_num(slow.wobble_x)
+        amplitude = np.where(np.isfinite(amplitude), amplitude, 0.0)
+        s_ss, v_sv = _slow_sums((s * scale, v * scale), group, seconds, fit.slope, amplitude, slow)
+        trace = amplitude * np.bincount(group, weights=scale * scale, minlength=n_groups)
     with np.errstate(invalid="ignore", divide="ignore"):
         persistence = np.sqrt(v_rv / v_v)
-        expected = (count - s_rs / sum_w - persistence**2) / (count - 2)
+        # The baseline's part is floored at zero, in the slope's variance and
+        # in the scatter it leaves. The wander is a model valid by
+        # construction and the wobble a triangle, so v'S~v >= 0 in exact
+        # arithmetic (§5.4); the floor keeps rounding, or a stand-in S a test
+        # hands in, from ever narrowing a sigma, as the Birge factor never does.
+        v_sv = np.fmax(v_sv, 0.0)
+        total = np.sqrt((v_rv + v_sv) / v_v)
+        baseline = total / persistence
+        left = np.fmax(trace - s_ss / sum_w - v_sv / v_v, 0.0)
+        expected = (count - s_rs / sum_w - persistence**2 + left) / (count - 2)
         # Two points leave no degree of freedom to expect a scatter on.
         expected = np.where((count > 2) & (expected > 0), expected, np.nan)
         if is_york:
             ratio = fit.mswd / expected
             birge = np.where(np.isfinite(ratio), np.sqrt(np.fmax(1.0, ratio)), np.nan)
-            widened = fit.slope_sigma * persistence * birge
+            widened = fit.slope_sigma * total * birge
         else:
-            widened = fit.slope_sigma * persistence / np.sqrt(expected)
-    return persistence, expected, birge, widened
+            widened = fit.slope_sigma * total / np.sqrt(expected)
+    return persistence, baseline, expected, birge, widened
 
 
 #: Below this correlation, a lag adds nothing a float can hold beside the
@@ -705,7 +924,48 @@ def _correlated_sums(
     return tuple(totals)
 
 
+def _slow_sums(
+    arrays: tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]],
+    group: npt.NDArray[np.intp],
+    seconds: npt.NDArray[np.float64],
+    slope: npt.NDArray[np.float64],
+    amplitude: npt.NDArray[np.float64],
+    slow: _Slow,
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """Return per group, for each array a, the sum over i, j of a_i a_j S(t_i - t_j).
+
+    S is the baseline's error between two points of one member
+    (``baseline_error.slow_covariance``), which does not die away with lag as
+    the readings' persistence does, so the sum runs over every lag a group
+    spans. Rows of one group are consecutive and in time order (``_rows``).
+    """
+    n_groups = slope.size
+
+    def kernel(dt: npt.NDArray[np.float64], g: npt.NDArray[np.intp]) -> npt.NDArray[np.float64]:
+        return slow_covariance(
+            dt, amplitude[g], slow.window_s[g], slope[g], slow.sweep[g], slow.wandering
+        )
+
+    zero = np.zeros(group.size)
+    diagonal = kernel(zero, group)
+    totals = [
+        np.bincount(group, weights=a * a * diagonal, minlength=n_groups).astype(np.float64)
+        for a in arrays
+    ]
+    # Every lag below the largest member's size has that member's pairs at least.
+    sizes = np.bincount(group, minlength=n_groups)
+    for lag in range(1, int(sizes.max(initial=0))):
+        same = group[lag:] == group[:-lag]
+        g = group[lag:][same]
+        weight = kernel(seconds[lag:][same] - seconds[:-lag][same], g)
+        for total, a in zip(totals, arrays, strict=True):
+            total += 2.0 * np.bincount(
+                g, weights=weight * a[lag:][same] * a[:-lag][same], minlength=n_groups
+            )
+    return totals[0], totals[1]
+
+
 def _table(frames: list[pd.DataFrame]) -> pd.DataFrame:
     """Return the fit table with its declared types, empty when there is nothing."""
     table = pd.concat(frames) if frames else pd.DataFrame(columns=list(FIT_COLUMNS))
-    return table.loc[:, list(FIT_COLUMNS)].astype(_FIT_DTYPES)
+    return table.loc[:, list(FIT_COLUMNS)].astype(FIT_DTYPES)

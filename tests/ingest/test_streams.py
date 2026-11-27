@@ -269,6 +269,34 @@ def test_omitted_systematic_is_labelled_zero_not_unknown() -> None:
     assert stream["ch4"].attrs["uncertainty_provenance_systematic"] == "zero"
 
 
+def test_a_declared_systematic_keeps_its_two_terms_apart() -> None:
+    """METHODS §2.4, §5.5: a ratio's systematic error comes from the relative term alone,
+    which the per-reading sigma_sys cannot give back."""
+    instrument = _instrument(
+        ch4={
+            "column": "CH4_dry",
+            "units": "ppm",
+            "uncertainty": {
+                "random": {"mode": "declared", "absolute": 0.002},
+                "systematic": {"mode": "declared", "absolute": 0.001, "relative": 0.02},
+            },
+        }
+    )
+    attrs = _build(_frame(), instrument)["ch4"].attrs
+    assert attrs["uncertainty_systematic_relative"] == 0.02
+    assert attrs["uncertainty_systematic_absolute"] == 0.001
+    # No systematic declared: nothing written, and the provenance says why.
+    omitted = _instrument(
+        ch4={
+            "column": "CH4_dry",
+            "units": "ppm",
+            "uncertainty": {"random": {"mode": "declared", "absolute": 0.002}},
+        }
+    )
+    assert "uncertainty_systematic_relative" not in _build(_frame(), omitted)["ch4"].attrs
+    assert "uncertainty_systematic_relative" not in _build(_frame(), _instrument())["ch4"].attrs
+
+
 def test_mixed_modes_are_labelled_mixed() -> None:
     instrument = _instrument(
         ch4={

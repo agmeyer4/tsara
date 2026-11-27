@@ -40,6 +40,7 @@ from tsara.core.naming import (
     QUANTILE_DIM,
     TIME_COORD,
     WINDOW_DIM,
+    clean_spread_name,
     enhancement_name,
 )
 from tsara.core.support import stream_cells
@@ -290,7 +291,7 @@ def _own_rows(
     z = _swept(state[f"z_{variable}"], 3)
     enhancement = _swept(baseline[enhancement_name(variable)], 3)
     level = _swept(state[f"clean_level_{variable}"], 3)
-    spread = _swept(state[f"clean_spread_{variable}"], 3)
+    spread = _swept(state[clean_spread_name(variable)], 3)
     record = state[f"record_{variable}"].values
     counts = _swept(state[f"n_events_{variable}"], 4)
     chance = _swept(state[f"chance_events_{variable}"], 4)

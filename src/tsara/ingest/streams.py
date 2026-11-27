@@ -51,7 +51,7 @@ import pandas as pd
 import xarray as xr
 
 from tsara._version import __version__
-from tsara.config.manifest import MobilePlatform, StationaryPlatform
+from tsara.config.manifest import DeclaredUncertainty, MobilePlatform, StationaryPlatform
 from tsara.core.circular import wrap_degrees
 from tsara.core.naming import (
     ALTITUDE_COORD,
@@ -346,6 +346,13 @@ def _add_variable(
         "uncertainty_provenance_systematic": resolved.systematic_provenance,
         "masked_fraction": masked_fraction(masked),
     }
+    systematic = variable.uncertainty.systematic if variable.uncertainty is not None else None
+    if isinstance(systematic, DeclaredUncertainty):
+        # The two declared terms kept apart, as the per-reading sigma cannot keep
+        # them: a ratio's systematic error comes from the relative term alone, an
+        # offset cancelling in every enhancement and slope (METHODS §5.5).
+        attrs["uncertainty_systematic_relative"] = systematic.relative
+        attrs["uncertainty_systematic_absolute"] = systematic.absolute
     if variable.description:
         attrs["description"] = variable.description
     if resolved.decorrelation_timescale is not None:

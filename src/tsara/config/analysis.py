@@ -970,9 +970,10 @@ class GatesConfig(_StrictModel):
     summary (§5.6) at no cost in refitting, and a one-element list is a fixed
     gate. Every gate has a value that lets everything through, so turning one
     off is a value rather than a switch: ``min_peak_z`` 0, ``min_points`` 3,
-    ``min_signal`` 0, ``mswd_probability`` and ``plateau_probability`` 1. The
-    plateau gate is off by default, the others on, as measured in 7c1's fourth
-    stage (METHODS.md §5.3).
+    ``min_signal`` 0, ``mswd_probability`` and ``plateau_probability`` 1,
+    ``max_window_fill`` infinite. The plateau gate is off by default, the others
+    on, as measured in 7c1's fourth stage and on real air with known plumes
+    added (METHODS.md §5.3).
 
     Gate settings are not pooled into a candidate's sigma_method: within one
     candidate a stricter gate only drops some of its members, and the spread of
@@ -1034,6 +1035,20 @@ class GatesConfig(_StrictModel):
             "because it rejects a neighbour nearby as much as a mixture (§5.3)."
         ),
     )
+    max_window_fill: tuple[float, ...] = Field(
+        default=(0.75,),
+        min_length=1,
+        description=(
+            "Crowding: the member's duration over its baseline window must not "
+            "exceed this. A plume that fills most of its window lifts the window's "
+            "low quantile with its own readings, so the baseline eats part of it and "
+            "the ratio reads low; such a plume belongs to a longer window, where it "
+            "fits. 3/4 by default: on real air with known plumes added, members above "
+            "it read a median 1.2 % low and their 95 % intervals held the truth in "
+            "67-68 % of them, members below it showed no bias (METHODS.md §5.3). "
+            "Infinite (.inf in YAML) lets every member through."
+        ),
+    )
 
     @field_validator("min_peak_z", "min_signal")
     @classmethod
@@ -1055,6 +1070,16 @@ class GatesConfig(_StrictModel):
                 f"points a line fit accepts; got {list(value)}."
             )
         return _strictly_increasing(value, "GatesConfig.min_points")
+
+    @field_validator("max_window_fill")
+    @classmethod
+    def _positive_and_increasing(cls, value: tuple[float, ...]) -> tuple[float, ...]:
+        if any(math.isnan(v) or v <= 0 for v in value):
+            raise ValueError(
+                "GatesConfig.max_window_fill values are shares of the baseline window, "
+                f"above 0 (infinite lets every member through); got {list(value)}."
+            )
+        return _strictly_increasing(value, "GatesConfig.max_window_fill")
 
     @field_validator("mswd_probability", "plateau_probability")
     @classmethod

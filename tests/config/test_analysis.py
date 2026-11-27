@@ -473,6 +473,7 @@ def test_gates_default_to_the_measured_thresholds() -> None:
     assert gates.min_signal == (2.0,)
     assert gates.mswd_probability == (0.99,)
     assert gates.plateau_probability == (1.0,)
+    assert gates.max_window_fill == (0.75,)
 
 
 def test_every_gate_is_a_list_and_each_has_a_value_that_lets_everything_through() -> None:
@@ -482,8 +483,10 @@ def test_every_gate_is_a_list_and_each_has_a_value_that_lets_everything_through(
         min_points=(3, 8),
         min_signal=(0.0, 2.0),
         mswd_probability=(0.95, 0.99, 1.0),
+        max_window_fill=(0.5, 0.75, float("inf")),
     )
     assert gates.mswd_probability[-1] == 1.0
+    assert gates.max_window_fill[-1] == float("inf")
 
 
 @pytest.mark.parametrize(
@@ -501,6 +504,9 @@ def test_every_gate_is_a_list_and_each_has_a_value_that_lets_everything_through(
         ("plateau_probability", [0.0], "above 0"),
         ("plateau_probability", [1.5], "at most 1"),
         ("plateau_probability", [1.0, 0.99], "strictly increasing"),
+        ("max_window_fill", [0.0], "above 0"),
+        ("max_window_fill", [float("nan")], "above 0"),
+        ("max_window_fill", [0.75, 0.5], "strictly increasing"),
         ("min_points", [], "at least 1"),
     ],
 )

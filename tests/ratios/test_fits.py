@@ -42,12 +42,22 @@ from tsara.ratios import (
     ols,
     york,
 )
+from tsara.ratios.baseline_error import Wander
 
 COLUMNS = PairColumns(
     numerator="enhancement_c2h6",
     reference="enhancement_ch4",
     numerator_reading="c2h6",
     reference_reading="ch4",
+)
+#: The same columns with both gases' clean spreads carried (METHODS §5.4).
+CLEAN_COLUMNS = PairColumns(
+    numerator="enhancement_c2h6",
+    reference="enhancement_ch4",
+    numerator_reading="c2h6",
+    reference_reading="ch4",
+    numerator_clean_spread="clean_spread_c2h6",
+    reference_clean_spread="clean_spread_ch4",
 )
 
 
@@ -62,6 +72,7 @@ def make_pairs(
     tau: tuple[str | None, str | None] = (None, None),
     borrowed: tuple[float, float] = (0.0, 0.0),
     width_s: int = 1,
+    clean_spread: tuple[float | None, float | None] = (None, None),
 ) -> xr.Dataset:
     """A paired product as pairing makes one: abutting cells of ``width_s`` (1 s
     by default), enhancements swept, readings carried.
@@ -69,7 +80,9 @@ def make_pairs(
     ``dx`` and ``dy`` are (cells,) arrays, the same at every sweep point, or
     (cells, windows, quantiles) arrays. ``tau`` is the (reference, numerator)
     decorrelation time declared on each enhancement, ``borrowed`` the
-    (reference, numerator) borrowed share of every value.
+    (reference, numerator) borrowed share of every value, ``clean_spread``
+    the (reference, numerator) clean spread carried beside them (columns
+    :data:`CLEAN_COLUMNS` names), none when None.
     """
     n = dx.shape[0]
     shape = (n, len(windows), len(quantiles))
@@ -95,6 +108,12 @@ def make_pairs(
                 np.broadcast_to(np.asarray(sigma, dtype=np.float64), (n,)).copy(),
                 {"uncertainty_provenance": "declared"},
             )
+    for column, spread in (
+        (CLEAN_COLUMNS.reference_clean_spread, clean_spread[0]),
+        (CLEAN_COLUMNS.numerator_clean_spread, clean_spread[1]),
+    ):
+        if spread is not None and column is not None:
+            data[column] = (swept, np.full(shape, spread), {"units": "ppb"})
     pairs = xr.Dataset(
         data,
         coords={
@@ -329,7 +348,7 @@ class _quiet:
 
 
 @pytest.mark.parametrize("borrowed", [(0.1, 0.25), (0.25, 0.1)])
-def test_the_largest_borrowed_share_of_either_member_is_recorded(
+def test_the_largest_borrowed_share_of_either_variable_is_recorded(
     borrowed: tuple[float, float],
 ) -> None:
     pairs = make_pairs(np.arange(10.0), 0.5 * np.arange(10.0), borrowed=borrowed)
@@ -844,3 +863,245 @@ def test_an_unregistered_estimator_is_refused(simple: tuple[xr.Dataset, pd.DataF
     pairs, catalog = simple
     with pytest.raises(TsaraRatioError, match="odr"):
         fit(pairs, catalog, methods=("odr",))
+
+
+# ---------------------------------------------------------------------------
+# The baseline's error (METHODS §5.4)
+# ---------------------------------------------------------------------------
+
+
+def _wandering_record(
+    seed: int, n: int = 7_200, *, varying: bool = False
+) -> tuple[xr.Dataset, pd.DataFrame]:
+    """Two hours of 1 s cells: four plumes of one source on backgrounds that wander, and
+    an event around each plume, at two windows; with ``varying``, methane's declared
+    sigma is 0.9 ppb every third second and 0.5 ppb
+    otherwise, so a member's median wobble is not its mean."""
+    rng = np.random.default_rng(seed)
+    t = np.arange(n, dtype=float)
+    plume = np.zeros(n)
+    spans = []
+    for k, centre in enumerate((900, 2400, 4200, 6000)):
+        width = 30 + 15 * k
+        plume += (30 + 10 * k) * np.exp(-0.5 * ((t - centre) / width) ** 2)
+        spans.append((centre - 3 * width, centre + 3 * width))
+    walk_x = np.cumsum(rng.normal(0, 0.15, n))
+    walk_y = np.cumsum(rng.normal(0, 0.006, n))
+    dx = plume + walk_x + rng.normal(0, 0.7, n)
+    dy = 0.05 * plume + walk_y + rng.normal(0, 0.05, n)
+    sigma_x = np.where(np.arange(n) % 3 == 0, 0.9, 0.5) if varying else 0.7
+    pairs = make_pairs(dx, dy, sigma_x=sigma_x, windows=(120.0, 600.0), clean_spread=(1.1, 0.07))
+    rows = []
+    for window in (120.0, 600.0):
+        for k, (start, end) in enumerate(spans):
+            rows.append(
+                event_row(
+                    f"e{window:.0f}_{k}",
+                    f"van.ch4/w{window:.0f}s/c{k}",
+                    (start, end),
+                    window=window,
+                )
+            )
+            rows.append(
+                event_row(
+                    f"f{window:.0f}_{k}",
+                    f"van.ch4/w{window:.0f}s/c{k}",
+                    (start + 20, end - 20),
+                    window=window,
+                    exit_=2.0,
+                )
+            )
+    return pairs, pd.DataFrame(rows)
+
+
+def _slow_factors_by_hand(
+    pairs: xr.Dataset, catalog: pd.DataFrame, row: pd.Series, wandering: Wander
+) -> tuple[float, float]:
+    """The baseline factor and expected MSWD of one fit, by a double loop from METHODS §5.4."""
+    mid = pairs.time.values.astype("datetime64[ns]").astype(np.int64)
+    inside = (mid >= pd.Timestamp(row.start_time).value) & (mid < pd.Timestamp(row.end_time).value)
+    at = dict(baseline_window=row.baseline_window, baseline_quantile=row.baseline_quantile)
+    x = pairs["enhancement_ch4"].sel(at).values[inside]
+    t = mid[inside] / 1e9
+    b = row.slope
+    sx = pairs["sigma_rand_ch4"].values[inside]
+    sy = pairs["sigma_rand_c2h6"].values[inside]
+    w = 1.0 / (sy**2 + b * b * sx**2)
+    weight = w if row.method == "york" else np.ones(x.size)
+    # York's points are scaled by their own residual noise; least squares' by its mean.
+    c = np.sqrt(w) if row.method == "york" else np.full(x.size, 1 / np.sqrt(np.mean(1 / w)))
+    s = np.sqrt(weight)
+    v = s * (x - np.sum(weight * x) / np.sum(weight))
+    i = list(pairs.baseline_window.values).index(row.baseline_window)
+    (nx, ny, nxy), (gx, gy, gxy) = wandering.nugget[i, 0], wandering.sill[i, 0]
+    tau = wandering.timescale[i, 0]
+    wobble_x = np.median(np.fmax(0.0, 1.1**2 - sx**2))
+    wobble_y = np.median(np.fmax(0.0, 0.07**2 - sy**2))
+    amplitude = wobble_y + b * b * wobble_x
+    # S whole, as a matrix: METHODS' formula at every pair's |dt|, the residual's
+    # model written out from the three curves' nuggets, sills and timescale.
+    dt = np.abs(t[:, None] - t[None, :])
+    nugget, sill = ny + b * b * nx - 2 * b * nxy, gy + b * b * gx - 2 * b * gxy
+    assert row.wander_nugget == pytest.approx(nugget, rel=1e-12)
+    assert row.wander_sill == pytest.approx(sill, rel=1e-12)
+    assert row.wander_timescale == tau
+    curve = np.where(dt == 0, 0.0, nugget + sill * (1 - np.exp(-dt / tau)))
+    S = amplitude * np.fmax(0.0, 1 - dt / row.baseline_window) - curve
+    St = (c[:, None] * S) * c[None, :]
+    v_sv = max(0.0, v @ St @ v)
+    total2 = (v @ v + v_sv) / (v @ v)
+    left = max(0.0, np.trace(St) - (s @ St @ s) / np.sum(weight) - v_sv / (v @ v))
+    return float(np.sqrt(total2)), float((x.size - 1 - 1 + left) / (x.size - 2))
+
+
+@pytest.mark.parametrize("varying", [False, True], ids=["one sigma", "sigma varying"])
+def test_the_baseline_factor_and_expected_mswd_are_their_definitions(varying: bool) -> None:
+    from tsara.ratios.baseline_error import wander
+
+    pairs, catalog = _wandering_record(11, varying=varying)
+    got = member_fits(
+        pairs, catalog, CLEAN_COLUMNS, reference="van.ch4", numerator="van.c2h6", period="native"
+    )
+    mid = pairs.time.values.astype("datetime64[ns]").astype(np.int64)
+    deltas = tuple(
+        pairs[name].transpose("time", "baseline_window", "baseline_quantile").values
+        for name in ("enhancement_c2h6", "enhancement_ch4")
+    )
+    sigmas = (pairs["sigma_rand_c2h6"].values, pairs["sigma_rand_ch4"].values)
+    wandering = wander(pairs, catalog, deltas, sigmas, mid, ("van.c2h6", "van.ch4"))  # type: ignore[arg-type]
+    assert wandering.described.all()
+    assert set(got.baseline_error) == {"wobble and wander"}
+    for k, row in enumerate(got.itertuples()):
+        baseline, expected = _slow_factors_by_hand(pairs, catalog, row, wandering)  # type: ignore[arg-type]
+        assert got.baseline_factor.iloc[k] == pytest.approx(baseline, rel=1e-9)
+        assert got.mswd_expected.iloc[k] == pytest.approx(expected, rel=1e-9)
+        mswd = float(got.mswd.iloc[k])
+        birge = (
+            math.sqrt(max(1.0, mswd / expected))
+            if got.method.iloc[k] == "york"
+            else 1 / math.sqrt(expected)
+        )
+        assert got.slope_sigma_widened.iloc[k] == pytest.approx(
+            float(got.slope_sigma.iloc[k]) * baseline * birge, rel=1e-9
+        )
+    if varying:
+        return
+    # The wobble is the clean spread beyond the readings' noise.
+    assert got.wobble_reference.to_numpy() == pytest.approx(math.sqrt(1.1**2 - 0.7**2))
+    assert got.wobble_numerator.to_numpy() == pytest.approx(math.sqrt(0.07**2 - 0.05**2))
+    assert (got.baseline_factor > 1).all()
+
+
+def test_the_baseline_factor_never_narrows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wander's model is valid by construction (§5.4), so v'S~v < 0 only by rounding;
+    the floor is checked with the most invalid stand-in: S(dt) = +|dt|, minus a valid
+    semivariogram, so that v'S~v is negative for every member; the baseline's part is
+    floored, and every fit keeps the noise's own factors."""
+    import tsara.ratios.fits as fits_module
+
+    pairs, catalog = _wandering_record(12)
+    no_clean = make_pairs(
+        pairs["enhancement_ch4"].values[:, 0, 0],
+        pairs["enhancement_c2h6"].values[:, 0, 0],
+        windows=(120.0, 600.0),
+    )
+    monkeypatch.setattr(fits_module, "slow_covariance", lambda dt, *args: np.abs(dt))
+    got = fit(no_clean, catalog)
+    assert set(got.baseline_error) == {"wander"}
+    assert got.baseline_factor.to_numpy() == pytest.approx(1.0, abs=1e-12)
+    # No persistence and the baseline's part floored: E is the noise's own, 1.
+    assert got.mswd_expected.to_numpy() == pytest.approx(1.0, abs=1e-12)
+
+
+def test_each_fit_says_which_parts_of_the_baseline_error_it_holds() -> None:
+    pairs, catalog = _wandering_record(13)
+    no_clean = make_pairs(
+        pairs["enhancement_ch4"].values[:, 0, 0],
+        pairs["enhancement_c2h6"].values[:, 0, 0],
+        windows=(120.0, 600.0),
+    )
+    wander_only = fit(no_clean, catalog)
+    assert set(wander_only.baseline_error) == {"wander"}
+    assert wander_only.wobble_reference.isna().all()
+    curve = wander_only[["wander_nugget", "wander_sill", "wander_timescale"]]
+    assert np.isfinite(curve.to_numpy()).all()
+    # A record too short to read any lag of, outside its events, with clean spreads: wobble only.
+    short = make_pairs(
+        np.linspace(0, 10, 40), np.linspace(0, 0.5, 40), windows=(600.0,), clean_spread=(1.1, 0.07)
+    )
+    short_catalog = pd.DataFrame([event_row("e0", "c0", (0, 40))])
+    got = member_fits(
+        short,
+        short_catalog,
+        CLEAN_COLUMNS,
+        reference="van.ch4",
+        numerator="van.c2h6",
+        period="native",
+    )
+    assert set(got.baseline_error) == {"wobble"}
+    # No lag read, so no wander curve: blank, not a curve of zeros.
+    assert got[["wander_nugget", "wander_sill", "wander_timescale"]].isna().all().all()
+    # Neither: no clean spread and no lag.
+    bare = make_pairs(np.linspace(0, 10, 40), np.linspace(0, 0.5, 40), windows=(600.0,))
+    assert set(fit(bare, short_catalog).baseline_error) == {"none"}
+    assert (fit(bare, short_catalog).baseline_factor == 1.0).all()
+
+
+def test_enhancements_known_to_carry_no_baseline_error_are_not_widened_for_one() -> None:
+    """On a true background (a test's, a notebook's) the wander outside the events is the
+    air's own small plumes; with baseline_error=False the fit widens for nothing of it."""
+    pairs, catalog = _wandering_record(14)
+    got = member_fits(
+        pairs,
+        catalog,
+        CLEAN_COLUMNS,
+        reference="van.ch4",
+        numerator="van.c2h6",
+        period="native",
+        baseline_error=False,
+    )
+    assert set(got.baseline_error) == {"none"}
+    assert got.wobble_reference.isna().all() and got.wobble_numerator.isna().all()
+    assert (got.baseline_factor == 1.0).all() and (got.mswd_expected == 1.0).all()
+    york_rows = got[got.method == "york"]
+    birge = np.sqrt(np.fmax(1.0, york_rows.mswd))
+    np.testing.assert_allclose(
+        york_rows.slope_sigma_widened, york_rows.slope_sigma * birge, rtol=1e-12
+    )
+
+
+@pytest.mark.parametrize(
+    ("attrs", "relative", "provenance"),
+    [
+        (
+            {
+                "uncertainty_provenance_systematic": "declared",
+                "uncertainty_systematic_relative": 0.02,
+            },
+            0.02,
+            "declared",
+        ),
+        ({"uncertainty_provenance_systematic": "zero"}, 0.0, "zero"),
+        ({"uncertainty_provenance_systematic": "reported"}, None, "reported"),
+        ({"uncertainty_provenance_systematic": "declared"}, None, "declared"),
+        ({}, None, "unknown"),
+    ],
+    ids=["declared", "zero", "reported", "declared without its terms", "nothing said"],
+)
+def test_each_fit_records_each_axis_relative_systematic(
+    paper: tuple[xr.Dataset, pd.DataFrame],
+    attrs: dict[str, object],
+    relative: float | None,
+    provenance: str,
+) -> None:
+    """§5.5: the ratio's systematic comes from each axis's relative term; reported per
+    reading or not declared, it is unknown, never assumed zero."""
+    paper_pairs, catalog = paper[0].copy(), paper[1]
+    paper_pairs["ch4"].attrs.update(attrs)
+    got = fit(paper_pairs, catalog)
+    if relative is None:
+        assert got.reference_systematic_relative.isna().all()
+    else:
+        assert (got.reference_systematic_relative == relative).all()
+    assert set(got.reference_systematic_provenance) == {provenance}
+    assert set(got.numerator_systematic_provenance) == {"unknown"}

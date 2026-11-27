@@ -28,6 +28,8 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Mapping
 
+    import xarray as xr
+
 __all__ = [
     "ALTITUDE_COORD",
     "BASELINE_PREFIX",
@@ -80,8 +82,10 @@ __all__ = [
     "WINDOW_DIM",
     "baseline_name",
     "borrowed_name",
+    "clean_spread_name",
     "coverage_name",
     "coverage_window_name",
+    "enhanced_variables",
     "enhancement_name",
     "is_circular",
     "is_companion_name",
@@ -449,6 +453,51 @@ def enhancement_name(variable: str) -> str:
         e.g. ``'enhancement_ch4'``.
     """
     return f"{ENHANCEMENT_PREFIX}{variable}"
+
+
+def clean_spread_name(variable: str) -> str:
+    """Return the name of a variable's clean spread in the event state.
+
+    The events stage writes it (``docs/METHODS.md`` §6.8); the ratio stage
+    reads the baseline's wobble from it (§5.4), carried onto the pair cells.
+
+    Parameters
+    ----------
+    variable : str
+        Canonical variable name, e.g. ``'ch4'``.
+
+    Returns
+    -------
+    str
+        e.g. ``'clean_spread_ch4'``.
+    """
+    return f"clean_spread_{variable}"
+
+
+def enhanced_variables(state: xr.Dataset) -> list[str]:
+    """Return every variable a baseline state holds an enhancement of, in its order.
+
+    The events stage finds events for these by default, and the pipeline
+    expands a ratio set's ``'<instrument>'`` numerators over them, so the two
+    read one rule.
+
+    Parameters
+    ----------
+    state : xarray.Dataset
+        A baseline state (or any Dataset whose enhancements follow
+        :func:`enhancement_name`).
+
+    Returns
+    -------
+    list of str
+        e.g. ``['ch4', 'c2h6']`` for a state holding ``enhancement_ch4`` and
+        ``enhancement_c2h6``.
+    """
+    return [
+        str(name)[len(ENHANCEMENT_PREFIX) :]
+        for name in state.data_vars
+        if str(name).startswith(ENHANCEMENT_PREFIX)
+    ]
 
 
 def n_readings_window_name(variable: str) -> str:

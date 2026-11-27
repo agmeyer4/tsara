@@ -33,9 +33,12 @@ __all__ = [
     "BUNDLE_CATALOG_FILE",
     "BUNDLE_CLOCK_TABLE_FILE",
     "BUNDLE_EVENTS_DIR",
+    "BUNDLE_FITS_FILE",
     "BUNDLE_FORMAT_VERSION",
     "BUNDLE_GRID_FILE",
     "BUNDLE_MANIFEST",
+    "BUNDLE_RATIOS_DIR",
+    "BUNDLE_RATIOS_FILE",
     "BUNDLE_STAGE_KEY",
     "BUNDLE_STREAMS_DIR",
     "BUNDLE_SURVEY_CONFIG",
@@ -93,6 +96,14 @@ BUNDLE_ANALYSIS_CONFIG = "analysis.yaml"
 BUNDLE_EVENTS_DIR = "events"
 BUNDLE_CATALOG_FILE = "catalog.parquet"
 BUNDLE_CANDIDATES_FILE = "candidates.parquet"
+
+#: Subdirectory holding the ratio stage's tables: every member's fit, every
+#: candidate's ratio at every gate setting, and the ratios section of the
+#: analysis configuration (``analysis.yaml``, as for the baseline state). A
+#: directory beside the others for the baseline state's reason.
+BUNDLE_RATIOS_DIR = "ratios"
+BUNDLE_FITS_FILE = "fits.parquet"
+BUNDLE_RATIOS_FILE = "ratios.parquet"
 
 #: Subdirectory holding a clock survey: the correction table it derived, for a
 #: person to review and name in a manifest, the three tables behind it, and the
