@@ -207,7 +207,7 @@ def _candidates(air: str) -> pd.DataFrame:
     return pd.concat(frames)
 
 
-@pytest.mark.parametrize(("air", "coverage"), [("flat", 0.966), ("wandering", 0.935)])
+@pytest.mark.parametrize(("air", "coverage"), [("flat", 0.962), ("wandering", 0.940)])
 def test_single_source_members_widened_sigma_covers_the_true_ratio(
     air: str, coverage: float
 ) -> None:
@@ -222,7 +222,7 @@ def test_single_source_members_widened_sigma_covers_the_true_ratio(
 
 
 @pytest.mark.parametrize(
-    ("air", "turned_away", "let_through"), [("flat", 0.057, 0.076), ("wandering", 0.072, 0.100)]
+    ("air", "turned_away", "let_through"), [("flat", 0.056, 0.075), ("wandering", 0.065, 0.101)]
 )
 def test_what_the_one_source_gate_turns_away_and_lets_through(
     air: str, turned_away: float, let_through: float
@@ -236,7 +236,7 @@ def test_what_the_one_source_gate_turns_away_and_lets_through(
 
 
 @pytest.mark.parametrize(
-    ("air", "count", "coverage"), [("flat", 111, 0.964), ("wandering", 119, 0.966)]
+    ("air", "count", "coverage"), [("flat", 111, 0.964), ("wandering", 119, 0.975)]
 )
 def test_a_candidates_combined_interval_covers_the_true_ratio(
     air: str, count: int, coverage: float

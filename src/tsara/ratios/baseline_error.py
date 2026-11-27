@@ -23,12 +23,12 @@ entered"):
 
 The wander is measured at :data:`LAGS_S` and never used as measured. Read
 from the fragments of a record between its events, a measured curve is
-ragged (on a real 2026 drive methane's rose to 4.5 ppb by 20 s, fell to 2.1
-by 40 s and rose again), and a ragged curve can describe an error no
-background could have, one that changes more over a gap than two half-gaps
-allow, which makes a member's slope variance from it negative. So the three
-curves are fitted, per window and quantile, by one model that is valid by
-construction (§5.4, "The wander as a fitted model"):
+ragged (on a real 2026 drive the typical change in methane's, sqrt(2 g),
+rose to 4.5 ppb by 20 s, fell to 2.1 by 40 s and rose again), and a ragged
+curve can describe an error no background could have, one that changes more
+over a gap than two half-gaps allow, which makes a member's slope variance
+from it negative. So the three curves are fitted, per window and quantile,
+by one model that is valid by construction (§5.4, "The wander as a fitted model"):
 
     g_x(L) = n_x + s_x (1 - exp(-L / tau)),  g_y and g_xy likewise, L > 0,
 
