@@ -1547,7 +1547,8 @@ ratio's interval on wandering air was 1.6 to 1.8× too narrow, and the
 one-source gate turned away a sixth of the good members.
 
 **The baseline's error, entered** **[decided 2026-11-18 — 7c2 stage 0;
-calibrated on generated air, to be tested on real air in 7c3]**. The slope
+calibrated on generated air, tested on real air with known plumes added
+2026-11-24, below]**. The slope
 depends only on how the baseline's error *changes* across a member: a constant
 moves the intercept, which York fits. So the error enters as a covariance
 between a member's points that is written from how much the error changes
