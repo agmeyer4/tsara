@@ -1180,7 +1180,11 @@ revisited (split from 7c2 in its walkthrough, 2026-11-27: both are built, and
 their design questions are measured there, §5.6, §5.7). 7c1 and 7c2 are built: each subsection's **Built**
 paragraph says what the package does, and the coverage numbers measured
 through the stage (§5.4, §5.5) are re-run by an opt-in test,
-`tests/ratios/test_ratio_coverage.py`. 7c3 is next. Out of 7c, each kept as an
+`tests/ratios/test_ratio_coverage.py`. The order from here (decided
+2026-11-27): a first run of a real campaign through the stage, outside the
+package; then the rule across windows (roadmap 7e, §6.1), since the
+fingerprint's unit is what it decides; then 7c4; and 7c3 last, re-running the
+campaign on the finished stage. Out of 7c, each kept as an
 open flag in CLAUDE.md: which window's ratio belongs to which plume (§6.1;
 ratios are reported per window, linked by `parent_candidate_id`); events
 formed from several gases at once; rolling ratios as a product; declaring the

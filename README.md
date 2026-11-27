@@ -36,10 +36,10 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 7b | Events grouped across the sweep into candidates, scored against the answer key | ✅ done |
 | 7c1 | The ratio stage's fits: every numerator against the reference over each candidate's members, on a pair clock, with gates swept as thresholds | ✅ done |
 | 7c2 | A ratio per candidate with its fit, method and systematic uncertainties, and save/load | planned |
-| 7c3 | The ratio stage on real data: the parked-night acceptance test, a drive, a pair of instruments | planned |
-| 7c4 | Fingerprints (a candidate's ratios across gases) and the sweep summary, their design measured and decided (both built in 7c2) | planned |
+| 7c3 | The ratio stage on real data: the parked-night acceptance test, a drive, a pair of instruments (last of Phase 7, on the finished stage) | planned |
+| 7c4 | Fingerprints (a candidate's ratios across gases) and the sweep summary, their design measured and decided (both built in 7c2; after 7e) | planned |
 | 7d | A run function and the `tsara` CLI | planned |
-| 7e | Ratios across baseline windows: which window's ratio belongs to which plume, and a broad plume's own ratio beneath its blips | planned |
+| 7e | Ratios across baseline windows: which window's ratio belongs to which plume, and a broad plume's own ratio beneath its blips (next) | planned |
 | 8 | Smoothing + spatiotemporal source complexes | planned, after the first campaign results |
 | 9 | `Pipeline` class | planned |
 | 10 | Docs + tutorial | planned |
