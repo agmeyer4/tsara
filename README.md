@@ -35,8 +35,9 @@ built one phase per review cycle, and only what is listed as done below exists.
 | 7a | Line fits: York's errors-in-both-variables line and least squares, through many groups of points at once | ✅ done |
 | 7b | Events grouped across the sweep into candidates, scored against the answer key | ✅ done |
 | 7c1 | The ratio stage's fits: every numerator against the reference over each candidate's members, on a pair clock, with gates swept as thresholds | ✅ done |
-| 7c2 | A ratio per candidate with its fit, method and systematic uncertainties, the sweep summary, save/load | planned |
+| 7c2 | A ratio per candidate with its fit, method and systematic uncertainties, and save/load | planned |
 | 7c3 | The ratio stage on real data: the parked-night acceptance test, a drive, a pair of instruments | planned |
+| 7c4 | Fingerprints (a candidate's ratios across gases) and the sweep summary, their design measured and decided (both built in 7c2) | planned |
 | 7d | A run function and the `tsara` CLI | planned |
 | 7e | Ratios across baseline windows: which window's ratio belongs to which plume, and a broad plume's own ratio beneath its blips | planned |
 | 8 | Smoothing + spatiotemporal source complexes | planned, after the first campaign results |
@@ -445,14 +446,12 @@ without being run, and none needs any real data:
   and what the widened σ does not hold, the baseline's error across a member.
   Same shape as 05.
 - [`10_candidate_ratios_walkthrough.ipynb`](examples/notebooks/10_candidate_ratios_walkthrough.ipynb)
-  — a candidate's ratio, on air of two sources with different fingerprints:
+  — a candidate's ratio, on air of two sources with different ratios:
   the median member and the three terms of its uncertainty, against a loop
   written from the definition; a ratio at every setting of the gates from one
   set of fits; many candidates against the truth, to see whether the interval
-  holds; a calibration error, the one term that never averages down; the
-  fingerprint across gases, upper limits included; the sweep summary and the
-  Birge ratio over a named population; and saving and loading the stage's
-  tables. Same shape as 05.
+  holds; a calibration error, the one term that never averages down; and
+  saving and loading the stage's tables. Same shape as 05.
 
 Three companions run on the real campaign archive instead, and are therefore
 committed **without** outputs:

@@ -46,8 +46,8 @@ attributes and this document, because each was once used for several:
 | **ratio** | a candidate's reported slope of a numerator on its reference, with σ_fit, σ_method and σ_sys beside their combination (§5.5) | a fit, or a slope over any other stretch |
 | **crowding** | a member whose interval fills most of its baseline window, so that its own readings lift the window's low quantile and the baseline eats part of it: a bias, the ratio reading low. The crowding gate (`max_window_fill`, §5.3) leaves such a plume to a longer window, where it fits | the background's drift, the other way a baseline errs across a member, which is random and carried in the σ (§5.4) |
 | **baseline allowance** | the part of a fit's σ for the baseline's error across a member (§5.4): how different the baseline's error can be at two readings L seconds apart, measured from the readings between events, fitted by a model valid by construction, evaluated at the gaps between the member's own readings and run through the slope's arithmetic. In a fit: `baseline_factor`, `baseline_error` | crowding, a bias no allowance repairs; or the readings' own noise |
-| **fingerprint** | a candidate's row of ratios across every numerator of its ratio set (§5.7) | a source's known signature: the package holds no library of those |
-| **sweep summary** | the fits' results summarized at every point of the sweep, gate thresholds included, over the candidates a caller names (§5.6): a view built on demand | a saved product. It was planned as the "stability cube" until 2026-11-17, renamed because a cube implies three dimensions |
+| **fingerprint** | a candidate's row of ratios across every numerator of its ratio set (§5.7; its design revisited in 7c4) | a source's known signature: the package holds no library of those |
+| **sweep summary** | the fits' results summarized at every point of the sweep, gate thresholds included, over the candidates a caller names (§5.6; its design revisited in 7c4): a view built on demand | a saved product. It was planned as the "stability cube" until 2026-11-17, renamed because a cube implies three dimensions |
 | **record** | a stretch of one stream over which the events stage computes its clean level and spread: split where consecutive readings are more than a set gap apart or, where the platform's speed is named, where it stays parked that long, and cut into pieces no longer than a set length (§6.8) | a file, a drive or a campaign |
 | **rolling** | the operation: a statistic over a window centred on each reading, moved along the record (`rolling_quantile`; Phase 7's fits over windows) | a stage or a product. The stage that computes baselines and enhancements is `baseline` (`tsara.baseline`); its product is the **baseline state**, saved under `baseline/` in a bundle. Both were named `rolling` until Phase 5 merged; no bundle under the old name exists outside that branch, so none is migrated |
 | **borrowed** | the share of a joined value resting on air outside its own cell (`borrowed_<name>`, `tsara_borrowed_share`, §11.2.4) | an uncertainty; it is a magnitude, and no threshold on it separates a blend from jitter |
@@ -1171,11 +1171,13 @@ Which parts of the sweep enter $\sigma^2_{\text{method}}$, and which are
 reported beside it instead, is §5.5.
 
 The ratio stage (`tsara.ratios`, config `ratios:`) was planned on 2026-11-17
-and is built in three parts, each its own pull request and walkthrough:
+and is built in four parts, each its own pull request and walkthrough:
 **7c1**, the fits and their gates (§5.2–5.4); **7c2**, a candidate's ratio,
 the sweep summary and what the stage saves (§5.5–5.7); **7c3**, real data
 (the parked nights of 2026-02-05..12 as the acceptance test, a drive, and a
-pair of instruments). 7c1 and 7c2 are built: each subsection's **Built**
+pair of instruments); and **7c4**, the fingerprint and the sweep summary
+revisited (split from 7c2 in its walkthrough, 2026-11-27: both are built, and
+their design questions are measured there, §5.6, §5.7). 7c1 and 7c2 are built: each subsection's **Built**
 paragraph says what the package does, and the coverage numbers measured
 through the stage (§5.4, §5.5) are re-run by an opt-in test,
 `tests/ratios/test_ratio_coverage.py`. 7c3 is next. Out of 7c, each kept as an
@@ -1981,6 +1983,16 @@ at the default gates, 1.4 s and 0.05 MB with 18 gate settings (height 3/5/8
 the ratio stage's cost is in the fits (about 25 s per 6 h record, §5.4), not
 in reading them.
 
+**Revisited in 7c4** **[decided 2026-11-27 — the 7c2 walkthrough]**. R_B at a
+sweep point reads the passing fits of the named population there, and on
+notebook 10's six-hour record (seed 1, source A named) that is two to four
+fits at every sweep point: R_B is one or two z-values (0.01–1.3 across the
+points) and says nothing about the error budget. R_B needs one source seen
+many times, such as the parked-night burps of 7c3's acceptance test (about
+550, §5). 7c4 measures it on such a population, with σ declared right, at half,
+and over a population that mixes two sources, before the sweep summary is
+read as a judge of a sweep point.
+
 ### 5.7 What the stage saves **[decided 2026-11-17 — 7c2]**
 
 Under `ratios/` in a bundle: `fits.parquet`, one row per member, numerator,
@@ -2015,6 +2027,34 @@ incomplete. Both tables declare their types and come back exactly: on the
 11,397 fits of §5.4 and their 27,396 ratio rows at 18 gate settings, equal
 column for column and type for type after the round trip, in 1.6 MB and
 0.3 MB.
+
+**The fingerprint, revisited in 7c4** **[decided 2026-11-27 — the 7c2
+walkthrough]**. As built, `tsara.ratios.fingerprints` pivots the ratio table,
+and each numerator's ratio comes from its own median member under its own
+gates. Measured on notebook 10's record (seed 1, ethane and CO against
+methane, the default gates):
+
+- **A row is not one stretch of air.** Of the 32 candidates with both an
+  ethane and a CO ratio, 23 read them from different members (another
+  quantile or exit). Read from ethane's member instead, CO moves by a median
+  0.30 and at most 0.93 of its σ_combined.
+- **Most candidates have no full row**: at 2 min 10 of 66 have both ratios, 6
+  one and 50 neither (10 min: 9, 2 and 25 of 36; 60 min: 13, 3 and 16 of 32).
+  A blank is "no member passed the gates for that numerator", not an upper
+  limit.
+- **The entries share the reference's errors** (its noise, its baseline
+  allowance, its gain inside every σ_sys), and no covariance between them is
+  recorded; it matters when two sources sit close together, not for
+  notebook 10's (0.05 and 0 against 0 and 3).
+- **A slope reads the source that varies inside a member, not the blend by
+  amounts.** Two candidates with 25 % and 20 % of their methane from source A
+  read source B's CO ratio (3.25 and 3.35 against B's 3): a source steady
+  under the other's plume goes into the intercept. That is the right reading
+  for telling sources apart and the wrong one for apportionment, where the
+  amounts are what count (the ratio of summed enhancements, on hold).
+
+7c4 decides, by measurement, whether a row reads one member for every
+numerator or each its own, and whether the entries' covariance is recorded.
 
 ---
 
